@@ -746,22 +746,48 @@ mod tests {
         assert!(stats.scanned <= 5);
     }
 
-    /// Synthetic large tree — ignored so default CI stays fast (AGENTS #8).
-    /// Run: `cargo test -p cd-core --lib index_50k_soft -- --ignored --nocapture`
+    /// Synthetic 50k-file tree — ignored so default CI stays fast (AGENTS #8).
+    ///
+    /// Run:
+    /// ```text
+    /// cargo test -p cd-core --lib index_50k_soft_cap_allows_large_tree -- --ignored --nocapture
+    /// ```
+    /// Uses a SQLite store so walk flushes per-file (peak RAM is post-load postings,
+    /// not an unbounded all-in-memory walk buffer). Default soft cap is 100_000.
     #[test]
-    #[ignore = "slow synthetic 5k-file tree; run with --ignored"]
+    #[ignore = "slow synthetic 50k-file tree; run with --ignored"]
     fn index_50k_soft_cap_allows_large_tree() {
         let dir = tempdir().unwrap();
-        let n = 5_000usize;
+        let cache = tempdir().unwrap();
+        let n = 50_000usize;
         for i in 0..n {
-            let sub = dir.path().join(format!("b{}", i % 50));
+            let sub = dir.path().join(format!("b{}", i % 200));
             let _ = fs::create_dir_all(&sub);
-            fs::write(sub.join(format!("f{i}.md")), format!("token_{i} unique")).unwrap();
+            fs::write(
+                sub.join(format!("f{i}.md")),
+                format!("token_{i} unique document body\n"),
+            )
+            .unwrap();
         }
-        let ws = Workspace::new("big", vec![dir.path().to_path_buf()]);
-        let idx = KeywordIndex::open_or_build(&ws, None, Some(100_000)).unwrap();
-        assert!(!idx.is_empty());
+        let ws = Workspace::new("big50k", vec![dir.path().to_path_buf()]);
+        let idx =
+            KeywordIndex::open_or_build(&ws, Some(cache.path()), Some(DEFAULT_MAX_FILES)).unwrap();
+        assert!(!idx.is_empty(), "index should not be empty after 50k walk");
+        // Not truncated at default cap.
+        let stats = {
+            // Second refresh should report mostly unchanged.
+            let mut idx2 =
+                KeywordIndex::open_or_build(&ws, Some(cache.path()), Some(DEFAULT_MAX_FILES))
+                    .unwrap();
+            idx2.refresh().unwrap()
+        };
+        assert!(
+            !stats.truncated,
+            "default cap must not truncate 50k files: {stats:?}"
+        );
         let hits = idx.search("token_42", 5);
         assert!(!hits.is_empty(), "expected hit for seeded token_42");
+        let hits2 = idx.search("token_49999", 5);
+        assert!(!hits2.is_empty(), "expected hit near end of corpus");
     }
 }

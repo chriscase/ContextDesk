@@ -21,7 +21,15 @@ cargo test --workspace
 cd desktop
 npm install
 npm run tauri:dev    # preferred — free-port aware
+
+# Large-workspace index bench (#117; ignored by default CI — AGENTS #8)
+# Creates a synthetic 50k-file tree, indexes with SQLite store + soft max 100k.
+cargo test -p cd-core --lib index_50k_soft_cap_allows_large_tree -- --ignored --nocapture
 ```
+
+Index soft caps: `AppConfig.index_max_files` (default **100_000**). When the cap is
+hit, `ReindexStats.truncated` is true and a `tracing::warn!` is emitted (never silent).
+Per-file max is 512 KiB; walk depth max is 12 (see `index.rs`).
 
 ## Dev ports (multi-Tauri machines)
 
