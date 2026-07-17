@@ -24,7 +24,7 @@ export function PermissionModal({ prompt, onRespond }: Props) {
 
   return (
     <div className="settings-overlay" role="alertdialog" aria-modal="true" aria-label="Permission required">
-      <div className="settings-panel" style={{ gridTemplateColumns: "1fr", maxWidth: 520, maxHeight: "80vh" }}>
+      <div className="settings-panel settings-panel--narrow">
         <div className="settings-body">
           <header className="settings-header">
             <div className="settings-header__title">

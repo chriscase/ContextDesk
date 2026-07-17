@@ -8,6 +8,7 @@ import {
   hostSaveActiveProvider,
   hostSaveConfluence,
   hostTestConfluence,
+  hostValidateWorkspacePath,
   profileIdForKind,
 } from "../lib/host";
 import {
@@ -17,7 +18,13 @@ import {
   type PreflightItem,
   type PreflightReport,
 } from "../lib/preflight";
-import { SecretField, SelectField, TextField } from "./forms/Field";
+import {
+  SecretField,
+  SelectField,
+  TextField,
+  ToggleField,
+  useDebouncedAsyncCheck,
+} from "./forms";
 import { PreflightPanel } from "./PreflightPanel";
 import { IconClose, IconSettings } from "./icons";
 
@@ -103,13 +110,56 @@ export function SettingsModal({
     }
   }, [open, setup, initialSection]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        requestClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // requestClose closes over dirty/setup — rebind when those change
+  });
+
   const urlError = useMemo(() => {
     if (draft.providerKind !== "openai_compatible") return null;
     return validateBaseUrl(draft.baseUrl);
   }, [draft.providerKind, draft.baseUrl]);
 
+  // Debounced live URL shape check when typing remote gateway base.
+  const remoteUrlCheck = useDebouncedAsyncCheck(
+    draft.baseUrl,
+    async (v) => {
+      const err = validateBaseUrl(v);
+      if (err) return { error: err };
+      if (!v.trim()) return {};
+      return { ok: "URL shape looks valid" };
+    },
+    350,
+    draft.providerKind === "openai_compatible",
+  );
+
   const clientReport = useMemo(() => runClientPreflight(draft), [draft, probeTick]);
   const report = hostReport ?? clientReport;
+
+  const dirty = useMemo(() => {
+    if (apiKeyDraft.trim() || cfTokenDraft.trim()) return true;
+    return JSON.stringify(draft) !== JSON.stringify(setup);
+  }, [draft, setup, apiKeyDraft, cfTokenDraft]);
+
+  const requestClose = () => {
+    if (dirty) {
+      const ok = window.confirm(
+        "You have unsaved settings changes. Discard them?",
+      );
+      if (!ok) return;
+    }
+    setApiKeyDraft("");
+    setCfTokenDraft("");
+    onClose();
+  };
 
   if (!open) return null;
 
@@ -167,6 +217,7 @@ export function SettingsModal({
 
   const addRoot = async () => {
     // Prefer native folder dialog under Tauri; prompt fallback in plain browser.
+    let path: string | null = null;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
@@ -175,35 +226,29 @@ export function SettingsModal({
         title: "Add workspace folder",
       });
       if (selected && typeof selected === "string") {
-        setDraft((d) => ({
-          ...d,
-          workspaceName: d.workspaceName ?? "Workspace",
-          workspaceRoots: d.workspaceRoots.includes(selected)
-            ? d.workspaceRoots
-            : [...d.workspaceRoots, selected],
-        }));
-        return;
-      }
-      if (Array.isArray(selected) && selected[0]) {
-        const path = selected[0];
-        setDraft((d) => ({
-          ...d,
-          workspaceName: d.workspaceName ?? "Workspace",
-          workspaceRoots: d.workspaceRoots.includes(path)
-            ? d.workspaceRoots
-            : [...d.workspaceRoots, path],
-        }));
-        return;
+        path = selected;
+      } else if (Array.isArray(selected) && selected[0]) {
+        path = selected[0];
       }
     } catch {
       /* not in Tauri */
     }
-    const path = window.prompt("Folder path to allowlist:");
+    if (!path) {
+      path = window.prompt("Folder path to allowlist:");
+    }
     if (!path?.trim()) return;
+    const trimmed = path.trim();
+    const check = await hostValidateWorkspacePath(trimmed);
+    if (!check.ok) {
+      window.alert(`Cannot add folder: ${check.detail}`);
+      return;
+    }
     setDraft((d) => ({
       ...d,
       workspaceName: d.workspaceName ?? "Workspace",
-      workspaceRoots: [...d.workspaceRoots, path.trim()],
+      workspaceRoots: d.workspaceRoots.includes(trimmed)
+        ? d.workspaceRoots
+        : [...d.workspaceRoots, trimmed],
     }));
   };
 
@@ -288,7 +333,7 @@ export function SettingsModal({
             <div className="settings-header__title">
               {NAV.find((n) => n.id === section)?.label}
             </div>
-            <button type="button" className="icon-btn" onClick={onClose} title="Close">
+            <button type="button" className="icon-btn" onClick={requestClose} title="Close">
               <IconClose />
             </button>
           </header>
@@ -328,8 +373,8 @@ export function SettingsModal({
                     <ul className="session-list">
                       {draft.workspaceRoots.map((r) => (
                         <li key={r}>
-                          <div className="session-list__item" style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span className="mono" style={{ fontSize: "0.8rem" }}>
+                          <div className="session-list__item row--between">
+                            <span className="mono mono--sm">
                               {r}
                             </span>
                             <button
@@ -400,8 +445,9 @@ export function SettingsModal({
                       label="Base URL"
                       hint="Paste origin or …/v1/models — we normalize and probe."
                       value={draft.baseUrl}
-                      error={urlError}
-                      ok={!urlError && draft.baseUrl ? "Looks like a valid URL" : null}
+                      error={remoteUrlCheck.error ?? urlError}
+                      ok={remoteUrlCheck.ok}
+                      pending={remoteUrlCheck.pending}
                       onChange={(e) =>
                         setDraft((d) => ({
                           ...d,
@@ -495,24 +541,23 @@ export function SettingsModal({
                   base URL and a personal access token (stored in the OS
                   keychain, never in config files).
                 </p>
-                <label className="toggle">
-                  <input
-                    type="checkbox"
-                    checked={draft.confluence?.enabled ?? false}
-                    onChange={(e) =>
-                      setDraft((d) => ({
-                        ...d,
-                        confluence: {
-                          enabled: e.target.checked,
-                          baseUrl: d.confluence?.baseUrl ?? "",
-                          spaces: d.confluence?.spaces ?? "",
-                          hasToken: d.confluence?.hasToken ?? false,
-                        },
-                      }))
-                    }
-                  />
-                  Enable Confluence (read-only)
-                </label>
+                <ToggleField
+                  id={`${baseId}-cf-enabled`}
+                  label="Enable Confluence (read-only)"
+                  hint="PAT is stored in the OS keychain only."
+                  checked={draft.confluence?.enabled ?? false}
+                  onChange={(enabled) =>
+                    setDraft((d) => ({
+                      ...d,
+                      confluence: {
+                        enabled,
+                        baseUrl: d.confluence?.baseUrl ?? "",
+                        spaces: d.confluence?.spaces ?? "",
+                        hasToken: d.confluence?.hasToken ?? false,
+                      },
+                    }))
+                  }
+                />
                 <TextField
                   id={`${baseId}-cf-url`}
                   label="Confluence base URL"
@@ -662,8 +707,8 @@ export function SettingsModal({
             ) : null}
           </div>
           <footer className="settings-footer">
-            <button type="button" className="btn btn--ghost" onClick={onClose}>
-              Cancel
+            <button type="button" className="btn btn--ghost" onClick={requestClose}>
+              Cancel{dirty ? " (unsaved)" : ""}
             </button>
             <button type="button" className="btn btn--primary" onClick={save}>
               Save

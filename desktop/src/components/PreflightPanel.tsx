@@ -21,7 +21,7 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
         Environment health for local tools and remote gateways. Fix issues here
         instead of editing config files. Recheck anytime.
       </p>
-      <div style={{ marginBottom: 12 }}>
+      <div className="preflight-actions">
         <button
           type="button"
           className="btn btn--ghost"
@@ -42,8 +42,7 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
               {item.fixAction && item.level !== "pass" ? (
                 <button
                   type="button"
-                  className="btn btn--ghost"
-                  style={{ marginTop: 6, paddingLeft: 0 }}
+                  className="btn btn--ghost btn--linkish"
                   onClick={() => onFix(item.fixAction!)}
                 >
                   Open {item.fixAction} settings →

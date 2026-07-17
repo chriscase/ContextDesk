@@ -14,17 +14,12 @@ export function SourcePreviewPane({ path, content, highlightLine }: Props) {
       ) : (
         <>
           <div className="field__label mono">{path}</div>
-          <pre className="tool-row__detail" style={{ maxHeight: "60vh" }}>
+          <pre className="tool-row__detail tool-row__detail--tall">
             {lines.map((line, i) => {
               const n = i + 1;
               const hi = highlightLine === n;
               return (
-                <div
-                  key={n}
-                  style={{
-                    background: hi ? "var(--accent-soft)" : undefined,
-                  }}
-                >
+                <div key={n} className="source-line" data-hi={hi ? "true" : "false"}>
                   <span className="field__hint">{String(n).padStart(4, " ")}| </span>
                   {line}
                 </div>

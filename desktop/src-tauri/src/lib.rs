@@ -459,12 +459,60 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
     ))
 }
 
+fn is_whole_home_root(path: &std::path::Path) -> bool {
+    let Ok(canon) = path.canonicalize() else {
+        return false;
+    };
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(h) = home.canonicalize() {
+            return canon == h;
+        }
+    }
+    false
+}
+
+/// Instant path check for workspace settings UI (exists + readable directory).
+#[tauri::command]
+fn validate_workspace_path(path: String) -> Result<String, String> {
+    let p = PathBuf::from(path.trim());
+    if path.trim().is_empty() {
+        return Err("Path is empty".into());
+    }
+    if !p.exists() {
+        return Err("Path does not exist".into());
+    }
+    if !p.is_dir() {
+        return Err("Path is not a directory".into());
+    }
+    if is_whole_home_root(&p) {
+        return Err(
+            "Refusing whole home directory as a workspace root — pick a project folder".into(),
+        );
+    }
+    // Readable: try listing one entry
+    match std::fs::read_dir(&p) {
+        Ok(_) => Ok(format!("Readable directory: {}", p.display())),
+        Err(e) => Err(format!("Not readable: {e}")),
+    }
+}
+
 #[tauri::command]
 fn set_workspace_roots(
     state: State<'_, AppState>,
     name: String,
     roots: Vec<String>,
 ) -> Result<(), String> {
+    let root_paths: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+    for r in &root_paths {
+        if is_whole_home_root(r) {
+            return Err(
+                "Refusing whole home directory as a workspace root — pick a project folder".into(),
+            );
+        }
+        if !r.exists() {
+            return Err(format!("Root does not exist: {}", r.display()));
+        }
+    }
     let mut cfg = state.config.lock().expect("config lock");
     let id = cfg
         .workspace
@@ -474,7 +522,7 @@ fn set_workspace_roots(
     cfg.workspace = Some(WorkspaceConfig {
         id,
         name,
-        roots: roots.into_iter().map(PathBuf::from).collect(),
+        roots: root_paths,
     });
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
@@ -701,6 +749,7 @@ pub fn run() {
             check_ollama,
             run_preflight_cmd,
             set_workspace_roots,
+            validate_workspace_path,
             agent_turn,
             complete_permission_cmd,
             reindex,

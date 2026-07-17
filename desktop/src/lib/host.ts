@@ -24,6 +24,28 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+export type BrandingDto = {
+  name: string;
+  slug: string;
+  tagline: string;
+  version: string;
+  protocol: string;
+};
+
+/** Product identity from Rust host / branding.toml (fallback for browser-only). */
+export async function hostGetBranding(): Promise<BrandingDto> {
+  if (!isTauri()) {
+    return {
+      name: "ContextDesk",
+      slug: "contextdesk",
+      tagline: "Developer knowledge workbench — find, synthesize, remember.",
+      version: "0.1.0",
+      protocol: "cd.v1",
+    };
+  }
+  return invoke<BrandingDto>("get_branding");
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);
@@ -102,6 +124,33 @@ export async function hostSetWorkspace(
 ): Promise<void> {
   if (!isTauri()) return;
   await invoke("set_workspace_roots", { name, roots });
+}
+
+export type HostConfigDto = {
+  workspace?: { id: string; name: string; roots: string[] } | null;
+  theme?: string;
+};
+
+/** Load non-secret app config from host (hydrate workspace roots). */
+export async function hostGetConfig(): Promise<HostConfigDto | null> {
+  if (!isTauri()) return null;
+  return invoke<HostConfigDto>("get_config");
+}
+
+/** Instant exists + readable directory check (Tauri host). */
+export async function hostValidateWorkspacePath(
+  path: string,
+): Promise<{ ok: boolean; detail: string }> {
+  if (!isTauri()) {
+    if (!path.trim()) return { ok: false, detail: "Path is empty" };
+    return { ok: true, detail: "Browser mode — host will recheck under Tauri" };
+  }
+  try {
+    const detail = await invoke<string>("validate_workspace_path", { path });
+    return { ok: true, detail };
+  } catch (e) {
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export async function hostSaveSecret(profileId: string, secret: string): Promise<void> {

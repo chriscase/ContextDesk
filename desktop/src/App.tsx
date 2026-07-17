@@ -17,11 +17,14 @@ import {
   agentTurn,
   completePermission,
   hostCheckOllama,
+  hostGetBranding,
+  hostGetConfig,
   hostListMemory,
   hostPreflight,
   hostReadFile,
   hostSetWorkspace,
   hostWriteMemory,
+  type BrandingDto,
   type EventDto,
 } from "./lib/host";
 import {
@@ -29,10 +32,6 @@ import {
   type AppSetupState,
   type PreflightReport,
 } from "./lib/preflight";
-
-const PRODUCT_NAME = "ContextDesk";
-const TAGLINE =
-  "Developer knowledge workbench — find, synthesize, remember.";
 
 type Msg = {
   id: string;
@@ -162,6 +161,13 @@ function applyEventsToMessage(
 }
 
 export function App() {
+  const [branding, setBranding] = useState<BrandingDto>({
+    name: "ContextDesk",
+    slug: "contextdesk",
+    tagline: "Developer knowledge workbench — find, synthesize, remember.",
+    version: "0.1.0",
+    protocol: "cd.v1",
+  });
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
@@ -191,6 +197,23 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    void hostGetBranding().then((b) => {
+      setBranding(b);
+      document.title = b.name;
+    });
+    void hostGetConfig().then((cfg) => {
+      if (!cfg?.workspace) return;
+      const roots = (cfg.workspace.roots ?? []).map(String);
+      setSetup((s) => ({
+        ...s,
+        workspaceName: cfg.workspace?.name ?? s.workspaceName,
+        workspaceRoots: roots.length ? roots : s.workspaceRoots,
+      }));
+    });
+  }, []);
+
+  useEffect(() => {
+    // Never persist secrets — setup type only holds booleans/refs metadata.
     localStorage.setItem("cd-setup", JSON.stringify(setup));
   }, [setup]);
 
@@ -399,12 +422,14 @@ export function App() {
 
   const onSaveSetup = async (next: AppSetupState) => {
     setSetup(next);
-    if (next.workspaceName && next.workspaceRoots.length) {
-      try {
-        await hostSetWorkspace(next.workspaceName, next.workspaceRoots);
-      } catch {
-        /* browser mode */
-      }
+    try {
+      // Always sync host allowlist (including clearing roots).
+      await hostSetWorkspace(
+        next.workspaceName ?? "Workspace",
+        next.workspaceRoots,
+      );
+    } catch {
+      /* browser mode */
     }
     void refreshHostPreflight();
   };
@@ -413,8 +438,8 @@ export function App() {
     <div className="app-shell">
       <header className="titlebar">
         <div className="titlebar__brand">
-          <IconSpark title={PRODUCT_NAME} />
-          <span>{PRODUCT_NAME}</span>
+          <IconSpark title={branding.name} />
+          <span>{branding.name}</span>
           <button
             type="button"
             className="chip"
@@ -451,7 +476,7 @@ export function App() {
             Setup incomplete — open Preflight to fix workspace or AI provider
             issues (no config files required).
           </span>
-          <span style={{ display: "flex", gap: 8 }}>
+          <span className="row">
             <button
               type="button"
               className="btn btn--primary"
@@ -540,8 +565,8 @@ export function App() {
               <div className="chat-scroll">
                 {messages.length === 0 ? (
                   <div className="empty-state">
-                    <div className="empty-state__title">{PRODUCT_NAME}</div>
-                    <p className="empty-state__body">{TAGLINE}</p>
+                    <div className="empty-state__title">{branding.name}</div>
+                    <p className="empty-state__body">{branding.tagline}</p>
                     <p className="empty-state__body">
                       Configure workspace + AI in Settings. Asks run through the
                       real agent/tool host (Tauri or cd-server), not a demo

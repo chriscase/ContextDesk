@@ -61,7 +61,7 @@ export function TodoPane({ storageKey }: Props) {
       </div>
       <ul className="session-list">
         {items.map((it) => (
-          <li key={it.id} className="session-list__item" style={{ display: "flex", gap: 8 }}>
+          <li key={it.id} className="session-list__item todo-item">
             <input
               type="checkbox"
               checked={it.done}
@@ -71,7 +71,7 @@ export function TodoPane({ storageKey }: Props) {
                 )
               }
             />
-            <span style={{ textDecoration: it.done ? "line-through" : undefined, flex: 1 }}>
+            <span className="todo-item__text" data-done={it.done ? "true" : "false"}>
               {it.text}
             </span>
             <button

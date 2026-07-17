@@ -10,18 +10,18 @@ Last audit: 2026-07-17. Update when closing.
 |---|--------|--------|-------|
 | 1 | Epic Foundation | PARTIAL | Docs/CI/core exist; epic open until children honest |
 | 11 | CI fmt/clippy/test | DONE | Closed honestly; CI green a444fdb |
-| 12 | Tauri shell + theming | PARTIAL | Tauri host + CSS themes; not full packaging |
+| 12 | Tauri shell + theming | DONE | tokens/themes; theme toggle; branding host; no inline style soup |
 | 13 | RENAME.md | DONE | `docs/RENAME.md` |
 | 57 | Threat model | DONE | `docs/THREAT_MODEL.md` living doc |
-| 59 | Workspace roots UX | PARTIAL | Settings form; native picker incomplete |
+| 59 | Workspace roots UX | DONE | chip + picker + block send; refuse whole-home |
 | 60 | Keychain secrets | DONE | Keychain store + save_active_provider; refs only; DEV.md service names |
 | 66 | gitleaks CI | DONE | Workflow + FP process in DEV.md; .gitleaks.toml |
 | 67 | Tauri capability lockdown | DONE | default.json minimal; AGENTS checklist; no secret-return IPC |
-| 68 | Epic Settings/preflight | PARTIAL | Shell exists |
-| 69 | Settings shell | PARTIAL | Sections incl. Connectors |
+| 68 | Epic Settings/preflight | PARTIAL | Shell exists; children remaining for #70/#74 |
+| 69 | Settings shell | DONE | Nav, unsaved guard, Escape, no secrets in full |
 | 70 | Preflight screen | PARTIAL | UI + cd-core + host probe |
-| 71 | Form system | PARTIAL | Field components |
-| 73 | Workspace settings form | PARTIAL | Path prompt not native dialog |
+| 71 | Form system | DONE | forms/* + forms.css + debounce + a11y |
+| 73 | Workspace settings form | DONE | Tauri folder dialog + validate_workspace_path |
 | 74 | First-run guided setup | PARTIAL | Opens preflight if blocking |
 
 ## Phase 1 — MVP

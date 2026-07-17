@@ -170,3 +170,63 @@
   color: var(--accent);
   cursor: pointer;
 }
+
+/* Small layout utilities — prefer these over inline style soup */
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.row--between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.stack-sm {
+  margin-bottom: var(--space-3);
+}
+
+.btn--linkish {
+  margin-top: var(--space-2);
+  padding-left: 0;
+}
+
+.mono--sm {
+  font-size: var(--text-sm);
+}
+
+.preflight-actions {
+  margin-bottom: var(--space-3);
+}
+
+.settings-panel--narrow {
+  grid-template-columns: 1fr;
+  max-width: 520px;
+  max-height: 80vh;
+}
+
+.tool-row__detail--tall {
+  max-height: 60vh;
+}
+
+.todo-item {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.todo-item__text {
+  flex: 1;
+}
+
+.todo-item__text[data-done="true"] {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
+.source-line[data-hi="true"] {
+  background: var(--accent-soft);
+}
