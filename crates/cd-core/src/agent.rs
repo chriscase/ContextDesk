@@ -12,6 +12,7 @@ use crate::tools::ToolSpec;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 /// Chat backend trait (real HTTP or mock).
 #[async_trait]
@@ -56,8 +57,12 @@ impl ChatBackend for ScriptedBackend {
 /// Agent turn options.
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
-    /// Max tool rounds.
+    /// Max tool rounds (from [`crate::router::RouterBudget::max_tool_rounds`]).
     pub max_rounds: usize,
+    /// Wall-clock deadline in ms (`0` = no deadline).
+    pub deadline_ms: u64,
+    /// Cap for source-query tools (search_kb limit).
+    pub max_results_per_source: usize,
     /// Session id for events.
     pub session_id: String,
     /// Model label.
@@ -68,10 +73,32 @@ pub struct AgentOptions {
 
 impl Default for AgentOptions {
     fn default() -> Self {
+        let b = crate::router::RouterBudget::default();
         Self {
-            max_rounds: 8,
+            max_rounds: b.max_tool_rounds,
+            deadline_ms: b.deadline_ms,
+            max_results_per_source: b.max_results_per_source,
             session_id: "session".into(),
             model: None,
+            cancel: None,
+        }
+    }
+}
+
+impl AgentOptions {
+    /// Build from a router budget (+ session/model metadata).
+    pub fn from_budget(
+        budget: &crate::router::RouterBudget,
+        session_id: impl Into<String>,
+        model: Option<String>,
+    ) -> Self {
+        let b = budget.clone().sanitized();
+        Self {
+            max_rounds: b.max_tool_rounds,
+            deadline_ms: b.deadline_ms,
+            max_results_per_source: b.max_results_per_source,
+            session_id: session_id.into(),
+            model,
             cancel: None,
         }
     }
@@ -134,12 +161,33 @@ pub async fn run_agent_turn(
         tool_calls: None,
     });
 
-    let mut trail: Vec<String> = vec!["started".into()];
+    // Enforce per-source result caps on tools for this turn.
+    host.set_max_results_per_source(opts.max_results_per_source);
+
+    let mut trail: Vec<String> = vec![
+        "started".into(),
+        format!(
+            "budget:rounds={},per_source={},deadline={}ms",
+            opts.max_rounds, opts.max_results_per_source, opts.deadline_ms
+        ),
+    ];
+    let started = Instant::now();
 
     for round in 0..opts.max_rounds {
         if cancelled(opts) {
             events.push(StreamEvent::TurnCompleted {
                 reason: "cancel".into(),
+            });
+            return Ok(events);
+        }
+        if opts.deadline_ms > 0 && started.elapsed().as_millis() as u64 >= opts.deadline_ms {
+            if !trail.is_empty() {
+                events.push(StreamEvent::SearchTrail {
+                    steps: trail.clone(),
+                });
+            }
+            events.push(StreamEvent::TurnCompleted {
+                reason: "budget_time".into(),
             });
             return Ok(events);
         }
@@ -252,11 +300,11 @@ pub async fn run_agent_turn(
     }
 
     events.push(StreamEvent::Error {
-        code: "max_rounds".into(),
-        message: "Agent reached max tool rounds".into(),
+        code: "budget_rounds".into(),
+        message: "Agent reached max tool rounds (router budget)".into(),
     });
     events.push(StreamEvent::TurnCompleted {
-        reason: "max_rounds".into(),
+        reason: "budget_rounds".into(),
     });
     Ok(events)
 }
@@ -341,6 +389,10 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { .. })));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Tool { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.starts_with("budget:"))
+        )));
         let text: String = events
             .iter()
             .filter_map(|e| match e {
@@ -386,5 +438,108 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { text } if text.contains("should not"))));
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn agent_stops_at_budget_rounds() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        // Always request another tool call — must stop after 2 rounds.
+        let always_tool = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "t".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "search_kb".into(),
+                    arguments: r#"{"query":"x","limit":20}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let backend = ScriptedBackend::new(vec![
+            always_tool.clone(),
+            always_tool.clone(),
+            always_tool.clone(),
+            always_tool,
+        ]);
+        let mut history = vec![];
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "loop",
+            &mut history,
+            &AgentOptions {
+                max_rounds: 2,
+                deadline_ms: 60_000,
+                max_results_per_source: 3,
+                session_id: "s".into(),
+                model: None,
+                cancel: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(events.iter().any(
+            |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_rounds")
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_stops_at_budget_time() {
+        struct SlowBackend;
+        #[async_trait]
+        impl ChatBackend for SlowBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                // Keep requesting tools so we would enter a second round.
+                Ok(ChatCompletion {
+                    content: String::new(),
+                    tool_calls: vec![ToolCallMsg {
+                        id: "slow".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "search_kb".into(),
+                            arguments: r#"{"query":"x"}"#.into(),
+                        },
+                    }],
+                    finish_reason: "tool_calls".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let mut history = vec![];
+        // Round 0 runs (~40ms); round 1 hits deadline before next complete.
+        let events = run_agent_turn(
+            &SlowBackend,
+            &mut host,
+            "hi",
+            &mut history,
+            &AgentOptions {
+                max_rounds: 8,
+                deadline_ms: 25,
+                max_results_per_source: 8,
+                session_id: "s".into(),
+                model: None,
+                cancel: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(events.iter().any(
+            |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
+        ));
     }
 }

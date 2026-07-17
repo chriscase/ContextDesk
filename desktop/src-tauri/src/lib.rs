@@ -95,8 +95,14 @@ fn rebuild_host(
     let index_cache = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("index"));
-    let mut host = cd_core::research::build_host_with_index_cache(ws, audit, index_cache)
-        .map_err(|e| e.to_string())?;
+    let mut host = cd_core::research::build_host_with_options(
+        ws,
+        audit,
+        index_cache,
+        Some(cfg.index_max_files),
+        Some(cfg.router.clone()),
+    )
+    .map_err(|e| e.to_string())?;
     apply_host_connectors(&mut host, &cfg, state);
     *state.host.lock().expect("host") = Some(host);
     Ok(())
@@ -118,6 +124,7 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     } else {
         host.set_x_search(false, None);
     }
+    host.set_router_budget(cfg.router.clone());
 }
 
 #[derive(Debug, Serialize)]
@@ -463,6 +470,41 @@ fn get_confluence_settings(state: State<'_, AppState>) -> ConfluenceSettings {
 #[tauri::command]
 fn get_web_research_enabled(state: State<'_, AppState>) -> bool {
     state.config.lock().expect("config").web_research_enabled
+}
+
+#[tauri::command]
+fn get_router_budget(state: State<'_, AppState>) -> cd_core::router::RouterBudget {
+    state.config.lock().expect("config").router.clone()
+}
+
+#[derive(Debug, Deserialize)]
+struct SetRouterBudgetReq {
+    max_sources: usize,
+    max_tool_rounds: usize,
+    max_results_per_source: usize,
+    deadline_ms: u64,
+}
+
+#[tauri::command]
+fn set_router_budget(
+    state: State<'_, AppState>,
+    req: SetRouterBudgetReq,
+) -> Result<cd_core::router::RouterBudget, String> {
+    let budget = cd_core::router::RouterBudget {
+        max_sources: req.max_sources,
+        max_tool_rounds: req.max_tool_rounds,
+        max_results_per_source: req.max_results_per_source,
+        deadline_ms: req.deadline_ms,
+        order: cd_core::router::RouterBudget::default().order,
+    }
+    .sanitized();
+    let mut cfg = state.config.lock().expect("config");
+    cfg.router = budget.clone();
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(budget)
 }
 
 /// Open an http(s) URL in the **system** default browser.
@@ -1787,6 +1829,8 @@ pub fn run() {
             test_x_config,
             get_web_research_enabled,
             set_web_research_enabled,
+            get_router_budget,
+            set_router_budget,
             list_web_research_sources,
             set_web_research_sources,
             open_external_url,

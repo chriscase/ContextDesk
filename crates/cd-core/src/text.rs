@@ -60,4 +60,3 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 99), 4);
     }
 }
-

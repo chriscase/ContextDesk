@@ -97,6 +97,16 @@ pub struct AppConfig {
     /// Missing keys use each source's registry default (typically true).
     #[serde(default)]
     pub web_research_sources: std::collections::HashMap<String, bool>,
+    /// Retrieval / agent router budgets (enforced on the live turn path).
+    #[serde(default)]
+    pub router: crate::router::RouterBudget,
+    /// Soft max files for indexing (default 100_000). Truncation is recorded, not silent.
+    #[serde(default = "default_index_max_files")]
+    pub index_max_files: usize,
+}
+
+fn default_index_max_files() -> usize {
+    100_000
 }
 
 fn default_theme() -> String {

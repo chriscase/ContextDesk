@@ -118,10 +118,28 @@ pub fn build_host_with_index_cache(
     audit_path: Option<PathBuf>,
     index_cache_dir: Option<PathBuf>,
 ) -> CoreResult<ToolHost> {
-    let index = KeywordIndex::open_or_build(&workspace, index_cache_dir.as_deref())?;
-    let audit = audit_path.map(AuditLog::new);
-    Ok(ToolHost::new(workspace, index, audit))
+    build_host_with_options(workspace, audit_path, index_cache_dir, None, None)
 }
+
+/// Build host with index cache, max files, and router budget.
+pub fn build_host_with_options(
+    workspace: Workspace,
+    audit_path: Option<PathBuf>,
+    index_cache_dir: Option<PathBuf>,
+    index_max_files: Option<usize>,
+    router: Option<crate::router::RouterBudget>,
+) -> CoreResult<ToolHost> {
+    let index =
+        KeywordIndex::open_or_build(&workspace, index_cache_dir.as_deref(), index_max_files)?;
+    let audit = audit_path.map(AuditLog::new);
+    let mut host = ToolHost::new(workspace, index, audit);
+    if let Some(b) = router {
+        host.set_router_budget(b);
+    }
+    Ok(host)
+}
+
+// Note: open_or_build third arg is max_files.
 
 /// Local research without an LLM: search_kb + cited synthesis from hits.
 /// This is a real shipped entry point used when no model is available and in fixtures.
@@ -173,15 +191,18 @@ pub fn research_local_with_skills(
         None,
     )?;
     events.extend(result.events.clone());
+    let budget = host.router_budget().clone();
+    host.set_max_results_per_source(budget.max_results_per_source);
     let ranked = crate::router::rank_sources(
         &query,
         &[
             crate::router::SourceKind::Memory,
             crate::router::SourceKind::Files,
         ],
-        &crate::router::RouterBudget::default(),
+        &budget,
     );
     let mut trail = crate::router::trail_for(&ranked);
+    trail.insert(0, budget.trail_step());
     trail.push("tool:search_kb".into());
     events.push(StreamEvent::SearchTrail { steps: trail });
 
@@ -284,20 +305,12 @@ pub async fn research_turn(
         if let Ok(client) = OllamaClient::new(&profile.base_url, &profile.chat_model) {
             if client.health().await {
                 let backend = OllamaBackend(client);
-                return run_agent_turn(
-                    &backend,
-                    host,
-                    user_text,
-                    history,
-                    &AgentOptions {
-                        session_id: session_id.into(),
-                        model: Some(profile.chat_model.clone()),
-                        max_rounds: 8,
-                        cancel: None,
-                    },
-                    None,
-                )
-                .await;
+                let opts = AgentOptions::from_budget(
+                    host.router_budget(),
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                );
+                return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
             }
         }
         return research_local(host, user_text, session_id);
@@ -312,20 +325,12 @@ pub async fn research_turn(
         let client =
             OpenAiCompatibleClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
         let backend = OpenAiBackend(client);
-        return run_agent_turn(
-            &backend,
-            host,
-            user_text,
-            history,
-            &AgentOptions {
-                session_id: session_id.into(),
-                model: Some(profile.chat_model.clone()),
-                max_rounds: 8,
-                cancel: None,
-            },
-            None,
-        )
-        .await;
+        let opts = AgentOptions::from_budget(
+            host.router_budget(),
+            session_id,
+            Some(profile.chat_model.clone()),
+        );
+        return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
     }
 
     // Explicit opt-in only: load ~/.grok/auth.json session, pin host to api.x.ai.
@@ -372,20 +377,12 @@ pub async fn research_turn(
             OpenAiCompatibleClient::new(base, None, &profile.chat_model, &SsrfPolicy::default())?
                 .with_extra_headers(headers);
         let backend = OpenAiBackend(client);
-        return run_agent_turn(
-            &backend,
-            host,
-            user_text,
-            history,
-            &AgentOptions {
-                session_id: session_id.into(),
-                model: Some(profile.chat_model.clone()),
-                max_rounds: 8,
-                cancel: None,
-            },
-            None,
-        )
-        .await;
+        let opts = AgentOptions::from_budget(
+            host.router_budget(),
+            session_id,
+            Some(profile.chat_model.clone()),
+        );
+        return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
     }
 
     research_local(host, user_text, session_id)
@@ -428,6 +425,8 @@ pub async fn research_scripted_tool_turn(
             session_id: session_id.into(),
             model: Some("scripted".into()),
             max_rounds: 4,
+            deadline_ms: 60_000,
+            max_results_per_source: 8,
             cancel: None,
         },
         None,

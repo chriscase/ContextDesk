@@ -4,10 +4,12 @@ import {
   hostConfluenceHasToken,
   hostEnsureDefaultWorkspace,
   hostGetConfluence,
+  hostGetRouterBudget,
   hostGetWebResearchEnabled,
   hostGetX,
   hostListLocalCandidates,
   hostListWebResearchSources,
+  hostSetRouterBudget,
   hostPreflight,
   hostProbeUrl,
   hostProviderHasSecret,
@@ -26,6 +28,7 @@ import {
   type DefaultWorkspaceDto,
   type LocalCandidateDto,
   type NewsSourceDto,
+  type RouterBudgetDto,
 } from "../lib/host";
 import {
   runClientPreflight,
@@ -109,6 +112,12 @@ export function SettingsModal({
   const [defaultWs, setDefaultWs] = useState<DefaultWorkspaceDto | null>(null);
   const [defaultWsBusy, setDefaultWsBusy] = useState(false);
   const [newsSources, setNewsSources] = useState<NewsSourceDto[]>([]);
+  const [routerBudget, setRouterBudget] = useState<RouterBudgetDto>({
+    max_sources: 3,
+    max_tool_rounds: 8,
+    max_results_per_source: 8,
+    deadline_ms: 60_000,
+  });
   const baseId = useId();
 
   useEffect(() => {
@@ -127,6 +136,8 @@ export function SettingsModal({
         const xHas = await hostXHasToken();
         const webOn = await hostGetWebResearchEnabled();
         const sources = await hostListWebResearchSources();
+        const budget = await hostGetRouterBudget();
+        if (budget) setRouterBudget(budget);
         if (sources.length) setNewsSources(sources);
         setDraft((d) => ({
           ...d,
@@ -494,6 +505,13 @@ export function SettingsModal({
         ...next,
         webResearchEnabled: draft.webResearchEnabled ?? false,
       };
+    }
+
+    try {
+      const savedBudget = await hostSetRouterBudget(routerBudget);
+      setRouterBudget(savedBudget);
+    } catch {
+      /* browser mode */
     }
 
     setApiKeyDraft("");
@@ -1522,6 +1540,63 @@ export function SettingsModal({
                   Data directory status:{" "}
                   {draft.dataDirWritable ? "writable" : "not writable"}.
                 </p>
+                <h3 className="settings-connector-block__title">
+                  Retrieval budgets
+                </h3>
+                <p className="field__hint">
+                  Enforced on the agent loop and search_kb. Reflected in the
+                  search trail as{" "}
+                  <code>budget:sources=…,rounds=…,per_source=…,deadline=…ms</code>
+                  .
+                </p>
+                <TextField
+                  id={`${baseId}-rounds`}
+                  label="Max tool rounds"
+                  hint="1–32. Loop stops with reason budget_rounds."
+                  value={String(routerBudget.max_tool_rounds)}
+                  onChange={(e) =>
+                    setRouterBudget((b) => ({
+                      ...b,
+                      max_tool_rounds: Number(e.target.value) || 1,
+                    }))
+                  }
+                />
+                <TextField
+                  id={`${baseId}-per-source`}
+                  label="Max results per source"
+                  hint="Caps search_kb limit (smaller of tool arg and this)."
+                  value={String(routerBudget.max_results_per_source)}
+                  onChange={(e) =>
+                    setRouterBudget((b) => ({
+                      ...b,
+                      max_results_per_source: Number(e.target.value) || 1,
+                    }))
+                  }
+                />
+                <TextField
+                  id={`${baseId}-sources`}
+                  label="Max ranked sources"
+                  hint="How many sources rank_sources may fan out."
+                  value={String(routerBudget.max_sources)}
+                  onChange={(e) =>
+                    setRouterBudget((b) => ({
+                      ...b,
+                      max_sources: Number(e.target.value) || 1,
+                    }))
+                  }
+                />
+                <TextField
+                  id={`${baseId}-deadline`}
+                  label="Deadline (ms)"
+                  hint="Wall-clock stop; TurnCompleted reason budget_time."
+                  value={String(routerBudget.deadline_ms)}
+                  onChange={(e) =>
+                    setRouterBudget((b) => ({
+                      ...b,
+                      deadline_ms: Number(e.target.value) || 500,
+                    }))
+                  }
+                />
               </div>
             ) : null}
           </div>

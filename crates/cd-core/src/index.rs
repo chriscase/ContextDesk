@@ -10,9 +10,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Max bytes read per file (binaries / huge dumps still skipped).
 const MAX_FILE_BYTES: u64 = 512 * 1024;
-const MAX_FILES: usize = 5_000;
+/// Default soft file cap (was hard 5_000; now configurable via AppConfig).
+const DEFAULT_MAX_FILES: usize = 100_000;
+/// Max directory depth when walking roots.
 const MAX_DEPTH: usize = 12;
+/// Soft max chars per chunk (structure-aware chunker).
+const MAX_CHUNK_CHARS: usize = 2_400;
+/// Overlap lines between consecutive chunks.
+const CHUNK_OVERLAP_LINES: usize = 4;
 
 /// A searchable chunk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +47,10 @@ pub struct ReindexStats {
     pub removed: u32,
     /// Files skipped because (size, mtime) matched the store.
     pub unchanged: u32,
+    /// True when walk stopped because max_files was hit (not silent).
+    pub truncated: bool,
+    /// Soft cap in effect during this refresh.
+    pub max_files: u32,
 }
 
 /// In-memory keyword index with optional SQLite backing store.
@@ -52,6 +63,8 @@ pub struct KeywordIndex {
     roots: Vec<PathBuf>,
     /// Optional SQLite path for persistence.
     store_path: Option<PathBuf>,
+    /// Soft max files (default 100_000).
+    max_files: usize,
 }
 
 impl Default for KeywordIndex {
@@ -61,6 +74,7 @@ impl Default for KeywordIndex {
             postings: HashMap::new(),
             roots: Vec::new(),
             store_path: None,
+            max_files: DEFAULT_MAX_FILES,
         }
     }
 }
@@ -83,14 +97,19 @@ impl KeywordIndex {
 
     /// Full walk build (in-memory only). Prefer [`Self::open_or_build`] when a cache dir is available.
     pub fn build(workspace: &Workspace) -> CoreResult<Self> {
-        Self::open_or_build(workspace, None)
+        Self::open_or_build(workspace, None, None)
     }
 
     /// Open a persisted store for this workspace or build from scratch.
     ///
     /// When `cache_dir` is `Some`, the SQLite file is
     /// `<cache_dir>/<workspace_id>.sqlite`. When `None`, in-memory only.
-    pub fn open_or_build(workspace: &Workspace, cache_dir: Option<&Path>) -> CoreResult<Self> {
+    /// `max_files` overrides the soft cap when `Some`.
+    pub fn open_or_build(
+        workspace: &Workspace,
+        cache_dir: Option<&Path>,
+        max_files: Option<usize>,
+    ) -> CoreResult<Self> {
         let store_path = cache_dir.map(|d| {
             let _ = fs::create_dir_all(d);
             d.join(format!("{}.sqlite", sanitize_ws_id(&workspace.id)))
@@ -101,6 +120,7 @@ impl KeywordIndex {
             postings: HashMap::new(),
             roots: workspace.roots.clone(),
             store_path: store_path.clone(),
+            max_files: max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, 1_000_000),
         };
 
         if let Some(ref path) = store_path {
@@ -118,11 +138,21 @@ impl KeywordIndex {
         Ok(idx)
     }
 
+    /// Configure soft max files (Settings / AppConfig).
+    pub fn set_max_files(&mut self, n: usize) {
+        self.max_files = n.clamp(1, 1_000_000);
+    }
+
     /// Incremental reindex: skip re-read when size+mtime unchanged.
     pub fn refresh(&mut self) -> CoreResult<ReindexStats> {
-        let mut stats = ReindexStats::default();
+        let mut stats = ReindexStats {
+            max_files: self.max_files as u32,
+            ..ReindexStats::default()
+        };
         let mut seen_paths: HashSet<String> = HashSet::new();
         let mut file_count = 0usize;
+        let mut hit_cap = false;
+        let max_files = self.max_files;
 
         // Snapshot existing file metadata from store or memory fingerprint map.
         let existing = self.file_meta_map()?;
@@ -132,7 +162,8 @@ impl KeywordIndex {
                 continue;
             }
             walk(&root, 0, &mut |path| {
-                if file_count >= MAX_FILES {
+                if file_count >= max_files {
+                    hit_cap = true;
                     return Ok(false);
                 }
                 let name = path
@@ -182,6 +213,15 @@ impl KeywordIndex {
                 }
                 Ok(true)
             })?;
+        }
+
+        if hit_cap {
+            stats.truncated = true;
+            tracing::warn!(
+                max_files = max_files,
+                scanned = stats.scanned,
+                "index walk truncated at max_files soft cap"
+            );
         }
 
         // Remove files no longer present.
@@ -384,7 +424,11 @@ impl KeywordIndex {
         }
     }
 
-    /// Search with simple TF scoring.
+    /// Search with TF-IDF plus path / heading boosts.
+    ///
+    /// Scoring: base IDF sum for matching terms; +2.0 if term appears in the
+    /// file path/basename; +1.5 if term appears in a markdown heading line
+    /// (`# …`) inside the chunk. Body-only hits still rank via IDF alone.
     pub fn search(&self, query: &str, limit: usize) -> Vec<(f32, &Chunk)> {
         let terms: Vec<String> = tokenize(query).collect();
         if terms.is_empty() {
@@ -396,6 +440,32 @@ impl KeywordIndex {
                 let idf = 1.0 + (self.chunks.len() as f32 / (1 + ids.len()) as f32).ln();
                 for &i in ids {
                     *scores.entry(i).or_default() += idf;
+                }
+            }
+        }
+        // Path / heading boosts
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            let Some(base) = scores.get_mut(&i) else {
+                continue;
+            };
+            let path_l = chunk.path.to_string_lossy().to_lowercase();
+            let file_stem = chunk
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            for term in &terms {
+                if path_l.contains(term) || file_stem.contains(term) {
+                    *base += 2.0;
+                }
+                for line in chunk.text.lines() {
+                    if line.trim_start().starts_with('#')
+                        && line.to_lowercase().contains(term.as_str())
+                    {
+                        *base += 1.5;
+                        break;
+                    }
                 }
             }
         }
@@ -421,13 +491,37 @@ impl KeywordIndex {
     }
 }
 
+/// Structure-aware overlapping chunks: prefer markdown headings / blank lines;
+/// bound by MAX_CHUNK_CHARS; overlap CHUNK_OVERLAP_LINES when advancing.
 fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
     let lines: Vec<&str> = text.lines().collect();
-    let chunk_size = 40usize;
+    if lines.is_empty() {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut start = 0usize;
     while start < lines.len() {
-        let end = (start + chunk_size).min(lines.len());
+        let mut end = start;
+        let mut chars = 0usize;
+        let mut last_break = start + 1;
+        while end < lines.len() {
+            let line = lines[end];
+            let add = line.chars().count() + 1;
+            if end > start && chars + add > MAX_CHUNK_CHARS {
+                break;
+            }
+            chars += add;
+            end += 1;
+            // Prefer break after heading or blank line
+            if line.starts_with('#') || line.trim().is_empty() {
+                last_break = end;
+            }
+        }
+        if end == start {
+            end = (start + 1).min(lines.len());
+        } else if end < lines.len() && last_break > start + 1 {
+            end = last_break;
+        }
         let body = lines[start..end].join("\n");
         if !body.trim().is_empty() {
             out.push(Chunk {
@@ -437,7 +531,12 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
                 text: body,
             });
         }
-        start = end;
+        if end >= lines.len() {
+            break;
+        }
+        // Overlap: step back a few lines, but always advance
+        let next = end.saturating_sub(CHUNK_OVERLAP_LINES).max(start + 1);
+        start = next;
     }
     out
 }
@@ -503,10 +602,8 @@ fn walk(dir: &Path, depth: usize, f: &mut dyn FnMut(&Path) -> CoreResult<bool>) 
     for ent in entries.flatten() {
         let path = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && name != ".contextdesk" {
-            if path.is_dir() && name != ".contextdesk" {
-                continue;
-            }
+        if name.starts_with('.') && name != ".contextdesk" && path.is_dir() {
+            continue;
         }
         if name == "node_modules" || name == "target" || name == "dist" || name == ".git" {
             continue;
@@ -567,7 +664,7 @@ mod tests {
         fs::write(dir.path().join("b.md"), "beta session two").unwrap();
         let ws = Workspace::new("ws1", vec![dir.path().to_path_buf()]);
 
-        let mut idx = KeywordIndex::open_or_build(&ws, Some(cache.path())).unwrap();
+        let mut idx = KeywordIndex::open_or_build(&ws, Some(cache.path()), None).unwrap();
         let hits1_text = idx
             .search("gateway", 5)
             .first()
@@ -582,7 +679,7 @@ mod tests {
         assert_eq!(stats.removed, 0);
 
         // Reopen: same search hits, no full re-index needed beyond refresh stats
-        let idx2 = KeywordIndex::open_or_build(&ws, Some(cache.path())).unwrap();
+        let idx2 = KeywordIndex::open_or_build(&ws, Some(cache.path()), None).unwrap();
         let hits2_text = idx2
             .search("gateway", 5)
             .first()
@@ -598,7 +695,7 @@ mod tests {
         let a = dir.path().join("a.md");
         fs::write(&a, "alpha gateway").unwrap();
         let ws = Workspace::new("ws2", vec![dir.path().to_path_buf()]);
-        let mut idx = KeywordIndex::open_or_build(&ws, Some(cache.path())).unwrap();
+        let mut idx = KeywordIndex::open_or_build(&ws, Some(cache.path()), None).unwrap();
 
         // Ensure mtime can change on some filesystems
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -619,7 +716,7 @@ mod tests {
         fs::write(dir.path().join("ok.md"), "public").unwrap();
         fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         let ws = Workspace::new("ws3", vec![dir.path().to_path_buf()]);
-        let idx = KeywordIndex::open_or_build(&ws, Some(cache.path())).unwrap();
+        let idx = KeywordIndex::open_or_build(&ws, Some(cache.path()), None).unwrap();
         assert!(idx.indexed_paths().iter().all(|p| !p.ends_with(".env")));
         // Store file must not contain .env path string
         let db = idx.store_path.clone().expect("persistent store path");
@@ -633,5 +730,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Soft cap is no longer 5_000 — default allows large workspaces; truncation is signaled.
+    #[test]
+    fn max_files_soft_cap_signals_truncation() {
+        let dir = tempdir().unwrap();
+        for i in 0..20 {
+            fs::write(dir.path().join(format!("f{i}.md")), format!("content {i}")).unwrap();
+        }
+        let ws = Workspace::new("cap", vec![dir.path().to_path_buf()]);
+        let mut idx = KeywordIndex::open_or_build(&ws, None, Some(5)).unwrap();
+        let stats = idx.refresh().unwrap();
+        assert!(stats.truncated, "expected truncated={stats:?}");
+        assert!(stats.scanned <= 5);
+    }
+
+    /// Synthetic large tree — ignored so default CI stays fast (AGENTS #8).
+    /// Run: `cargo test -p cd-core --lib index_50k_soft -- --ignored --nocapture`
+    #[test]
+    #[ignore = "slow synthetic 5k-file tree; run with --ignored"]
+    fn index_50k_soft_cap_allows_large_tree() {
+        let dir = tempdir().unwrap();
+        let n = 5_000usize;
+        for i in 0..n {
+            let sub = dir.path().join(format!("b{}", i % 50));
+            let _ = fs::create_dir_all(&sub);
+            fs::write(sub.join(format!("f{i}.md")), format!("token_{i} unique")).unwrap();
+        }
+        let ws = Workspace::new("big", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::open_or_build(&ws, None, Some(100_000)).unwrap();
+        assert!(!idx.is_empty());
+        let hits = idx.search("token_42", 5);
+        assert!(!hits.is_empty(), "expected hit for seeded token_42");
     }
 }

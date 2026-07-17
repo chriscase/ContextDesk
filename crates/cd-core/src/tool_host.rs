@@ -84,6 +84,10 @@ pub struct ToolHost {
     x_enabled: bool,
     /// X API bearer from host keychain (never logged).
     x_bearer: Option<String>,
+    /// Cap for search_kb (and similar) results; from router budget.
+    max_results_per_source: usize,
+    /// Full router budget for agent turns.
+    router_budget: crate::router::RouterBudget,
 }
 
 impl ToolHost {
@@ -116,7 +120,27 @@ impl ToolHost {
             last_web_call: None,
             x_enabled: false,
             x_bearer: None,
+            max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
+            router_budget: crate::router::RouterBudget::default(),
         }
+    }
+
+    /// Set full router budget (rounds, deadline, per-source caps).
+    pub fn set_router_budget(&mut self, budget: crate::router::RouterBudget) {
+        let b = budget.sanitized();
+        self.max_results_per_source = b.max_results_per_source;
+        self.router_budget = b;
+    }
+
+    /// Effective router budget.
+    pub fn router_budget(&self) -> &crate::router::RouterBudget {
+        &self.router_budget
+    }
+
+    /// Set per-source result cap (router budget).
+    pub fn set_max_results_per_source(&mut self, n: usize) {
+        self.max_results_per_source = n.clamp(1, 50);
+        self.router_budget.max_results_per_source = self.max_results_per_source;
     }
 
     /// Attach Confluence RO config + PAT (from host keychain only).
@@ -225,7 +249,7 @@ impl ToolHost {
             tracing::debug!(?stats, "tool host reindex (in-place)");
             return Ok(());
         }
-        let mut idx = KeywordIndex::open_or_build(&self.workspace, cache.as_deref())?;
+        let mut idx = KeywordIndex::open_or_build(&self.workspace, cache.as_deref(), None)?;
         let stats = idx.refresh()?;
         tracing::debug!(?stats, "tool host reindex (rebuild arc)");
         self.index = Arc::new(idx);
@@ -410,11 +434,13 @@ impl ToolHost {
         if query.is_empty() {
             return Err(CoreError::Message("search_kb requires query".into()));
         }
-        let limit = args
+        let requested = args
             .get("limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(8)
             .min(50) as usize;
+        // Smaller of tool arg and router budget per-source cap.
+        let limit = requested.min(self.max_results_per_source);
         let hits = self.index.search(query, limit);
         let mut lines = Vec::new();
         let mut first_path = None;

@@ -641,6 +641,27 @@ export async function hostGetWebResearchEnabled(): Promise<boolean | null> {
   return invoke<boolean>("get_web_research_enabled");
 }
 
+export type RouterBudgetDto = {
+  max_sources: number;
+  max_tool_rounds: number;
+  max_results_per_source: number;
+  deadline_ms: number;
+};
+
+export async function hostGetRouterBudget(): Promise<RouterBudgetDto | null> {
+  if (!isTauri()) return null;
+  return invoke<RouterBudgetDto>("get_router_budget");
+}
+
+export async function hostSetRouterBudget(
+  budget: RouterBudgetDto,
+): Promise<RouterBudgetDto> {
+  if (!isTauri()) {
+    throw new Error("Router budget requires Tauri host");
+  }
+  return invoke<RouterBudgetDto>("set_router_budget", { req: budget });
+}
+
 export async function hostSetWebResearchEnabled(
   enabled: boolean,
 ): Promise<boolean> {

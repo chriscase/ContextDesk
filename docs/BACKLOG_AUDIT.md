@@ -47,7 +47,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 26 | Indexer | DONE (remediation #115) | Persistent SQLite + incremental refresh; secret skip; size/depth caps |
 | 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
 | 28 | Citations UI | DONE | chips + trail + markdown #cite links |
-| 29 | Router budgets | DONE | rank + trail + tests |
+| 29 | Router budgets | DONE (remediation #118) | Enforced rounds/time/per-source; AppConfig + Settings; trail budget step |
 | 30 | Streaming markdown | DONE | progressive text_delta + MarkdownBody + materialize |
 | 31 | Compact tools UI | DONE | status icons; collapse threshold 4 |
 | 32 | Composer | DONE | expand; Enter/Shift+Enter; stop SVG; list/code assist |
