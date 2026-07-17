@@ -64,17 +64,19 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 
 ## Connectors
 
-Workspace connectors are configured from **Settings** (not hand-edited secret files).
+**Shipped in Settings** (not hand-edited secret files): Files/memory, SQLite RO, Confluence RO, X search, web research.
 
-| Kind | Module | Notes |
-|------|--------|--------|
-| Files / memory | workspace + `memory_fs` | Allowlisted roots |
-| SQLite RO | `sql_ro` | Single-SELECT denylist; host `sql_ro_query` |
-| MCP (stdio) | `mcp_client` + `connectors::validate_mcp_command` | Absolute command only; opt-in config; tools named `mcp__{server}__{tool}`; host assigns side-effect class |
-| HTTP presets | `http_preset` | Allowlisted host + GET routes only; SSRF-aware |
-| Confluence RO | `confluence_ro` + Settings Connectors | PAT in keychain (`confluence/default/pat`); space allowlist |
+| Kind | Module | Status | Notes |
+|------|--------|--------|--------|
+| Files / memory | workspace + `memory_fs` | **Shipped** | Allowlisted roots; Settings workspace |
+| SQLite RO | `sql_ro` | **Shipped** | Single-SELECT denylist; host `sql_ro_query` |
+| Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors |
+| X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
+| Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
+| MCP (stdio) | `mcp_client` + `connectors::validate_mcp_command` | **Planned** | Plumbing exists; **not** in `AppConfig` / Settings UI yet |
+| HTTP presets | `http_preset` | **Planned** | Allowlisted host + GET; **not** exposed in Settings |
 
-MCP config example (non-secret):
+Forward-looking MCP config shape (not a current Settings feature):
 
 ```json
 {
