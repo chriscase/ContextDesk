@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import {
   hostCheckOllama,
   hostConfluenceHasToken,
+  hostEnsureDefaultWorkspace,
   hostGetConfluence,
   hostListLocalCandidates,
   hostPreflight,
@@ -9,9 +10,11 @@ import {
   hostProviderHasSecret,
   hostSaveActiveProvider,
   hostSaveConfluence,
+  hostSuggestDefaultWorkspace,
   hostTestConfluence,
   hostValidateWorkspacePath,
   profileIdForKind,
+  type DefaultWorkspaceDto,
   type LocalCandidateDto,
 } from "../lib/host";
 import {
@@ -81,6 +84,8 @@ export function SettingsModal({
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [candidates, setCandidates] = useState<LocalCandidateDto[]>([]);
   const [probeNote, setProbeNote] = useState<string | null>(null);
+  const [defaultWs, setDefaultWs] = useState<DefaultWorkspaceDto | null>(null);
+  const [defaultWsBusy, setDefaultWsBusy] = useState(false);
   const baseId = useId();
 
   useEffect(() => {
@@ -113,6 +118,8 @@ export function SettingsModal({
         }
         const cands = await hostListLocalCandidates();
         setCandidates(cands);
+        const suggested = await hostSuggestDefaultWorkspace();
+        setDefaultWs(suggested);
       })();
     }
   }, [open, setup, initialSection]);
@@ -229,6 +236,18 @@ export function SettingsModal({
     else setSection("general");
   };
 
+  const appendRoot = (path: string, nameFallback?: string) => {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    setDraft((d) => ({
+      ...d,
+      workspaceName: d.workspaceName ?? nameFallback ?? "Workspace",
+      workspaceRoots: d.workspaceRoots.includes(trimmed)
+        ? d.workspaceRoots
+        : [...d.workspaceRoots, trimmed],
+    }));
+  };
+
   const addRoot = async () => {
     // Prefer native folder dialog under Tauri; prompt fallback in plain browser.
     let path: string | null = null;
@@ -257,13 +276,32 @@ export function SettingsModal({
       window.alert(`Cannot add folder: ${check.detail}`);
       return;
     }
-    setDraft((d) => ({
-      ...d,
-      workspaceName: d.workspaceName ?? "Workspace",
-      workspaceRoots: d.workspaceRoots.includes(trimmed)
-        ? d.workspaceRoots
-        : [...d.workspaceRoots, trimmed],
-    }));
+    appendRoot(trimmed);
+  };
+
+  /** Create/use OS Documents/<product> folder as a workspace root. */
+  const useDefaultWorkspace = async () => {
+    setDefaultWsBusy(true);
+    try {
+      const ensured = await hostEnsureDefaultWorkspace();
+      if (!ensured) {
+        window.alert(
+          "Default workspace is available in the desktop app (Tauri). Pick a folder instead.",
+        );
+        return;
+      }
+      const check = await hostValidateWorkspacePath(ensured.path);
+      if (!check.ok) {
+        window.alert(`Cannot use default folder: ${check.detail}`);
+        return;
+      }
+      setDefaultWs(ensured);
+      const folderName =
+        ensured.label.split("/").pop() || ensured.path.split(/[/\\]/).pop() || "Workspace";
+      appendRoot(ensured.path, folderName);
+    } finally {
+      setDefaultWsBusy(false);
+    }
   };
 
   const save = async () => {
@@ -411,13 +449,45 @@ export function SettingsModal({
                       ))}
                     </ul>
                   )}
-                  <button
-                    type="button"
-                    className="btn btn--primary"
-                    onClick={() => void addRoot()}
-                  >
-                    Add folder…
-                  </button>
+                  <div className="workspace-root-actions">
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() => void addRoot()}
+                    >
+                      Add folder…
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      disabled={defaultWsBusy}
+                      onClick={() => void useDefaultWorkspace()}
+                      title={
+                        defaultWs
+                          ? `Create or use ${defaultWs.path}`
+                          : "Use the platform Documents folder (desktop app)"
+                      }
+                    >
+                      {defaultWsBusy
+                        ? "Setting default…"
+                        : defaultWs
+                          ? `Use default (${defaultWs.label})`
+                          : "Use default folder"}
+                    </button>
+                  </div>
+                  {defaultWs ? (
+                    <p className="field__hint">
+                      Default on this OS:{" "}
+                      <span className="mono mono--sm">{defaultWs.path}</span>
+                      {defaultWs.exists ? " (exists)" : " (will be created)"}
+                      . Never uses your whole home directory.
+                    </p>
+                  ) : (
+                    <p className="field__hint">
+                      In the desktop app, one click sets a Documents/ContextDesk
+                      folder (macOS, Windows, and Linux).
+                    </p>
+                  )}
                 </div>
               </div>
             ) : null}

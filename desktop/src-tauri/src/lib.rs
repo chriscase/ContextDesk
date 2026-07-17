@@ -487,18 +487,6 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
     ))
 }
 
-fn is_whole_home_root(path: &std::path::Path) -> bool {
-    let Ok(canon) = path.canonicalize() else {
-        return false;
-    };
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(h) = home.canonicalize() {
-            return canon == h;
-        }
-    }
-    false
-}
-
 /// Instant path check for workspace settings UI (exists + readable directory).
 #[tauri::command]
 fn validate_workspace_path(path: String) -> Result<String, String> {
@@ -512,7 +500,7 @@ fn validate_workspace_path(path: String) -> Result<String, String> {
     if !p.is_dir() {
         return Err("Path is not a directory".into());
     }
-    if is_whole_home_root(&p) {
+    if cd_core::workspace::is_whole_home_directory(&p) {
         return Err(
             "Refusing whole home directory as a workspace root — pick a project folder".into(),
         );
@@ -524,6 +512,37 @@ fn validate_workspace_path(path: String) -> Result<String, String> {
     }
 }
 
+/// Suggested OS-default workspace (Documents/<product>) without creating it.
+#[derive(Serialize)]
+struct DefaultWorkspaceDto {
+    path: String,
+    label: String,
+    exists: bool,
+}
+
+#[tauri::command]
+fn suggest_default_workspace(state: State<'_, AppState>) -> Result<DefaultWorkspaceDto, String> {
+    let path = cd_core::workspace::default_workspace_root(&state.branding.name)
+        .map_err(|e| e.to_string())?;
+    Ok(DefaultWorkspaceDto {
+        path: path.display().to_string(),
+        label: cd_core::workspace::default_workspace_label(&state.branding.name),
+        exists: path.is_dir(),
+    })
+}
+
+/// Create Documents/<product> if needed and return its absolute path.
+#[tauri::command]
+fn ensure_default_workspace(state: State<'_, AppState>) -> Result<DefaultWorkspaceDto, String> {
+    let path = cd_core::workspace::ensure_default_workspace_root(&state.branding.name)
+        .map_err(|e| e.to_string())?;
+    Ok(DefaultWorkspaceDto {
+        path: path.display().to_string(),
+        label: cd_core::workspace::default_workspace_label(&state.branding.name),
+        exists: true,
+    })
+}
+
 #[tauri::command]
 fn set_workspace_roots(
     state: State<'_, AppState>,
@@ -532,7 +551,7 @@ fn set_workspace_roots(
 ) -> Result<(), String> {
     let root_paths: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
     for r in &root_paths {
-        if is_whole_home_root(r) {
+        if cd_core::workspace::is_whole_home_directory(r) {
             return Err(
                 "Refusing whole home directory as a workspace root — pick a project folder".into(),
             );
@@ -871,6 +890,8 @@ pub fn run() {
             run_preflight_cmd,
             set_workspace_roots,
             validate_workspace_path,
+            suggest_default_workspace,
+            ensure_default_workspace,
             agent_turn,
             complete_permission_cmd,
             list_skills_cmd,

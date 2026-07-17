@@ -153,6 +153,24 @@ export async function hostValidateWorkspacePath(
   }
 }
 
+export type DefaultWorkspaceDto = {
+  path: string;
+  label: string;
+  exists: boolean;
+};
+
+/** OS Documents/<product> suggestion (does not create the folder). */
+export async function hostSuggestDefaultWorkspace(): Promise<DefaultWorkspaceDto | null> {
+  if (!isTauri()) return null;
+  return invoke<DefaultWorkspaceDto>("suggest_default_workspace");
+}
+
+/** Create Documents/<product> if needed and return its path. */
+export async function hostEnsureDefaultWorkspace(): Promise<DefaultWorkspaceDto | null> {
+  if (!isTauri()) return null;
+  return invoke<DefaultWorkspaceDto>("ensure_default_workspace");
+}
+
 export async function hostSaveSecret(profileId: string, secret: string): Promise<void> {
   if (!isTauri()) return;
   await invoke("set_provider_secret", { profileId, secret });

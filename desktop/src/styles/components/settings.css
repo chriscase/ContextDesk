@@ -269,3 +269,11 @@
   background: color-mix(in srgb, var(--success) 12%, transparent);
   border-color: color-mix(in srgb, var(--success) 25%, var(--border-soft));
 }
+
+.workspace-root-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
