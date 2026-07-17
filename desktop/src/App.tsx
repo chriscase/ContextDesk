@@ -50,7 +50,6 @@ import {
   parseModelSelectionKey,
   type BrandingDto,
   type ChatSessionDto,
-  type EventDto,
   type MessageMetaDto,
   type ModelOptionDto,
 } from "./lib/host";
@@ -59,19 +58,15 @@ import {
   type AppSetupState,
   type PreflightReport,
 } from "./lib/preflight";
+import {
+  applyEventsToMessage,
+  shortSourceLabel,
+  type ChatMsg as Msg,
+} from "./lib/turn";
 
-type Msg = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  tools?: ToolCallView[];
-  /** id = url/path, label = short source, title = article/page title */
-  citations?: { id: string; label: string; title?: string }[];
-  trail?: string[];
-  streaming?: boolean;
-  /** Model / gateway used for this assistant response (persisted). */
-  meta?: MessageMetaDto;
-};
+function isHttpUrl(s: string): boolean {
+  return /^https?:\/\//i.test(s.trim());
+}
 
 type PaneId = "chat" | "archive" | "memory" | "source" | "todos";
 
@@ -125,133 +120,6 @@ function loadSetup(): AppSetupState {
     x: { enabled: false, hasToken: false },
     webResearchEnabled: false,
   };
-}
-
-function applyEventsToMessage(
-  base: Msg,
-  events: EventDto[],
-): { msg: Msg; permission: PermissionPrompt | null } {
-  let content = base.content;
-  const tools: ToolCallView[] = [...(base.tools ?? [])];
-  const citations: { id: string; label: string; title?: string }[] = [
-    ...(base.citations ?? []),
-  ];
-  const trail: string[] = [...(base.trail ?? [])];
-  let permission: PermissionPrompt | null = null;
-
-  for (const ev of events) {
-    const p = ev.payload;
-    switch (ev.kind) {
-      case "text_delta":
-        content += String(p.text ?? "");
-        break;
-      case "tool": {
-        const id = String(p.id ?? crypto.randomUUID());
-        const existing = tools.find((t) => t.id === id);
-        if (existing) {
-          existing.summary = String(p.summary ?? existing.summary);
-          if (p.detail) existing.detail = String(p.detail);
-          if (p.ok !== undefined && p.ok !== null) existing.ok = Boolean(p.ok);
-        } else {
-          tools.push({
-            id,
-            name: String(p.name ?? "tool"),
-            summary: String(p.summary ?? ""),
-            detail: p.detail ? String(p.detail) : undefined,
-            ok: p.ok === undefined || p.ok === null ? undefined : Boolean(p.ok),
-          });
-        }
-        break;
-      }
-      case "citation": {
-        const id = String(p.source_id ?? p.label ?? "");
-        let label = String(p.label ?? p.source_id ?? "source");
-        // Never show raw mega-URLs as the chip name.
-        if (/^https?:\/\//i.test(label) || label.length > 48) {
-          label = shortSourceLabel(label, id);
-        }
-        const titleRaw = p.locator != null ? String(p.locator) : "";
-        const title =
-          titleRaw && titleRaw !== id && titleRaw !== label
-            ? titleRaw
-            : undefined;
-        if (id && !citations.some((c) => c.id === id)) {
-          citations.push({ id, label, title });
-        }
-        break;
-      }
-      case "search_trail": {
-        const steps = p.steps;
-        if (Array.isArray(steps)) {
-          for (const s of steps) {
-            const step = String(s);
-            if (step && !trail.includes(step)) trail.push(step);
-          }
-        }
-        break;
-      }
-      case "permission_required":
-        permission = {
-          requestId: String(p.request_id ?? ""),
-          toolName: String(p.tool_name ?? ""),
-          target: String(p.target ?? ""),
-          reason: String(p.reason ?? ""),
-          preview: String(p.preview ?? ""),
-          risk: String(p.risk ?? "local"),
-          typeConfirmPhrase:
-            p.risk === "remote" || p.risk === "destructive" ? "WRITE" : null,
-        };
-        break;
-      case "error":
-        content += `\n\n**Error:** ${String(p.message ?? "unknown")}\n`;
-        break;
-      default:
-        break;
-    }
-  }
-
-  // Sources UI is the expandable Sources control — do not dump URL lists into body.
-
-  return {
-    msg: {
-      ...base,
-      content,
-      tools: tools.length ? tools : undefined,
-      citations: citations.length ? citations : undefined,
-      trail: trail.length ? trail : undefined,
-      streaming: false,
-      meta: base.meta,
-    },
-    permission,
-  };
-}
-
-function isHttpUrl(s: string): boolean {
-  return /^https?:\/\//i.test(s.trim());
-}
-
-/** Short publisher / host for chips (never the full Google News URL). */
-function shortSourceLabel(label: string, id: string): string {
-  const raw = (label || id || "source").trim();
-  if (!isHttpUrl(raw) && raw.length <= 48 && !raw.includes("://")) {
-    // "Headline - Al Jazeera"
-    const dash = raw.lastIndexOf(" - ");
-    if (dash > 8 && raw.length - dash - 3 <= 40) {
-      return raw.slice(dash + 3).trim();
-    }
-    return raw;
-  }
-  const url = isHttpUrl(raw) ? raw : id;
-  try {
-    const u = new URL(url);
-    let host = u.hostname.replace(/^www\./, "");
-    if (host.includes("news.google.")) return "Google News";
-    if (host.includes("duckduckgo.com")) return "DuckDuckGo";
-    if (host.endsWith("wikipedia.org")) return "Wikipedia";
-    return host;
-  } catch {
-    return raw.length > 40 ? `${raw.slice(0, 36)}…` : raw || "source";
-  }
 }
 
 function openExternalUrl(url: string) {

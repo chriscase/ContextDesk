@@ -40,15 +40,48 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy -p cd-core -p cd-server -- -D warnings
-      - name: test
-        run: cargo test -p cd-core
+      - name: clippy (workspace, all targets)
+        # Lints libs, bins, and tests (#162).
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test workspace
+        # cd-core + cd-server (incl. tenant isolation) (#160).
+        run: cargo test --workspace
       - name: server smoke
         run: cargo run -p cd-server -- --print-branding
 
+  tauri-host:
+    name: tauri host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Linux deps (keyring + webkit for Tauri link)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: fmt
+        run: cargo fmt -- --check
+      - name: clippy
+        run: cargo clippy -- -D warnings
+      - name: check
+        run: cargo check
+
   desktop:
-    name: desktop ui build
+    name: desktop ui (typecheck, lint, test, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -61,4 +94,7 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
       - run: npm run build

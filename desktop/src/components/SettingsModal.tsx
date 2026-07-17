@@ -336,7 +336,7 @@ export function SettingsModal({
    * When `persist` is true (preflight accept), write through to host/parent immediately
    * so first-run does not require a separate Save click.
    */
-  const useDefaultWorkspace = async (opts?: { persist?: boolean }) => {
+  const applyDefaultWorkspace = async (opts?: { persist?: boolean }) => {
     setDefaultWsBusy(true);
     try {
       const ensured = await hostEnsureDefaultWorkspace();
@@ -537,7 +537,7 @@ export function SettingsModal({
                 defaultWorkspace={defaultWs}
                 defaultWorkspaceBusy={defaultWsBusy}
                 onUseDefaultWorkspace={() =>
-                  void useDefaultWorkspace({ persist: true })
+                  void applyDefaultWorkspace({ persist: true })
                 }
               />
             ) : null}
@@ -601,7 +601,7 @@ export function SettingsModal({
                       type="button"
                       className="btn btn--ghost"
                       disabled={defaultWsBusy}
-                      onClick={() => void useDefaultWorkspace({ persist: false })}
+                      onClick={() => void applyDefaultWorkspace({ persist: false })}
                       title={
                         defaultWs
                           ? `Create or use ${defaultWs.path}`

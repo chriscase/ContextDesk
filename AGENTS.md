@@ -54,6 +54,34 @@ Treat UI work as requiring an expert visual/UX pass—not a default form dump.
 - UI: component tests for tool collapse / composer expand where practical
 - Never require network or real API keys for default `cargo test` / CI unit jobs
 
+## Build / test / lint (must match CI)
+
+Copy-paste gate — same steps as [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+```bash
+# Root workspace (cd-core + cd-server)
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p cd-server -- --print-branding
+
+# Tauri host (nested workspace; not a root member)
+( cd desktop/src-tauri && cargo fmt -- --check && cargo clippy -- -D warnings && cargo check )
+
+# Desktop UI
+( cd desktop && npm ci && npm run typecheck && npm run lint && npm run test && npm run build )
+```
+
+On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` job).
+
+## Definition of done (before push / close)
+
+- [ ] Commands above all exit 0 (or equivalent CI green on your PR).
+- [ ] Every acceptance criterion on the issue is **literally true** and proven (test name, command output, or screenshot) — see `docs/ISSUE_HONESTY.md`.
+- [ ] No secrets in commits; IPC DTOs never carry raw keys.
+- [ ] HardWrite / SoftWrite paths still require UI-originated confirmation.
+- [ ] Issue close comment (or PR body) pastes proof; partial work stays open with a Residual note.
+
 ## How to work issues
 
 1. Prefer the smallest PR that closes one issue or a tight cluster

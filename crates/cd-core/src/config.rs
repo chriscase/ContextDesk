@@ -211,19 +211,21 @@ mod tests {
     fn save_load_roundtrip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let mut cfg = AppConfig::default();
-        cfg.providers = ProviderConfig::with_local_ollama();
-        cfg.theme = "dark".into();
-        cfg.confluence = ConfluenceSettings {
-            enabled: true,
-            base_url: "https://wiki.example.com".into(),
-            spaces: vec!["ENG".into()],
-            pat_ref: Some(CONFLUENCE_PAT_REF.into()),
-        };
-        cfg.web_research_enabled = true;
-        cfg.x = XSettings {
-            enabled: true,
-            api_key_ref: Some(X_API_KEY_REF.into()),
+        let cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            theme: "dark".into(),
+            confluence: ConfluenceSettings {
+                enabled: true,
+                base_url: "https://wiki.example.com".into(),
+                spaces: vec!["ENG".into()],
+                pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+            },
+            web_research_enabled: true,
+            x: XSettings {
+                enabled: true,
+                api_key_ref: Some(X_API_KEY_REF.into()),
+            },
+            ..AppConfig::default()
         };
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
@@ -280,9 +282,12 @@ mod tests {
     fn refuses_raw_secret_in_api_key_ref() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let mut cfg = AppConfig::default();
-        cfg.providers = ProviderConfig::with_local_ollama();
-        cfg.providers.profiles[0].api_key_ref = Some("sk-proj-totally-a-secret".into());
+        let mut providers = ProviderConfig::with_local_ollama();
+        providers.profiles[0].api_key_ref = Some("sk-proj-totally-a-secret".into());
+        let mut cfg = AppConfig {
+            providers,
+            ..AppConfig::default()
+        };
         assert!(save_config(&path, &cfg).is_err());
         // Path-shaped refs are OK
         cfg.providers.profiles[0].api_key_ref = Some("provider/openai-compatible/api_key".into());

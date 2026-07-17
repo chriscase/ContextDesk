@@ -1,29 +1,27 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 use cd_core::branding::Branding;
+use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
     WorkspaceConfig, XSettings, CONFLUENCE_PAT_REF, X_API_KEY_REF,
 };
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
-use cd_core::permissions::PermissionDecision;
-use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
-use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
-use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
-use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
-use cd_core::research::{
-    build_host, events_to_dto, grant_and_execute, research_turn, EventDto,
-};
 use cd_core::keychain_store::{
     key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key, looks_like_raw_secret,
     KeychainSecretStore, SecretStore,
 };
-use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
-use cd_core::chat::{ChatMessage, Role as ChatRole};
+use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
+use cd_core::permissions::PermissionDecision;
+use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
+use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
+use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
+use cd_core::research::{build_host, events_to_dto, grant_and_execute, research_turn, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
     SessionSearchHit, SessionStore,
 };
+use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use serde::{Deserialize, Serialize};
@@ -75,11 +73,7 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     let mut host = build_host(ws, audit).map_err(|e| e.to_string())?;
     // Attach Confluence RO when enabled (PAT from keychain only).
     if cfg.confluence.enabled && cfg.confluence.is_configured() {
-        let pat = state
-            .secrets
-            .get(&key_ref_confluence_pat())
-            .ok()
-            .flatten();
+        let pat = state.secrets.get(&key_ref_confluence_pat()).ok().flatten();
         host.set_confluence(Some(cfg.confluence.to_ro_config()), pat);
     } else {
         host.set_confluence(None, None);
@@ -155,7 +149,12 @@ fn set_provider_secret(
     state.secrets.set(&r, secret).map_err(|e| e.to_string())?;
     // Ensure profile records the ref only (not the secret).
     let mut cfg = state.config.lock().expect("config lock");
-    if let Some(p) = cfg.providers.profiles.iter_mut().find(|p| p.id == profile_id) {
+    if let Some(p) = cfg
+        .providers
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
+    {
         p.api_key_ref = Some(r);
     }
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
@@ -233,9 +232,7 @@ fn save_active_provider(
     if matches!(kind, ProviderKind::XaiGrokBuild) {
         cd_core::grok_auth::assert_grok_base_allowed(&base_url).map_err(|e| e.to_string())?;
         if cd_core::grok_auth::detect_grok_session().is_none() {
-            return Err(
-                "No Grok session found. Run `grok login`, then try again.".into(),
-            );
+            return Err("No Grok session found. Run `grok login`, then try again.".into());
         }
     }
 
@@ -243,12 +240,13 @@ fn save_active_provider(
     if !matches!(kind, ProviderKind::XaiGrokBuild) {
         if let Some(key) = req.api_key.as_ref() {
             let key = key.trim();
-            if !key.is_empty() && !key.chars().all(|c| c == '•') {
-                if looks_like_raw_secret(key) || key.len() >= 8 {
-                    let r = key_ref_for_profile(&id);
-                    state.secrets.set(&r, key).map_err(|e| e.to_string())?;
-                    api_key_ref = Some(r);
-                }
+            if !key.is_empty()
+                && !key.chars().all(|c| c == '•')
+                && (looks_like_raw_secret(key) || key.len() >= 8)
+            {
+                let r = key_ref_for_profile(&id);
+                state.secrets.set(&r, key).map_err(|e| e.to_string())?;
+                api_key_ref = Some(r);
             }
         }
     }
@@ -269,7 +267,7 @@ fn save_active_provider(
         api_key_ref = Some(r.clone());
     }
 
-    let local_only = req.local_only.unwrap_or_else(|| match kind {
+    let local_only = req.local_only.unwrap_or(match kind {
         ProviderKind::Ollama => true,
         ProviderKind::XaiGrokBuild => false,
         _ => false,
@@ -277,9 +275,7 @@ fn save_active_provider(
     if local_only && !base_url.is_empty() {
         let policy = SsrfPolicy::local_only();
         if validate_provider_url(&base_url, &policy).is_err() {
-            return Err(
-                "local-only profile: base URL must be loopback (e.g. 127.0.0.1)".into(),
-            );
+            return Err("local-only profile: base URL must be loopback (e.g. 127.0.0.1)".into());
         }
     }
 
@@ -438,11 +434,7 @@ fn get_confluence_settings(state: State<'_, AppState>) -> ConfluenceSettings {
 
 #[tauri::command]
 fn get_web_research_enabled(state: State<'_, AppState>) -> bool {
-    state
-        .config
-        .lock()
-        .expect("config")
-        .web_research_enabled
+    state.config.lock().expect("config").web_research_enabled
 }
 
 /// Open an http(s) URL in the **system** default browser.
@@ -479,7 +471,7 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
             .arg(url)
             .spawn()
             .map_err(|e| format!("failed to open browser: {e}"))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
@@ -506,10 +498,7 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_web_research_enabled(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<bool, String> {
+fn set_web_research_enabled(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
     let mut cfg = state.config.lock().expect("config");
     cfg.web_research_enabled = enabled;
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
@@ -912,7 +901,10 @@ fn propose_save_skill_cmd(
 }
 
 #[tauri::command]
-async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec<EventDto>, String> {
+async fn agent_turn(
+    state: State<'_, AppState>,
+    req: AgentTurnReq,
+) -> Result<Vec<EventDto>, String> {
     ensure_host(&state)?;
     let cfg = state.config.lock().expect("config").clone();
     let skill_dirs = skill_dirs_for(&state, &cfg);
@@ -976,10 +968,7 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
 
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
-        histories
-            .entry(req.session_id.clone())
-            .or_default()
-            .clone()
+        histories.entry(req.session_id.clone()).or_default().clone()
     };
 
     // Always use local research when forced or for reliability without holding locks
@@ -1462,10 +1451,7 @@ fn set_default_chat_model(state: State<'_, AppState>, model: String) -> Result<S
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     Ok(model_selection_key(
-        cfg.providers
-            .active_id
-            .as_deref()
-            .unwrap_or("ollama-local"),
+        cfg.providers.active_id.as_deref().unwrap_or("ollama-local"),
         &model_id,
     ))
 }
@@ -1585,10 +1571,7 @@ async fn suggest_chat_title(state: State<'_, AppState>, prompt: String) -> Resul
 
 /// Generate LLM title for session (if not rename-locked) and persist.
 #[tauri::command]
-async fn retitle_chat_session(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<Session, String> {
+async fn retitle_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     if session.title_locked {
@@ -1697,16 +1680,14 @@ fn sql_ro_query(
 ) -> Result<cd_core::sql_ro::SqlRoResult, String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
-    let path = cd_core::paths::resolve_allowed_path(&ws, &db_path, false)
-        .map_err(|e| e.to_string())?;
+    let path =
+        cd_core::paths::resolve_allowed_path(&ws, &db_path, false).map_err(|e| e.to_string())?;
     cd_core::sql_ro::execute_sqlite_ro(&path, &sql).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let branding = Branding::default();
     let _ = ensure_config_dir(&branding);

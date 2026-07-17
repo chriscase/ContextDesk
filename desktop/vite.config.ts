@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 /**
@@ -36,5 +36,10 @@ export default defineConfig({
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+  },
+  test: {
+    environment: "happy-dom",
+    globals: true,
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
 });

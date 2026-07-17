@@ -39,7 +39,7 @@ function escapeHtml(s: string): string {
 function shortHostFromUrl(raw: string): string {
   try {
     const u = new URL(raw);
-    let host = u.hostname.replace(/^www\./, "");
+    const host = u.hostname.replace(/^www\./, "");
     if (host.includes("news.google.")) return "Google News";
     if (host.includes("duckduckgo.com")) return "DuckDuckGo";
     if (host.endsWith("wikipedia.org")) return "Wikipedia";
