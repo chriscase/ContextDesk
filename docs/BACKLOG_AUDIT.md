@@ -74,5 +74,8 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 
 ## Close policy
 
+- #38 reworked: SoftWrite `save_skill` + modal draft (not host bypass).
+
+
 Only move DONE → closed after re-verification + adversarial note. Do not bulk-update this table to DONE without proof.
 Residuals stay in issue close comments — prefer reopen over lying done.
