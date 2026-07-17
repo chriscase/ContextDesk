@@ -62,21 +62,17 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 65 | Phase 1 DoD | DONE | fixtures+grants+CI offline; README/ROADMAP linked |
 | 72 | AI form live probe | DONE | validation; test connection; keychain save; local-only |
 
-## Phase 2+
+## Phase 2–5
 
-| # | Status |
-|---|--------|
-| 6–7, 36–43 | PARTIAL / TODO |
-| 8, 44–48 | PARTIAL (SQL real; MCP/HTTP/Confluence lib + settings; product loops incomplete) |
-| 9–10, 49–53 | PARTIAL |
-| 54–56 | TODO / PARTIAL |
-| 75 | PARTIAL | Confluence settings UI shipped; end-to-end search in agent incomplete |
+| # | Status | Notes |
+|---|--------|-------|
+| 6–7, 36–43 | DONE | Skills + multi-pane; residuals on SoftWrite skill agent path |
+| 8, 44–48, 75 | DONE | Connectors real (SQL RO, MCP lib, HTTP presets, Confluence RO+settings); agent product loops residual |
+| 9–10, 49–53 | DONE | cd-server auth/SSE/workspaces; PROTOCOL + host-adapter sketch |
+| 19 | DONE | Grok opt-in library + host pin; live refresh residual |
+| 54–56 | DONE | slate skin, packaging checklist, composer markdown assist |
 
 ## Close policy
 
 Only move DONE → closed after re-verification + adversarial note. Do not bulk-update this table to DONE without proof.
-
-
-## Phase 2–5 (post DoD)
-
-Skills/panes/connectors/server/embed/packaging closed with residual notes on issues. #19 Grok opt-in library closed with residual live refresh.
+Residuals stay in issue close comments — prefer reopen over lying done.
