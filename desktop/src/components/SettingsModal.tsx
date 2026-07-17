@@ -338,8 +338,10 @@ export function SettingsModal({
               data-active={section === item.id ? "true" : "false"}
               onClick={() => setSection(item.id)}
             >
-              {item.id === "preflight" ? "◎" : <IconSettings />}
-              {item.label}
+              <span className="settings-nav__icon" aria-hidden>
+                {item.id === "preflight" ? "◎" : <IconSettings />}
+              </span>
+              <span className="settings-nav__label">{item.label}</span>
             </button>
           ))}
         </nav>
