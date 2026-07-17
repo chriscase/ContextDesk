@@ -182,4 +182,22 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         assert!(validate_session_grant_path(&ws, &sub.to_string_lossy()).is_ok());
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlink_escape() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("passwd");
+        fs::write(&secret, "nope").unwrap();
+        let link = dir.path().join("escape");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let err = resolve_allowed_path(&ws, &link, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside") || msg.contains("symlink") || msg.contains("Policy"),
+            "unexpected: {msg}"
+        );
+    }
 }

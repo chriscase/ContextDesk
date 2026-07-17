@@ -28,6 +28,20 @@ npm run tauri dev
 | `~/.contextdesk/` | User config, profiles, skills (planned) |
 | `<workspace>/.contextdesk/` | Project skills & memory (planned) |
 
+## SSRF policy (provider bases)
+
+Outbound provider / probe URLs go through `cd_core::ssrf::validate_provider_url` **before** any HTTP.
+
+| Policy | Behavior |
+|--------|----------|
+| `SsrfPolicy::default()` | Block RFC1918, link-local, CGNAT, cloud metadata IPs; **allow loopback** (Ollama) |
+| `SsrfPolicy::local_only()` | Same defaults; intended for local profiles |
+| `SsrfPolicy::allow_private_networks()` | **Opt-in** for intentional private / corporate gateways |
+
+Desktop probe UI passes `allow_private` into the host (`probe_url`). Prefer public or loopback bases on the happy path. Enabling private networks is an advanced override — treat it as expanding the trust boundary (see `docs/THREAT_MODEL.md`).
+
+DNS rebinding residual: hostname resolution is not re-checked after every hop; prefer literal hosts you control for sensitive gateways.
+
 ## Secrets
 
 Copy `.env.example` → `.env` for local experiments. Never commit `.env`.
