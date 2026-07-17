@@ -152,9 +152,40 @@ export function SettingsModal({
     return validateBaseUrl(u);
   }, [draft.confluence]);
 
-  const addRoot = () => {
-    // Native picker lands with Tauri; prompt keeps the form usable in browser.
-    const path = window.prompt("Folder path to allowlist (native picker later):");
+  const addRoot = async () => {
+    // Prefer native folder dialog under Tauri; prompt fallback in plain browser.
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Add workspace folder",
+      });
+      if (selected && typeof selected === "string") {
+        setDraft((d) => ({
+          ...d,
+          workspaceName: d.workspaceName ?? "Workspace",
+          workspaceRoots: d.workspaceRoots.includes(selected)
+            ? d.workspaceRoots
+            : [...d.workspaceRoots, selected],
+        }));
+        return;
+      }
+      if (Array.isArray(selected) && selected[0]) {
+        const path = selected[0];
+        setDraft((d) => ({
+          ...d,
+          workspaceName: d.workspaceName ?? "Workspace",
+          workspaceRoots: d.workspaceRoots.includes(path)
+            ? d.workspaceRoots
+            : [...d.workspaceRoots, path],
+        }));
+        return;
+      }
+    } catch {
+      /* not in Tauri */
+    }
+    const path = window.prompt("Folder path to allowlist:");
     if (!path?.trim()) return;
     setDraft((d) => ({
       ...d,
@@ -270,7 +301,11 @@ export function SettingsModal({
                       ))}
                     </ul>
                   )}
-                  <button type="button" className="btn btn--primary" onClick={addRoot}>
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => void addRoot()}
+                  >
                     Add folder…
                   </button>
                 </div>

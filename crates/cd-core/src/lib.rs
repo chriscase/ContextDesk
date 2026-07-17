@@ -21,6 +21,8 @@ pub mod home_source;
 pub mod http_preset;
 pub mod index;
 pub mod injection;
+/// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
+pub mod keychain_store;
 pub mod mcp_client;
 pub mod memory_fs;
 pub mod paths;
@@ -30,8 +32,6 @@ pub mod probe;
 pub mod providers;
 pub mod research;
 pub mod router;
-/// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
-pub mod keychain_store;
 /// Back-compat alias path used in docs.
 pub use keychain_store as secrets;
 pub mod sessions;

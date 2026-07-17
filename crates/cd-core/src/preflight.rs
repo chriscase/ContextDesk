@@ -391,8 +391,9 @@ mod tests {
             confluence_pat_present: Some(false),
         });
         assert!(!report.has_blocking);
-        assert!(report.items.iter().any(|i| {
-            i.id == "confluence.pat" && i.level == PreflightLevel::Warn
-        }));
+        assert!(report
+            .items
+            .iter()
+            .any(|i| { i.id == "confluence.pat" && i.level == PreflightLevel::Warn }));
     }
 }
