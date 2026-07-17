@@ -326,6 +326,8 @@ fn save_active_provider(
         }
     }
 
+    // #125: seed per-kind defaults from descriptor (never all-false Default).
+    let capabilities = desc.default_capabilities;
     let profile = ProviderProfile {
         id: id.clone(),
         label: label.clone(),
@@ -333,9 +335,14 @@ fn save_active_provider(
         base_url: base_url.clone(),
         api_key_ref: api_key_ref.clone(),
         chat_model: chat_model.clone(),
-        embedding_model: None,
+        embedding_model: if capabilities.embeddings {
+            // Ollama local default embed id when kind supports embeddings.
+            Some("nomic-embed-text".into())
+        } else {
+            None
+        },
         embedding_base_url: None,
-        capabilities: Default::default(),
+        capabilities,
         local_only,
     };
 

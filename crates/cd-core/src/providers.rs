@@ -40,6 +40,8 @@ pub struct ProviderDescriptor {
     pub is_local: bool,
     /// Default base URL when the user leaves the field empty.
     pub default_base_url: Option<&'static str>,
+    /// Default capability matrix for new profiles of this kind (#125).
+    pub default_capabilities: ProviderCapabilities,
 }
 
 /// Return the descriptor for `kind`.
@@ -54,6 +56,7 @@ pub fn descriptor_for(kind: ProviderKind) -> ProviderDescriptor {
             needs_api_key: false,
             is_local: true,
             default_base_url: Some("http://127.0.0.1:11434"),
+            default_capabilities: ProviderCapabilities::local_full(),
         },
         ProviderKind::OpenAiCompatible => ProviderDescriptor {
             profile_id_slug: "openai-compatible",
@@ -62,6 +65,7 @@ pub fn descriptor_for(kind: ProviderKind) -> ProviderDescriptor {
             needs_api_key: true,
             is_local: false,
             default_base_url: None,
+            default_capabilities: ProviderCapabilities::chat_remote(),
         },
         ProviderKind::Anthropic => ProviderDescriptor {
             profile_id_slug: "anthropic",
@@ -70,6 +74,7 @@ pub fn descriptor_for(kind: ProviderKind) -> ProviderDescriptor {
             needs_api_key: true,
             is_local: false,
             default_base_url: Some("https://api.anthropic.com"),
+            default_capabilities: ProviderCapabilities::chat_remote(),
         },
         ProviderKind::XaiGrokBuild => ProviderDescriptor {
             profile_id_slug: "xai-grok-build",
@@ -78,6 +83,7 @@ pub fn descriptor_for(kind: ProviderKind) -> ProviderDescriptor {
             needs_api_key: true,
             is_local: false,
             default_base_url: Some("https://api.x.ai/v1"),
+            default_capabilities: ProviderCapabilities::chat_remote(),
         },
     }
 }
@@ -93,7 +99,7 @@ pub fn all_provider_kinds() -> &'static [ProviderKind] {
 }
 
 /// Capability flags discovered or assumed for a profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProviderCapabilities {
     /// Native tool calling likely available.
     pub tools: bool,
@@ -101,6 +107,26 @@ pub struct ProviderCapabilities {
     pub stream: bool,
     /// Embeddings available on this profile (or embed override).
     pub embeddings: bool,
+}
+
+impl ProviderCapabilities {
+    /// Chat-capable remote: tools + stream, no embeddings by default.
+    pub const fn chat_remote() -> Self {
+        Self {
+            tools: true,
+            stream: true,
+            embeddings: false,
+        }
+    }
+
+    /// Local Ollama default: tools + stream + embeddings.
+    pub const fn local_full() -> Self {
+        Self {
+            tools: true,
+            stream: true,
+            embeddings: true,
+        }
+    }
 }
 
 /// Named provider profile (secrets stored as keychain refs, not inline).

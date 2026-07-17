@@ -13,7 +13,7 @@ use crate::error::CoreResult;
 use crate::events::StreamEvent;
 use crate::index::KeywordIndex;
 use crate::permissions::PermissionDecision;
-use crate::providers::{ProviderKind, ProviderProfile};
+use crate::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
@@ -379,6 +379,71 @@ impl ChatBackend for AnthropicBackend {
     }
 }
 
+/// Honor profile capability flags: strip tools when disabled; skip stream when
+/// `stream` is false (#125). Does not swallow rejections — non-stream path is explicit.
+pub struct CapabilityAwareBackend {
+    inner: Box<dyn ChatBackend>,
+    caps: ProviderCapabilities,
+}
+
+impl CapabilityAwareBackend {
+    /// Wrap a constructed backend with profile capabilities.
+    pub fn new(inner: Box<dyn ChatBackend>, caps: ProviderCapabilities) -> Self {
+        Self { inner, caps }
+    }
+}
+
+#[async_trait]
+impl ChatBackend for CapabilityAwareBackend {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        let tools = if self.caps.tools { tools } else { &[] };
+        self.inner.complete(messages, tools).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        let tools = if self.caps.tools { tools } else { &[] };
+        if !self.caps.stream {
+            // Explicit non-stream path — no attempt-then-catch mask.
+            let c = self.inner.complete(messages, tools).await?;
+            if !c.content.is_empty() && c.tool_calls.is_empty() {
+                on_text(c.content.clone());
+            }
+            return Ok(c);
+        }
+        match self
+            .inner
+            .complete_streaming(messages, tools, on_text, cancel)
+            .await
+        {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                // Surface stream rejection rather than silent success-with-empty.
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("stream")
+                    || msg.contains("sse")
+                    || msg.contains("not support")
+                    || msg.contains("unsupported")
+                {
+                    return Err(CoreError::Message(format!(
+                        "Streaming rejected by provider (capabilities.stream=true but request failed): {e}"
+                    )));
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Build a [`ChatBackend`] for `profile` (#122).
 ///
 /// Owns SSRF policy selection, Anthropic/OpenAI client construction, and Grok
@@ -517,7 +582,7 @@ pub async fn research_turn_with_cancel(
     session_id: &str,
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         let ev = research_local(host, user_text, session_id)?;
@@ -570,13 +635,35 @@ pub async fn research_turn_with_cancel(
         }
     };
 
+    // #125: honor capability matrix with explicit degrade notices.
+    let caps = profile.capabilities;
+    let tools_notice = if !caps.tools {
+        Some(StreamEvent::SearchTrail {
+            steps: vec![format!(
+                "tools disabled for profile “{}” (capabilities.tools=false)",
+                profile.label
+            )],
+        })
+    } else {
+        None
+    };
+    if let (Some(notice), Some(sink)) = (&tools_notice, live.as_mut()) {
+        sink(notice.clone());
+    }
+    let backend = CapabilityAwareBackend::new(backend, caps);
+
     let mut opts = AgentOptions::from_budget(
         host.router_budget(),
         session_id,
         Some(profile.chat_model.clone()),
     );
     opts.cancel = cancel;
-    run_agent_turn_with_sink(backend.as_ref(), host, user_text, history, &opts, live).await
+    let mut events =
+        run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
+    if let Some(notice) = tools_notice {
+        events.insert(0, notice);
+    }
+    Ok(events)
 }
 
 /// Emit a provider failure as stream events (no keyword-only TextDelta shell) (#123).
@@ -991,6 +1078,96 @@ mod tests {
         assert!(backend_for(&bad, Some("sk-test-key-12345".into()))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn capability_matrix_honors_tools_and_stream_flags() {
+        use std::sync::Arc;
+        struct SharedProbe {
+            tools_lens: std::sync::Mutex<Vec<usize>>,
+            used_stream: std::sync::Mutex<bool>,
+        }
+        #[async_trait]
+        impl ChatBackend for Arc<SharedProbe> {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                self.tools_lens.lock().unwrap().push(tools.len());
+                Ok(ChatCompletion {
+                    content: "ok".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+            async fn complete_streaming(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+                on_text: &mut (dyn FnMut(String) + Send),
+                _cancel: Option<&std::sync::atomic::AtomicBool>,
+            ) -> CoreResult<ChatCompletion> {
+                *self.used_stream.lock().unwrap() = true;
+                let c = self.complete(messages, tools).await?;
+                if !c.content.is_empty() {
+                    on_text(c.content.clone());
+                }
+                Ok(c)
+            }
+        }
+
+        let tools = [ToolSpec {
+            name: "search_kb".into(),
+            description: "x".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            side_effect: crate::tools::ToolSideEffect::Read,
+        }];
+
+        // tools=false, stream=false → empty tools + complete (not stream path on inner).
+        let probe = Arc::new(SharedProbe {
+            tools_lens: std::sync::Mutex::new(vec![]),
+            used_stream: std::sync::Mutex::new(false),
+        });
+        let backend = CapabilityAwareBackend::new(
+            Box::new(probe.clone()),
+            ProviderCapabilities {
+                tools: false,
+                stream: false,
+                embeddings: false,
+            },
+        );
+        let mut _d = vec![];
+        backend
+            .complete_streaming(&[], &tools, &mut |t| _d.push(t), None)
+            .await
+            .unwrap();
+        assert_eq!(*probe.tools_lens.lock().unwrap(), vec![0]);
+        assert!(
+            !*probe.used_stream.lock().unwrap(),
+            "stream=false must not call complete_streaming on inner"
+        );
+
+        // tools=true, stream=true → tools passed + stream path.
+        let probe2 = Arc::new(SharedProbe {
+            tools_lens: std::sync::Mutex::new(vec![]),
+            used_stream: std::sync::Mutex::new(false),
+        });
+        let backend2 = CapabilityAwareBackend::new(
+            Box::new(probe2.clone()),
+            ProviderCapabilities {
+                tools: true,
+                stream: true,
+                embeddings: false,
+            },
+        );
+        let mut _d2 = vec![];
+        backend2
+            .complete_streaming(&[], &tools, &mut |t| _d2.push(t), None)
+            .await
+            .unwrap();
+        assert_eq!(*probe2.tools_lens.lock().unwrap(), vec![1]);
+        assert!(*probe2.used_stream.lock().unwrap());
     }
 
     #[tokio::test]
