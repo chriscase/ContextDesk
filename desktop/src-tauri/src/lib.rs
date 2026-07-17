@@ -916,7 +916,26 @@ fn rename_chat_session(
     Ok(session)
 }
 
-/// Delete session file and drop in-memory history.
+/// Soft-delete: move session to trash (recoverable).
+#[tauri::command]
+fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let session = session_store(&state)?
+        .trash(&id)
+        .map_err(|e| e.to_string())?;
+    let mut histories = state.histories.lock().expect("hist");
+    histories.remove(&id);
+    Ok(session)
+}
+
+/// Restore a session from trash.
+#[tauri::command]
+fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    session_store(&state)?
+        .restore_from_trash(&id)
+        .map_err(|e| e.to_string())
+}
+
+/// Permanently delete session file and drop in-memory history.
 #[tauri::command]
 fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     session_store(&state)?
@@ -967,12 +986,16 @@ fn search_chat_sessions(
     query: String,
     limit: Option<usize>,
     include_archived: Option<bool>,
+    include_trashed: Option<bool>,
+    only_trashed: Option<bool>,
 ) -> Result<Vec<SessionSearchHit>, String> {
     session_store(&state)?
         .search(
             &query,
             limit.unwrap_or(50),
             include_archived.unwrap_or(false),
+            include_trashed.unwrap_or(false),
+            only_trashed.unwrap_or(false),
         )
         .map_err(|e| e.to_string())
 }
@@ -1545,6 +1568,8 @@ pub fn run() {
             load_chat_session,
             save_chat_session,
             rename_chat_session,
+            trash_chat_session,
+            restore_chat_session,
             delete_chat_session,
             pin_chat_session,
             archive_chat_session,

@@ -352,6 +352,8 @@ export type ChatSessionDto = {
   created_at: string;
   updated_at: string;
   archived: boolean;
+  trashed?: boolean;
+  trashed_at?: string | null;
   pinned: boolean;
   title_locked: boolean;
   chat_model?: string | null;
@@ -407,9 +409,11 @@ export type SessionMetaDto = {
   id: string;
   title: string;
   archived: boolean;
+  trashed?: boolean;
   pinned: boolean;
   created_at: string;
   updated_at: string;
+  trashed_at?: string | null;
   message_count: number;
   preview: string;
 };
@@ -445,6 +449,23 @@ export async function hostRenameChatSession(
   return invoke<ChatSessionDto>("rename_chat_session", { id, title });
 }
 
+/** Soft-delete: move chat to trash (recoverable). */
+export async function hostTrashChatSession(
+  id: string,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("trash_chat_session", { id });
+}
+
+/** Restore chat from trash. */
+export async function hostRestoreChatSession(
+  id: string,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("restore_chat_session", { id });
+}
+
+/** Permanently delete chat file. Prefer trash for user-facing delete. */
 export async function hostDeleteChatSession(id: string): Promise<void> {
   if (!isTauri()) return;
   await invoke("delete_chat_session", { id });
@@ -469,13 +490,20 @@ export async function hostArchiveChatSession(
 /** Keyword search over chat archive (title + body scoring). */
 export async function hostSearchChatSessions(
   query: string,
-  opts?: { limit?: number; includeArchived?: boolean },
+  opts?: {
+    limit?: number;
+    includeArchived?: boolean;
+    includeTrashed?: boolean;
+    onlyTrashed?: boolean;
+  },
 ): Promise<SessionSearchHitDto[]> {
   if (!isTauri()) return [];
   return invoke<SessionSearchHitDto[]>("search_chat_sessions", {
     query,
     limit: opts?.limit ?? 50,
     includeArchived: opts?.includeArchived ?? false,
+    includeTrashed: opts?.includeTrashed ?? false,
+    onlyTrashed: opts?.onlyTrashed ?? false,
   });
 }
 

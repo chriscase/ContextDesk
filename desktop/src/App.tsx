@@ -27,7 +27,6 @@ import {
   agentTurn,
   completePermission,
   hostCheckOllama,
-  hostDeleteChatSession,
   hostGetBranding,
   hostGetConfig,
   hostGetDefaultChatModel,
@@ -43,6 +42,7 @@ import {
   hostSetDefaultChatModel,
   hostSetWorkspace,
   hostSuggestChatTitle,
+  hostTrashChatSession,
   hostWriteMemory,
   modelSelectionKey,
   parseModelSelectionKey,
@@ -295,6 +295,9 @@ export function App() {
     createdAt: string;
     updatedAt: string;
     archived: boolean;
+    /** Soft-deleted into trash. */
+    trashed: boolean;
+    trashedAt: string | null;
     pinned: boolean;
     /** Model for this chat; null uses app default. */
     chatModel: string | null;
@@ -321,6 +324,8 @@ export function App() {
       createdAt: t,
       updatedAt: t,
       archived: false,
+      trashed: false,
+      trashedAt: null,
       pinned: false,
       chatModel,
       providerProfileId: null,
@@ -415,6 +420,8 @@ export function App() {
     createdAt: dto.created_at,
     updatedAt: dto.updated_at,
     archived: dto.archived,
+    trashed: dto.trashed ?? false,
+    trashedAt: dto.trashed_at ?? null,
     pinned: dto.pinned ?? false,
     chatModel: dto.chat_model ?? null,
     providerProfileId: dto.provider_profile_id ?? null,
@@ -438,6 +445,8 @@ export function App() {
     created_at: s.createdAt,
     updated_at: s.updatedAt,
     archived: s.archived,
+    trashed: s.trashed,
+    trashed_at: s.trashedAt,
     pinned: s.pinned,
     title_locked: s.titleLocked,
     chat_model: s.chatModel,
@@ -576,7 +585,8 @@ export function App() {
   };
 
   const persistSession = useCallback(async (s: ChatSession) => {
-    if (s.messages.length === 0) return s;
+    // Never re-save trashed chats (avoids resurrecting after soft-delete races).
+    if (s.messages.length === 0 || s.trashed) return s;
     let next = { ...s, updatedAt: nowIso() };
     if (!next.titleLocked && isPlaceholderTitle(next.title)) {
       const firstUser = next.messages.find((m) => m.role === "user");
@@ -610,9 +620,9 @@ export function App() {
         }
         const loaded: ChatSession[] = [];
         for (const meta of metas) {
-          if (meta.archived) continue;
+          if (meta.archived || meta.trashed) continue;
           const dto = await hostLoadChatSession(meta.id);
-          if (dto) loaded.push(sessionFromDto(dto));
+          if (dto && !dto.trashed) loaded.push(sessionFromDto(dto));
         }
         if (cancelled) return;
         if (loaded.length === 0) {
@@ -1176,6 +1186,13 @@ export function App() {
     try {
       const dto = await hostLoadChatSession(id);
       if (dto) {
+        if (dto.trashed) {
+          setAgentError(
+            "That chat is in Trash. Restore it from Archive → Trash first.",
+          );
+          setPane("archive");
+          return;
+        }
         const s = sessionFromDto(dto);
         setSessions((all) => {
           if (all.some((x) => x.id === s.id)) return all;
@@ -1276,25 +1293,14 @@ export function App() {
     );
   };
 
-  const deleteSessionById = async (id: string) => {
-    const target = sessions.find((s) => s.id === id);
-    if (!target) return;
-    const ok = window.confirm(
-      `Delete chat “${target.title}”? This cannot be undone.`,
-    );
-    if (!ok) return;
-    try {
-      await hostDeleteChatSession(id);
-    } catch {
-      /* still drop local */
-    }
-    setArchiveRefreshKey((n) => n + 1);
+  /** Drop a session from in-memory list (after trash/delete); keep a blank chat if empty. */
+  const dropSessionLocally = (id: string) => {
     setSessions((all) => {
-      const next = all.filter((s) => s.id !== id);
+      const next = all.filter((s) => s.id !== id && !s.trashed);
       if (next.length === 0) {
-        const { modelId } = parseModelSelectionKey(defaultModelKey);
+        const { modelId, providerId } = parseModelSelectionKey(defaultModelKey);
         const s = newSession("Chat 1", modelId || null);
-        s.providerProfileId = parseModelSelectionKey(defaultModelKey).providerId;
+        s.providerProfileId = providerId;
         setActiveSessionId(s.id);
         return [s];
       }
@@ -1305,11 +1311,87 @@ export function App() {
     });
   };
 
+  /**
+   * Soft-delete: move to trash. Fixes sidebar ghosts by removing local state
+   * and never resurrecting missing disk sessions on archive refresh.
+   */
+  const trashSessionById = async (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (!target) return;
+    const ok = window.confirm(
+      `Move “${target.title}” to Trash?\n\nYou can restore it from Archive → Trash. Permanent delete is only from Trash.`,
+    );
+    if (!ok) return;
+    try {
+      await hostTrashChatSession(id);
+    } catch {
+      /* still drop local so sidebar is honest */
+    }
+    setArchiveRefreshKey((n) => n + 1);
+    dropSessionLocally(id);
+  };
+
+  /** Sync local session flags from disk; drop sessions that vanished or were trashed. */
+  const syncSessionsFromHost = useCallback(async () => {
+    try {
+      const metas = await hostListChatSessions();
+      const byId = new Map(metas.map((m) => [m.id, m]));
+      setSessions((all) => {
+        const next = all
+          .filter((s) => {
+            const m = byId.get(s.id);
+            // Gone from disk (permanent delete) or in trash → leave local list
+            if (!m) {
+              // Keep never-saved empty drafts
+              return s.messages.length === 0 && !s.trashed;
+            }
+            if (m.trashed) return false;
+            return true;
+          })
+          .map((s) => {
+            const m = byId.get(s.id);
+            if (!m) return s;
+            return {
+              ...s,
+              title: m.title,
+              pinned: m.pinned,
+              archived: m.archived,
+              trashed: m.trashed ?? false,
+              trashedAt: m.trashed_at ?? null,
+              updatedAt: m.updated_at,
+            };
+          })
+          .filter((s) => !s.archived && !s.trashed);
+        if (next.length === 0) {
+          const { modelId, providerId } =
+            parseModelSelectionKey(defaultModelKey);
+          const blank = newSession("Chat 1", modelId || null);
+          blank.providerProfileId = providerId;
+          setActiveSessionId(blank.id);
+          return [blank];
+        }
+        if (!next.some((s) => s.id === resolvedSessionId)) {
+          setActiveSessionId(next[0].id);
+        }
+        return next;
+      });
+    } catch {
+      /* ignore */
+    }
+  }, [defaultModelKey, resolvedSessionId]);
+
   /** Sidebar: pinned chats + current session if not already listed. */
   const sidebarSessions = (() => {
-    const pinned = sessions.filter((s) => s.pinned && !s.archived);
+    const pinned = sessions.filter(
+      (s) => s.pinned && !s.archived && !s.trashed,
+    );
     const ids = new Set(pinned.map((s) => s.id));
-    if (activeSession && !ids.has(activeSession.id) && !activeSession.archived) {
+    if (
+      activeSession &&
+      !ids.has(activeSession.id) &&
+      !activeSession.archived &&
+      !activeSession.trashed
+    ) {
       return [activeSession, ...pinned];
     }
     return pinned;
@@ -1558,23 +1640,7 @@ export function App() {
               onOpenSession={(id) => void openSessionById(id)}
               onSessionsChanged={() => {
                 setArchiveRefreshKey((n) => n + 1);
-                // Refresh in-memory session flags from disk for open chats
-                void (async () => {
-                  const metas = await hostListChatSessions();
-                  setSessions((all) =>
-                    all.map((s) => {
-                      const m = metas.find((x) => x.id === s.id);
-                      if (!m) return s;
-                      return {
-                        ...s,
-                        title: m.title,
-                        pinned: m.pinned,
-                        archived: m.archived,
-                        updatedAt: m.updated_at,
-                      };
-                    }),
-                  );
-                })();
+                void syncSessionsFromHost();
               }}
             />
           ) : null}
@@ -1999,10 +2065,10 @@ export function App() {
                   className="chat-ctx-menu__item chat-ctx-menu__item--danger"
                   onClick={() => {
                     setChatCtxMenu(null);
-                    void deleteSessionById(target.id);
+                    void trashSessionById(target.id);
                   }}
                 >
-                  Delete…
+                  Move to Trash…
                 </button>
               </div>
             );

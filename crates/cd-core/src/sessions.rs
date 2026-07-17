@@ -20,6 +20,9 @@ pub struct SessionMeta {
     pub title: String,
     /// Archived (soft-hide from default lists).
     pub archived: bool,
+    /// In trash (soft-deleted; recoverable until permanent delete).
+    #[serde(default)]
+    pub trashed: bool,
     /// Pinned to the app sidebar.
     #[serde(default)]
     pub pinned: bool,
@@ -27,6 +30,9 @@ pub struct SessionMeta {
     pub created_at: DateTime<Utc>,
     /// Updated.
     pub updated_at: DateTime<Utc>,
+    /// When moved to trash (if trashed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_at: Option<DateTime<Utc>>,
     /// Message count (full history).
     pub message_count: usize,
     /// Short preview for list rows.
@@ -70,6 +76,12 @@ pub struct Session {
     /// Archived (soft-hide).
     #[serde(default)]
     pub archived: bool,
+    /// Soft-deleted into trash (recoverable).
+    #[serde(default)]
+    pub trashed: bool,
+    /// When the session was moved to trash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_at: Option<DateTime<Utc>>,
     /// Pinned to sidebar shortcuts.
     #[serde(default)]
     pub pinned: bool,
@@ -128,6 +140,8 @@ impl Session {
             created_at: now,
             updated_at: now,
             archived: false,
+            trashed: false,
+            trashed_at: None,
             pinned: false,
             title_locked: false,
             chat_model: None,
@@ -256,12 +270,29 @@ impl Session {
             id: self.id.clone(),
             title: self.title.clone(),
             archived: self.archived,
+            trashed: self.trashed,
             pinned: self.pinned,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            trashed_at: self.trashed_at,
             message_count: self.messages.len(),
             preview: self.preview(),
         }
+    }
+
+    /// Move to trash (soft-delete). Clears pin.
+    pub fn move_to_trash(&mut self) {
+        self.trashed = true;
+        self.trashed_at = Some(Utc::now());
+        self.pinned = false;
+        self.touch();
+    }
+
+    /// Restore from trash (not archived).
+    pub fn restore_from_trash(&mut self) {
+        self.trashed = false;
+        self.trashed_at = None;
+        self.touch();
     }
 }
 
@@ -444,7 +475,7 @@ impl SessionStore {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    /// Delete session file if present.
+    /// Delete session file if present (permanent).
     pub fn delete(&self, id: &str) -> CoreResult<()> {
         Self::validate_id(id)?;
         let p = self.path(id);
@@ -452,6 +483,22 @@ impl SessionStore {
             fs::remove_file(p)?;
         }
         Ok(())
+    }
+
+    /// Soft-delete: mark trashed and unpin.
+    pub fn trash(&self, id: &str) -> CoreResult<Session> {
+        let mut s = self.load(id)?;
+        s.move_to_trash();
+        self.save(&s)?;
+        Ok(s)
+    }
+
+    /// Restore a trashed session back to the active archive.
+    pub fn restore_from_trash(&self, id: &str) -> CoreResult<Session> {
+        let mut s = self.load(id)?;
+        s.restore_from_trash();
+        self.save(&s)?;
+        Ok(s)
     }
 
     /// List sessions (ids + titles + archived) — unsorted legacy shape.
@@ -497,18 +544,30 @@ impl SessionStore {
 
     /// Keyword search over titles + message bodies (scored, newest break ties).
     ///
-    /// Empty query returns all non-archived metas as zero-score hits (archive browse).
+    /// Empty query returns metas as zero-score hits (archive browse).
+    /// Trashed sessions are excluded unless `only_trashed` or `include_trashed`.
     pub fn search(
         &self,
         query: &str,
         limit: usize,
         include_archived: bool,
+        include_trashed: bool,
+        only_trashed: bool,
     ) -> CoreResult<Vec<SessionSearchHit>> {
         let terms = tokenize_query(query);
         let mut hits = Vec::new();
         for s in self.load_all()? {
-            if s.archived && !include_archived {
-                continue;
+            if only_trashed {
+                if !s.trashed {
+                    continue;
+                }
+            } else {
+                if s.trashed && !include_trashed {
+                    continue;
+                }
+                if s.archived && !include_archived {
+                    continue;
+                }
             }
             if terms.is_empty() {
                 hits.push(SessionSearchHit {
@@ -762,10 +821,42 @@ mod tests {
             meta: None,
         });
         store.save(&b).unwrap();
-        let hits = store.search("ollama", 10, false).unwrap();
+        let hits = store.search("ollama", 10, false, false, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].meta.id, "s1");
         assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn trash_hides_from_search_until_restore() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut a = Session::new("Keep me");
+        a.id = "keep".into();
+        store.save(&a).unwrap();
+        let mut b = Session::new("Trash me");
+        b.id = "bin".into();
+        b.pinned = true;
+        store.save(&b).unwrap();
+
+        store.trash("bin").unwrap();
+        let active = store.search("", 20, false, false, false).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].meta.id, "keep");
+
+        let trashed = store.search("", 20, true, true, true).unwrap();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].meta.id, "bin");
+        assert!(trashed[0].meta.trashed);
+        assert!(!trashed[0].meta.pinned);
+
+        store.restore_from_trash("bin").unwrap();
+        let again = store.search("", 20, false, false, false).unwrap();
+        assert_eq!(again.len(), 2);
+
+        store.trash("bin").unwrap();
+        store.delete("bin").unwrap();
+        assert_eq!(store.search("", 20, true, true, true).unwrap().len(), 0);
     }
 
     #[test]
