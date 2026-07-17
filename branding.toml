@@ -1,0 +1,25 @@
+# Product identity — single source of truth for display strings and paths.
+# Rename by editing this file (and regenerating any derived assets); avoid
+# hardcoding product names deep in application logic.
+
+[product]
+# Working name — intentionally easy to change.
+name = "ContextDesk"
+# Short slug for CLI binaries, package ids, data dirs (lowercase, no spaces).
+slug = "contextdesk"
+# One-line description for about dialogs and package metadata.
+tagline = "Developer knowledge workbench — find, synthesize, remember."
+# Repository (public OSS).
+repository = "https://github.com/chriscase/ContextDesk"
+
+[paths]
+# Relative to the user home directory unless absolute.
+# Prefer XDG on Linux; desktop hosts may override.
+config_dir_name = ".contextdesk"
+# Workspace-local config/skills folder name inside a project.
+workspace_dir_name = ".contextdesk"
+
+[themes]
+default = "dark"
+# Future skins register by id; UI loads CSS variables from themes/<id>.css
+available = ["dark", "light"]

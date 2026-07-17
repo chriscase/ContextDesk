@@ -1,0 +1,23 @@
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg-app: #f4f6f9;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #f0f3f7;
+  --bg-hover: #e8edf4;
+  --border: #d5dbe6;
+  --border-strong: #b7c0d0;
+  --text: #141a24;
+  --text-muted: #5a6578;
+  --text-faint: #8a94a6;
+  --accent: #2f6fed;
+  --accent-strong: #1f5ad4;
+  --accent-soft: rgb(47 111 237 / 0.1);
+  --success: #1a9a5c;
+  --warning: #b8860b;
+  --danger: #c0392b;
+  --tool-bg: #eef2f7;
+  --chat-user-bg: #e8eef9;
+  --chat-assistant-bg: transparent;
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+}

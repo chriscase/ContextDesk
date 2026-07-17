@@ -1,0 +1,17 @@
+[package]
+name = "cd-server"
+description = "ContextDesk headless server (team knowledge) — early stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cd-server"
+path = "src/main.rs"
+
+[dependencies]
+cd-core = { path = "../cd-core" }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

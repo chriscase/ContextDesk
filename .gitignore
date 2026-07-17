@@ -1,0 +1,58 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+auth.json
+**/credentials*
+**/*secret*
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.npm
+.vite/
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri / desktop
+desktop/src-tauri/target/
+desktop/dist/
+*.app
+*.dmg
+*.AppImage
+*.exe
+*.msi
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+
+# Local app data (if generated in-repo by mistake)
+.contextdesk/
+*.db
+*.sqlite
+*.sqlite3
+
+# Coverage / reports
+coverage/
+lcov.info
+tarpaulin-report.html
+
+# Logs
+*.log
+logs/
