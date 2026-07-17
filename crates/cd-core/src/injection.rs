@@ -164,7 +164,10 @@ mod tests {
         let after = &w[start + open_prefix.len()..];
         let nonce_end = after.find(' ').expect("nonce end");
         let nonce = &after[..nonce_end];
-        assert!(nonce.len() >= 16, "nonce should be ≥64 bits hex, got {nonce}");
+        assert!(
+            nonce.len() >= 16,
+            "nonce should be ≥64 bits hex, got {nonce}"
+        );
         let close = format!("<<<END_UNTRUSTED_DATA:{nonce}>>>");
         assert!(w.ends_with(&close) || w.contains(&close));
         // Defanged: literal <<< prefixes inside body must not appear raw.
