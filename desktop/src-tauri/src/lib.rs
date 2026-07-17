@@ -278,6 +278,9 @@ fn save_active_provider(
     if base_url.is_empty() && matches!(kind, ProviderKind::XaiGrokBuild) {
         base_url = "https://api.x.ai/v1".into();
     }
+    if base_url.is_empty() && matches!(kind, ProviderKind::Anthropic) {
+        base_url = "https://api.anthropic.com".into();
+    }
     let chat_model = req.chat_model.trim().to_string();
     if chat_model.is_empty() {
         return Err("chat model is required".into());
@@ -1457,7 +1460,23 @@ async fn models_for_profile(
                 }
             }
         }
-        ProviderKind::Anthropic => {}
+        ProviderKind::Anthropic => {
+            let policy = if profile.local_only {
+                SsrfPolicy::local_only()
+            } else {
+                SsrfPolicy::default()
+            };
+            if let Ok(client) = cd_core::chat::AnthropicClient::new(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+            ) {
+                if let Ok(listed) = client.list_models().await {
+                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                }
+            }
+        }
     }
 
     let profile_model = profile.chat_model.trim();

@@ -352,10 +352,11 @@ export function profileIdForKind(kind: string): string {
 /** Normalize host/discovery kind strings into AppSetup providerKind. */
 export function normalizeProviderKind(
   kind: string,
-): "ollama" | "openai_compatible" | "xai_grok_build" | "none" {
+): "ollama" | "openai_compatible" | "anthropic" | "xai_grok_build" | "none" {
   const k = kind.trim().toLowerCase().replace(/-/g, "_");
   if (k === "ollama") return "ollama";
   if (k === "openai_compatible" || k === "openaicompatible") return "openai_compatible";
+  if (k === "anthropic") return "anthropic";
   if (k === "xai_grok_build" || k === "xaigrokbuild" || k === "grok" || k === "xai") {
     return "xai_grok_build";
   }

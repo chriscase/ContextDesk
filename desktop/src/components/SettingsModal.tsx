@@ -186,7 +186,12 @@ export function SettingsModal({
   });
 
   const urlError = useMemo(() => {
-    if (draft.providerKind !== "openai_compatible") return null;
+    if (
+      draft.providerKind !== "openai_compatible" &&
+      draft.providerKind !== "anthropic"
+    ) {
+      return null;
+    }
     return validateBaseUrl(draft.baseUrl);
   }, [draft.providerKind, draft.baseUrl]);
 
@@ -200,7 +205,8 @@ export function SettingsModal({
       return { ok: "URL shape looks valid" };
     },
     350,
-    draft.providerKind === "openai_compatible",
+    draft.providerKind === "openai_compatible" ||
+      draft.providerKind === "anthropic",
   );
 
   const clientReport = useMemo(() => runClientPreflight(draft), [draft, probeTick]);
@@ -267,7 +273,10 @@ export function SettingsModal({
           // Browser without Tauri: mark warn via null, not fake true
           setDraft((d) => ({ ...d, ollamaReachable: null }));
         }
-      } else if (draft.providerKind === "openai_compatible") {
+      } else if (
+        draft.providerKind === "openai_compatible" ||
+        draft.providerKind === "anthropic"
+      ) {
         const probe = await hostProbeUrl(draft.baseUrl, false);
         if (probe.ok) {
           setProbeNote(
@@ -762,13 +771,17 @@ export function SettingsModal({
                                       c.base_url ??
                                       (kind === "ollama"
                                         ? "http://127.0.0.1:11434"
-                                        : d.baseUrl),
+                                        : kind === "anthropic"
+                                          ? "https://api.anthropic.com"
+                                          : d.baseUrl),
                                     localOnly: kind === "ollama",
                                     hasApiKey: c.credentials_present || d.hasApiKey,
                                     chatModel:
                                       kind === "ollama" && !d.chatModel.trim()
                                         ? "mistral"
-                                        : d.chatModel,
+                                        : kind === "anthropic" && !d.chatModel.trim()
+                                          ? "claude-sonnet-4-20250514"
+                                          : d.chatModel,
                                     ollamaReachable: null,
                                     remoteReachable: null,
                                   }));
@@ -802,9 +815,11 @@ export function SettingsModal({
                           ? "Ollama (local)"
                           : kind === "openai_compatible"
                             ? "OpenAI-compatible gateway"
-                            : kind === "xai_grok_build"
-                              ? "Grok Build session"
-                              : null,
+                            : kind === "anthropic"
+                              ? "Anthropic"
+                              : kind === "xai_grok_build"
+                                ? "Grok Build session"
+                                : null,
                       ollamaReachable: null,
                       remoteReachable: null,
                       localOnly: kind === "ollama",
@@ -813,26 +828,36 @@ export function SettingsModal({
                           ? "http://127.0.0.1:11434"
                           : kind === "xai_grok_build"
                             ? "https://api.x.ai/v1"
-                            : d.baseUrl,
+                            : kind === "anthropic"
+                              ? "https://api.anthropic.com"
+                              : d.baseUrl,
                       chatModel:
                         kind === "xai_grok_build" && !d.chatModel.trim()
                           ? "grok-3"
-                          : d.chatModel,
+                          : kind === "anthropic" && !d.chatModel.trim()
+                            ? "claude-sonnet-4-20250514"
+                            : d.chatModel,
                     }));
                   }}
                 >
                   <option value="none">Select…</option>
                   <option value="ollama">Ollama (local)</option>
                   <option value="openai_compatible">OpenAI-compatible gateway</option>
+                  <option value="anthropic">Anthropic</option>
                   <option value="xai_grok_build">Grok Build session</option>
                 </SelectField>
 
-                {draft.providerKind === "openai_compatible" ? (
+                {draft.providerKind === "openai_compatible" ||
+                draft.providerKind === "anthropic" ? (
                   <>
                     <TextField
                       id={`${baseId}-url`}
                       label="Base URL"
-                      hint="Paste origin or …/v1/models — we normalize and probe."
+                      hint={
+                        draft.providerKind === "anthropic"
+                          ? "Default https://api.anthropic.com — custom base only if using a proxy."
+                          : "Paste origin or …/v1/models — we normalize and probe."
+                      }
                       value={draft.baseUrl}
                       error={remoteUrlCheck.error ?? urlError}
                       ok={remoteUrlCheck.ok}
@@ -844,7 +869,11 @@ export function SettingsModal({
                           remoteReachable: null,
                         }))
                       }
-                      placeholder="https://gateway.example.com/v1"
+                      placeholder={
+                        draft.providerKind === "anthropic"
+                          ? "https://api.anthropic.com"
+                          : "https://gateway.example.com/v1"
+                      }
                     />
                     <SecretField
                       id={`${baseId}-key`}
@@ -855,12 +884,16 @@ export function SettingsModal({
                         body: (
                           <>
                             <p>
-                              Required for most OpenAI-compatible gateways.
-                              ContextDesk stores the key in the OS keychain —
-                              never in local config files or chat history.
+                              {draft.providerKind === "anthropic"
+                                ? "Required for Anthropic Messages API. ContextDesk stores the key in the OS keychain — never in local config files or chat history."
+                                : "Required for most OpenAI-compatible gateways. ContextDesk stores the key in the OS keychain — never in local config files or chat history."}
                             </p>
                             <ol>
-                              <li>Paste the key from your provider dashboard.</li>
+                              <li>
+                                {draft.providerKind === "anthropic"
+                                  ? "Paste the key from the Anthropic Console."
+                                  : "Paste the key from your provider dashboard."}
+                              </li>
                               <li>
                                 Click <strong>Save</strong> so it is written to
                                 the keychain.
@@ -876,7 +909,9 @@ export function SettingsModal({
                       value={apiKeyDraft}
                       error={
                         !draft.hasApiKey && !apiKeyDraft.trim()
-                          ? "Required for remote gateways."
+                          ? draft.providerKind === "anthropic"
+                            ? "Required for Anthropic."
+                            : "Required for remote gateways."
                           : null
                       }
                       ok={
@@ -981,7 +1016,9 @@ export function SettingsModal({
                         ? "mistral"
                         : draft.providerKind === "xai_grok_build"
                           ? "grok-3"
-                          : "provider/model"
+                          : draft.providerKind === "anthropic"
+                            ? "claude-sonnet-4-20250514"
+                            : "provider/model"
                     }
                   />
                 ) : null}

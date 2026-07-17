@@ -26,6 +26,11 @@ describe("normalizeProviderKind", () => {
     expect(normalizeProviderKind("openai-compatible")).toBe("openai_compatible");
   });
 
+  it("keeps anthropic (does not collapse to none)", () => {
+    expect(normalizeProviderKind("anthropic")).toBe("anthropic");
+    expect(normalizeProviderKind("Anthropic")).toBe("anthropic");
+  });
+
   it("maps grok / xai aliases to xai_grok_build", () => {
     expect(normalizeProviderKind("xai_grok_build")).toBe("xai_grok_build");
     expect(normalizeProviderKind("xai-grok-build")).toBe("xai_grok_build");
