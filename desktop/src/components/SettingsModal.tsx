@@ -196,6 +196,20 @@ export function SettingsModal({
     return validateBaseUrl(u);
   }, [draft.confluence]);
 
+  const newsByGroup = useMemo(() => {
+    const groups: { key: string; label: string; items: NewsSourceDto[] }[] =
+      [];
+    const order: string[] = [];
+    for (const s of newsSources) {
+      if (!order.includes(s.group)) {
+        order.push(s.group);
+        groups.push({ key: s.group, label: s.group_label, items: [] });
+      }
+      groups.find((g) => g.key === s.group)?.items.push(s);
+    }
+    return groups;
+  }, [newsSources]);
+
   const requestClose = () => {
     if (dirty) {
       const ok = window.confirm(
@@ -432,20 +446,6 @@ export function SettingsModal({
     onSaveSetup(next);
     onClose();
   };
-
-  const newsByGroup = useMemo(() => {
-    const groups: { key: string; label: string; items: NewsSourceDto[] }[] =
-      [];
-    const order: string[] = [];
-    for (const s of newsSources) {
-      if (!order.includes(s.group)) {
-        order.push(s.group);
-        groups.push({ key: s.group, label: s.group_label, items: [] });
-      }
-      groups.find((g) => g.key === s.group)?.items.push(s);
-    }
-    return groups;
-  }, [newsSources]);
 
   const setSourceEnabled = (id: string, enabled: boolean) => {
     setNewsSources((all) =>
