@@ -90,7 +90,10 @@ pub async fn preset_get(
         return Err(CoreError::Message(format!("HTTP {status}")));
     }
     if text.len() > 64 * 1024 {
-        return Ok(format!("{}…", &text[..64 * 1024]));
+        return Ok(format!(
+            "{}…",
+            crate::text::truncate_bytes(&text, 64 * 1024)
+        ));
     }
     Ok(text)
 }
@@ -109,5 +112,20 @@ mod tests {
         };
         assert!(build_preset_url(&p, "/health", false).is_ok());
         assert!(build_preset_url(&p, "/admin", false).is_err());
+    }
+
+    /// Cap path: multibyte body straddling 64KiB must not panic (uses truncate_bytes).
+    #[test]
+    fn truncate_multibyte_body_at_64k_boundary() {
+        // Build string whose len is just over 64KiB with multi-byte chars at the cut.
+        let mut s = "a".repeat(64 * 1024 - 2);
+        s.push('é'); // 2 bytes → total 64KiB+0 mid-char if sliced at exactly 65536
+        s.push_str("tail");
+        assert!(s.len() > 64 * 1024);
+        let t = crate::text::truncate_bytes(&s, 64 * 1024);
+        assert!(t.len() <= 64 * 1024);
+        assert!(t.is_char_boundary(t.len()));
+        let formatted = format!("{}…", t);
+        assert!(formatted.ends_with('…'));
     }
 }

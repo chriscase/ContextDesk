@@ -990,13 +990,13 @@ fn preview_args(args: &Value) -> String {
     if args.get("body_markdown").is_some() && args.get("id").is_some() {
         let draft = skill_draft_preview(args);
         if draft.len() > 2000 {
-            return format!("{}…", &draft[..2000]);
+            return format!("{}…", crate::text::truncate_bytes(&draft, 2000));
         }
         return draft;
     }
     let s = args.to_string();
     if s.len() > 500 {
-        format!("{}…", &s[..500])
+        format!("{}…", crate::text::truncate_bytes(&s, 500))
     } else {
         s
     }
@@ -1147,6 +1147,26 @@ mod tests {
         let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
         assert!(names.iter().any(|n| n == names::WEB_SEARCH));
         assert!(names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    /// Pre-fix: `preview_args` byte-sliced skill drafts and panicked on emoji.
+    #[test]
+    fn preview_args_emoji_skill_body_does_not_panic() {
+        let body = "🌍".repeat(800); // 3200 bytes
+        let args = json!({
+            "id": "emoji-skill",
+            "name": "Emoji",
+            "description": "d",
+            "body_markdown": body,
+            "allows_write": false
+        });
+        let preview = preview_args(&args);
+        assert!(preview.contains("emoji-skill") || preview.contains("…"));
+        assert!(preview.is_char_boundary(preview.len()));
+        // JSON path
+        let big = json!({ "q": "世".repeat(400) });
+        let p2 = preview_args(&big);
+        assert!(p2.is_char_boundary(p2.len()));
     }
 
     #[test]

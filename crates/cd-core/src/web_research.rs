@@ -97,7 +97,9 @@ pub fn extract_title(html: &str) -> String {
     };
     let rest = &after[gt + 1..];
     let rest_l = rest.to_ascii_lowercase();
-    let end = rest_l.find("</title>").unwrap_or(rest.len().min(500));
+    let end = rest_l
+        .find("</title>")
+        .unwrap_or_else(|| crate::text::floor_char_boundary(rest, 500));
     collapse_ws(&strip_tags(&rest[..end]))
         .chars()
         .take(300)
@@ -936,10 +938,13 @@ pub fn parse_ddg_html(html: &str, limit: usize) -> Vec<WebSearchHit> {
         // Prefer scanning from nearby <a (class may appear after href).
         let search_from = rest[..idx].rfind("<a").unwrap_or(idx);
         let chunk = &rest[search_from..];
-        let chunk_end = chunk
-            .find("</a>")
-            .map(|i| i + 4)
-            .unwrap_or(chunk.len().min(2000));
+        let chunk_end = crate::text::floor_char_boundary(
+            chunk,
+            chunk
+                .find("</a>")
+                .map(|i| i + 4)
+                .unwrap_or(2000.min(chunk.len())),
+        );
         let a_tag = &chunk[..chunk_end];
 
         let href = extract_attr(a_tag, "href").unwrap_or_default();
@@ -1003,8 +1008,9 @@ fn extract_attr(tag: &str, name: &str) -> Option<String> {
 fn extract_next_snippet(after: &str) -> String {
     let lower = after.to_ascii_lowercase();
     // Cap look-ahead so we don't steal next result's text
-    let window = &after[..after.len().min(2500)];
-    let window_l = &lower[..lower.len().min(2500)];
+    let win_end = crate::text::floor_char_boundary(after, 2500);
+    let window = &after[..win_end];
+    let window_l = &lower[..win_end];
     if let Some(si) = window_l.find("result__snippet") {
         let from = &window[si..];
         if let Some(gt) = from.find('>') {
@@ -1012,7 +1018,7 @@ fn extract_next_snippet(after: &str) -> String {
             let end = body
                 .to_ascii_lowercase()
                 .find("</")
-                .unwrap_or(body.len().min(500));
+                .unwrap_or_else(|| crate::text::floor_char_boundary(body, 500));
             return collapse_ws(&strip_tags(&body[..end]));
         }
     }
@@ -1060,7 +1066,7 @@ fn parse_ddg_uddg_fallback(html: &str, limit: usize) -> Vec<WebSearchHit> {
         let after = &rest[i + 5..];
         let end = after
             .find(['&', '"', '\'', ' ', '>'])
-            .unwrap_or(after.len().min(2000));
+            .unwrap_or_else(|| crate::text::floor_char_boundary(after, 2000));
         let encoded = &after[..end];
         let decoded = percent_decode(encoded);
         rest = &after[end..];
@@ -1372,6 +1378,42 @@ mod tests {
         let fmt = format_fetch_result(&r);
         assert!(fmt.contains("failed (soft)"));
         assert!(fmt.contains("401"));
+    }
+
+    /// Pre-fix: `extract_title` with no `</title>` and >500 bytes of emoji panicked.
+    #[test]
+    fn extract_title_emoji_no_close_does_not_panic() {
+        let html = format!("<html><title>{}", "🌍".repeat(400));
+        let t = extract_title(&html);
+        // Truncated prefix is valid UTF-8 (no panic) and non-empty-ish when present
+        assert!(t.is_char_boundary(t.len()));
+        let _ = t;
+    }
+
+    /// Pre-fix: unclosed `<a class="result__a">` + huge CJK tail panicked on chunk_end.
+    #[test]
+    fn parse_ddg_html_unclosed_cjk_does_not_panic() {
+        let cjk = "世".repeat(1500);
+        let html = format!(r#"<a class="result__a" href="https://example.com/a">{cjk}"#);
+        let hits = parse_ddg_html(&html, 5);
+        // May or may not produce a hit depending on validation; must not panic.
+        let _ = hits;
+    }
+
+    #[test]
+    fn extract_next_snippet_multibyte_window_does_not_panic() {
+        let tail = "世".repeat(2000);
+        let after = format!("prefix result__snippet\">{tail}</div>");
+        let s = extract_next_snippet(&after);
+        assert!(s.is_char_boundary(s.len()));
+    }
+
+    #[test]
+    fn parse_ddg_uddg_multibyte_cap_does_not_panic() {
+        let encoded = "https%3A%2F%2Fexample.com%2F".to_string() + &"e%CC%81".repeat(800);
+        let html = format!("uddg={encoded}");
+        let hits = parse_ddg_uddg_fallback(&html, 3);
+        let _ = hits;
     }
 
     #[test]

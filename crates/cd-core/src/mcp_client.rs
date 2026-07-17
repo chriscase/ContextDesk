@@ -175,7 +175,10 @@ impl McpSession {
         // Cap size
         let s = result.to_string();
         if s.len() > 64 * 1024 {
-            return Ok(format!("{}…(truncated)", &s[..64 * 1024]));
+            return Ok(format!(
+                "{}…(truncated)",
+                crate::text::truncate_bytes(&s, 64 * 1024)
+            ));
         }
         Ok(s)
     }
@@ -230,6 +233,21 @@ mod tests {
         let (s, t) = parse_mcp_tool_name("mcp__fs__read").unwrap();
         assert_eq!(s, "fs");
         assert_eq!(t, "read");
+    }
+
+    /// Cap path: multibyte JSON body straddling 64KiB must not panic.
+    #[test]
+    fn tool_result_truncate_multibyte_safe() {
+        let mut s = "x".repeat(64 * 1024 - 1);
+        s.push('世'); // 3-byte char straddling the old raw slice point
+        s.push_str("more");
+        let out = if s.len() > 64 * 1024 {
+            format!("{}…(truncated)", crate::text::truncate_bytes(&s, 64 * 1024))
+        } else {
+            s.clone()
+        };
+        assert!(out.contains("truncated") || out.len() <= s.len());
+        assert!(out.is_char_boundary(out.len()));
     }
 
     #[test]
