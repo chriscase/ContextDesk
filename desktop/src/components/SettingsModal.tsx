@@ -156,6 +156,14 @@ export function SettingsModal({
     return JSON.stringify(draft) !== JSON.stringify(setup);
   }, [draft, setup, apiKeyDraft, cfTokenDraft]);
 
+  // Must stay above any early return — Rules of Hooks.
+  const confluenceUrlError = useMemo(() => {
+    if (!draft.confluence?.enabled) return null;
+    const u = draft.confluence.baseUrl.trim();
+    if (!u) return "Base URL is required when Confluence is enabled.";
+    return validateBaseUrl(u);
+  }, [draft.confluence]);
+
   const requestClose = () => {
     if (dirty) {
       const ok = window.confirm(
@@ -220,13 +228,6 @@ export function SettingsModal({
     else if (s === "appearance") setSection("appearance");
     else setSection("general");
   };
-
-  const confluenceUrlError = useMemo(() => {
-    if (!draft.confluence?.enabled) return null;
-    const u = draft.confluence.baseUrl.trim();
-    if (!u) return "Base URL is required when Confluence is enabled.";
-    return validateBaseUrl(u);
-  }, [draft.confluence]);
 
   const addRoot = async () => {
     // Prefer native folder dialog under Tauri; prompt fallback in plain browser.
