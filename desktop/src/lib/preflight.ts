@@ -33,7 +33,7 @@ export type AppSetupState = {
   workspaceName: string | null;
   workspaceRoots: string[];
   providerLabel: string | null;
-  providerKind: "ollama" | "openai_compatible" | "xai_grok_build" | "none";
+  providerKind: "ollama" | "openai_compatible" | "anthropic" | "xai_grok_build" | "none";
   chatModel: string;
   baseUrl: string;
   hasApiKey: boolean;
@@ -163,11 +163,16 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
       });
     }
 
-    if (s.providerKind === "openai_compatible") {
+    if (
+      s.providerKind === "openai_compatible" ||
+      s.providerKind === "anthropic"
+    ) {
+      const urlTitle =
+        s.providerKind === "anthropic" ? "Anthropic base URL" : "Gateway URL";
       if (!s.baseUrl.trim()) {
         items.push({
           id: "provider.url",
-          title: "Gateway URL",
+          title: urlTitle,
           level: "fail",
           detail: "Base URL is required.",
           fixAction: "ai",
@@ -175,7 +180,7 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
       } else if (!looksLikeUrl(s.baseUrl)) {
         items.push({
           id: "provider.url",
-          title: "Gateway URL",
+          title: urlTitle,
           level: "fail",
           detail: "Enter a valid http(s) URL.",
           fixAction: "ai",
@@ -183,7 +188,7 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
       } else {
         items.push({
           id: "provider.url",
-          title: "Gateway URL",
+          title: urlTitle,
           level: "pass",
           detail: s.baseUrl,
           fixAction: "ai",

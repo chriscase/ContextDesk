@@ -1030,6 +1030,21 @@ pub fn anthropic_request_body(
     body
 }
 
+/// Parse Anthropic `GET /v1/models` JSON (`{ "data": [ { "id": … } ] }`).
+pub fn parse_anthropic_models_list(text: &str) -> CoreResult<Vec<String>> {
+    let v: Value = serde_json::from_str(text)
+        .map_err(|e| CoreError::Message(format!("anthropic models json: {e}")))?;
+    let mut ids = Vec::new();
+    if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+        for m in arr {
+            if let Some(id) = m.get("id").and_then(|x| x.as_str()) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// Parse non-stream Anthropic Messages JSON into [`ChatCompletion`].
 pub fn parse_anthropic_completion(text: &str) -> CoreResult<ChatCompletion> {
     let v: Value = serde_json::from_str(text)
@@ -1336,6 +1351,31 @@ impl AnthropicClient {
         accumulate_anthropic_sse(&text)
     }
 
+    /// List models via GET /v1/models (x-api-key).
+    pub async fn list_models(&self) -> CoreResult<Vec<String>> {
+        let url = if self.base_url.ends_with("/v1") {
+            format!("{}/models", self.base_url)
+        } else {
+            format!("{}/v1/models", self.base_url)
+        };
+        let req = self.apply_headers(self.http.get(url));
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CoreError::Message(format!("anthropic models: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| CoreError::Message(format!("anthropic models body: {e}")))?;
+        if !status.is_success() {
+            return Err(CoreError::Message(format!(
+                "anthropic models HTTP {status}"
+            )));
+        }
+        parse_anthropic_models_list(&text)
+    }
+
     /// Streaming with live text callbacks (bytes_stream line buffer).
     #[allow(clippy::string_slice)]
     pub async fn complete_stream_cb<F>(
@@ -1511,6 +1551,29 @@ mod tests {
             &SsrfPolicy::default(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn parse_anthropic_models_list_extracts_ids() {
+        let fixture = r#"{
+          "data": [
+            {"id": "claude-opus-4-20250514", "type": "model"},
+            {"id": "claude-sonnet-4-20250514", "type": "model"},
+            {"type": "model"}
+          ]
+        }"#;
+        let ids = parse_anthropic_models_list(fixture).unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-opus-4-20250514".to_string(),
+                "claude-sonnet-4-20250514".to_string()
+            ]
+        );
+        assert!(parse_anthropic_models_list(r#"{"data":[]}"#)
+            .unwrap()
+            .is_empty());
+        assert!(parse_anthropic_models_list("not-json").is_err());
     }
 
     #[test]

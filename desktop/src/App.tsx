@@ -1364,7 +1364,8 @@ export function App() {
     ? "Local-only"
     : setup.providerKind === "xai_grok_build"
       ? "Grok session"
-      : setup.providerKind === "openai_compatible"
+      : setup.providerKind === "openai_compatible" ||
+          setup.providerKind === "anthropic"
         ? "Remote AI"
         : "Local";
 
