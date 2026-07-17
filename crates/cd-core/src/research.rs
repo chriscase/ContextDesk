@@ -107,9 +107,18 @@ pub fn events_to_dto(events: &[StreamEvent]) -> Vec<EventDto> {
         .collect()
 }
 
-/// Build a tool host for a workspace.
+/// Build a tool host for a workspace (in-memory index; no disk cache).
 pub fn build_host(workspace: Workspace, audit_path: Option<PathBuf>) -> CoreResult<ToolHost> {
-    let index = KeywordIndex::build(&workspace)?;
+    build_host_with_index_cache(workspace, audit_path, None)
+}
+
+/// Build a tool host with an optional persistent index cache directory.
+pub fn build_host_with_index_cache(
+    workspace: Workspace,
+    audit_path: Option<PathBuf>,
+    index_cache_dir: Option<PathBuf>,
+) -> CoreResult<ToolHost> {
+    let index = KeywordIndex::open_or_build(&workspace, index_cache_dir.as_deref())?;
     let audit = audit_path.map(AuditLog::new);
     Ok(ToolHost::new(workspace, index, audit))
 }

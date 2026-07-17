@@ -216,9 +216,19 @@ impl ToolHost {
         self.specs_for_model()
     }
 
-    /// Rebuild index.
+    /// Incremental index refresh (skips unchanged files when a store is present).
     pub fn reindex(&mut self) -> CoreResult<()> {
-        self.index = Arc::new(KeywordIndex::build(&self.workspace)?);
+        let cache = self.index.cache_dir();
+        // Prefer refresh on the existing Arc if we are the sole owner.
+        if let Some(idx) = Arc::get_mut(&mut self.index) {
+            let stats = idx.refresh()?;
+            tracing::debug!(?stats, "tool host reindex (in-place)");
+            return Ok(());
+        }
+        let mut idx = KeywordIndex::open_or_build(&self.workspace, cache.as_deref())?;
+        let stats = idx.refresh()?;
+        tracing::debug!(?stats, "tool host reindex (rebuild arc)");
+        self.index = Arc::new(idx);
         Ok(())
     }
 

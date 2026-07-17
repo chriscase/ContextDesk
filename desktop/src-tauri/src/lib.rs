@@ -16,7 +16,7 @@ use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
-use cd_core::research::{build_host, events_to_dto, grant_and_execute, research_turn, EventDto};
+use cd_core::research::{events_to_dto, grant_and_execute, research_turn, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
     SessionSearchHit, SessionStore,
@@ -67,10 +67,42 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     if ws.roots.is_empty() {
         return Err("workspace has no roots".into());
     }
+
+    let mut host_guard = state.host.lock().expect("host");
+    if let Some(host) = host_guard.as_mut() {
+        // Long-lived host (#110): keep permissions; incremental reindex only.
+        if host.workspace.roots != ws.roots || host.workspace.id != ws.id {
+            // Workspace changed — rebuild.
+            drop(host_guard);
+            return rebuild_host(state, cfg, ws);
+        }
+        let _ = host.reindex();
+        apply_host_connectors(host, &cfg, state);
+        return Ok(());
+    }
+    drop(host_guard);
+    rebuild_host(state, cfg, ws)
+}
+
+fn rebuild_host(
+    state: &AppState,
+    cfg: AppConfig,
+    ws: Workspace,
+) -> Result<(), String> {
     let audit = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("audit.jsonl"));
-    let mut host = build_host(ws, audit).map_err(|e| e.to_string())?;
+    let index_cache = ensure_config_dir(&state.branding)
+        .ok()
+        .map(|d| d.join("index"));
+    let mut host = cd_core::research::build_host_with_index_cache(ws, audit, index_cache)
+        .map_err(|e| e.to_string())?;
+    apply_host_connectors(&mut host, &cfg, state);
+    *state.host.lock().expect("host") = Some(host);
+    Ok(())
+}
+
+fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState) {
     // Attach Confluence RO when enabled (PAT from keychain only).
     if cfg.confluence.enabled && cfg.confluence.is_configured() {
         let pat = state.secrets.get(&key_ref_confluence_pat()).ok().flatten();
@@ -78,18 +110,14 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     } else {
         host.set_confluence(None, None);
     }
-    // Open-web research tools (opt-in; no secrets) + publisher RSS enable map.
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
-    // X search when enabled + bearer in keychain.
     if cfg.x.enabled {
         let bearer = state.secrets.get(&key_ref_x_api_key()).ok().flatten();
         host.set_x_search(true, bearer);
     } else {
         host.set_x_search(false, None);
     }
-    *state.host.lock().expect("host") = Some(host);
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]

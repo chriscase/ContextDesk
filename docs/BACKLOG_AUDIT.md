@@ -44,7 +44,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 23 | Permission modal UI | DONE | Blocking modal; preview; allow once/session; type-confirm |
 | 24 | Audit log | DONE | JSONL + scrub |
 | 25 | MVP tools | DONE | search/read/save + allowlist + line caps |
-| 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
+| 26 | Indexer | DONE (remediation #115) | Persistent SQLite + incremental refresh; secret skip; size/depth caps |
 | 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
 | 28 | Citations UI | DONE | chips + trail + markdown #cite links |
 | 29 | Router budgets | DONE | rank + trail + tests |
