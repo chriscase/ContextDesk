@@ -67,7 +67,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | # | Status | Notes |
 |---|--------|-------|
 | 6–7, 36–43 | DONE | Skills + multi-pane; residuals on SoftWrite skill agent path |
-| 8, 44–48, 75 | DONE | Connectors real (SQL RO, MCP lib, HTTP presets, Confluence RO+settings); agent product loops residual |
+| 8, 44–48, 75 | DONE | Connectors + Confluence RO tools on host; PAT keychain; RO only |
 | 9–10, 49–53 | DONE | cd-server auth/SSE/workspaces; PROTOCOL + host-adapter sketch |
 | 19 | DONE | refresh_token + expiry + offline mock tests; ToS docs |
 | 54–56 | DONE | slate skin, packaging checklist, composer markdown assist |
