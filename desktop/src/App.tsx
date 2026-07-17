@@ -156,12 +156,18 @@ function applyEventsToMessage(
         }
         break;
       }
-      case "citation":
-        citations.push({
-          id: String(p.source_id ?? p.label ?? ""),
-          label: String(p.label ?? p.source_id ?? "source"),
-        });
+      case "citation": {
+        const id = String(p.source_id ?? p.label ?? "");
+        let label = String(p.label ?? p.source_id ?? "source");
+        // Never show raw mega-URLs as the chip name.
+        if (/^https?:\/\//i.test(label) || label.length > 48) {
+          label = shortSourceLabel(label, id);
+        }
+        if (id && !citations.some((c) => c.id === id)) {
+          citations.push({ id, label });
+        }
         break;
+      }
       case "search_trail": {
         const steps = p.steps;
         if (Array.isArray(steps)) {
@@ -192,12 +198,15 @@ function applyEventsToMessage(
     }
   }
 
-  // When retrieval produced citations, ensure content can reference them as chips.
+  // When retrieval produced citations, ensure content can reference them as chips
+  // (short labels only — full URL stays in #cite: target / chip link button).
   if (citations.length && content && !content.includes("#cite:")) {
     const refs = citations
+      .slice(0, 8)
       .map((c) => `[${c.label}](#cite:${c.id})`)
       .join(" ");
-    if (!content.includes(citations[0].label)) {
+    const hasAnyLabel = citations.some((c) => content.includes(c.label));
+    if (!hasAnyLabel) {
       content = `${content.trim()}\n\nSources: ${refs}`;
     }
   }
@@ -214,6 +223,42 @@ function applyEventsToMessage(
     },
     permission,
   };
+}
+
+function isHttpUrl(s: string): boolean {
+  return /^https?:\/\//i.test(s.trim());
+}
+
+/** Short publisher / host for chips (never the full Google News URL). */
+function shortSourceLabel(label: string, id: string): string {
+  const raw = (label || id || "source").trim();
+  if (!isHttpUrl(raw) && raw.length <= 48 && !raw.includes("://")) {
+    // "Headline - Al Jazeera"
+    const dash = raw.lastIndexOf(" - ");
+    if (dash > 8 && raw.length - dash - 3 <= 40) {
+      return raw.slice(dash + 3).trim();
+    }
+    return raw;
+  }
+  const url = isHttpUrl(raw) ? raw : id;
+  try {
+    const u = new URL(url);
+    let host = u.hostname.replace(/^www\./, "");
+    if (host.includes("news.google.")) return "Google News";
+    if (host.includes("duckduckgo.com")) return "DuckDuckGo";
+    if (host.endsWith("wikipedia.org")) return "Wikipedia";
+    return host;
+  } catch {
+    return raw.length > 40 ? `${raw.slice(0, 36)}…` : raw || "source";
+  }
+}
+
+function openExternalUrl(url: string) {
+  try {
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch {
+    /* ignore */
+  }
 }
 
 function formatMsgMetaFooter(meta: MessageMetaDto): string {
@@ -1767,30 +1812,56 @@ export function App() {
                         </div>
                       ) : null}
                       {m.citations?.length ? (
-                        <div>
-                          {m.citations.map((c) => (
-                            <button
-                              key={c.id + c.label}
-                              type="button"
-                              className="citation-chip"
-                              onClick={() => {
-                                setSourcePath(c.id);
-                                setPane("source");
-                                setSourceContent("Loading…");
-                                void hostReadFile(c.id)
-                                  .then((body) => setSourceContent(body))
-                                  .catch((err) =>
-                                    setSourceContent(
-                                      `Could not read ${c.id}:\n${
-                                        err instanceof Error ? err.message : String(err)
-                                      }`,
-                                    ),
-                                  );
-                              }}
-                            >
-                              {c.label}
-                            </button>
-                          ))}
+                        <div className="citation-row" aria-label="Sources">
+                          {m.citations.map((c) => {
+                            const name = shortSourceLabel(c.label, c.id);
+                            const external = isHttpUrl(c.id);
+                            return (
+                              <span
+                                key={c.id + name}
+                                className="citation-chip"
+                                data-kind={external ? "web" : "file"}
+                              >
+                                <span className="citation-chip__name" title={c.id}>
+                                  {name}
+                                </span>
+                                {external ? (
+                                  <button
+                                    type="button"
+                                    className="citation-chip__link"
+                                    title={c.id}
+                                    onClick={() => openExternalUrl(c.id)}
+                                  >
+                                    Link
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="citation-chip__link"
+                                    title={c.id}
+                                    onClick={() => {
+                                      setSourcePath(c.id);
+                                      setPane("source");
+                                      setSourceContent("Loading…");
+                                      void hostReadFile(c.id)
+                                        .then((body) => setSourceContent(body))
+                                        .catch((err) =>
+                                          setSourceContent(
+                                            `Could not read ${c.id}:\n${
+                                              err instanceof Error
+                                                ? err.message
+                                                : String(err)
+                                            }`,
+                                          ),
+                                        );
+                                    }}
+                                  >
+                                    Open
+                                  </button>
+                                )}
+                              </span>
+                            );
+                          })}
                         </div>
                       ) : null}
                       <div className="msg__bubble">
@@ -1811,8 +1882,15 @@ export function App() {
                                 data-streaming={m.streaming ? "true" : "false"}
                                 onClick={(e) => {
                                   const t = e.target as HTMLElement;
-                                  const cite = t.getAttribute("data-cite");
+                                  const citeEl = t.closest(
+                                    "[data-cite]",
+                                  ) as HTMLElement | null;
+                                  const cite = citeEl?.getAttribute("data-cite");
                                   if (!cite) return;
+                                  if (isHttpUrl(cite)) {
+                                    openExternalUrl(cite);
+                                    return;
+                                  }
                                   setSourcePath(cite);
                                   setPane("source");
                                   setSourceContent("Loading…");

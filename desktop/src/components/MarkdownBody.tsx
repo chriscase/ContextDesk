@@ -19,19 +19,39 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function shortHostFromUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    let host = u.hostname.replace(/^www\./, "");
+    if (host.includes("news.google.")) return "Google News";
+    if (host.includes("duckduckgo.com")) return "DuckDuckGo";
+    if (host.endsWith("wikipedia.org")) return "Wikipedia";
+    return host;
+  } catch {
+    return "link";
+  }
+}
+
 function renderInline(src: string): string {
   let s = escapeHtml(src);
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  // Internal cite chips: label only (open via data-cite handler).
   s = s.replace(
     /\[([^\]]+)\]\(#cite:([^)]+)\)/g,
-    '<button type="button" class="citation-chip" data-cite="$2">$1</button>',
+    '<button type="button" class="citation-chip" data-cite="$2"><span class="citation-chip__name">$1</span></button>',
   );
-  s = s.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
-  );
+  // Markdown links: keep anchor text, never dump the raw URL as visible text.
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_m, text, href) => {
+    const label = String(text).trim() || shortHostFromUrl(String(href));
+    return `<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${label}</a>`;
+  });
+  // Bare URLs → short host + link (avoids Google News mega-URLs in the bubble).
+  s = s.replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g, (_m, pre, href) => {
+    const host = shortHostFromUrl(String(href));
+    return `${pre}<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${host}</a>`;
+  });
   return s;
 }
 

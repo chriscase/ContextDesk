@@ -76,6 +76,8 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
              and other public backends; snippets in the tool result are often enough for a brief. \
              Use web_fetch selectively on open sources. If web_fetch returns HTTP 401/403/429 \
              (common on Reuters/NYT/etc.), that is NOT a host crash — try another URL or answer from snippets. \
+             Cite sources by short name (e.g. Al Jazeera, BBC, Wikipedia) — never paste long raw URLs \
+             into the user-facing answer; the UI attaches link chips. \
              Do not refuse web research or tell the user to open Google themselves when tools returned data.\n",
         );
     }

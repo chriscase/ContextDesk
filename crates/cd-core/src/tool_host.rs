@@ -267,6 +267,7 @@ impl ToolHost {
             ok: None,
         };
 
+        let mut web_cites: Vec<(String, String)> = Vec::new();
         let (ok, summary, raw, citation) = match name {
             names::SEARCH_KB => self.tool_search(arguments)?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
@@ -274,8 +275,19 @@ impl ToolHost {
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments)?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments)?,
-            names::WEB_SEARCH => self.tool_web_search(arguments)?,
-            names::WEB_FETCH => self.tool_web_fetch(arguments)?,
+            names::WEB_SEARCH => {
+                let (ok, summary, raw, cites) = self.tool_web_search(arguments)?;
+                let first = cites.first().map(|(u, _)| u.clone());
+                web_cites = cites;
+                (ok, summary, raw, first)
+            }
+            names::WEB_FETCH => {
+                let (ok, summary, raw, cite) = self.tool_web_fetch(arguments)?;
+                if let Some((url, label)) = cite.clone() {
+                    web_cites.push((url, label));
+                }
+                (ok, summary, raw, cite.map(|(u, _)| u))
+            }
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
             }
@@ -291,10 +303,20 @@ impl ToolHost {
         };
 
         let mut events = vec![started, finished];
-        if let Some(ref path) = citation {
+        if !web_cites.is_empty() {
+            // Friendly labels (publisher/domain) — full URL stays in source_id for Link.
+            for (url, label) in web_cites {
+                events.push(StreamEvent::Citation {
+                    source_id: url,
+                    label,
+                    locator: None,
+                });
+            }
+        } else if let Some(ref path) = citation {
+            let label = citation_display_label(path);
             events.push(StreamEvent::Citation {
                 source_id: path.clone(),
-                label: path.clone(),
+                label,
                 locator: None,
             });
         }
@@ -552,10 +574,11 @@ impl ToolHost {
         Ok(())
     }
 
+    /// Returns (ok, summary, raw, citations as (url, label)).
     fn tool_web_search(
         &mut self,
         args: &Value,
-    ) -> CoreResult<(bool, String, String, Option<String>)> {
+    ) -> CoreResult<(bool, String, String, Vec<(String, String)>)> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -572,7 +595,16 @@ impl ToolHost {
         self.throttle_web()?;
         let (hits, notes) = block_on_http(web_research::web_search(&q, limit))?;
         let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
-        let first = hits.first().map(|h| h.url.clone());
+        let cites: Vec<(String, String)> = hits
+            .iter()
+            .take(8)
+            .map(|h| {
+                (
+                    h.url.clone(),
+                    web_research::source_display_label(Some(&h.title), &h.url),
+                )
+            })
+            .collect();
         let ok = !hits.is_empty();
         Ok((
             ok,
@@ -582,14 +614,15 @@ impl ToolHost {
                 format!("no web results for `{q}` ({})", notes.join(", "))
             },
             raw,
-            first,
+            cites,
         ))
     }
 
+    /// Returns (ok, summary, raw, optional (url, label)).
     fn tool_web_fetch(
         &mut self,
         args: &Value,
-    ) -> CoreResult<(bool, String, String, Option<String>)> {
+    ) -> CoreResult<(bool, String, String, Option<(String, String)>)> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -614,19 +647,28 @@ impl ToolHost {
                     "web_fetch network error for {url}: {e}\n\
                      Try another URL from web_search or answer from search snippets. Do not abort."
                 );
+                let label = web_research::source_display_label(None, url);
                 return Ok((
                     false,
-                    format!("web_fetch failed for {url}"),
+                    format!("web_fetch failed ({label})"),
                     raw,
-                    Some(url.to_string()),
+                    Some((url.to_string(), label)),
                 ));
             }
         };
         let raw = web_research::format_fetch_result(&fetched);
         let ok = fetched.ok();
+        let label = web_research::source_display_label(
+            if fetched.title.is_empty() {
+                None
+            } else {
+                Some(&fetched.title)
+            },
+            &fetched.url,
+        );
         let summary = if ok {
             if fetched.title.is_empty() {
-                format!("fetched {}", fetched.url)
+                format!("fetched {label}")
             } else {
                 format!(
                     "fetched “{}”",
@@ -634,9 +676,9 @@ impl ToolHost {
                 )
             }
         } else {
-            format!("web_fetch HTTP {} for {}", fetched.status, fetched.url)
+            format!("web_fetch HTTP {} ({label})", fetched.status)
         };
-        Ok((ok, summary, raw, Some(fetched.url)))
+        Ok((ok, summary, raw, Some((fetched.url, label))))
     }
 
     /// SoftWrite skill author — only called after grant (see execute gate).
@@ -825,6 +867,20 @@ fn preview_args(args: &Value) -> String {
     } else {
         s
     }
+}
+
+/// Display label for a citation path (file path or http URL).
+fn citation_display_label(path: &str) -> String {
+    let p = path.trim();
+    if p.starts_with("http://") || p.starts_with("https://") {
+        return web_research::source_display_label(None, p);
+    }
+    // File paths: basename
+    std::path::Path::new(p)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(p)
+        .to_string()
 }
 
 fn block_on_http<F, T>(fut: F) -> CoreResult<T>

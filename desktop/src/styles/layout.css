@@ -403,21 +403,82 @@
   margin-bottom: var(--space-2);
 }
 
+.citation-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 var(--space-2);
+}
+
 .citation-chip {
   display: inline-flex;
-  margin: 2px 4px 2px 0;
-  padding: 2px 8px;
+  align-items: center;
+  gap: 0;
+  margin: 0;
+  padding: 0;
   border-radius: 999px;
   border: 1px solid var(--border-soft);
   background: var(--surface-chip);
   font-size: var(--text-xs);
-  color: var(--accent);
-  cursor: pointer;
+  color: var(--text);
+  overflow: hidden;
+  max-width: 100%;
 }
 
-.citation-chip:hover {
+.citation-chip__name {
+  padding: 3px 8px 3px 10px;
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 12rem;
+}
+
+/* Inline cite buttons inside markdown */
+button.citation-chip {
+  cursor: pointer;
+  padding: 2px 8px;
+  color: var(--accent);
+}
+
+button.citation-chip:hover {
   border-color: var(--border);
   background: var(--bg-hover);
+}
+
+.citation-chip__link {
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.citation-chip__link:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.citation-chip[data-kind="web"] .citation-chip__name {
+  color: var(--text-muted);
+}
+
+.md-ext-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  font-weight: 500;
+}
+
+.md-ext-link:hover {
+  border-bottom-color: var(--accent);
 }
 
 /* Status bar — GrokPtah density */

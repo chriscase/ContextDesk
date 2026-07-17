@@ -956,12 +956,78 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Human-friendly source name for chips / tool output (not the full URL).
+///
+/// Prefers a publisher suffix from news titles (`… - Al Jazeera`), else the
+/// registrable-ish host (`www.bbc.com` → `bbc.com`, Google News → `Google News`).
+pub fn source_display_label(title: Option<&str>, url: &str) -> String {
+    if let Some(t) = title {
+        let t = t.trim();
+        // Common wire pattern: "Headline - Publisher"
+        if let Some((head, pub_)) = t.rsplit_once(" - ") {
+            let pub_ = pub_.trim();
+            if !pub_.is_empty()
+                && pub_.len() <= 48
+                && !pub_.contains("http")
+                && head.trim().len() >= 4
+            {
+                return pub_.to_string();
+            }
+        }
+        // "Headline | Publisher"
+        if let Some((head, pub_)) = t.rsplit_once(" | ") {
+            let pub_ = pub_.trim();
+            if !pub_.is_empty() && pub_.len() <= 48 && head.trim().len() >= 4 {
+                return pub_.to_string();
+            }
+        }
+    }
+    host_display_label(url)
+}
+
+/// Short host label from a URL.
+pub fn host_display_label(url: &str) -> String {
+    let Ok(u) = Url::parse(url.trim()) else {
+        return "source".into();
+    };
+    let host = u.host_str().unwrap_or("source");
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.contains("news.google.") {
+        return "Google News".into();
+    }
+    if host.contains("duckduckgo.com") {
+        return "DuckDuckGo".into();
+    }
+    if host.ends_with("wikipedia.org") {
+        return "Wikipedia".into();
+    }
+    // Keep 2–3 labels max for readability
+    host.chars().take(40).collect()
+}
+
+/// Headline without publisher suffix (for list rows).
+pub fn headline_without_publisher(title: &str) -> String {
+    let t = title.trim();
+    for sep in [" - ", " | "] {
+        if let Some((head, pub_)) = t.rsplit_once(sep) {
+            let pub_ = pub_.trim();
+            if !pub_.is_empty() && pub_.len() <= 48 && head.trim().len() >= 4 {
+                return head.trim().to_string();
+            }
+        }
+    }
+    t.to_string()
+}
+
 /// Format search hits for the model/UI trail.
 pub fn format_search_hits(hits: &[WebSearchHit], query: &str) -> String {
     format_search_hits_with_notes(hits, query, &[])
 }
 
 /// Format hits plus backend notes (for debugging empty results).
+///
+/// Does **not** dump giant URLs as the primary line — source name + headline,
+/// with a compact `link:` line for the agent to pass to `web_fetch`.
 pub fn format_search_hits_with_notes(
     hits: &[WebSearchHit],
     query: &str,
@@ -982,17 +1048,22 @@ pub fn format_search_hits_with_notes(
     if !notes.is_empty() {
         lines.push(format!("[sources: {}]", notes.join(", ")));
     }
+    lines.push(
+        "Cite sources by name (e.g. Al Jazeera, BBC). Do not paste full URLs into the user-facing answer."
+            .into(),
+    );
     for (i, h) in hits.iter().enumerate() {
+        let source = source_display_label(Some(&h.title), &h.url);
+        let headline = headline_without_publisher(&h.title);
+        let snip = if h.snippet.is_empty() {
+            String::new()
+        } else {
+            format!("\n   {}", h.snippet.chars().take(280).collect::<String>())
+        };
         lines.push(format!(
-            "{}. {}\n   URL: {}\n   {}",
+            "{}. [{source}] {headline}{snip}\n   link: {}",
             i + 1,
-            h.title,
-            h.url,
-            if h.snippet.is_empty() {
-                "(no snippet)".into()
-            } else {
-                h.snippet.clone()
-            }
+            h.url
         ));
     }
     lines.join("\n")
@@ -1000,10 +1071,19 @@ pub fn format_search_hits_with_notes(
 
 /// Format fetch result for the model.
 pub fn format_fetch_result(r: &WebFetchResult) -> String {
-    let mut out = format!("URL: {}\nHTTP: {}\n", r.url, r.status);
+    let source = source_display_label(
+        if r.title.is_empty() {
+            None
+        } else {
+            Some(&r.title)
+        },
+        &r.url,
+    );
+    let mut out = format!("Source: {source}\nHTTP: {}\n", r.status);
     if !r.title.is_empty() {
         out.push_str(&format!("Title: {}\n", r.title));
     }
+    out.push_str(&format!("link: {}\n", r.url));
     if !r.ok() {
         out.push_str("RESULT: failed (soft) — try another URL or use search snippets.\n");
     }
@@ -1179,6 +1259,34 @@ mod tests {
         assert!(!is_ddg_bot_challenge(
             r#"<a class="result__a" href="https://example.com">x</a>"#
         ));
+    }
+
+    #[test]
+    fn source_labels_prefer_publisher_not_full_url() {
+        let label = source_display_label(
+            Some("Iran war live: US intensifies attacks - Al Jazeera"),
+            "https://news.google.com/rss/articles/CBMivwFBVV95cUxOd3lS",
+        );
+        assert_eq!(label, "Al Jazeera");
+        assert_eq!(
+            host_display_label("https://www.bbc.com/news/world-123"),
+            "bbc.com"
+        );
+        assert_eq!(
+            host_display_label("https://news.google.com/rss/articles/x"),
+            "Google News"
+        );
+        let fmt = format_search_hits(
+            &[WebSearchHit {
+                title: "Story - Reuters".into(),
+                url: "https://news.google.com/rss/articles/abc".into(),
+                snippet: "brief".into(),
+            }],
+            "q",
+        );
+        assert!(fmt.contains("[Reuters]"));
+        assert!(!fmt.contains("URL: https://"));
+        assert!(fmt.contains("link: "));
     }
 
     #[tokio::test]
