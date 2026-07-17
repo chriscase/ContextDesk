@@ -203,6 +203,52 @@ pub fn resolve_and_validate(
     Ok(ips)
 }
 
+/// Build a reqwest client that cannot follow redirects and is DNS-pinned to
+/// IPs vetted by [`resolve_and_validate`] (#141 anti-rebind).
+///
+/// Callers that need redirects must implement a manual hop loop and re-call
+/// this (or re-validate each hop) — never use `Policy::limited`/`default`.
+pub fn build_pinned_client(
+    url: &Url,
+    policy: &SsrfPolicy,
+    resolver: &impl DnsResolver,
+    timeout: std::time::Duration,
+) -> CoreResult<reqwest::Client> {
+    let ips = resolve_and_validate(url, policy, resolver)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| CoreError::Config("URL missing host".into()))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| CoreError::Config("URL missing port".into()))?;
+    let sockets: Vec<SocketAddr> = ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    // Literal IP URLs: pin is optional (host is already the IP string).
+    if host.parse::<IpAddr>().is_err() && !(host.eq_ignore_ascii_case("localhost")) {
+        builder = builder.resolve_to_addrs(host, &sockets);
+    }
+    builder
+        .build()
+        .map_err(|e| CoreError::Message(format!("http client: {e}")))
+}
+
+/// Convenience: parse `raw`, resolve+vet with the given resolver, pin client.
+pub fn build_pinned_client_for_url(
+    raw: &str,
+    policy: &SsrfPolicy,
+    resolver: &impl DnsResolver,
+    timeout: std::time::Duration,
+) -> CoreResult<(Url, reqwest::Client)> {
+    let url = validate_provider_url(raw, policy)?;
+    let client = build_pinned_client(&url, policy, resolver, timeout)?;
+    Ok((url, client))
+}
+
 fn check_ip(ip: IpAddr, policy: &SsrfPolicy) -> CoreResult<()> {
     match ip {
         IpAddr::V4(v4) => check_v4(v4, policy),
@@ -417,5 +463,38 @@ mod tests {
         let ips =
             resolve_and_validate(&url, &SsrfPolicy::allow_private_networks(), &resolver).unwrap();
         assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))]);
+    }
+
+    /// #141: pinned client refuses hostname→private without network I/O.
+    #[test]
+    fn pinned_client_rejects_hostname_resolving_to_private() {
+        let resolver = MapResolver::from_pairs([(
+            "evil.example".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))],
+        )]);
+        let url = Url::parse("https://evil.example/v1").unwrap();
+        let r = build_pinned_client(
+            &url,
+            &SsrfPolicy::default(),
+            &resolver,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(r.is_err(), "expected refuse, got ok");
+    }
+
+    #[test]
+    fn pinned_client_allows_public_map_resolver() {
+        let resolver = MapResolver::from_pairs([(
+            "api.example.com".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        )]);
+        let url = Url::parse("https://api.example.com/v1").unwrap();
+        let client = build_pinned_client(
+            &url,
+            &SsrfPolicy::default(),
+            &resolver,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(client.is_ok());
     }
 }

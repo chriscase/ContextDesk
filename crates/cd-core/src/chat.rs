@@ -1,7 +1,7 @@
 //! Chat provider clients (OpenAI-compatible + Ollama).
 
 use crate::error::{CoreError, CoreResult};
-use crate::ssrf::{validate_provider_url, SsrfPolicy};
+use crate::ssrf::{build_pinned_client_for_url, SsrfPolicy, SystemResolver};
 use crate::tools::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -360,16 +360,16 @@ impl OpenAiCompatibleClient {
         policy: &SsrfPolicy,
     ) -> CoreResult<Self> {
         let base_url = base_url.into();
-        validate_provider_url(&base_url, policy)?;
-        // No redirects: SSRF check is on the user-entered base only.
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| CoreError::Message(format!("http client: {e}")))?;
+        // #141: resolve+vet+pin; no redirects (anti-rebind / SSRF).
+        let (url, http) = build_pinned_client_for_url(
+            &base_url,
+            policy,
+            &SystemResolver,
+            std::time::Duration::from_secs(120),
+        )?;
         Ok(Self {
             http,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: url.as_str().trim_end_matches('/').to_string(),
             api_key,
             model: model.into(),
             extra_headers: Vec::new(),
@@ -697,14 +697,16 @@ impl OllamaClient {
     /// Create with SSRF policy (loopback allowed by default).
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> CoreResult<Self> {
         let base_url = base_url.into();
-        validate_provider_url(&base_url, &SsrfPolicy::default())?;
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| CoreError::Message(format!("http: {e}")))?;
+        // Loopback Ollama: pin with default policy (allow_loopback).
+        let (url, http) = build_pinned_client_for_url(
+            &base_url,
+            &SsrfPolicy::default(),
+            &SystemResolver,
+            std::time::Duration::from_secs(120),
+        )?;
         Ok(Self {
             http,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: url.as_str().trim_end_matches('/').to_string(),
             model: model.into(),
         })
     }

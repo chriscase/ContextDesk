@@ -1,7 +1,7 @@
 //! Confluence read-only client (CQL search + page fetch, space allowlist).
 
 use crate::error::{CoreError, CoreResult};
-use crate::ssrf::{validate_provider_url, SsrfPolicy};
+use crate::ssrf::SsrfPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -40,7 +40,12 @@ pub async fn cql_search(
     limit: usize,
 ) -> CoreResult<Vec<ConfluenceHit>> {
     let policy = SsrfPolicy::default();
-    let base = validate_provider_url(&cfg.base_url, &policy)?;
+    let (base, client) = crate::ssrf::build_pinned_client_for_url(
+        &cfg.base_url,
+        &policy,
+        &crate::ssrf::SystemResolver,
+        std::time::Duration::from_secs(30),
+    )?;
     // Restrict CQL to allowed spaces when possible
     let mut cql = cql.to_string();
     if !cfg.spaces.is_empty() && !cql.to_lowercase().contains("space") {
@@ -58,11 +63,6 @@ pub async fn cql_search(
         urlencoding_encode(&cql),
         limit.min(25)
     );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| CoreError::Message(format!("http: {e}")))?;
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {pat}"))
@@ -119,17 +119,17 @@ pub async fn cql_search(
 /// Fetch page body as plain-ish text (storage format stripped lightly).
 pub async fn fetch_page(cfg: &ConfluenceRoConfig, page_id: &str, pat: &str) -> CoreResult<String> {
     let policy = SsrfPolicy::default();
-    let base = validate_provider_url(&cfg.base_url, &policy)?;
+    let (base, client) = crate::ssrf::build_pinned_client_for_url(
+        &cfg.base_url,
+        &policy,
+        &crate::ssrf::SystemResolver,
+        std::time::Duration::from_secs(30),
+    )?;
     let url = format!(
         "{}/rest/api/content/{}?expand=body.storage,space",
         base.as_str().trim_end_matches('/'),
         page_id
     );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| CoreError::Message(format!("http: {e}")))?;
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {pat}"))
