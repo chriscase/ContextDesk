@@ -86,11 +86,7 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     rebuild_host(state, cfg, ws)
 }
 
-fn rebuild_host(
-    state: &AppState,
-    cfg: AppConfig,
-    ws: Workspace,
-) -> Result<(), String> {
+fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
     let audit = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("audit.jsonl"));
