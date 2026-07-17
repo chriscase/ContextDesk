@@ -177,12 +177,7 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
                 });
             }
 
-            let needs_key = matches!(
-                p.kind,
-                ProviderKind::OpenAiCompatible
-                    | ProviderKind::Anthropic
-                    | ProviderKind::XaiGrokBuild
-            );
+            let needs_key = crate::providers::descriptor_for(p.kind).needs_api_key;
             if needs_key {
                 match input.active_key_present {
                     Some(true) => items.push(PreflightItem {

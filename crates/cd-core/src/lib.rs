@@ -54,7 +54,9 @@ pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
 pub use error::{CoreError, CoreResult};
 pub use events::{StreamEvent, ToolPhase};
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
-pub use providers::{ProviderConfig, ProviderKind, ProviderProfile};
+pub use providers::{
+    descriptor_for, ProviderConfig, ProviderDescriptor, ProviderKind, ProviderProfile,
+};
 pub use tools::{ToolSideEffect, ToolSpec};
 
 /// Library version (cargo package version).

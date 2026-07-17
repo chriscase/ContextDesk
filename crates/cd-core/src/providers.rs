@@ -1,4 +1,9 @@
 //! LLM provider profile model (no network).
+//!
+//! # Adding a provider kind
+//! Adding a generic kind = edit [`ProviderKind`] + [`descriptor_for`] +
+//! [`crate::research::backend_for`], nothing else. Hosts must not grow new
+//! per-kind if-chains (see #122).
 
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +16,80 @@ pub enum ProviderKind {
     Ollama,
     /// OpenAI-compatible `/v1/chat/completions` (generic gateways).
     OpenAiCompatible,
-    /// Anthropic Messages API (future).
+    /// Anthropic Messages API.
     Anthropic,
     /// Grok Build / xAI session path (opt-in; Phase 2+).
     XaiGrokBuild,
+}
+
+/// Static metadata for a [`ProviderKind`] (ids, labels, defaults).
+///
+/// Exhaustive via [`descriptor_for`]: a new enum variant fails to compile
+/// until a row is added here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderDescriptor {
+    /// Stable profile id slug used for keychain refs (e.g. `ollama-local`).
+    pub profile_id_slug: &'static str,
+    /// Default human label for a new profile of this kind.
+    pub default_label: &'static str,
+    /// Group label for model-picker UI.
+    pub group_label: &'static str,
+    /// Whether chat requires an API key (or session credential) in secure storage.
+    pub needs_api_key: bool,
+    /// Prefer local-only / loopback defaults.
+    pub is_local: bool,
+    /// Default base URL when the user leaves the field empty.
+    pub default_base_url: Option<&'static str>,
+}
+
+/// Return the descriptor for `kind`.
+///
+/// Adding a generic kind = edit the enum + this table + `backend_for`, nothing else.
+pub fn descriptor_for(kind: ProviderKind) -> ProviderDescriptor {
+    match kind {
+        ProviderKind::Ollama => ProviderDescriptor {
+            profile_id_slug: "ollama-local",
+            default_label: "Ollama (local)",
+            group_label: "Ollama",
+            needs_api_key: false,
+            is_local: true,
+            default_base_url: Some("http://127.0.0.1:11434"),
+        },
+        ProviderKind::OpenAiCompatible => ProviderDescriptor {
+            profile_id_slug: "openai-compatible",
+            default_label: "OpenAI-compatible gateway",
+            group_label: "OpenAI-compatible",
+            needs_api_key: true,
+            is_local: false,
+            default_base_url: None,
+        },
+        ProviderKind::Anthropic => ProviderDescriptor {
+            profile_id_slug: "anthropic",
+            default_label: "Anthropic",
+            group_label: "Anthropic",
+            needs_api_key: true,
+            is_local: false,
+            default_base_url: Some("https://api.anthropic.com"),
+        },
+        ProviderKind::XaiGrokBuild => ProviderDescriptor {
+            profile_id_slug: "xai-grok-build",
+            default_label: "Grok Build session",
+            group_label: "Grok Build",
+            needs_api_key: true,
+            is_local: false,
+            default_base_url: Some("https://api.x.ai/v1"),
+        },
+    }
+}
+
+/// All known kinds (for registry completeness tests).
+pub fn all_provider_kinds() -> &'static [ProviderKind] {
+    &[
+        ProviderKind::Ollama,
+        ProviderKind::OpenAiCompatible,
+        ProviderKind::Anthropic,
+        ProviderKind::XaiGrokBuild,
+    ]
 }
 
 /// Capability flags discovered or assumed for a profile.
@@ -122,5 +197,27 @@ mod tests {
         assert!(!s.contains("sk-"));
         let back: ProviderConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.profiles.len(), 1);
+    }
+
+    #[test]
+    fn descriptor_covers_every_provider_kind() {
+        for kind in all_provider_kinds() {
+            let d = descriptor_for(*kind);
+            assert!(!d.profile_id_slug.is_empty(), "{kind:?}");
+            assert!(!d.default_label.is_empty(), "{kind:?}");
+            assert!(!d.group_label.is_empty(), "{kind:?}");
+        }
+        // Exhaustive: every variant appears in all_provider_kinds (compile-checked via match).
+        let _ = descriptor_for(ProviderKind::Ollama);
+        let _ = descriptor_for(ProviderKind::OpenAiCompatible);
+        let _ = descriptor_for(ProviderKind::Anthropic);
+        let _ = descriptor_for(ProviderKind::XaiGrokBuild);
+        assert_eq!(all_provider_kinds().len(), 4);
+        assert!(descriptor_for(ProviderKind::Anthropic).needs_api_key);
+        assert!(!descriptor_for(ProviderKind::Ollama).needs_api_key);
+        assert_eq!(
+            descriptor_for(ProviderKind::Anthropic).default_base_url,
+            Some("https://api.anthropic.com")
+        );
     }
 }
