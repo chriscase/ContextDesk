@@ -51,7 +51,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 30 | Streaming markdown | DONE | progressive text_delta + MarkdownBody + materialize |
 | 31 | Compact tools UI | DONE | status icons; collapse threshold 4 |
 | 32 | Composer | DONE | expand; Enter/Shift+Enter; stop SVG; list/code assist |
-| 33 | Compaction | DONE | core + UI compact; history retained |
+| 33 | Compaction | PARTIAL | #112 wires context_messages/recompact into agent path; full history retained; pairing-safe keep. UI toggle show_full_history still accurate. |
 | 34 | Multi-session tabs | DONE | session tabs + per-session state |
 | 35 | SVG icons | DONE | icons.tsx used across UI |
 | 58 | Golden harness | DONE | golden_research offline |

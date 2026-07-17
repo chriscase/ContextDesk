@@ -103,6 +103,110 @@ fn default_keep_last() -> usize {
     6
 }
 
+/// Default keep-last window for model context (public for agent options).
+pub fn default_compact_keep_last() -> usize {
+    default_keep_last()
+}
+
+/// Pairing-safe start index for the keep-tail of a chat history (#112).
+///
+/// If the naive `len - keep` boundary falls on a `Role::Tool` message (orphaning
+/// it from its assistant tool_calls parent), walk left until the pair is intact
+/// or the history start is reached.
+pub fn pairing_safe_start(messages: &[ChatMessage], keep: usize) -> usize {
+    if messages.len() <= keep {
+        return 0;
+    }
+    let mut start = messages.len().saturating_sub(keep);
+    while start > 0 {
+        match messages[start].role {
+            Role::Tool => {
+                // Keep walking left to include the assistant that owns this tool result.
+                start -= 1;
+            }
+            Role::Assistant if messages[start].tool_calls.is_some() => {
+                // Start on an assistant-with-tools is fine (tool results follow).
+                break;
+            }
+            _ => break,
+        }
+    }
+    // Never drop a lone system message at index 0 if it is the policy message —
+    // callers may re-inject system; still prefer keeping it when start==0.
+    start
+}
+
+/// Build a compact summary string from messages older than the keep window.
+/// Returns `None` when nothing is older than keep.
+pub fn recompact_chat_history(messages: &[ChatMessage], keep: usize) -> Option<String> {
+    if messages.len() <= keep {
+        return None;
+    }
+    let start = pairing_safe_start(messages, keep);
+    if start == 0 {
+        return None;
+    }
+    let older = &messages[..start];
+    let mut lines = Vec::new();
+    for m in older {
+        let snippet: String = m.content.chars().take(160).collect();
+        lines.push(format!("- {:?}: {snippet}", m.role));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Model-facing context: optional summary + pairing-safe last N (full history unchanged).
+pub fn context_chat_messages(
+    messages: &[ChatMessage],
+    compact_summary: Option<&str>,
+    keep: usize,
+) -> Vec<ChatMessage> {
+    if messages.len() <= keep {
+        return messages.to_vec();
+    }
+    let start = pairing_safe_start(messages, keep);
+    let mut out = Vec::new();
+    // Prefer an existing system policy message at the head of the tail, else
+    // inject a summary-only system note before the keep window.
+    let tail = &messages[start..];
+    let has_system = tail.iter().any(|m| matches!(m.role, Role::System));
+    if let Some(sum) = compact_summary {
+        if !sum.is_empty() {
+            out.push(ChatMessage {
+                role: Role::System,
+                content: format!("[Compacted earlier conversation]\n{sum}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+    }
+    // If the full history had a system policy before the window and the tail
+    // already includes it (start==0), do not duplicate — already in tail.
+    // If tail has no system but messages[0] is system, prepend it so tools remain visible.
+    if !has_system {
+        if let Some(sys) = messages.iter().find(|m| matches!(m.role, Role::System)) {
+            // Avoid double-injecting when we already pushed a compaction system msg:
+            // still need the tool policy system content — merge into first system or push.
+            if out.is_empty() || !matches!(out[0].role, Role::System) {
+                out.insert(
+                    0,
+                    ChatMessage {
+                        role: Role::System,
+                        content: sys.content.clone(),
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                );
+            } else {
+                // Prepend policy before compacted summary content.
+                out[0].content = format!("{}\n\n{}", sys.content, out[0].content);
+            }
+        }
+    }
+    out.extend(tail.iter().cloned());
+    out
+}
+
 /// One stored message (desktop transcript).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
@@ -226,41 +330,20 @@ impl Session {
         }
     }
 
-    /// Messages for model context: summary + last N full (legacy helper).
+    /// Messages for model context: summary + last N full (pairing-safe, #112).
     pub fn context_messages(&self) -> Vec<ChatMessage> {
         let hist = self.to_chat_history();
-        let keep = self.compact_keep_last;
-        if hist.len() <= keep {
-            return hist;
-        }
-        let mut out = Vec::new();
-        if let Some(sum) = &self.compact_summary {
-            out.push(ChatMessage {
-                role: Role::System,
-                content: format!("[Compacted earlier conversation]\n{sum}"),
-                tool_call_id: None,
-                tool_calls: None,
-            });
-        }
-        let start = hist.len().saturating_sub(keep);
-        out.extend(hist[start..].iter().cloned());
-        out
+        context_chat_messages(
+            &hist,
+            self.compact_summary.as_deref(),
+            self.compact_keep_last,
+        )
     }
 
     /// Build compact summary from older messages (lossy; full history retained).
     pub fn recompact(&mut self) {
-        let keep = self.compact_keep_last;
-        if self.messages.len() <= keep {
-            self.compact_summary = None;
-            return;
-        }
-        let older = &self.messages[..self.messages.len() - keep];
-        let mut lines = Vec::new();
-        for m in older {
-            let snippet: String = m.content.chars().take(160).collect();
-            lines.push(format!("- {}: {snippet}", m.role));
-        }
-        self.compact_summary = Some(lines.join("\n"));
+        let hist = self.to_chat_history();
+        self.compact_summary = recompact_chat_history(&hist, self.compact_keep_last);
         self.touch();
     }
 
@@ -680,7 +763,85 @@ mod tests {
         assert_eq!(expand_full_history(&s).len(), 6);
         let ctx = s.context_messages();
         assert!(ctx.len() < 6);
-        assert!(ctx[0].content.contains("Compacted"));
+        assert!(ctx.iter().any(|m| m.content.contains("Compacted")));
+    }
+
+    /// #112: keep window that would orphan a tool result extends left to the pair.
+    #[test]
+    fn pairing_safe_keep_includes_tool_parent() {
+        use crate::chat::{FunctionCall, ToolCallMsg};
+        let mut hist = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "old user".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: "tool result body".into(),
+                tool_call_id: Some("c1".into()),
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "new user".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        // keep=2 would start on Tool if naive — pairing_safe must pull assistant in.
+        let start = pairing_safe_start(&hist, 2);
+        assert!(
+            start <= 2,
+            "start={start} should include assistant at index 2"
+        );
+        assert!(!matches!(hist[start].role, Role::Tool));
+        let summary = recompact_chat_history(&hist, 2);
+        assert!(summary.is_some());
+        let ctx = context_chat_messages(&hist, summary.as_deref(), 2);
+        // No orphan tool: every Tool has matching assistant tool_calls id in ctx.
+        for m in &ctx {
+            if matches!(m.role, Role::Tool) {
+                let id = m.tool_call_id.as_deref().unwrap();
+                let has_parent = ctx.iter().any(|a| {
+                    matches!(a.role, Role::Assistant)
+                        && a.tool_calls
+                            .as_ref()
+                            .map(|t| t.iter().any(|tc| tc.id == id))
+                            .unwrap_or(false)
+                });
+                assert!(has_parent, "orphaned tool {id} in ctx");
+            }
+        }
+        // Full hist unchanged
+        assert_eq!(hist.len(), 5);
+        hist.push(ChatMessage {
+            role: Role::Assistant,
+            content: "answer".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        assert_eq!(hist.len(), 6);
     }
 
     #[test]
