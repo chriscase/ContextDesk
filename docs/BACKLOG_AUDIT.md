@@ -2,7 +2,7 @@
 
 Legend: **DONE** = AC met + tests | **PARTIAL** = real code, AC incomplete | **TODO** = missing or stub
 
-Last audit: 2026-07-17. Update when closing.
+Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 
 ## Phase 0 — Foundation
 
@@ -75,3 +75,8 @@ Last audit: 2026-07-17. Update when closing.
 ## Close policy
 
 Only move DONE → closed after re-verification + adversarial note. Do not bulk-update this table to DONE without proof.
+
+
+## Phase 2–5 (post DoD)
+
+Skills/panes/connectors/server/embed/packaging closed with residual notes on issues. #19 Grok opt-in library closed with residual live refresh.
