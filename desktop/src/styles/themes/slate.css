@@ -1,4 +1,4 @@
-/* Optional skin: slate (registered for Phase 5 skins). */
+/* Optional skin: slate (Phase 5 skins). */
 html[data-theme="slate"] {
   color-scheme: dark;
   --bg-app: #0f1419;
@@ -7,6 +7,7 @@ html[data-theme="slate"] {
   --bg-input: #0d1117;
   --bg-hover: #21262d;
   --border: #30363d;
+  --border-soft: #21262d;
   --border-strong: #484f58;
   --text: #e6edf3;
   --text-muted: #8b949e;
@@ -14,10 +15,19 @@ html[data-theme="slate"] {
   --accent: #58a6ff;
   --accent-strong: #79b8ff;
   --accent-soft: rgb(88 166 255 / 0.15);
+  --accent-on: #0b1020;
   --success: #3fb950;
+  --warning: #d29922;
   --danger: #f85149;
-  --warn: #d29922;
+  --tool-bg: #161b22;
   --chat-user-bg: #161b22;
-  --chat-assistant-bg: #0d1117;
+  --chat-assistant-bg: transparent;
+  --surface-deep: #010409;
+  --surface-chrome: #161b22;
+  --surface-chip: #21262d;
+  --status-bar-bg: #010409;
+  --overlay-scrim: rgb(0 0 0 / 0.62);
+  --overlay-soft: rgb(0 0 0 / 0.22);
+  --overlay-faint: rgb(255 255 255 / 0.04);
   --focus-ring: 0 0 0 2px rgb(88 166 255 / 0.35);
 }

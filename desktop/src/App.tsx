@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Composer } from "./components/Composer";
 import { MarkdownBody } from "./components/MarkdownBody";
 import {
@@ -237,7 +237,11 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("preflight");
-  const [dismissedBanner, setDismissedBanner] = useState(false);
+  /** Session-only: hide setup banner after Continue / close settings while incomplete. */
+  const [dismissedBanner, setDismissedBanner] = useState(
+    () => sessionStorage.getItem("cd-setup-dismissed") === "1",
+  );
+  const autoOpenedPreflight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [permission, setPermission] = useState<PermissionPrompt | null>(null);
   const [pendingToolArgs, setPendingToolArgs] = useState<Record<
@@ -345,18 +349,46 @@ export function App() {
     }
   }, [setup.workspaceRoots, refreshMemory]);
 
+  // Auto-open Preflight each cold start while setup is incomplete (NexaDeck-style
+  // readiness gate). Closing settings / Continue dismisses for this session only.
   useEffect(() => {
-    if (preflight.hasBlocking && !localStorage.getItem("cd-setup-seen")) {
-      setSettingsOpen(true);
-      setSettingsSection("preflight");
-      localStorage.setItem("cd-setup-seen", "1");
+    if (!preflight.hasBlocking) {
+      autoOpenedPreflight.current = false;
+      if (sessionStorage.getItem("cd-setup-dismissed") === "1") {
+        sessionStorage.removeItem("cd-setup-dismissed");
+        setDismissedBanner(false);
+      }
+      return;
     }
-  }, [preflight.hasBlocking]);
+    if (
+      dismissedBanner ||
+      settingsOpen ||
+      autoOpenedPreflight.current ||
+      sessionStorage.getItem("cd-setup-dismissed") === "1"
+    ) {
+      return;
+    }
+    autoOpenedPreflight.current = true;
+    setSettingsSection("preflight");
+    setSettingsOpen(true);
+  }, [preflight.hasBlocking, dismissedBanner, settingsOpen]);
 
   const openSettings = (section: SettingsSection = "preflight") => {
     setSettingsSection(section);
     setSettingsOpen(true);
   };
+
+  const dismissSetupPrompt = useCallback(() => {
+    sessionStorage.setItem("cd-setup-dismissed", "1");
+    setDismissedBanner(true);
+  }, []);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    if (preflight.hasBlocking) {
+      dismissSetupPrompt();
+    }
+  }, [preflight.hasBlocking, dismissSetupPrompt]);
 
   const onSubmit = useCallback(
     async (text: string) => {
@@ -550,6 +582,7 @@ export function App() {
 
   return (
     <div className="app-shell">
+      <div className="app-chrome">
       <header className="titlebar">
         <div className="titlebar__brand">
           <IconSpark title={branding.name} />
@@ -599,42 +632,48 @@ export function App() {
 
       {preflight.hasBlocking && !dismissedBanner ? (
         <div className="banner" role="status">
-          <span>
-            Setup incomplete — open Preflight to fix workspace or AI provider
-            issues (no config files required).
+          <span className="banner__msg">
+            <strong>Setup incomplete</strong>
+            Fix workspace or AI provider in Preflight
           </span>
-          <span className="row">
+          <span className="banner__actions">
             <button
               type="button"
-              className="btn btn--primary"
+              className="btn btn--primary btn--sm"
               onClick={() => openSettings("preflight")}
             >
               Open Preflight
             </button>
             <button
               type="button"
-              className="btn btn--ghost"
-              onClick={() => setDismissedBanner(true)}
+              className="btn btn--ghost btn--sm"
+              onClick={dismissSetupPrompt}
             >
-              Continue anyway
+              Dismiss
             </button>
           </span>
         </div>
       ) : null}
 
       {agentError ? (
-        <div className="banner" role="alert">
-          <span>{agentError}</span>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={() => setAgentError(null)}
-          >
-            Dismiss
-          </button>
+        <div className="banner" data-tone="danger" role="alert">
+          <span className="banner__msg">
+            <strong>Error</strong>
+            {agentError}
+          </span>
+          <span className="banner__actions">
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => setAgentError(null)}
+            >
+              Dismiss
+            </button>
+          </span>
         </div>
       ) : null}
 
+      <div className="app-body">
       <div className="main">
         <aside className="sidebar">
           <div className="sidebar__label">Sessions</div>
@@ -653,9 +692,10 @@ export function App() {
           <button
             type="button"
             className="session-list__item"
+            data-warn={preflight.hasBlocking ? "true" : undefined}
             onClick={() => openSettings("preflight")}
           >
-            Preflight {preflight.hasBlocking ? "• issues" : "• ok"}
+            Preflight {preflight.hasBlocking ? "· issues" : "· ok"}
           </button>
           <button
             type="button"
@@ -902,6 +942,48 @@ export function App() {
           ) : null}
         </div>
       </div>
+      </div>
+
+      <footer className="status-bar">
+        <span className="status-bar__left">
+          <span
+            className="status-bar__dot"
+            data-live={busy ? "true" : undefined}
+            data-warn={!busy && preflight.hasBlocking ? "true" : undefined}
+            data-ok={!busy && !preflight.hasBlocking ? "true" : undefined}
+            aria-hidden
+          />
+          <span>
+            {busy
+              ? "Live · agent turn"
+              : preflight.hasBlocking
+                ? "Setup incomplete"
+                : "Ready"}
+          </span>
+          <span aria-hidden>·</span>
+          <button type="button" onClick={() => openSettings("preflight")}>
+            Preflight {preflight.hasBlocking ? "issues" : "ok"}
+          </button>
+        </span>
+        <span className="status-bar__right">
+          <button type="button" onClick={() => openSettings("workspace")}>
+            {scopeLabel}
+          </button>
+          <span aria-hidden>·</span>
+          <button type="button" onClick={() => openSettings("ai")}>
+            {egressLabel}
+          </button>
+          {setup.chatModel ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="mono" title="Chat model">
+                {setup.chatModel}
+              </span>
+            </>
+          ) : null}
+        </span>
+      </footer>
+      </div>
 
       <SettingsModal
         open={settingsOpen}
@@ -909,7 +991,7 @@ export function App() {
         setup={setup}
         theme={theme}
         onThemeChange={setTheme}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         onSaveSetup={onSaveSetup}
         onRecheckHost={refreshHostPreflight}
         hostReport={hostPreflightReport}

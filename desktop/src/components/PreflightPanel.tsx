@@ -19,18 +19,20 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
   const total = report.items.length;
   return (
     <div>
-      <p className="section-lead">
-        Environment health for local tools and remote gateways. Fix issues here
-        instead of editing config files. Recheck anytime.
-      </p>
-      <p className="field__hint" role="status">
-        Progress: {pass}/{total} checks passing
-        {report.hasBlocking ? " · blocking issues remain" : " · ready"}
-      </p>
+      <div className="row--between stack-sm preflight-lead">
+        <p className="section-lead preflight-lead__text">
+          Environment health for local tools and gateways. Fix here — no config
+          files required.
+        </p>
+        <span className="field__hint preflight-lead__count" role="status">
+          {pass}/{total}
+          {report.hasBlocking ? " blocking" : " ready"}
+        </span>
+      </div>
       <div className="preflight-actions row">
         <button
           type="button"
-          className="btn btn--ghost"
+          className="btn btn--ghost btn--sm"
           onClick={onRecheck}
           disabled={checking}
         >
@@ -38,12 +40,12 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
           {checking ? "Checking…" : "Recheck"}
         </button>
         <a
-          className="btn btn--ghost"
+          className="btn btn--ghost btn--sm"
           href="https://ollama.com/download"
           target="_blank"
           rel="noreferrer"
         >
-          Install / start Ollama
+          Install Ollama
         </a>
       </div>
       <ul className="preflight-list">

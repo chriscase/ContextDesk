@@ -1,11 +1,14 @@
-/* Design tokens — theme files override semantic colors only. */
+/* Design tokens — theme files override semantic colors only.
+   Density tuned for coding-agent chrome (GrokPtah-adjacent), not marketing UI. */
 :root {
-  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue",
+    sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo,
+    Consolas, monospace;
 
   --radius-sm: 6px;
   --radius-md: 10px;
-  --radius-lg: 14px;
+  --radius-lg: 12px;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -14,18 +17,22 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  --text-xs: 0.75rem;
-  --text-sm: 0.8125rem;
-  --text-md: 0.9375rem;
-  --text-lg: 1.125rem;
+  /* Dense desktop type scale (root ~13.5px) */
+  --text-xs: 0.6875rem; /* ~11px */
+  --text-sm: 0.8125rem; /* ~13px */
+  --text-md: 0.875rem; /* ~14px */
+  --text-lg: 1.0625rem; /* ~17px */
 
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.2);
-  --shadow-md: 0 8px 24px rgb(0 0 0 / 0.28);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18);
+  --shadow-md: 0 12px 36px rgb(0 0 0 / 0.4);
+  --shadow-inset: 0 1px 0 rgb(255 255 255 / 0.04) inset;
 
   --motion-fast: 120ms;
   --motion-med: 220ms;
 
-  --composer-min-h: 48px;
-  --composer-max-h: 240px;
-  --titlebar-h: 44px;
+  --composer-min-h: 44px;
+  --composer-max-h: 220px;
+  --titlebar-h: 40px;
+  --status-bar-h: 24px;
+  --banner-h: 32px;
 }
