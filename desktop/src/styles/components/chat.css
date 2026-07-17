@@ -395,7 +395,8 @@
 
 .empty-state {
   max-width: 28rem;
-  margin: 10vh auto 0;
+  /* Keep short so first send doesn't fight a huge empty-state height jump */
+  margin: 4vh auto 0;
   text-align: center;
   color: var(--text-muted);
   padding: 0 var(--space-4);

@@ -423,9 +423,11 @@ export function App() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
   /** When true, new content auto-scrolls to bottom. Cleared if user scrolls up. */
   const stickToBottomRef = useRef(true);
+  /** Ignore scroll events we caused programmatically. */
+  const ignoreScrollRef = useRef(false);
   const [unreadBelow, setUnreadBelow] = useState(0);
 
-  const NEAR_BOTTOM_PX = 100;
+  const NEAR_BOTTOM_PX = 120;
 
   const isNearBottom = (el: HTMLElement) =>
     el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
@@ -433,13 +435,13 @@ export function App() {
   const markSessionRead = useCallback(
     (sid: string, messageId: string | null) => {
       if (!messageId) return;
-      setSessions((all) =>
-        all.map((s) =>
-          s.id === sid
-            ? { ...s, lastReadMessageId: messageId, updatedAt: nowIso() }
-            : s,
-        ),
-      );
+      setSessions((all) => {
+        const cur = all.find((s) => s.id === sid);
+        if (!cur || cur.lastReadMessageId === messageId) return all;
+        return all.map((s) =>
+          s.id === sid ? { ...s, lastReadMessageId: messageId } : s,
+        );
+      });
     },
     [],
   );
@@ -455,20 +457,38 @@ export function App() {
     [],
   );
 
-  const scrollChatToBottom = useCallback(
-    (behavior: ScrollBehavior = "smooth") => {
+  /** Pin scroll to the end after layout (double rAF avoids empty-state height races). */
+  const pinScrollToEnd = useCallback((behavior: ScrollBehavior = "auto") => {
+    const run = () => {
       const el = chatScrollRef.current;
       if (!el) return;
-      el.scrollTo({ top: el.scrollHeight, behavior });
+      ignoreScrollRef.current = true;
+      const top = Math.max(0, el.scrollHeight - el.clientHeight);
+      if (behavior === "smooth") {
+        el.scrollTo({ top, behavior: "smooth" });
+      } else {
+        el.scrollTop = top;
+      }
+      window.setTimeout(() => {
+        ignoreScrollRef.current = false;
+      }, behavior === "smooth" ? 320 : 0);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(run));
+  }, []);
+
+  const scrollChatToBottom = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
       stickToBottomRef.current = true;
       setUnreadBelow(0);
+      pinScrollToEnd(behavior);
       const last = messages[messages.length - 1];
       if (last && sessionId) markSessionRead(sessionId, last.id);
     },
-    [messages, sessionId, markSessionRead],
+    [messages, sessionId, markSessionRead, pinScrollToEnd],
   );
 
   const onChatScroll = useCallback(() => {
+    if (ignoreScrollRef.current) return;
     const el = chatScrollRef.current;
     if (!el || !sessionId) return;
     if (isNearBottom(el)) {
@@ -620,32 +640,25 @@ export function App() {
   }, [pane]);
 
   // Auto-scroll when content grows if user is following the bottom.
-  const lastContentSig = `${messages.length}:${messages[messages.length - 1]?.content.length ?? 0}:${messages[messages.length - 1]?.streaming ? "1" : "0"}`;
+  // Do not mark-read on every token (that re-rendered and fought the viewport).
+  const lastContentSig = `${messages.length}:${messages[messages.length - 1]?.content.length ?? 0}:${messages[messages.length - 1]?.streaming ? "1" : "0"}:${isFolded ? "f" : "u"}`;
   useEffect(() => {
     if (pane !== "chat") return;
-    const el = chatScrollRef.current;
-    if (!el) return;
     if (stickToBottomRef.current) {
-      const last = messages[messages.length - 1];
-      const behavior: ScrollBehavior = last?.streaming ? "auto" : "smooth";
-      el.scrollTo({ top: el.scrollHeight, behavior });
-      if (last) markSessionRead(sessionId, last.id);
+      pinScrollToEnd("auto");
       setUnreadBelow(0);
     } else {
-      const n = countUnread(
-        messages,
-        activeSession?.lastReadMessageId ?? null,
+      setUnreadBelow(
+        countUnread(messages, activeSession?.lastReadMessageId ?? null),
       );
-      setUnreadBelow(n);
     }
   }, [
     lastContentSig,
     pane,
-    sessionId,
     messages,
     activeSession?.lastReadMessageId,
-    markSessionRead,
     countUnread,
+    pinScrollToEnd,
   ]);
 
   // Switching chats: restore unread badge; jump to bottom if fully read.
@@ -656,10 +669,7 @@ export function App() {
     setUnreadBelow(n);
     if (n === 0) {
       stickToBottomRef.current = true;
-      requestAnimationFrame(() => {
-        const el = chatScrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
+      pinScrollToEnd("auto");
     } else {
       stickToBottomRef.current = false;
     }
@@ -847,7 +857,8 @@ export function App() {
         }),
       );
       setPane("chat");
-      requestAnimationFrame(() => scrollChatToBottom("auto"));
+      // After React commits the new bubbles (empty-state unmounts), pin to end.
+      pinScrollToEnd("auto");
       if (wasFirstUser) {
         void upgradeTitleWithLlm(sessionId, text);
       }
@@ -994,7 +1005,7 @@ export function App() {
       refreshMemory,
       persistSession,
       upgradeTitleWithLlm,
-      scrollChatToBottom,
+      pinScrollToEnd,
     ],
   );
 
@@ -1590,7 +1601,12 @@ export function App() {
                   </div>
                 ) : (
                   visibleMessages.map((m) => (
-                    <article key={m.id} className="msg" data-role={m.role}>
+                    <article
+                      key={m.id}
+                      className="msg"
+                      data-role={m.role}
+                      data-msg-id={m.id}
+                    >
                       <div className="msg__role">{m.role}</div>
                       {m.tools ? <ToolCallList tools={m.tools} /> : null}
                       {m.trail?.length ? (
