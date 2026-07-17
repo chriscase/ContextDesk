@@ -116,12 +116,14 @@
 }
 
 .session-tabs {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  padding: var(--space-2) var(--space-3) 0;
-  border-bottom: 1px solid var(--border);
+  padding: 4px var(--space-3) 0;
+  border-bottom: 1px solid var(--border-soft);
   flex-wrap: wrap;
+  background: var(--bg-app);
 }
 
 .session-tab {

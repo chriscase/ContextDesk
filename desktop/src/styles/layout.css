@@ -183,27 +183,32 @@
   color: var(--warning);
 }
 
+/* Flex column so session tabs / chrome stay compact; chat body takes remaining space.
+   (Grid `auto 1fr auto` previously assigned 1fr to session-tabs when chat was open.) */
 .workspace {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   min-width: 0;
   background: var(--bg-app);
 }
 
 .chat-scroll {
+  flex: 1 1 auto;
   overflow: auto;
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: 0;
 }
 
 .composer-dock {
+  flex: 0 0 auto;
   border-top: 1px solid var(--border-soft);
   background: linear-gradient(180deg, transparent, var(--bg-app) 22%);
   padding: var(--space-2) var(--space-4) var(--space-3);
 }
 
 .pane-tabs {
+  flex: 0 0 auto;
   display: flex;
   gap: 2px;
   padding: 4px var(--space-3);
@@ -231,6 +236,7 @@
 }
 
 .pane {
+  flex: 1 1 auto;
   padding: var(--space-3);
   min-height: 0;
   overflow: auto;
