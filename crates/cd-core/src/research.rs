@@ -10,6 +10,7 @@ use crate::error::CoreResult;
 use crate::events::StreamEvent;
 use crate::index::KeywordIndex;
 use crate::permissions::PermissionDecision;
+use crate::error::CoreError;
 use crate::providers::{ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
@@ -327,6 +328,69 @@ pub async fn research_turn(
         };
         let client =
             OpenAiCompatibleClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
+        let backend = OpenAiBackend(client);
+        return run_agent_turn(
+            &backend,
+            host,
+            user_text,
+            history,
+            &AgentOptions {
+                session_id: session_id.into(),
+                model: Some(profile.chat_model.clone()),
+                max_rounds: 8,
+                cancel: None,
+            },
+            None,
+        )
+        .await;
+    }
+
+    // Explicit opt-in only: load ~/.grok/auth.json session, pin host to api.x.ai.
+    if profile.kind == ProviderKind::XaiGrokBuild {
+        let base = if profile.base_url.trim().is_empty() {
+            "https://api.x.ai/v1"
+        } else {
+            profile.base_url.trim()
+        };
+        crate::grok_auth::assert_grok_base_allowed(base)?;
+        let creds = crate::grok_auth::load_grok_session_credentials()?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| CoreError::Message(format!("http client: {e}")))?;
+        let creds = crate::grok_auth::ensure_fresh_credentials(creds, |token_url, body| {
+            let http = http.clone();
+            async move {
+                let resp = http
+                    .post(token_url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| CoreError::Message(format!("refresh request: {e}")))?;
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| CoreError::Message(format!("refresh body: {e}")))?;
+                if !status.is_success() {
+                    return Err(CoreError::Message(format!(
+                        "refresh HTTP {status}: {}",
+                        text.chars().take(120).collect::<String>()
+                    )));
+                }
+                serde_json::from_str(&text).map_err(|e| CoreError::Message(format!("refresh json: {e}")))
+            }
+        })
+        .await?;
+        let headers = creds.request_headers();
+        let client = OpenAiCompatibleClient::new(
+            base,
+            None,
+            &profile.chat_model,
+            &SsrfPolicy::default(),
+        )?
+        .with_extra_headers(headers);
         let backend = OpenAiBackend(client);
         return run_agent_turn(
             &backend,

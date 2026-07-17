@@ -289,7 +289,21 @@ export function profileIdForKind(kind: string): string {
   if (kind === "ollama") return "ollama-local";
   if (kind === "openai_compatible") return "openai-compatible";
   if (kind === "anthropic") return "anthropic";
+  if (kind === "xai_grok_build") return "xai-grok-build";
   return kind;
+}
+
+/** Normalize host/discovery kind strings into AppSetup providerKind. */
+export function normalizeProviderKind(
+  kind: string,
+): "ollama" | "openai_compatible" | "xai_grok_build" | "none" {
+  const k = kind.trim().toLowerCase().replace(/-/g, "_");
+  if (k === "ollama") return "ollama";
+  if (k === "openai_compatible" || k === "openaicompatible") return "openai_compatible";
+  if (k === "xai_grok_build" || k === "xaigrokbuild" || k === "grok" || k === "xai") {
+    return "xai_grok_build";
+  }
+  return "none";
 }
 
 export async function hostReadFile(path: string): Promise<string> {

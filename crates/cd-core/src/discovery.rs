@@ -73,18 +73,18 @@ pub fn discover_local() -> Vec<LocalCandidate> {
         });
     }
 
-    // Grok Build session presence only
+    // Grok Build session — Use requires explicit opt-in in Settings (never auto-active).
     if let Some(home) = dirs::home_dir() {
         let auth = home.join(".grok").join("auth.json");
         if auth.is_file() {
             out.push(LocalCandidate {
                 id: "grok-build-session".into(),
-                label: "Grok Build session (opt-in)".into(),
+                label: "Grok Build session".into(),
                 kind: ProviderKind::XaiGrokBuild,
-                base_url: None,
+                base_url: Some("https://api.x.ai/v1".into()),
                 credentials_present: true,
                 notes: vec![
-                    "Session file present; use only after explicit opt-in".into(),
+                    "Click Use to opt in — tokens stay in ~/.grok/auth.json".into(),
                     auth_display(&auth),
                 ],
             });

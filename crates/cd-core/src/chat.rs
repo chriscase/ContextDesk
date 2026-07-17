@@ -343,10 +343,12 @@ pub struct OpenAiCompatibleClient {
     http: reqwest::Client,
     /// Base URL (may include /v1).
     pub base_url: String,
-    /// Bearer token (optional).
+    /// Bearer token (optional). Skipped when `extra_headers` already set Authorization.
     pub api_key: Option<String>,
     /// Model id.
     pub model: String,
+    /// Optional extra request headers (e.g. Grok OIDC CLI markers).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAiCompatibleClient {
@@ -370,7 +372,20 @@ impl OpenAiCompatibleClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model: model.into(),
+            extra_headers: Vec::new(),
         })
+    }
+
+    /// Attach extra headers (e.g. session/OIDC). If Authorization is present, clears `api_key`.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        if headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("Authorization"))
+        {
+            self.api_key = None;
+        }
+        self.extra_headers = headers;
+        self
     }
 
     fn chat_url(&self) -> String {
@@ -382,6 +397,16 @@ impl OpenAiCompatibleClient {
         } else {
             format!("{b}/v1/chat/completions")
         }
+    }
+
+    fn apply_auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (k, v) in &self.extra_headers {
+            req = req.header(k, v);
+        }
+        if let Some(k) = &self.api_key {
+            req = req.bearer_auth(k);
+        }
+        req
     }
 
     /// Non-streaming chat completion.
@@ -401,10 +426,7 @@ impl OpenAiCompatibleClient {
                 body["tool_choice"] = json!("auto");
             }
         }
-        let mut req = self.http.post(self.chat_url()).json(&body);
-        if let Some(k) = &self.api_key {
-            req = req.bearer_auth(k);
-        }
+        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
         let resp = req
             .send()
             .await
@@ -443,10 +465,7 @@ impl OpenAiCompatibleClient {
                 body["tool_choice"] = json!("auto");
             }
         }
-        let mut req = self.http.post(self.chat_url()).json(&body);
-        if let Some(k) = &self.api_key {
-            req = req.bearer_auth(k);
-        }
+        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
         let resp = req
             .send()
             .await
@@ -477,9 +496,7 @@ impl OpenAiCompatibleClient {
             format!("{}/v1/models", self.base_url)
         };
         let mut req = self.http.get(url);
-        if let Some(k) = &self.api_key {
-            req = req.bearer_auth(k);
-        }
+        req = self.apply_auth(req);
         let resp = req
             .send()
             .await

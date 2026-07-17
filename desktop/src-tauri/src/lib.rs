@@ -178,6 +178,7 @@ fn save_active_provider(
         "ollama" => ProviderKind::Ollama,
         "openai_compatible" => ProviderKind::OpenAiCompatible,
         "anthropic" => ProviderKind::Anthropic,
+        "xai_grok_build" => ProviderKind::XaiGrokBuild,
         other => return Err(format!("unsupported provider kind: {other}")),
     };
     let id = match kind {
@@ -192,40 +193,60 @@ fn save_active_provider(
         ProviderKind::Anthropic => "Anthropic".into(),
         ProviderKind::XaiGrokBuild => "Grok Build session".into(),
     });
-    let base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    let mut base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() && matches!(kind, ProviderKind::XaiGrokBuild) {
+        base_url = "https://api.x.ai/v1".into();
+    }
     let chat_model = req.chat_model.trim().to_string();
     if chat_model.is_empty() {
         return Err("chat model is required".into());
     }
 
+    // Grok session credentials live in ~/.grok/auth.json — never paste into keychain via this path.
+    if matches!(kind, ProviderKind::XaiGrokBuild) {
+        cd_core::grok_auth::assert_grok_base_allowed(&base_url).map_err(|e| e.to_string())?;
+        if cd_core::grok_auth::detect_grok_session().is_none() {
+            return Err(
+                "No Grok session found. Run `grok login`, then try again.".into(),
+            );
+        }
+    }
+
     let mut api_key_ref: Option<String> = None;
-    if let Some(key) = req.api_key.as_ref() {
-        let key = key.trim();
-        if !key.is_empty() && !key.chars().all(|c| c == '•') {
-            if looks_like_raw_secret(key) || key.len() >= 8 {
-                let r = key_ref_for_profile(&id);
-                state.secrets.set(&r, key).map_err(|e| e.to_string())?;
-                api_key_ref = Some(r);
+    if !matches!(kind, ProviderKind::XaiGrokBuild) {
+        if let Some(key) = req.api_key.as_ref() {
+            let key = key.trim();
+            if !key.is_empty() && !key.chars().all(|c| c == '•') {
+                if looks_like_raw_secret(key) || key.len() >= 8 {
+                    let r = key_ref_for_profile(&id);
+                    state.secrets.set(&r, key).map_err(|e| e.to_string())?;
+                    api_key_ref = Some(r);
+                }
             }
         }
     }
 
     let mut cfg = state.config.lock().expect("config lock");
-    // Keep existing ref if no new key provided.
-    if api_key_ref.is_none() {
+    // Keep existing ref if no new key provided (non-Grok).
+    if api_key_ref.is_none() && !matches!(kind, ProviderKind::XaiGrokBuild) {
         if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
             api_key_ref = existing.api_key_ref.clone();
         }
     }
     // If still none but key exists under standard ref, record the ref.
     let r = key_ref_for_profile(&id);
-    if api_key_ref.is_none() && state.secrets.has(&r).unwrap_or(false) {
+    if api_key_ref.is_none()
+        && !matches!(kind, ProviderKind::XaiGrokBuild)
+        && state.secrets.has(&r).unwrap_or(false)
+    {
         api_key_ref = Some(r.clone());
     }
 
-    let local_only = req
-        .local_only
-        .unwrap_or_else(|| matches!(kind, ProviderKind::Ollama));
+    let local_only = req.local_only.unwrap_or_else(|| match kind {
+        ProviderKind::Ollama => true,
+        ProviderKind::XaiGrokBuild => false,
+        _ => false,
+    });
     if local_only && !base_url.is_empty() {
         let policy = SsrfPolicy::local_only();
         if validate_provider_url(&base_url, &policy).is_err() {
@@ -258,10 +279,14 @@ fn save_active_provider(
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
 
-    let has_key = api_key_ref
-        .as_ref()
-        .map(|r| state.secrets.has(r).unwrap_or(false))
-        .unwrap_or(false);
+    let has_key = if matches!(kind, ProviderKind::XaiGrokBuild) {
+        cd_core::grok_auth::detect_grok_session().is_some()
+    } else {
+        api_key_ref
+            .as_ref()
+            .map(|r| state.secrets.has(r).unwrap_or(false))
+            .unwrap_or(false)
+    };
 
     Ok(ProviderDto {
         id,

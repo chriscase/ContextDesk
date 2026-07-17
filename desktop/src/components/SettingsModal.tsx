@@ -13,6 +13,7 @@ import {
   hostSuggestDefaultWorkspace,
   hostTestConfluence,
   hostValidateWorkspacePath,
+  normalizeProviderKind,
   profileIdForKind,
   type DefaultWorkspaceDto,
   type LocalCandidateDto,
@@ -341,8 +342,14 @@ export function SettingsModal({
           baseUrl: draft.baseUrl,
           chatModel: draft.chatModel,
           label: draft.providerLabel ?? undefined,
-          apiKey: apiKeyDraft.trim() || undefined,
-          localOnly: draft.localOnly ?? draft.providerKind === "ollama",
+          apiKey:
+            draft.providerKind === "xai_grok_build"
+              ? undefined
+              : apiKeyDraft.trim() || undefined,
+          localOnly:
+            draft.providerKind === "xai_grok_build"
+              ? false
+              : (draft.localOnly ?? draft.providerKind === "ollama"),
         });
         if (saved) {
           next = {
@@ -351,13 +358,16 @@ export function SettingsModal({
             baseUrl: saved.base_url,
             chatModel: saved.chat_model,
             providerLabel: saved.label,
+            providerKind: draft.providerKind,
+            localOnly: saved.kind === "xai_grok_build" ? false : next.localOnly,
           };
         }
-      } catch {
-        // browser mode: local flags only
-        if (apiKeyDraft.trim()) {
-          next = { ...next, hasApiKey: true };
-        }
+      } catch (e) {
+        // Host present but save failed (e.g. no Grok session, bad URL) — don't silent-close.
+        window.alert(
+          `Could not save AI provider: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return;
       }
     }
 
@@ -533,43 +543,95 @@ export function SettingsModal({
                   <div className="field">
                     <span className="field__label">Local candidates</span>
                     <ul className="session-list">
-                      {candidates.map((c) => (
-                        <li key={c.id}>
-                          <div className="session-list__item row--between">
-                            <span>
-                              {c.label}
-                              {c.credentials_present ? " · credentials present" : ""}
-                              {c.notes[0] ? ` · ${c.notes[0]}` : ""}
-                            </span>
-                            <button
-                              type="button"
-                              className="btn btn--ghost"
-                              onClick={() => {
-                                const kind =
-                                  c.kind === "ollama"
-                                    ? "ollama"
-                                    : c.kind === "openai_compatible" ||
-                                        c.kind === "OpenAiCompatible"
-                                      ? "openai_compatible"
-                                      : "none";
-                                if (kind === "none") return;
-                                setDraft((d) => ({
-                                  ...d,
-                                  providerKind: kind,
-                                  providerLabel: c.label,
-                                  baseUrl: c.base_url ?? d.baseUrl,
-                                }));
-                              }}
-                            >
-                              Use
-                            </button>
-                          </div>
-                        </li>
-                      ))}
+                      {candidates.map((c) => {
+                        const candKind = normalizeProviderKind(c.kind);
+                        const inUse =
+                          candKind !== "none" &&
+                          draft.providerKind === candKind &&
+                          (candKind !== "openai_compatible" ||
+                            !c.base_url ||
+                            draft.baseUrl === c.base_url);
+                        return (
+                          <li key={c.id}>
+                            <div className="session-list__item row--between">
+                              <span>
+                                {c.label}
+                                {c.credentials_present ? " · credentials present" : ""}
+                                {c.notes[0] ? ` · ${c.notes[0]}` : ""}
+                                {inUse ? " · selected" : ""}
+                              </span>
+                              <button
+                                type="button"
+                                className={
+                                  inUse ? "btn btn--primary btn--sm" : "btn btn--ghost btn--sm"
+                                }
+                                disabled={inUse}
+                                onClick={() => {
+                                  const kind = normalizeProviderKind(c.kind);
+                                  if (kind === "none") {
+                                    window.alert(
+                                      `This candidate (${c.kind}) is not supported yet.`,
+                                    );
+                                    return;
+                                  }
+                                  if (kind === "xai_grok_build") {
+                                    const ok = window.confirm(
+                                      [
+                                        "Use Grok Build session credentials?",
+                                        "",
+                                        "ContextDesk will call api.x.ai using your local",
+                                        "~/.grok/auth.json session (not auto-enabled until you Save).",
+                                        "Tokens stay on this machine and are never written to settings JSON.",
+                                      ].join("\n"),
+                                    );
+                                    if (!ok) return;
+                                    setDraft((d) => ({
+                                      ...d,
+                                      providerKind: "xai_grok_build",
+                                      providerLabel: c.label,
+                                      baseUrl: c.base_url ?? "https://api.x.ai/v1",
+                                      chatModel:
+                                        d.providerKind === "xai_grok_build" && d.chatModel.trim()
+                                          ? d.chatModel
+                                          : "grok-3",
+                                      localOnly: false,
+                                      hasApiKey: c.credentials_present,
+                                      ollamaReachable: null,
+                                      remoteReachable: null,
+                                    }));
+                                    return;
+                                  }
+                                  setDraft((d) => ({
+                                    ...d,
+                                    providerKind: kind,
+                                    providerLabel: c.label,
+                                    baseUrl:
+                                      c.base_url ??
+                                      (kind === "ollama"
+                                        ? "http://127.0.0.1:11434"
+                                        : d.baseUrl),
+                                    localOnly: kind === "ollama",
+                                    hasApiKey: c.credentials_present || d.hasApiKey,
+                                    chatModel:
+                                      kind === "ollama" && !d.chatModel.trim()
+                                        ? "mistral"
+                                        : d.chatModel,
+                                    ollamaReachable: null,
+                                    remoteReachable: null,
+                                  }));
+                                }}
+                              >
+                                {inUse ? "Selected" : "Use"}
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
                     </ul>
                     <span className="field__hint">
-                      Grok session presence is metadata only — never used until
-                      explicit Phase 2 opt-in.
+                      Candidates are discovered on this machine. Grok requires an
+                      explicit Use + Save opt-in before session credentials are sent
+                      to api.x.ai.
                     </span>
                   </div>
                 ) : null}
@@ -587,17 +649,29 @@ export function SettingsModal({
                           ? "Ollama (local)"
                           : kind === "openai_compatible"
                             ? "OpenAI-compatible gateway"
-                            : null,
+                            : kind === "xai_grok_build"
+                              ? "Grok Build session"
+                              : null,
                       ollamaReachable: null,
                       remoteReachable: null,
+                      localOnly: kind === "ollama",
                       baseUrl:
-                        kind === "ollama" ? "http://127.0.0.1:11434" : d.baseUrl,
+                        kind === "ollama"
+                          ? "http://127.0.0.1:11434"
+                          : kind === "xai_grok_build"
+                            ? "https://api.x.ai/v1"
+                            : d.baseUrl,
+                      chatModel:
+                        kind === "xai_grok_build" && !d.chatModel.trim()
+                          ? "grok-3"
+                          : d.chatModel,
                     }));
                   }}
                 >
                   <option value="none">Select…</option>
                   <option value="ollama">Ollama (local)</option>
                   <option value="openai_compatible">OpenAI-compatible gateway</option>
+                  <option value="xai_grok_build">Grok Build session</option>
                 </SelectField>
 
                 {draft.providerKind === "openai_compatible" ? (
@@ -652,6 +726,30 @@ export function SettingsModal({
                   </>
                 ) : null}
 
+                {draft.providerKind === "xai_grok_build" ? (
+                  <>
+                    <TextField
+                      id={`${baseId}-grok-url`}
+                      label="API base (api.x.ai only)"
+                      hint="Session credentials are only allowed against api.x.ai. Tokens come from ~/.grok/auth.json after opt-in Save."
+                      value={draft.baseUrl}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          baseUrl: e.target.value,
+                          remoteReachable: null,
+                        }))
+                      }
+                      placeholder="https://api.x.ai/v1"
+                    />
+                    <p className="field__hint" role="status">
+                      {draft.hasApiKey
+                        ? "Grok session file detected — Save to activate this profile."
+                        : "No session file — run `grok login` in a terminal, then re-open Settings."}
+                    </p>
+                  </>
+                ) : null}
+
                 {draft.providerKind === "ollama" ? (
                   <TextField
                     id={`${baseId}-ollama-url`}
@@ -678,12 +776,17 @@ export function SettingsModal({
                       setDraft((d) => ({ ...d, chatModel: e.target.value }))
                     }
                     placeholder={
-                      draft.providerKind === "ollama" ? "mistral" : "provider/model"
+                      draft.providerKind === "ollama"
+                        ? "mistral"
+                        : draft.providerKind === "xai_grok_build"
+                          ? "grok-3"
+                          : "provider/model"
                     }
                   />
                 ) : null}
 
-                {draft.providerKind !== "none" ? (
+                {draft.providerKind !== "none" &&
+                draft.providerKind !== "xai_grok_build" ? (
                   <ToggleField
                     id={`${baseId}-local-only`}
                     label="Local-only profile"

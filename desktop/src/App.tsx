@@ -562,9 +562,11 @@ export function App() {
     setup.localOnly ?? setup.providerKind === "ollama";
   const egressLabel = localOnly
     ? "Local-only"
-    : setup.providerKind === "openai_compatible"
-      ? "Remote AI"
-      : "Local";
+    : setup.providerKind === "xai_grok_build"
+      ? "Grok session"
+      : setup.providerKind === "openai_compatible"
+        ? "Remote AI"
+        : "Local";
 
   const onSaveSetup = async (next: AppSetupState) => {
     setSetup(next);

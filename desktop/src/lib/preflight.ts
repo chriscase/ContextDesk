@@ -28,7 +28,7 @@ export type AppSetupState = {
   workspaceName: string | null;
   workspaceRoots: string[];
   providerLabel: string | null;
-  providerKind: "ollama" | "openai_compatible" | "none";
+  providerKind: "ollama" | "openai_compatible" | "xai_grok_build" | "none";
   chatModel: string;
   baseUrl: string;
   hasApiKey: boolean;
@@ -140,6 +140,18 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
           fixAction: "ai",
         });
       }
+    }
+
+    if (s.providerKind === "xai_grok_build") {
+      items.push({
+        id: "provider.grok_opt_in",
+        title: "Grok Build session",
+        level: s.hasApiKey ? "pass" : "fail",
+        detail: s.hasApiKey
+          ? `Using session credentials for ${s.baseUrl || "https://api.x.ai/v1"} (opted in).`
+          : "Session file missing — run `grok login`, then Use again.",
+        fixAction: "ai",
+      });
     }
 
     if (s.providerKind === "openai_compatible") {
