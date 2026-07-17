@@ -1,28 +1,20 @@
-# Host adapter sketch (`cd.v1`)
+# Host adapter sketch (cd.v1)
 
-External Tauri/Rust apps can embed ContextDesk knowledge without forking the UI.
-
-## Options
-
-1. **Library embed** — depend on `cd-core`, call `run_agent_turn`, `ToolHost`, `KeywordIndex`.
-2. **Local RPC** — run `cd-server` on `127.0.0.1` with API key; call `/v1/search` and stream events later.
-
-## Minimal in-process sketch
+Embed ContextDesk by linking `cd-core` and mapping events:
 
 ```rust
-// pseudo
-use cd_core::agent::{run_agent_turn, ScriptedBackend, AgentOptions};
-use cd_core::tool_host::ToolHost;
-// build workspace + index, then:
-// let events = run_agent_turn(backend, &mut host, question, &mut history, &opts, None).await?;
+// Pseudocode — host owns UI; core owns tools + research.
+use cd_core::research::{build_host, research_local, events_to_dto};
+use cd_core::workspace::Workspace;
+
+fn turn(ws: Workspace, q: &str) {
+    let mut host = build_host(ws, None).unwrap();
+    let events = research_local(&mut host, q, "embed-session").unwrap();
+    for dto in events_to_dto(&events) {
+        // forward dto.kind / dto.payload to host webview or RPC
+        let _ = dto;
+    }
+}
 ```
 
-## Auth for local server
-
-- Default bind: `127.0.0.1`
-- API keys hashed (SHA-256) in process memory
-- Every search/publish requires `workspace_id` so keys cannot cross workspaces without explicit mapping
-
-## Semver
-
-Protocol constant: `cd_core::PROTOCOL_VERSION` (`cd.v1`). Breaking stream event changes require `cd.v2`.
+Protocol event names: see `docs/PROTOCOL.md` (`cd.v1`). Version constant: `cd_core::PROTOCOL_VERSION`.

@@ -1,0 +1,23 @@
+/* Optional skin: slate (registered for Phase 5 skins). */
+html[data-theme="slate"] {
+  color-scheme: dark;
+  --bg-app: #0f1419;
+  --bg-panel: #161b22;
+  --bg-elevated: #1c232d;
+  --bg-input: #0d1117;
+  --bg-hover: #21262d;
+  --border: #30363d;
+  --border-strong: #484f58;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-faint: #6e7681;
+  --accent: #58a6ff;
+  --accent-strong: #79b8ff;
+  --accent-soft: rgb(88 166 255 / 0.15);
+  --success: #3fb950;
+  --danger: #f85149;
+  --warn: #d29922;
+  --chat-user-bg: #161b22;
+  --chat-assistant-bg: #0d1117;
+  --focus-ring: 0 0 0 2px rgb(88 166 255 / 0.35);
+}

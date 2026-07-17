@@ -28,6 +28,40 @@ npm run tauri dev
 | `~/.contextdesk/` | User config, profiles, skills (planned) |
 | `<workspace>/.contextdesk/` | Project skills & memory (planned) |
 
+## Connectors
+
+Workspace connectors are configured from **Settings** (not hand-edited secret files).
+
+| Kind | Module | Notes |
+|------|--------|--------|
+| Files / memory | workspace + `memory_fs` | Allowlisted roots |
+| SQLite RO | `sql_ro` | Single-SELECT denylist; host `sql_ro_query` |
+| MCP (stdio) | `mcp_client` + `connectors::validate_mcp_command` | Absolute command only; opt-in config; tools named `mcp__{server}__{tool}`; host assigns side-effect class |
+| HTTP presets | `http_preset` | Allowlisted host + GET routes only; SSRF-aware |
+| Confluence RO | `confluence_ro` + Settings Connectors | PAT in keychain (`confluence/default/pat`); space allowlist |
+
+MCP config example (non-secret):
+
+```json
+{
+  "id": "docs-mcp",
+  "kind": "mcp",
+  "enabled": true,
+  "settings": {
+    "name": "docs",
+    "command": "/usr/local/bin/my-mcp-server",
+    "args": [],
+    "hard_write_tools": []
+  }
+}
+```
+
+No marketplace auto-start.
+
+## Grok Build session (opt-in)
+
+After explicit UI opt-in, the host may load `~/.grok/auth.json` **in Rust only** via `grok_auth::load_grok_session_credentials`. Credentials attach only to host `api.x.ai` (exact match). Never logged. User is responsible for Grok ToS / account rules — not legal advice.
+
 ## SSRF policy (provider bases)
 
 Outbound provider / probe URLs go through `cd_core::ssrf::validate_provider_url` **before** any HTTP.
