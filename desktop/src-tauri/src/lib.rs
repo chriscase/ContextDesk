@@ -437,6 +437,66 @@ fn get_web_research_enabled(state: State<'_, AppState>) -> bool {
         .web_research_enabled
 }
 
+/// Open an http(s) URL in the **system** default browser.
+///
+/// WKWebView / Tauri does not treat `window.open` as a real browser launch.
+/// Only http(s) is allowed — no `file:`, no custom schemes, no shell strings.
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("empty URL".into());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("only http(s) URLs may open in the system browser".into());
+    }
+    // Reject embedded credentials (https://user:pass@host/...).
+    if let Some(rest) = url.split("://").nth(1) {
+        if rest.contains('@') {
+            return Err("credentials in URL are not allowed".into());
+        }
+    }
+    // Basic length guard against abuse.
+    if url.len() > 8_192 {
+        return Err("URL too long".into());
+    }
+    open_url_in_default_browser(url)
+}
+
+fn open_url_in_default_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("failed to open browser: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `start` treats the first quoted arg as window title.
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|e| format!("failed to open browser: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("failed to open browser: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        let _ = url;
+        Err("opening the system browser is unsupported on this platform".into())
+    }
+}
+
 #[tauri::command]
 fn set_web_research_enabled(
     state: State<'_, AppState>,
@@ -1595,6 +1655,7 @@ pub fn run() {
             test_confluence_config,
             get_web_research_enabled,
             set_web_research_enabled,
+            open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

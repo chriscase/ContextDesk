@@ -45,6 +45,7 @@ import {
   hostSuggestChatTitle,
   hostTrashChatSession,
   hostWriteMemory,
+  hostOpenExternalUrl,
   modelSelectionKey,
   parseModelSelectionKey,
   type BrandingDto,
@@ -250,11 +251,9 @@ function shortSourceLabel(label: string, id: string): string {
 }
 
 function openExternalUrl(url: string) {
-  try {
-    window.open(url, "_blank", "noopener,noreferrer");
-  } catch {
-    /* ignore */
-  }
+  void hostOpenExternalUrl(url).catch((err) => {
+    console.error("open external url failed", err);
+  });
 }
 
 function formatMsgMetaFooter(meta: MessageMetaDto): string {
@@ -1850,6 +1849,15 @@ export function App() {
                                 data-streaming={m.streaming ? "true" : "false"}
                                 onClick={(e) => {
                                   const t = e.target as HTMLElement;
+                                  // Markdown external links → system browser (not WKWebView).
+                                  const a = t.closest(
+                                    "a.md-ext-link, a[href^='http']",
+                                  ) as HTMLAnchorElement | null;
+                                  if (a?.href && isHttpUrl(a.href)) {
+                                    e.preventDefault();
+                                    openExternalUrl(a.href);
+                                    return;
+                                  }
                                   const citeEl = t.closest(
                                     "[data-cite]",
                                   ) as HTMLElement | null;

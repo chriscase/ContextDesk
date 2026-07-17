@@ -1,4 +1,5 @@
 import { useMemo, useState, type CSSProperties } from "react";
+import { hostOpenExternalUrl } from "../lib/host";
 import { IconFile, IconLink } from "./icons";
 
 export type SourceCitation = {
@@ -38,14 +39,6 @@ function monogram(label: string): string {
   return t.slice(0, 2).toUpperCase();
 }
 
-function openExternal(url: string) {
-  try {
-    window.open(url, "_blank", "noopener,noreferrer");
-  } catch {
-    /* ignore */
-  }
-}
-
 /**
  * Compact “Sources” control: collapsed row of SVG monograms;
  * expand to show titles that open the source link.
@@ -68,7 +61,9 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
 
   const activate = (c: SourceCitation) => {
     if (isHttpUrl(c.id)) {
-      openExternal(c.id);
+      void hostOpenExternalUrl(c.id).catch((err) => {
+        console.error("open external url failed", err);
+      });
       return;
     }
     onOpenFile?.(c.id);

@@ -24,6 +24,20 @@ function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/**
+ * Open an http(s) URL in the **system** default browser.
+ * In Tauri, `window.open` does not launch the OS browser — host IPC does.
+ */
+export async function hostOpenExternalUrl(url: string): Promise<void> {
+  const u = url.trim();
+  if (!u) return;
+  if (!isTauri()) {
+    window.open(u, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await invoke<void>("open_external_url", { url: u });
+}
+
 export type BrandingDto = {
   name: string;
   slug: string;
