@@ -489,7 +489,7 @@ export function App() {
               className="btn btn--ghost"
               onClick={() => setDismissedBanner(true)}
             >
-              Dismiss
+              Continue anyway
             </button>
           </span>
         </div>

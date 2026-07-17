@@ -74,6 +74,8 @@ pub struct PreflightInput<'a> {
     pub confluence: Option<&'a ConfluenceSettings>,
     /// Host-reported: Confluence PAT present in keychain.
     pub confluence_pat_present: Option<bool>,
+    /// Host-reported: Grok Build session *presence* only (never the secret).
+    pub grok_session_present: Option<bool>,
 }
 
 /// Run offline + host-supplied reachability checks.
@@ -265,6 +267,64 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
         }
     }
 
+    // Embed path health when chat base ≠ embed base (optional profile fields).
+    if let Some(p) = input.providers.active() {
+        if let Some(embed_base) = p.embedding_base_url.as_ref() {
+            let embed = embed_base.trim();
+            let chat = p.base_url.trim().trim_end_matches('/');
+            if !embed.is_empty() && embed.trim_end_matches('/') != chat {
+                // Structural check only — host may add reachability later.
+                if embed.starts_with("http://") || embed.starts_with("https://") {
+                    items.push(PreflightItem {
+                        id: "provider.embed".into(),
+                        title: "Embeddings endpoint".into(),
+                        level: PreflightLevel::Pass,
+                        detail: format!("Separate embed base configured (chat ≠ embed): {embed}"),
+                        fix_action: Some("ai".into()),
+                    });
+                } else {
+                    items.push(PreflightItem {
+                        id: "provider.embed".into(),
+                        title: "Embeddings endpoint".into(),
+                        level: PreflightLevel::Warn,
+                        detail: "Embedding base URL is set but not a valid http(s) URL.".into(),
+                        fix_action: Some("ai".into()),
+                    });
+                }
+            }
+        } else if p.embedding_model.is_some() {
+            items.push(PreflightItem {
+                id: "provider.embed".into(),
+                title: "Embeddings endpoint".into(),
+                level: PreflightLevel::Pass,
+                detail: "Embed model uses the same base as chat (no separate embed URL).".into(),
+                fix_action: Some("ai".into()),
+            });
+        }
+    }
+
+    // Optional: Grok session *presence* only (never auto-uses credentials).
+    if let Some(present) = input.grok_session_present {
+        items.push(if present {
+            PreflightItem {
+                id: "provider.grok_session".into(),
+                title: "Grok Build session".into(),
+                level: PreflightLevel::Pass,
+                detail: "Local session material detected (opt-in use only; not auto-enabled)."
+                    .into(),
+                fix_action: Some("ai".into()),
+            }
+        } else {
+            PreflightItem {
+                id: "provider.grok_session".into(),
+                title: "Grok Build session".into(),
+                level: PreflightLevel::Warn,
+                detail: "No local Grok session file detected (optional).".into(),
+                fix_action: Some("ai".into()),
+            }
+        });
+    }
+
     // Confluence (optional — never blocking for core chat)
     if let Some(cf) = input.confluence {
         if cf.enabled {
@@ -342,6 +402,7 @@ mod tests {
             active_key_present: None,
             confluence: None,
             confluence_pat_present: None,
+            grok_session_present: None,
         });
         assert!(report.has_blocking);
         assert!(report
@@ -364,8 +425,13 @@ mod tests {
             active_key_present: None,
             confluence: None,
             confluence_pat_present: None,
+            grok_session_present: Some(false),
         });
         assert!(!report.has_blocking);
+        assert!(report
+            .items
+            .iter()
+            .any(|i| i.id == "provider.grok_session" && i.level == PreflightLevel::Warn));
     }
 
     #[test]
@@ -389,11 +455,36 @@ mod tests {
             active_key_present: None,
             confluence: Some(&cf),
             confluence_pat_present: Some(false),
+            grok_session_present: None,
         });
         assert!(!report.has_blocking);
         assert!(report
             .items
             .iter()
             .any(|i| { i.id == "confluence.pat" && i.level == PreflightLevel::Warn }));
+    }
+
+    #[test]
+    fn embed_separate_base_reported() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let mut providers = ProviderConfig::with_local_ollama();
+        providers.profiles[0].embedding_model = Some("nomic".into());
+        providers.profiles[0].embedding_base_url = Some("http://127.0.0.1:8080".into());
+        let report = run_preflight(PreflightInput {
+            workspace: Some(&ws),
+            providers: &providers,
+            data_dir_writable: true,
+            ollama_reachable: Some(true),
+            provider_reachable: None,
+            active_key_present: None,
+            confluence: None,
+            confluence_pat_present: None,
+            grok_session_present: None,
+        });
+        assert!(report
+            .items
+            .iter()
+            .any(|i| i.id == "provider.embed" && i.level == PreflightLevel::Pass));
     }
 }

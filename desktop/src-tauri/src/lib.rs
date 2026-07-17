@@ -339,6 +339,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     } else {
         None
     };
+    let grok_session_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
     Ok(run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
@@ -348,6 +349,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         active_key_present: key_present,
         confluence: Some(&cfg.confluence),
         confluence_pat_present: confluence_pat,
+        grok_session_present,
     }))
 }
 

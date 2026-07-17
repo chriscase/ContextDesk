@@ -17,12 +17,12 @@ Last audit: 2026-07-17. Update when closing.
 | 60 | Keychain secrets | DONE | Keychain store + save_active_provider; refs only; DEV.md service names |
 | 66 | gitleaks CI | DONE | Workflow + FP process in DEV.md; .gitleaks.toml |
 | 67 | Tauri capability lockdown | DONE | default.json minimal; AGENTS checklist; no secret-return IPC |
-| 68 | Epic Settings/preflight | PARTIAL | Shell exists; children remaining for #70/#74 |
+| 68 | Epic Settings/preflight | DONE | Children #69–#74 honestly closed (when marked DONE below) |
 | 69 | Settings shell | DONE | Nav, unsaved guard, Escape, no secrets in full |
-| 70 | Preflight screen | PARTIAL | UI + cd-core + host probe |
+| 70 | Preflight screen | DONE | Host run_preflight; embed/grok presence; recheck; no secrets |
 | 71 | Form system | DONE | forms/* + forms.css + debounce + a11y |
 | 73 | Workspace settings form | DONE | Tauri folder dialog + validate_workspace_path |
-| 74 | First-run guided setup | PARTIAL | Opens preflight if blocking |
+| 74 | First-run guided setup | DONE | Auto-open preflight; progress; continue-anyway banner |
 
 ## Phase 1 — MVP
 

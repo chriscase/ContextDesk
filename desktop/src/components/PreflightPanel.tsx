@@ -15,13 +15,19 @@ function LevelIcon({ level }: { level: PreflightItem["level"] }) {
 }
 
 export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
+  const pass = report.items.filter((i) => i.level === "pass").length;
+  const total = report.items.length;
   return (
     <div>
       <p className="section-lead">
         Environment health for local tools and remote gateways. Fix issues here
         instead of editing config files. Recheck anytime.
       </p>
-      <div className="preflight-actions">
+      <p className="field__hint" role="status">
+        Progress: {pass}/{total} checks passing
+        {report.hasBlocking ? " · blocking issues remain" : " · ready"}
+      </p>
+      <div className="preflight-actions row">
         <button
           type="button"
           className="btn btn--ghost"
@@ -31,6 +37,14 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
           <IconRefresh />
           {checking ? "Checking…" : "Recheck"}
         </button>
+        <a
+          className="btn btn--ghost"
+          href="https://ollama.com/download"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Install / start Ollama
+        </a>
       </div>
       <ul className="preflight-list">
         {report.items.map((item) => (
@@ -45,7 +59,12 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
                   className="btn btn--ghost btn--linkish"
                   onClick={() => onFix(item.fixAction!)}
                 >
-                  Open {item.fixAction} settings →
+                  Open {item.fixAction === "workspace"
+                    ? "workspace"
+                    : item.fixAction === "ai"
+                      ? "AI"
+                      : item.fixAction}{" "}
+                  settings →
                 </button>
               ) : null}
             </div>
