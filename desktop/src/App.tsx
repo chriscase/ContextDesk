@@ -1331,6 +1331,7 @@ export function App() {
         permission.toolName,
         pendingToolArgs ?? {},
         typed,
+        sessionId,
       );
       setPermission(null);
       setPendingToolArgs(null);

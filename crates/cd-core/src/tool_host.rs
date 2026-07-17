@@ -1381,6 +1381,7 @@ mod tests {
             None,
             names::SAVE_SKILL,
             &json!({}),
+            None,
         )
         .unwrap();
         assert!(
@@ -1426,6 +1427,7 @@ mod tests {
             None,
             "save_memory",
             &json!({}),
+            None,
         )
         .unwrap();
         assert!(events
