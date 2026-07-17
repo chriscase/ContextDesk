@@ -29,6 +29,7 @@ import { IconMoon, IconSettings, IconSpark, IconSun } from "./components/icons";
 import {
   agentTurn,
   completePermission,
+  hostCancelTurn,
   hostCheckOllama,
   hostGetBranding,
   hostGetConfig,
@@ -1880,12 +1881,14 @@ export function App() {
                   onModelChange={setSessionModel}
                   onSetDefaultModel={(key) => void setAppDefaultModel(key)}
                   onStop={() => {
-                    // #90 owns true host/provider cancellation. This only
-                    // stops client-side materialization of already-returned text.
+                    // Client-side materialization halt (#105) + host cancel flag (#109).
                     stopRef.current = true;
+                    if (sessionId) {
+                      void hostCancelTurn(sessionId);
+                    }
                     setBusy(false);
                     setAgentError(
-                      "Stopped showing the response (the model turn may have already completed).",
+                      "Stop requested — waiting for the host to end the turn (cancel).",
                     );
                   }}
                 />

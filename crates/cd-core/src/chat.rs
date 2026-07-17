@@ -488,6 +488,119 @@ impl OpenAiCompatibleClient {
         accumulate_openai_sse(&text)
     }
 
+    /// Streaming chat: invoke `on_delta` for each text fragment as SSE arrives.
+    ///
+    /// Reads `bytes_stream()` and splits on newlines; call with a multi-chunk
+    /// fixture in tests. Returns the same accumulated [`ChatCompletion`] as the
+    /// buffered path. When `cancel` is set, aborts mid-stream.
+    #[allow(clippy::string_slice)] // line buffer split on ASCII '\n'
+    pub async fn complete_stream_cb<F>(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        mut on_delta: F,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion>
+    where
+        F: FnMut(StreamDelta),
+    {
+        use futures_util::StreamExt;
+        use std::sync::atomic::Ordering;
+
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+        });
+        if let Some(specs) = tools {
+            if !specs.is_empty() {
+                body["tools"] = tools_to_openai(specs);
+                body["tool_choice"] = json!("auto");
+            }
+        }
+        let req = self.apply_auth(self.http.post(self.chat_url()).json(&body));
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp
+                .text()
+                .await
+                .unwrap_or_default();
+            return Err(CoreError::Message(format!(
+                "stream HTTP {status}: {}",
+                text.chars().take(300).collect::<String>()
+            )));
+        }
+
+        let mut acc = StreamAccumulator::new();
+        let mut line_buf = String::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            if cancel
+                .map(|c| c.load(Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                return Err(CoreError::Message("cancelled".into()));
+            }
+            let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;
+            let s = String::from_utf8_lossy(&bytes);
+            line_buf.push_str(&s);
+            while let Some(nl) = line_buf.find('\n') {
+                let line = line_buf[..nl].trim_end_matches('\r').to_string();
+                line_buf = line_buf[nl + 1..].to_string();
+                let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+                if data.is_empty() {
+                    continue;
+                }
+                // Full JSON object fallback (gateway ignored stream)
+                if data.starts_with('{') && !data.contains("\"choices\"") && line_buf.is_empty() {
+                    // keep scanning
+                }
+                match parse_openai_sse_data(data) {
+                    Ok(Some(delta)) => {
+                        if let StreamDelta::Text(ref t) = delta {
+                            if !t.is_empty() {
+                                on_delta(StreamDelta::Text(t.clone()));
+                            }
+                        } else {
+                            on_delta(delta.clone());
+                        }
+                        acc.push(delta);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        // Non-SSE full body
+                        if data.starts_with('{') {
+                            return parse_openai_completion(data);
+                        }
+                    }
+                }
+            }
+        }
+        // Flush remaining buffer
+        if !line_buf.trim().is_empty() {
+            let data = line_buf
+                .trim()
+                .strip_prefix("data:")
+                .map(str::trim)
+                .unwrap_or(line_buf.trim());
+            if let Ok(Some(delta)) = parse_openai_sse_data(data) {
+                if let StreamDelta::Text(ref t) = delta {
+                    if !t.is_empty() {
+                        on_delta(StreamDelta::Text(t.clone()));
+                    }
+                }
+                acc.push(delta);
+            } else if data.starts_with('{') {
+                return parse_openai_completion(data);
+            }
+        }
+        Ok(acc.into_completion())
+    }
+
     /// List models via GET /v1/models.
     pub async fn list_models(&self) -> CoreResult<Vec<String>> {
         let url = if self.base_url.ends_with("/v1") {
@@ -927,6 +1040,41 @@ data: [DONE]
         assert_eq!(c.content, "Hello **world**");
         assert!(c.tool_calls.is_empty());
         assert_eq!(c.finish_reason, "stop");
+    }
+
+    /// Feed fixture in awkward byte slices (mid-line) and rebuild via same
+    /// line-buffer logic as complete_stream_cb.
+    #[test]
+    #[allow(clippy::string_slice)] // ASCII '\n' split of fixture
+    fn sse_multi_chunk_byte_boundaries_match_buffered() {
+        let full = SSE_TEXT_FIXTURE.as_bytes();
+        let mut line_buf = String::new();
+        let mut acc = StreamAccumulator::new();
+        let mut texts = Vec::new();
+        // Split every 17 bytes — not aligned to lines or JSON.
+        for chunk in full.chunks(17) {
+            line_buf.push_str(&String::from_utf8_lossy(chunk));
+            while let Some(nl) = line_buf.find('\n') {
+                let line = line_buf[..nl].trim_end_matches('\r').to_string();
+                line_buf = line_buf[nl + 1..].to_string();
+                let data = line.strip_prefix("data:").map(str::trim).unwrap_or("");
+                if data.is_empty() {
+                    continue;
+                }
+                if let Ok(Some(delta)) = parse_openai_sse_data(data) {
+                    if let StreamDelta::Text(ref t) = delta {
+                        texts.push(t.clone());
+                    }
+                    acc.push(delta);
+                }
+            }
+        }
+        let c = acc.into_completion();
+        let buffered = accumulate_openai_sse(SSE_TEXT_FIXTURE).unwrap();
+        assert_eq!(c.content, buffered.content);
+        assert_eq!(c.tool_calls.len(), buffered.tool_calls.len());
+        assert!(!texts.is_empty(), "expected live text deltas across chunks");
+        assert_eq!(texts.join(""), buffered.content);
     }
 
     #[test]

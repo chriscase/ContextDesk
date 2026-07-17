@@ -16,7 +16,7 @@ use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
-use cd_core::research::{events_to_dto, grant_and_execute, research_turn, EventDto};
+use cd_core::research::{events_to_dto, grant_and_execute, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
     SessionSearchHit, SessionStore,
@@ -38,6 +38,8 @@ struct AppState {
     histories: Mutex<HashMap<String, Vec<ChatMessage>>>,
     /// Live tool host (rebuilt when workspace changes)
     host: Mutex<Option<ToolHost>>,
+    /// Per-session cooperative cancel flags for in-flight turns (#109).
+    cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -1041,6 +1043,13 @@ async fn agent_turn(
         histories.entry(req.session_id.clone()).or_default().clone()
     };
 
+    // Fresh cancel flag for this turn (#109).
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.insert(req.session_id.clone(), cancel.clone());
+    }
+
     // Always use local research when forced or for reliability without holding locks
     // across await: run local path under mutex (sync). Live model path uses block_in_place.
     let events = if req.force_local || profile.kind == cd_core::providers::ProviderKind::Ollama {
@@ -1049,15 +1058,18 @@ async fn agent_turn(
         // Try ollama via block_in_place only if not force_local
         if !req.force_local {
             let res = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(research_turn(
-                    host,
-                    &profile,
-                    api_key.clone(),
-                    &user_text,
-                    &mut history,
-                    &req.session_id,
-                    false,
-                ))
+                tokio::runtime::Handle::current().block_on(
+                    cd_core::research::research_turn_with_cancel(
+                        host,
+                        &profile,
+                        api_key.clone(),
+                        &user_text,
+                        &mut history,
+                        &req.session_id,
+                        false,
+                        Some(cancel.clone()),
+                    ),
+                )
             });
             match res {
                 Ok(ev) => ev,
@@ -1082,24 +1094,41 @@ async fn agent_turn(
         let mut host_guard = state.host.lock().expect("host");
         let host = host_guard.as_mut().ok_or("host missing")?;
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(research_turn(
-                host,
-                &profile,
-                api_key,
-                &user_text,
-                &mut history,
-                &req.session_id,
-                false,
-            ))
+            tokio::runtime::Handle::current().block_on(
+                cd_core::research::research_turn_with_cancel(
+                    host,
+                    &profile,
+                    api_key,
+                    &user_text,
+                    &mut history,
+                    &req.session_id,
+                    false,
+                    Some(cancel.clone()),
+                ),
+            )
         })
         .map_err(|e| e.to_string())?
     };
 
     {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(&req.session_id);
+    }
+    {
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(req.session_id.clone(), history);
     }
     Ok(events_to_dto(&events))
+}
+
+/// Signal cooperative cancel for an in-flight turn (#109).
+#[tauri::command]
+fn cancel_turn(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(&session_id) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 /// List durable chat sessions (newest first).
@@ -1773,6 +1802,7 @@ pub fn run() {
         secrets: KeychainSecretStore::new(),
         histories: Mutex::new(HashMap::new()),
         host: Mutex::new(None),
+        cancels: Mutex::new(HashMap::new()),
     };
     let _ = ensure_host(&state);
 
@@ -1834,6 +1864,7 @@ pub fn run() {
             list_web_research_sources,
             set_web_research_sources,
             open_external_url,
+            cancel_turn,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

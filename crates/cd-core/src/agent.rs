@@ -17,12 +17,28 @@ use std::time::Instant;
 /// Chat backend trait (real HTTP or mock).
 #[async_trait]
 pub trait ChatBackend: Send + Sync {
-    /// Complete one turn.
+    /// Complete one turn (buffered).
     async fn complete(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion>;
+
+    /// Streaming complete: call `on_text` for each text fragment as it arrives.
+    /// Default: buffered complete then one-shot text emit.
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        _cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        let c = self.complete(messages, tools).await?;
+        if !c.content.is_empty() && c.tool_calls.is_empty() {
+            on_text(c.content.clone());
+        }
+        Ok(c)
+    }
 }
 
 /// Mock backend for tests: scripted responses.
@@ -191,7 +207,29 @@ pub async fn run_agent_turn(
             });
             return Ok(events);
         }
-        let completion = backend.complete(history, &specs).await?;
+        let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
+        let mut streamed_text = false;
+        let completion = {
+            let mut on_text = |t: String| {
+                if !t.is_empty() {
+                    streamed_text = true;
+                    events.push(StreamEvent::TextDelta { text: t });
+                }
+            };
+            backend
+                .complete_streaming(history, &specs, &mut on_text, cancel_ref)
+                .await
+        };
+        let completion = match completion {
+            Ok(c) => c,
+            Err(e) if e.to_string().contains("cancelled") => {
+                events.push(StreamEvent::TurnCompleted {
+                    reason: "cancel".into(),
+                });
+                return Ok(events);
+            }
+            Err(e) => return Err(e),
+        };
         let mut tool_calls = completion.tool_calls.clone();
 
         // JSON fallback if no native tools
@@ -209,11 +247,11 @@ pub async fn run_agent_turn(
         }
 
         if tool_calls.is_empty() {
-            if !completion.content.is_empty() {
-                // Emit text in chunks for streaming UX compatibility
-                for chunk in chunk_text(&completion.content, 48) {
-                    events.push(StreamEvent::TextDelta { text: chunk });
-                }
+            // Default backends may not stream; emit remaining content once.
+            if !streamed_text && !completion.content.is_empty() {
+                events.push(StreamEvent::TextDelta {
+                    text: completion.content.clone(),
+                });
             }
             history.push(ChatMessage {
                 role: Role::Assistant,
@@ -307,21 +345,6 @@ pub async fn run_agent_turn(
         reason: "budget_rounds".into(),
     });
     Ok(events)
-}
-
-fn chunk_text(s: &str, size: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in s.chars() {
-        cur.push(ch);
-        if cur.len() >= size {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
 }
 
 /// Prefetch retrieval when tools unsupported: force search_kb then answer.

@@ -275,11 +275,50 @@ impl ChatBackend for OpenAiBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        // Prefer SSE stream path (buffered accumulate); fall back to non-stream
-        // when gateway rejects stream or tools-on-stream.
-        match self.0.complete_stream(messages, Some(tools)).await {
+        // Prefer live SSE callback path; fall back to non-stream.
+        match self
+            .0
+            .complete_stream_cb(messages, Some(tools), |_| {}, None)
+            .await
+        {
             Ok(c) => Ok(c),
             Err(_) => self.0.complete(messages, Some(tools)).await,
+        }
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        match self
+            .0
+            .complete_stream_cb(
+                messages,
+                Some(tools),
+                |d| {
+                    if let crate::chat::StreamDelta::Text(t) = d {
+                        if !t.is_empty() {
+                            on_text(t);
+                        }
+                    }
+                },
+                cancel,
+            )
+            .await
+        {
+            Ok(c) => Ok(c),
+            Err(e) if e.to_string().contains("cancelled") => Err(e),
+            Err(_) => {
+                // Fall back to non-stream; emit once.
+                let c = self.0.complete(messages, Some(tools)).await?;
+                if !c.content.is_empty() && c.tool_calls.is_empty() {
+                    on_text(c.content.clone());
+                }
+                Ok(c)
+            }
         }
     }
 }
@@ -294,6 +333,31 @@ pub async fn research_turn(
     session_id: &str,
     force_local: bool,
 ) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        None,
+    )
+    .await
+}
+
+/// Research turn with optional cooperative cancel flag.
+#[allow(clippy::too_many_arguments)] // host API; cancel is additive for #109
+pub async fn research_turn_with_cancel(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         return research_local(host, user_text, session_id);
     }
@@ -305,11 +369,12 @@ pub async fn research_turn(
         if let Ok(client) = OllamaClient::new(&profile.base_url, &profile.chat_model) {
             if client.health().await {
                 let backend = OllamaBackend(client);
-                let opts = AgentOptions::from_budget(
+                let mut opts = AgentOptions::from_budget(
                     host.router_budget(),
                     session_id,
                     Some(profile.chat_model.clone()),
                 );
+                opts.cancel = cancel;
                 return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
             }
         }
@@ -325,11 +390,12 @@ pub async fn research_turn(
         let client =
             OpenAiCompatibleClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
         let backend = OpenAiBackend(client);
-        let opts = AgentOptions::from_budget(
+        let mut opts = AgentOptions::from_budget(
             host.router_budget(),
             session_id,
             Some(profile.chat_model.clone()),
         );
+        opts.cancel = cancel;
         return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
     }
 
@@ -377,11 +443,12 @@ pub async fn research_turn(
             OpenAiCompatibleClient::new(base, None, &profile.chat_model, &SsrfPolicy::default())?
                 .with_extra_headers(headers);
         let backend = OpenAiBackend(client);
-        let opts = AgentOptions::from_budget(
+        let mut opts = AgentOptions::from_budget(
             host.router_budget(),
             session_id,
             Some(profile.chat_model.clone()),
         );
+        opts.cancel = cancel;
         return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
     }
 

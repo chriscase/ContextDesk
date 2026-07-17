@@ -109,6 +109,12 @@ export async function agentTurn(
   });
 }
 
+/** Cooperative cancel for an in-flight agent turn (#109). */
+export async function hostCancelTurn(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("cancel_turn", { sessionId });
+}
+
 export async function completePermission(
   requestId: string,
   decision: "deny" | "allow_once" | "allow_session_path",
