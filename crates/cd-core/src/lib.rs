@@ -12,6 +12,7 @@
 //! - [`workspace`] — workspace identity (early stub)
 //! - [`probe`] — gateway URL normalization / model heuristics
 //! - [`permissions`] — UI-originated write grants
+//! - [`providers`] — provider profile model (keychain refs, not secrets)
 
 #![deny(missing_docs)]
 
@@ -20,6 +21,7 @@ pub mod error;
 pub mod events;
 pub mod permissions;
 pub mod probe;
+pub mod providers;
 pub mod tools;
 pub mod workspace;
 
@@ -27,6 +29,7 @@ pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
 pub use error::{CoreError, CoreResult};
 pub use events::{StreamEvent, ToolPhase};
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
+pub use providers::{ProviderConfig, ProviderKind, ProviderProfile};
 pub use tools::{ToolSideEffect, ToolSpec};
 
 /// Library version (cargo package version).
