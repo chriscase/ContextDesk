@@ -424,11 +424,26 @@ pub async fn research_turn_with_cancel(
         };
         crate::grok_auth::assert_grok_base_allowed(base)?;
         let creds = crate::grok_auth::load_grok_session_credentials()?;
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| CoreError::Message(format!("http client: {e}")))?;
+        // #141: pin OIDC refresh host (auth.x.ai) — no auto-redirects.
+        let refresh_url = creds.oidc_issuer.as_deref().unwrap_or("https://auth.x.ai");
+        // Prefer pin to known Grok auth host; fall back to unpinned none-redirect if load fails.
+        let http = match crate::ssrf::build_pinned_client_for_url(
+            if refresh_url.starts_with("http") {
+                refresh_url
+            } else {
+                "https://auth.x.ai"
+            },
+            &crate::ssrf::SsrfPolicy::default(),
+            &crate::ssrf::SystemResolver,
+            std::time::Duration::from_secs(60),
+        ) {
+            Ok((_u, c)) => c,
+            Err(_) => reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| CoreError::Message(format!("http client: {e}")))?,
+        };
         let creds = crate::grok_auth::ensure_fresh_credentials(creds, |token_url, body| {
             let http = http.clone();
             async move {

@@ -88,11 +88,16 @@ pub async fn search_recent(
         urlencoding_encode(&q)
     );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| CoreError::Message(format!("x_search client: {e}")))?;
+    // #141: pin api.x.com to vetted public IPs; no redirects.
+    let policy = crate::ssrf::SsrfPolicy::default();
+    let (parsed, client) = crate::ssrf::build_pinned_client_for_url(
+        &url,
+        &policy,
+        &crate::ssrf::SystemResolver,
+        std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
+    )
+    .map_err(|e| CoreError::Message(format!("x_search client: {e}")))?;
+    let _ = parsed;
 
     let resp = client
         .get(&url)
