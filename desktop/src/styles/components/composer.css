@@ -47,7 +47,8 @@
 }
 
 .composer__model-select {
-  max-width: 11rem;
+  max-width: 14rem;
+  min-width: 9rem;
   padding: 3px 6px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-soft);

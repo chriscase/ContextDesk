@@ -43,6 +43,8 @@ import {
   hostSetWorkspace,
   hostSuggestChatTitle,
   hostWriteMemory,
+  modelSelectionKey,
+  parseModelSelectionKey,
   type BrandingDto,
   type ChatSessionDto,
   type EventDto,
@@ -231,6 +233,8 @@ export function App() {
     pinned: boolean;
     /** Model for this chat; null uses app default. */
     chatModel: string | null;
+    /** Provider profile when model is from a non-default source. */
+    providerProfileId: string | null;
     /** Last message id scrolled into view / marked read. */
     lastReadMessageId: string | null;
   };
@@ -254,6 +258,7 @@ export function App() {
       archived: false,
       pinned: false,
       chatModel,
+      providerProfileId: null,
       lastReadMessageId: null,
     };
   };
@@ -346,6 +351,7 @@ export function App() {
     archived: dto.archived,
     pinned: dto.pinned ?? false,
     chatModel: dto.chat_model ?? null,
+    providerProfileId: dto.provider_profile_id ?? null,
     lastReadMessageId: dto.last_read_message_id ?? null,
   });
 
@@ -368,6 +374,7 @@ export function App() {
     pinned: s.pinned,
     title_locked: s.titleLocked,
     chat_model: s.chatModel,
+    provider_profile_id: s.providerProfileId,
     last_read_message_id: s.lastReadMessageId,
   });
 
@@ -574,9 +581,8 @@ export function App() {
   });
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [modelOptions, setModelOptions] = useState<ModelOptionDto[]>([]);
-  const [defaultChatModel, setDefaultChatModel] = useState<string>(
-    () => setup.chatModel || "mistral",
-  );
+  /** Default selection key `provider::model` for new chats. */
+  const [defaultModelKey, setDefaultModelKey] = useState<string>("");
 
   const refreshModels = useCallback(async () => {
     try {
@@ -586,10 +592,16 @@ export function App() {
       ]);
       setModelOptions(listed);
       if (def?.trim()) {
-        setDefaultChatModel(def.trim());
-        setSetup((s) =>
-          s.chatModel === def.trim() ? s : { ...s, chatModel: def.trim() },
-        );
+        setDefaultModelKey(def.trim());
+        const { modelId } = parseModelSelectionKey(def.trim());
+        if (modelId) {
+          setSetup((s) =>
+            s.chatModel === modelId ? s : { ...s, chatModel: modelId },
+          );
+        }
+      } else {
+        const d = listed.find((m) => m.is_default) ?? listed[0];
+        if (d) setDefaultModelKey(d.selection_key);
       }
     } catch {
       /* browser / host */
@@ -840,14 +852,15 @@ export function App() {
         // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
         const forceLocal =
           setup.providerKind === "ollama" && setup.ollamaReachable === false;
-        const sessionModel =
-          sessions.find((s) => s.id === sessionId)?.chatModel ??
-          defaultChatModel;
+        const sess = sessions.find((s) => s.id === sessionId);
+        const sessionModel = sess?.chatModel ?? null;
+        const sessionProvider = sess?.providerProfileId ?? null;
         const events = await agentTurn(
           sessionId,
           text,
           forceLocal,
           sessionModel,
+          sessionProvider,
         );
 
         // Progressive append of real text_delta chunks from the agent host
@@ -971,7 +984,6 @@ export function App() {
       sessionId,
       resolvedSessionId,
       sessions,
-      defaultChatModel,
       setup.ollamaReachable,
       setup.providerKind,
       refreshMemory,
@@ -981,42 +993,63 @@ export function App() {
     ],
   );
 
+  const effectiveModelKey = (() => {
+    if (activeSession?.chatModel && activeSession.providerProfileId) {
+      return modelSelectionKey(
+        activeSession.providerProfileId,
+        activeSession.chatModel,
+      );
+    }
+    if (activeSession?.chatModel) {
+      const match = modelOptions.find((m) => m.id === activeSession.chatModel);
+      if (match) return match.selection_key;
+    }
+    return (
+      defaultModelKey ||
+      modelOptions.find((m) => m.is_default)?.selection_key ||
+      modelOptions[0]?.selection_key ||
+      ""
+    );
+  })();
+
   const effectiveChatModel =
-    activeSession?.chatModel?.trim() ||
-    defaultChatModel ||
+    parseModelSelectionKey(effectiveModelKey).modelId ||
+    activeSession?.chatModel ||
     setup.chatModel ||
     "mistral";
 
-  const setSessionModel = (modelId: string) => {
+  const setSessionModel = (selectionKey: string) => {
     if (!activeSession) return;
+    const { providerId, modelId } = parseModelSelectionKey(selectionKey);
+    const updated = {
+      ...activeSession,
+      chatModel: modelId,
+      providerProfileId: providerId,
+      updatedAt: nowIso(),
+    };
     setSessions((all) =>
-      all.map((s) =>
-        s.id === activeSession.id
-          ? { ...s, chatModel: modelId, updatedAt: nowIso() }
-          : s,
-      ),
+      all.map((s) => (s.id === activeSession.id ? updated : s)),
     );
-    // Persist model choice if session already has content (or still save empty later).
-    const cur = sessions.find((s) => s.id === activeSession.id);
-    if (cur && cur.messages.length > 0) {
-      void hostSaveChatSession(
-        sessionToDto({ ...cur, chatModel: modelId, updatedAt: nowIso() }),
-      ).catch(() => {
+    if (updated.messages.length > 0) {
+      void hostSaveChatSession(sessionToDto(updated)).catch(() => {
         /* ignore */
       });
     }
   };
 
-  const setAppDefaultModel = async (modelId: string) => {
+  const setAppDefaultModel = async (selectionKey: string) => {
     try {
-      const saved = await hostSetDefaultChatModel(modelId);
-      const next = saved?.trim() || modelId;
-      setDefaultChatModel(next);
-      setSetup((s) => ({ ...s, chatModel: next }));
+      const saved = await hostSetDefaultChatModel(selectionKey);
+      const next = saved?.trim() || selectionKey;
+      setDefaultModelKey(next);
+      const { modelId } = parseModelSelectionKey(next);
+      if (modelId) setSetup((s) => ({ ...s, chatModel: modelId }));
       setModelOptions((opts) =>
-        opts.map((m) => ({ ...m, is_default: m.id === next })),
+        opts.map((m) => ({
+          ...m,
+          is_default: m.selection_key === next,
+        })),
       );
-      // New empty session without explicit model follows default; leave active override.
       void refreshModels();
     } catch (e) {
       setAgentError(e instanceof Error ? e.message : String(e));
@@ -1024,7 +1057,12 @@ export function App() {
   };
 
   const createSession = () => {
-    const s = newSession(`Chat ${sessions.length + 1}`, defaultChatModel);
+    const { providerId, modelId } = parseModelSelectionKey(defaultModelKey);
+    const s = newSession(
+      `Chat ${sessions.length + 1}`,
+      modelId || null,
+    );
+    s.providerProfileId = providerId;
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
     setPane("chat");
@@ -1156,7 +1194,9 @@ export function App() {
     setSessions((all) => {
       const next = all.filter((s) => s.id !== id);
       if (next.length === 0) {
-        const s = newSession("Chat 1", defaultChatModel);
+        const { modelId } = parseModelSelectionKey(defaultModelKey);
+        const s = newSession("Chat 1", modelId || null);
+        s.providerProfileId = parseModelSelectionKey(defaultModelKey).providerId;
         setActiveSessionId(s.id);
         return [s];
       }
@@ -1649,9 +1689,9 @@ export function App() {
                   disabled={busy}
                   busy={busy}
                   models={modelOptions}
-                  selectedModel={effectiveChatModel}
+                  selectedModelKey={effectiveModelKey}
                   onModelChange={setSessionModel}
-                  onSetDefaultModel={(id) => void setAppDefaultModel(id)}
+                  onSetDefaultModel={(key) => void setAppDefaultModel(key)}
                   onStop={() => {
                     setBusy(false);
                     setAgentError("Turn stopped (cooperative cancel).");

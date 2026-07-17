@@ -1,4 +1,4 @@
-import { useCallback, useId, useState } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 
@@ -8,13 +8,13 @@ type Props = {
   disabled?: boolean;
   busy?: boolean;
   onStop?: () => void;
-  /** Models available from the active provider. */
+  /** Models available from configured providers (grouped by source). */
   models?: ModelOptionDto[];
-  /** Model id for this chat. */
-  selectedModel?: string;
-  onModelChange?: (modelId: string) => void;
+  /** Full selection key `provider::model` for this chat. */
+  selectedModelKey?: string;
+  onModelChange?: (selectionKey: string) => void;
   /** Mark selected model as default for new chats. */
-  onSetDefaultModel?: (modelId: string) => void;
+  onSetDefaultModel?: (selectionKey: string) => void;
 };
 
 export function Composer({
@@ -23,7 +23,7 @@ export function Composer({
   busy,
   onStop,
   models = [],
-  selectedModel,
+  selectedModelKey,
   onModelChange,
   onSetDefaultModel,
 }: Props) {
@@ -43,19 +43,31 @@ export function Composer({
     setExpanded(true);
   };
 
-  const modelOptions =
-    selectedModel && !models.some((m) => m.id === selectedModel)
-      ? [
-          {
-            id: selectedModel,
-            label: selectedModel,
-            provider_id: "",
-            provider_label: "",
-            is_default: false,
-          },
-          ...models,
-        ]
-      : models;
+  const groups = useMemo(() => {
+    const map = new Map<string, ModelOptionDto[]>();
+    for (const m of models) {
+      const g = m.group || m.provider_label || "Other";
+      const list = map.get(g) ?? [];
+      list.push(m);
+      map.set(g, list);
+    }
+    return [...map.entries()];
+  }, [models]);
+
+  const selected: ModelOptionDto | undefined = selectedModelKey
+    ? models.find((m) => m.selection_key === selectedModelKey) ||
+      models.find((m) => m.id === selectedModelKey)
+    : undefined;
+  const selectValue =
+    selected?.selection_key ??
+    selectedModelKey ??
+    models.find((m) => m.is_default)?.selection_key ??
+    models[0]?.selection_key ??
+    "";
+
+  const selectedIsDefault = Boolean(
+    models.find((m) => m.selection_key === selectValue)?.is_default,
+  );
 
   return (
     <div className="composer" data-expanded={expanded ? "true" : "false"}>
@@ -64,33 +76,37 @@ export function Composer({
           Enter to send · Shift+Enter newline · /skill id …
         </span>
         <div className="row">
-          {modelOptions.length > 0 && onModelChange ? (
+          {groups.length > 0 && onModelChange ? (
             <label className="composer__model">
               <span className="composer__model-label">Model</span>
               <select
                 className="composer__model-select"
-                value={selectedModel ?? modelOptions[0]?.id ?? ""}
+                value={selectValue}
                 disabled={busy}
-                aria-label="Chat model"
-                title="Model for this chat (can change mid-conversation)"
+                aria-label="Chat model by source"
+                title="Model for this chat — grouped by provider source"
                 onChange={(e) => onModelChange(e.target.value)}
               >
-                {modelOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                    {m.is_default ? " · default" : ""}
-                  </option>
+                {groups.map(([group, opts]) => (
+                  <optgroup key={group} label={group}>
+                    {opts.map((m) => (
+                      <option key={m.selection_key} value={m.selection_key}>
+                        {m.label}
+                        {m.is_default ? " · default" : ""}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </label>
           ) : null}
-          {selectedModel && onSetDefaultModel ? (
+          {selectValue && onSetDefaultModel ? (
             <button
               type="button"
               className="btn btn--ghost btn--sm"
               title="Use this model for new chats"
-              disabled={busy || models.find((m) => m.id === selectedModel)?.is_default}
-              onClick={() => onSetDefaultModel(selectedModel)}
+              disabled={busy || selectedIsDefault}
+              onClick={() => onSetDefaultModel(selectValue)}
             >
               Set default
             </button>

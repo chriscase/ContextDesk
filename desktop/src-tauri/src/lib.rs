@@ -636,6 +636,9 @@ struct AgentTurnReq {
     /// Optional per-turn / per-chat model override.
     #[serde(default)]
     chat_model: Option<String>,
+    /// Optional provider profile id when model is chosen from a non-active source.
+    #[serde(default)]
+    provider_profile_id: Option<String>,
 }
 
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
@@ -724,11 +727,25 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
             }
         }
     }
-    let mut profile = cfg
-        .providers
-        .active()
-        .cloned()
-        .unwrap_or_else(ProviderProfile::ollama_local);
+    let mut profile = if let Some(pid) = req
+        .provider_profile_id
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        cfg.providers
+            .profiles
+            .iter()
+            .find(|p| p.id == pid)
+            .cloned()
+            .or_else(|| cfg.providers.active().cloned())
+            .unwrap_or_else(ProviderProfile::ollama_local)
+    } else {
+        cfg.providers
+            .active()
+            .cloned()
+            .unwrap_or_else(ProviderProfile::ollama_local)
+    };
     // Per-chat model override (mid-chat switch), else app default, else profile model.
     if let Some(m) = req
         .chat_model
@@ -736,7 +753,9 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
-        profile.chat_model = m.to_string();
+        // Accept bare model id or provider::model selection key.
+        let (_pid, mid) = parse_selection_key(m);
+        profile.chat_model = mid;
     } else if let Some(m) = cfg
         .default_chat_model
         .as_ref()
@@ -932,16 +951,75 @@ fn search_chat_sessions(
         .map_err(|e| e.to_string())
 }
 
-/// A selectable chat model for the UI.
+/// A selectable chat model for the UI (grouped by provider source).
 #[derive(Debug, Clone, Serialize)]
 struct ModelOptionDto {
+    /// Model id as sent to the API (e.g. `grok-3`, `mistral`).
     id: String,
+    /// Display label (usually same as id).
     label: String,
-    /// Provider profile this model is valid for.
+    /// Unique select value: `provider_id::model_id`.
+    selection_key: String,
+    /// Provider profile this model belongs to.
     provider_id: String,
+    /// Human group label for `<optgroup>` (e.g. "Ollama (local)").
     provider_label: String,
+    /// Stable group key for sorting/grouping.
+    group: String,
     /// True when this is the app default for new chats.
     is_default: bool,
+}
+
+fn model_selection_key(provider_id: &str, model_id: &str) -> String {
+    format!("{provider_id}::{model_id}")
+}
+
+fn parse_selection_key(key: &str) -> (Option<String>, String) {
+    if let Some((pid, mid)) = key.split_once("::") {
+        if !pid.is_empty() && !mid.is_empty() {
+            return (Some(pid.to_string()), mid.to_string());
+        }
+    }
+    (None, key.to_string())
+}
+
+fn provider_group_label(p: &ProviderProfile) -> String {
+    match p.kind {
+        ProviderKind::Ollama => {
+            if p.label.trim().is_empty() {
+                "Ollama".into()
+            } else {
+                p.label.clone()
+            }
+        }
+        ProviderKind::OpenAiCompatible => {
+            if p.label.trim().is_empty() {
+                "OpenAI-compatible".into()
+            } else {
+                p.label.clone()
+            }
+        }
+        ProviderKind::XaiGrokBuild => "Grok / xAI".into(),
+        ProviderKind::Anthropic => "Anthropic".into(),
+    }
+}
+
+fn looks_like_chat_model_id(id: &str) -> bool {
+    let l = id.to_ascii_lowercase();
+    // Drop obvious non-chat entries from vendor catalogs.
+    if l.contains("embed")
+        || l.contains("whisper")
+        || l.contains("tts")
+        || l.contains("dall")
+        || l.contains("image")
+        || l.contains("moderation")
+        || l.contains("realtime")
+        || l.contains("audio")
+        || l.contains("transcri")
+    {
+        return false;
+    }
+    true
 }
 
 fn resolve_default_model(cfg: &AppConfig) -> String {
@@ -960,29 +1038,33 @@ fn resolve_default_model(cfg: &AppConfig) -> String {
         .unwrap_or_else(|| "mistral".into())
 }
 
-/// List models from the active provider (validated via list/tags when possible).
-#[tauri::command]
-async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionDto>, String> {
-    let cfg = state.config.lock().expect("config").clone();
-    let profile = cfg
+fn resolve_default_selection(cfg: &AppConfig) -> String {
+    let model = resolve_default_model(cfg);
+    let pid = cfg
         .providers
         .active()
-        .cloned()
-        .unwrap_or_else(ProviderProfile::ollama_local);
-    let default_model = resolve_default_model(&cfg);
+        .map(|p| p.id.as_str())
+        .unwrap_or("ollama-local");
+    model_selection_key(pid, &model)
+}
+
+async fn models_for_profile(
+    profile: &ProviderProfile,
+    secrets: &KeychainSecretStore,
+) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
     let api_key = profile
         .api_key_ref
         .as_ref()
-        .and_then(|r| state.secrets.get(r).ok().flatten());
+        .and_then(|r| secrets.get(r).ok().flatten());
 
-    let mut ids: Vec<String> = Vec::new();
     match profile.kind {
         ProviderKind::Ollama => {
             if let Ok(client) =
                 cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
             {
                 if let Ok(tags) = client.list_tags().await {
-                    ids.extend(tags);
+                    ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
                 }
             }
         }
@@ -999,12 +1081,11 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
                 &policy,
             ) {
                 if let Ok(listed) = client.list_models().await {
-                    ids.extend(listed);
+                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
                 }
             }
         }
         ProviderKind::XaiGrokBuild => {
-            // Known chat models + whatever the API lists when session works.
             ids.extend(
                 ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision-1212"]
                     .into_iter()
@@ -1025,8 +1106,10 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
                     ) {
                         let client = client.with_extra_headers(creds.request_headers());
                         if let Ok(listed) = client.list_models().await {
-                            for m in listed {
-                                if !ids.iter().any(|x| x == &m) {
+                            for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
+                                // Prefer chat-oriented grok ids from the catalog.
+                                let l = m.to_ascii_lowercase();
+                                if l.contains("grok") && !ids.iter().any(|x| x == &m) {
                                     ids.push(m);
                                 }
                             }
@@ -1038,57 +1121,132 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
         ProviderKind::Anthropic => {}
     }
 
-    // Always include profile model + app default so the UI never has an empty list.
-    for m in [&profile.chat_model, &default_model] {
-        let m = m.trim();
-        if !m.is_empty() && !ids.iter().any(|x| x == m) {
-            ids.insert(0, m.to_string());
-        }
+    let profile_model = profile.chat_model.trim();
+    if !profile_model.is_empty() && !ids.iter().any(|x| x == profile_model) {
+        ids.insert(0, profile_model.to_string());
     }
     ids.sort();
     ids.dedup();
-
-    Ok(ids
-        .into_iter()
-        .map(|id| ModelOptionDto {
-            is_default: id == default_model,
-            label: id.clone(),
-            id,
-            provider_id: profile.id.clone(),
-            provider_label: profile.label.clone(),
-        })
-        .collect())
+    ids
 }
 
-/// Set the default model for new chats (also updates active profile chat_model).
+/// List models from **all** configured providers, for grouped UI selection.
+#[tauri::command]
+async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionDto>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let default_model = resolve_default_model(&cfg);
+    let default_pid = cfg
+        .providers
+        .active()
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| "ollama-local".into());
+    let default_key = model_selection_key(&default_pid, &default_model);
+
+    let mut profiles = cfg.providers.profiles.clone();
+    if profiles.is_empty() {
+        profiles.push(ProviderProfile::ollama_local());
+    }
+
+    let mut out: Vec<ModelOptionDto> = Vec::new();
+    for profile in &profiles {
+        let ids = models_for_profile(profile, &state.secrets).await;
+        let group = provider_group_label(profile);
+        for id in ids {
+            let selection_key = model_selection_key(&profile.id, &id);
+            out.push(ModelOptionDto {
+                is_default: selection_key == default_key
+                    || (id == default_model && profile.id == default_pid),
+                label: id.clone(),
+                selection_key,
+                id,
+                provider_id: profile.id.clone(),
+                provider_label: group.clone(),
+                group: group.clone(),
+            });
+        }
+    }
+
+    // Ensure default is present even if listing failed for that provider.
+    if !out.iter().any(|m| m.selection_key == default_key) {
+        let label = cfg
+            .providers
+            .active()
+            .map(provider_group_label)
+            .unwrap_or_else(|| "Default".into());
+        out.insert(
+            0,
+            ModelOptionDto {
+                id: default_model.clone(),
+                label: default_model.clone(),
+                selection_key: default_key.clone(),
+                provider_id: default_pid,
+                provider_label: label.clone(),
+                group: label,
+                is_default: true,
+            },
+        );
+    }
+
+    // Group order: active provider first, then alpha by group, then model id.
+    let active_id = cfg.providers.active_id.clone().unwrap_or_default();
+    out.sort_by(|a, b| {
+        let a_act = a.provider_id == active_id;
+        let b_act = b.provider_id == active_id;
+        b_act
+            .cmp(&a_act)
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    Ok(out)
+}
+
+/// Set default model for new chats. `selection` may be `provider::model` or bare model id.
 #[tauri::command]
 fn set_default_chat_model(state: State<'_, AppState>, model: String) -> Result<String, String> {
-    let model = model.trim().to_string();
-    if model.is_empty() {
+    let raw = model.trim().to_string();
+    if raw.is_empty() {
+        return Err("model id is required".into());
+    }
+    let (provider_id, model_id) = parse_selection_key(&raw);
+    if model_id.is_empty() {
         return Err("model id is required".into());
     }
     let mut cfg = state.config.lock().expect("config");
-    cfg.default_chat_model = Some(model.clone());
-    if let Some(active_id) = cfg.providers.active_id.clone() {
+    cfg.default_chat_model = Some(model_id.clone());
+    if let Some(pid) = provider_id {
+        if cfg.providers.profiles.iter().any(|p| p.id == pid) {
+            cfg.providers.active_id = Some(pid.clone());
+            if let Some(p) = cfg.providers.profiles.iter_mut().find(|p| p.id == pid) {
+                p.chat_model = model_id.clone();
+            }
+        }
+    } else if let Some(active_id) = cfg.providers.active_id.clone() {
         if let Some(p) = cfg
             .providers
             .profiles
             .iter_mut()
             .find(|p| p.id == active_id)
         {
-            p.chat_model = model.clone();
+            p.chat_model = model_id.clone();
         }
     }
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
-    Ok(model)
+    Ok(model_selection_key(
+        cfg.providers
+            .active_id
+            .as_deref()
+            .unwrap_or("ollama-local"),
+        &model_id,
+    ))
 }
 
-/// Read resolved default chat model.
+/// Read resolved default selection key (`provider::model`).
 #[tauri::command]
 fn get_default_chat_model(state: State<'_, AppState>) -> String {
     let cfg = state.config.lock().expect("config");
-    resolve_default_model(&cfg)
+    resolve_default_selection(&cfg)
 }
 
 /// One-shot LLM title (falls back to short heuristic if model unavailable).

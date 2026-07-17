@@ -57,6 +57,7 @@ export async function agentTurn(
   text: string,
   forceLocal = false,
   chatModel?: string | null,
+  providerProfileId?: string | null,
 ): Promise<EventDto[]> {
   if (!isTauri()) {
     // Browser-only: use same offline research contract via local server if present,
@@ -89,6 +90,7 @@ export async function agentTurn(
       text,
       force_local: forceLocal,
       chat_model: chatModel?.trim() || null,
+      provider_profile_id: providerProfileId?.trim() || null,
     },
   });
 }
@@ -343,16 +345,38 @@ export type ChatSessionDto = {
   pinned: boolean;
   title_locked: boolean;
   chat_model?: string | null;
+  provider_profile_id?: string | null;
   last_read_message_id?: string | null;
 };
 
 export type ModelOptionDto = {
   id: string;
   label: string;
+  /** Unique select value: `provider_id::model_id`. */
+  selection_key: string;
   provider_id: string;
   provider_label: string;
+  group: string;
   is_default: boolean;
 };
+
+export function parseModelSelectionKey(key: string): {
+  providerId: string | null;
+  modelId: string;
+} {
+  const i = key.indexOf("::");
+  if (i > 0) {
+    return {
+      providerId: key.slice(0, i),
+      modelId: key.slice(i + 2),
+    };
+  }
+  return { providerId: null, modelId: key };
+}
+
+export function modelSelectionKey(providerId: string, modelId: string): string {
+  return `${providerId}::${modelId}`;
+}
 
 export async function hostListChatModels(): Promise<ModelOptionDto[]> {
   if (!isTauri()) return [];

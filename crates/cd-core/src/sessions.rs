@@ -79,6 +79,9 @@ pub struct Session {
     /// Chat model id for this session (None → app default / active profile).
     #[serde(default)]
     pub chat_model: Option<String>,
+    /// Provider profile id when the session model is not from the active default source.
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
     /// Last message id the user has scrolled into view / marked read.
     #[serde(default)]
     pub last_read_message_id: Option<String>,
@@ -125,6 +128,7 @@ impl Session {
             pinned: false,
             title_locked: false,
             chat_model: None,
+            provider_profile_id: None,
             last_read_message_id: None,
         }
     }
