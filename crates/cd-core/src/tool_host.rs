@@ -70,6 +70,10 @@ pub struct ToolHost {
     /// Rate-limit: min interval between open-web HTTP calls.
     web_min_interval: Duration,
     last_web_call: Option<Instant>,
+    /// When set with bearer, `x_search` is registered.
+    x_enabled: bool,
+    /// X API bearer from host keychain (never logged).
+    x_bearer: Option<String>,
 }
 
 impl ToolHost {
@@ -100,6 +104,8 @@ impl ToolHost {
             // Slightly more conservative than Confluence (public engines).
             web_min_interval: Duration::from_millis(800),
             last_web_call: None,
+            x_enabled: false,
+            x_bearer: None,
         }
     }
 
@@ -107,6 +113,12 @@ impl ToolHost {
     pub fn set_confluence(&mut self, cfg: Option<ConfluenceRoConfig>, pat: Option<String>) {
         self.confluence = cfg;
         self.confluence_pat = pat;
+    }
+
+    /// Attach X search (enabled flag + bearer from host keychain only).
+    pub fn set_x_search(&mut self, enabled: bool, bearer: Option<String>) {
+        self.x_enabled = enabled;
+        self.x_bearer = bearer.filter(|b| !b.trim().is_empty());
     }
 
     /// Enable or disable open-web research tools (Settings toggle).
@@ -127,7 +139,12 @@ impl ToolHost {
         self.web_research_enabled
     }
 
-    /// Tool specs; Confluence / web tools omitted when not enabled.
+    /// Whether X search is available (enabled + non-empty bearer).
+    pub fn x_search_available(&self) -> bool {
+        self.x_enabled && self.x_bearer.is_some()
+    }
+
+    /// Tool specs; Confluence / web / X tools omitted when not enabled.
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
@@ -137,6 +154,9 @@ impl ToolHost {
         }
         if !self.web_research_enabled {
             specs.retain(|t| t.name != names::WEB_SEARCH && t.name != names::WEB_FETCH);
+        }
+        if !self.x_search_available() {
+            specs.retain(|t| t.name != names::X_SEARCH);
         }
         specs
     }
@@ -301,6 +321,12 @@ impl ToolHost {
                     web_cites.push((url, label, title));
                 }
                 (ok, summary, raw, cite.map(|(u, _, _)| u))
+            }
+            names::X_SEARCH => {
+                let (ok, summary, raw, cites) = self.tool_x_search(arguments)?;
+                let first = cites.first().map(|(u, _, _)| u.clone());
+                web_cites = cites;
+                (ok, summary, raw, first)
             }
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
@@ -604,6 +630,17 @@ impl ToolHost {
             .unwrap_or("")
             .trim();
         let limit = web_research::clamp_search_limit(args.get("limit").and_then(|v| v.as_u64()));
+        // Optional packs: model-selected publisher groups ∩ user-enabled sources.
+        let packs: Vec<String> = args
+            .get("packs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         // Sanitize early for clearer errors before network.
         let q = web_research::sanitize_search_query(q)?;
         self.throttle_web()?;
@@ -611,6 +648,7 @@ impl ToolHost {
             &q,
             limit,
             &self.web_research_sources,
+            &packs,
         ))?;
         let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
         let cites: Vec<(String, String, Option<String>)> = hits
@@ -633,6 +671,79 @@ impl ToolHost {
                 format!("{} web result(s) for `{q}`", hits.len())
             } else {
                 format!("no web results for `{q}` ({})", notes.join(", "))
+            },
+            raw,
+            cites,
+        ))
+    }
+
+    /// Returns (ok, summary, raw, citations).
+    fn tool_x_search(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Vec<(String, String, Option<String>)>)> {
+        if !self.x_enabled {
+            return Err(CoreError::Policy(
+                "X search is disabled. Enable it in Settings → Connectors and add an API key."
+                    .into(),
+            ));
+        }
+        let bearer = self
+            .x_bearer
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let Some(bearer) = bearer else {
+            return Err(CoreError::Policy(
+                "X API key missing from secure storage. Add a bearer token in Settings → Connectors."
+                    .into(),
+            ));
+        };
+        let q = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .clamp(10, 25) as usize;
+        let q = crate::x_search::sanitize_x_query(q)?;
+        self.throttle_web()?;
+        let (hits, notes) = match block_on_http(crate::x_search::search_recent(&q, limit, &bearer))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let raw = format!(
+                    "x_search network/error for `{q}`: {e}\n\
+                     Soft fail — try web_search or report the gap. Do not invent posts."
+                );
+                return Ok((
+                    false,
+                    format!("x_search failed for `{q}`"),
+                    raw,
+                    vec![],
+                ));
+            }
+        };
+        let raw = crate::x_search::format_x_hits(&hits, &q, &notes);
+        let cites: Vec<(String, String, Option<String>)> = hits
+            .iter()
+            .take(8)
+            .map(|h| {
+                let label = "X".to_string();
+                let title = h.title.clone();
+                (h.url.clone(), label, Some(title))
+            })
+            .collect();
+        let ok = !hits.is_empty();
+        Ok((
+            ok,
+            if ok {
+                format!("{} X post(s) for `{q}`", hits.len())
+            } else {
+                format!("no X posts for `{q}` ({})", notes.join(", "))
             },
             raw,
             cites,
@@ -1045,6 +1156,47 @@ mod tests {
         let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
         assert!(names.iter().any(|n| n == names::WEB_SEARCH));
         assert!(names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    #[test]
+    fn x_search_hidden_without_key() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_x_search(true, None);
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n == names::X_SEARCH));
+        host.set_x_search(false, Some("bearer-test".into()));
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n == names::X_SEARCH));
+    }
+
+    #[test]
+    fn x_search_visible_when_enabled_with_key() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_x_search(true, Some("test-bearer-token".into()));
+        assert!(host.x_search_available());
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(names.iter().any(|n| n == names::X_SEARCH));
+    }
+
+    #[test]
+    fn x_search_blocked_when_disabled() {
+        let (_tmp, mut host) = host_with_docs();
+        let err = host
+            .execute(names::X_SEARCH, &json!({"query": "nasa"}), None)
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("disabled")
+                || err.to_string().to_lowercase().contains("key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn web_search_schema_has_packs() {
+        let specs = mvp_tool_specs();
+        let s = specs.iter().find(|t| t.name == names::WEB_SEARCH).unwrap();
+        let props = s.parameters.get("properties").unwrap();
+        assert!(props.get("packs").is_some(), "packs param missing");
     }
 
     #[test]

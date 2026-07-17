@@ -5,6 +5,7 @@ import {
   hostEnsureDefaultWorkspace,
   hostGetConfluence,
   hostGetWebResearchEnabled,
+  hostGetX,
   hostListLocalCandidates,
   hostListWebResearchSources,
   hostPreflight,
@@ -12,11 +13,14 @@ import {
   hostProviderHasSecret,
   hostSaveActiveProvider,
   hostSaveConfluence,
+  hostSaveX,
   hostSetWebResearchEnabled,
   hostSetWebResearchSources,
   hostSuggestDefaultWorkspace,
   hostTestConfluence,
+  hostTestX,
   hostValidateWorkspacePath,
+  hostXHasToken,
   normalizeProviderKind,
   profileIdForKind,
   type DefaultWorkspaceDto,
@@ -95,6 +99,8 @@ export function SettingsModal({
   const [probeTick, setProbeTick] = useState(0);
   const [cfStatus, setCfStatus] = useState<string | null>(null);
   const [cfTokenDraft, setCfTokenDraft] = useState("");
+  const [xTokenDraft, setXTokenDraft] = useState("");
+  const [xStatus, setXStatus] = useState<string | null>(null);
   /** Transient API key typed in UI — never written to localStorage / setup state. */
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [candidates, setCandidates] = useState<LocalCandidateDto[]>([]);
@@ -110,30 +116,35 @@ export function SettingsModal({
       setSection(initialSection);
       setCfTokenDraft("");
       setCfStatus(null);
+      setXTokenDraft("");
+      setXStatus(null);
       setApiKeyDraft("");
       void (async () => {
         const cf = await hostGetConfluence();
         const has = await hostConfluenceHasToken();
+        const x = await hostGetX();
+        const xHas = await hostXHasToken();
         const webOn = await hostGetWebResearchEnabled();
         const sources = await hostListWebResearchSources();
         if (sources.length) setNewsSources(sources);
-        if (cf) {
-          setDraft((d) => ({
-            ...d,
-            confluence: {
-              enabled: cf.enabled,
-              baseUrl: cf.base_url,
-              spaces: cf.spaces.join(", "),
-              hasToken: has ?? Boolean(cf.pat_ref),
-            },
-            webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
-          }));
-        } else if (webOn !== null) {
-          setDraft((d) => ({
-            ...d,
-            webResearchEnabled: webOn,
-          }));
-        }
+        setDraft((d) => ({
+          ...d,
+          confluence: cf
+            ? {
+                enabled: cf.enabled,
+                baseUrl: cf.base_url,
+                spaces: cf.spaces.join(", "),
+                hasToken: has ?? Boolean(cf.pat_ref),
+              }
+            : d.confluence,
+          x: x
+            ? {
+                enabled: x.enabled,
+                hasToken: xHas ?? Boolean(x.api_key_ref),
+              }
+            : d.x ?? { enabled: false, hasToken: false },
+          webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
+        }));
         if (setup.providerKind !== "none") {
           const pid = profileIdForKind(setup.providerKind);
           const keyOk = await hostProviderHasSecret(pid);
@@ -184,9 +195,9 @@ export function SettingsModal({
   const report = hostReport ?? clientReport;
 
   const dirty = useMemo(() => {
-    if (apiKeyDraft.trim() || cfTokenDraft.trim()) return true;
+    if (apiKeyDraft.trim() || cfTokenDraft.trim() || xTokenDraft.trim()) return true;
     return JSON.stringify(draft) !== JSON.stringify(setup);
-  }, [draft, setup, apiKeyDraft, cfTokenDraft]);
+  }, [draft, setup, apiKeyDraft, cfTokenDraft, xTokenDraft]);
 
   // Must stay above any early return — Rules of Hooks.
   const confluenceUrlError = useMemo(() => {
@@ -219,6 +230,7 @@ export function SettingsModal({
     }
     setApiKeyDraft("");
     setCfTokenDraft("");
+    setXTokenDraft("");
     onClose();
   };
 
@@ -422,6 +434,27 @@ export function SettingsModal({
       // browser mode: keep in local setup only
     }
 
+    // Persist X connector (keychain only for bearer)
+    try {
+      const saved = await hostSaveX({
+        enabled: draft.x?.enabled ?? false,
+        apiKey: xTokenDraft.trim() || undefined,
+      });
+      const has = await hostXHasToken();
+      next = {
+        ...next,
+        x: {
+          enabled: saved.enabled,
+          hasToken: has ?? Boolean(saved.api_key_ref),
+        },
+      };
+    } catch {
+      next = {
+        ...next,
+        x: draft.x ?? { enabled: false, hasToken: false },
+      };
+    }
+
     // Persist web research toggle + publisher source map (rebuilds tool host)
     try {
       const webOn = await hostSetWebResearchEnabled(
@@ -443,6 +476,7 @@ export function SettingsModal({
 
     setApiKeyDraft("");
     setCfTokenDraft("");
+    setXTokenDraft("");
     onSaveSetup(next);
     onClose();
   };
@@ -460,8 +494,12 @@ export function SettingsModal({
   };
 
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
-      <div className="settings-panel">
+    <div
+      className="settings-page"
+      role="region"
+      aria-label="Settings"
+    >
+      <div className="settings-panel settings-panel--page">
         <nav className="settings-nav" aria-label="Settings sections">
           <div className="settings-nav__title">Settings</div>
           {NAV.map((item) => (
@@ -881,14 +919,14 @@ export function SettingsModal({
             {section === "connectors" ? (
               <div>
                 <p className="section-lead">
-                  Optional data sources. Confluence is read-only (PAT in OS
-                  keychain). Web research is opt-in open-web search/fetch with
-                  SSRF protections — off by default.
+                  Optional data sources. Web research and publisher packs are
+                  opt-in. X search needs a paid API key (keychain only).
+                  Confluence is read-only (PAT in keychain).
                 </p>
                 <ToggleField
                   id={`${baseId}-web-research`}
                   label="Enable web research"
-                  hint="Exposes web_search and web_fetch. Combines Google News with curated publisher RSS (real article URLs). Public http(s) only; SSRF-gated."
+                  hint="Exposes web_search and web_fetch. Combines Google News with curated publisher RSS. The model may pass packs (e.g. middle_east, security) to narrow fan-in. Public http(s) only; SSRF-gated."
                   checked={draft.webResearchEnabled ?? false}
                   onChange={(webResearchEnabled) =>
                     setDraft((d) => ({ ...d, webResearchEnabled }))
@@ -897,9 +935,9 @@ export function SettingsModal({
                 {draft.webResearchEnabled && newsSources.length > 0 ? (
                   <div className="news-sources">
                     <p className="field__hint news-sources__lead">
-                      Publisher feeds used for current-events search (in
-                      addition to Google News). All on by default — turn off
-                      any you do not want the agent to query. Feeds are cached
+                      Publisher feeds (user allowlist). The agent can further
+                      narrow by pack id matching these groups. All on by
+                      default — turn off any you do not want queried. Cached
                       ~8 minutes.
                     </p>
                     <div className="news-sources__bulk">
@@ -961,6 +999,94 @@ export function SettingsModal({
                     ))}
                   </div>
                 ) : null}
+                <div className="settings-connector-block">
+                  <h3 className="settings-connector-block__title">X (Twitter)</h3>
+                  <p className="field__hint">
+                    Optional. Recent-search via the official X API. Free tier
+                    cannot search in practice — you need a paid/usable plan.
+                    Bearer token is stored in the OS keychain only (never in
+                    config.json). When enabled with a key, the agent gets{" "}
+                    <code>x_search</code>.
+                  </p>
+                  <ToggleField
+                    id={`${baseId}-x-enabled`}
+                    label="Enable X search"
+                    hint="Registers x_search only when a bearer is also on file."
+                    checked={draft.x?.enabled ?? false}
+                    onChange={(enabled) =>
+                      setDraft((d) => ({
+                        ...d,
+                        x: {
+                          enabled,
+                          hasToken: d.x?.hasToken ?? false,
+                        },
+                      }))
+                    }
+                  />
+                  <SecretField
+                    id={`${baseId}-x-key`}
+                    label="X API bearer token"
+                    hint="OAuth 2.0 Bearer for api.x.com. Stored in keychain on Save."
+                    value={
+                      xTokenDraft
+                        ? xTokenDraft
+                        : draft.x?.hasToken
+                          ? "••••••••••••"
+                          : ""
+                    }
+                    error={
+                      draft.x?.enabled && !draft.x.hasToken && !xTokenDraft
+                        ? "Required when X search is enabled."
+                        : null
+                    }
+                    ok={
+                      draft.x?.hasToken && !xTokenDraft
+                        ? "Token on file (masked)"
+                        : null
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v.includes("•") && draft.x?.hasToken) return;
+                      setXTokenDraft(v);
+                      if (v.trim()) {
+                        setDraft((d) => ({
+                          ...d,
+                          x: {
+                            enabled: d.x?.enabled ?? true,
+                            hasToken: true,
+                          },
+                        }));
+                      }
+                    }}
+                    placeholder="Paste bearer token"
+                  />
+                  <div className="field-row">
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => {
+                        void (async () => {
+                          try {
+                            const msg = await hostTestX();
+                            setXStatus(msg);
+                          } catch (e) {
+                            setXStatus(
+                              e instanceof Error ? e.message : String(e),
+                            );
+                          }
+                        })();
+                      }}
+                    >
+                      Test X config
+                    </button>
+                  </div>
+                  {xStatus ? (
+                    <p className="field__hint" role="status">
+                      {xStatus}
+                    </p>
+                  ) : null}
+                </div>
+
                 <ToggleField
                   id={`${baseId}-cf-enabled`}
                   label="Enable Confluence (read-only)"

@@ -3,7 +3,7 @@
 use cd_core::branding::Branding;
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
-    WorkspaceConfig, CONFLUENCE_PAT_REF,
+    WorkspaceConfig, XSettings, CONFLUENCE_PAT_REF, X_API_KEY_REF,
 };
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
 use cd_core::permissions::PermissionDecision;
@@ -15,8 +15,8 @@ use cd_core::research::{
     build_host, events_to_dto, grant_and_execute, research_turn, EventDto,
 };
 use cd_core::keychain_store::{
-    key_ref_confluence_pat, key_ref_for_profile, looks_like_raw_secret, KeychainSecretStore,
-    SecretStore,
+    key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key, looks_like_raw_secret,
+    KeychainSecretStore, SecretStore,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::chat::{ChatMessage, Role as ChatRole};
@@ -87,6 +87,13 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     // Open-web research tools (opt-in; no secrets) + publisher RSS enable map.
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
+    // X search when enabled + bearer in keychain.
+    if cfg.x.enabled {
+        let bearer = state.secrets.get(&key_ref_x_api_key()).ok().flatten();
+        host.set_x_search(true, bearer);
+    } else {
+        host.set_x_search(false, None);
+    }
     *state.host.lock().expect("host") = Some(host);
     Ok(())
 }
@@ -627,6 +634,78 @@ fn confluence_has_token(state: State<'_, AppState>) -> Result<bool, String> {
         .secrets
         .has(&key_ref_confluence_pat())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_x_settings(state: State<'_, AppState>) -> XSettings {
+    state.config.lock().expect("config").x.clone()
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveXReq {
+    enabled: bool,
+    /// Optional new bearer; empty means keep existing.
+    api_key: Option<String>,
+}
+
+#[tauri::command]
+fn save_x_settings(state: State<'_, AppState>, req: SaveXReq) -> Result<XSettings, String> {
+    let mut api_key_ref = state.config.lock().expect("config").x.api_key_ref.clone();
+
+    if let Some(key) = req.api_key {
+        let key = key.trim();
+        if !key.is_empty() && !key.chars().all(|c| c == '•') {
+            state
+                .secrets
+                .set(&key_ref_x_api_key(), key)
+                .map_err(|e| e.to_string())?;
+            api_key_ref = Some(X_API_KEY_REF.to_string());
+        }
+    }
+
+    let x = XSettings {
+        enabled: req.enabled,
+        api_key_ref,
+    };
+
+    let mut cfg = state.config.lock().expect("config");
+    cfg.x = x.clone();
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(x)
+}
+
+#[tauri::command]
+fn x_has_token(state: State<'_, AppState>) -> Result<bool, String> {
+    state
+        .secrets
+        .has(&key_ref_x_api_key())
+        .map_err(|e| e.to_string())
+}
+
+/// Validate token presence (no live X API call — avoids burning quota / leaking status).
+#[tauri::command]
+fn test_x_config(state: State<'_, AppState>) -> Result<String, String> {
+    let cfg = state.config.lock().expect("config").x.clone();
+    if !cfg.enabled {
+        return Ok("X search disabled".into());
+    }
+    let has = state
+        .secrets
+        .has(&key_ref_x_api_key())
+        .map_err(|e| e.to_string())?;
+    if !has {
+        return Err(
+            "No X API bearer in secure storage. Paste a key under Connectors (paid X API plan)."
+                .into(),
+        );
+    }
+    Ok(
+        "X enabled with a key on file. Search requires a paid/usable X API plan; free tier cannot search."
+            .into(),
+    )
 }
 
 /// Validate URL + token presence (no live network call to avoid leaking PAT to logs).
@@ -1693,6 +1772,10 @@ pub fn run() {
             save_confluence_settings,
             confluence_has_token,
             test_confluence_config,
+            get_x_settings,
+            save_x_settings,
+            x_has_token,
+            test_x_config,
             get_web_research_enabled,
             set_web_research_enabled,
             list_web_research_sources,

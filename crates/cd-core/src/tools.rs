@@ -46,6 +46,8 @@ pub mod names {
     pub const WEB_SEARCH: &str = "web_search";
     /// Open-web page fetch (opt-in; SSRF-safe text extract).
     pub const WEB_FETCH: &str = "web_fetch";
+    /// X (Twitter) recent search (opt-in; requires API bearer in keychain).
+    pub const X_SEARCH: &str = "x_search";
 }
 
 /// MVP tool specifications (schemas only; execution is host/agent work).
@@ -140,14 +142,19 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::WEB_SEARCH.into(),
-            description: "Search the public web (Google News RSS multi-query + fallbacks). Returns titles/snippets — NOT full articles. For named people / commanders killed / casualty lists, call again with alternate keyword queries, then web_fetch open list articles. Do not conclude absence of names from titles alone. Requires Web research enabled."
+            description: "Search the public web (Google News RSS + curated publisher feeds + fallbacks). Returns titles/snippets — NOT full articles. Optional packs narrow publisher fan-in to matching groups (intersected with user-enabled sources): public_intl, us_mainstream, middle_east, security, progressive, conservative. Omit packs to use all enabled publishers. For named people / casualties, run 2+ queries then web_fetch open articles. Requires Web research enabled."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Search query — prefer keywords over long questions" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 15 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 15 },
+                    "packs": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional publisher pack ids to prefer (e.g. [\"middle_east\",\"security\"]). Invalid ids ignored; empty/omit = all enabled."
+                    }
                 },
                 "required": ["query"]
             }),
@@ -163,6 +170,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "url": { "type": "string", "description": "Absolute http(s) URL" }
                 },
                 "required": ["url"]
+            }),
+        },
+        ToolSpec {
+            name: names::X_SEARCH.into(),
+            description: "Search recent posts on X (Twitter) via official API. Requires X connector enabled + API bearer in keychain (paid plan). Use for breaking social/primary posts; not a substitute for publisher long-form. Soft-fails on auth/rate limits. Do not invent posts when empty."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "X recent-search query (keywords, from:user, etc. per X operators)" },
+                    "limit": { "type": "integer", "minimum": 10, "maximum": 25 }
+                },
+                "required": ["query"]
             }),
         },
     ]
@@ -185,6 +206,7 @@ mod tests {
         assert!(specs.iter().any(|t| t.name == names::SAVE_SKILL));
         assert!(specs.iter().any(|t| t.name == names::WEB_SEARCH));
         assert!(specs.iter().any(|t| t.name == names::WEB_FETCH));
+        assert!(specs.iter().any(|t| t.name == names::X_SEARCH));
         let save = specs.iter().find(|t| t.name == names::SAVE_MEMORY).unwrap();
         assert_eq!(save.side_effect, ToolSideEffect::SoftWrite);
         let skill = specs.iter().find(|t| t.name == names::SAVE_SKILL).unwrap();

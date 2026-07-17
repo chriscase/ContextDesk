@@ -72,7 +72,10 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
         .any(|n| *n == "web_search" || *n == "web_fetch")
     {
         s.push_str(
-            "Web research is ENABLED: for current events, call web_search first (Google News RSS + fallbacks). \
+            "Web research is ENABLED: for current events, call web_search first (Google News + publisher feeds). \
+             Optional packs on web_search narrow publisher fan-in (user toggles remain the max): \
+             public_intl, us_mainstream, middle_east, security, progressive, conservative. \
+             Examples: Middle East conflict → packs [\"middle_east\",\"security\"]; US politics → [\"us_mainstream\"]; omit packs for general queries. \
              For who/killed/commander/officials questions: run 2+ different web_search queries \
              (e.g. condensed keywords, \"IRGC commander killed\", \"list officials killed\"). \
              Titles alone are incomplete — when names matter, web_fetch open publishers \
@@ -80,6 +83,13 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
              NEVER assert \"nobody was killed\" or \"no named officials\" from RSS titles alone — \
              report what titles/snippets show, what you could not verify, and point the user at the Sources chips. \
              Cite by short name; never paste long raw URLs. Do not refuse web research when tools returned data.\n",
+        );
+    }
+    if tool_names.iter().any(|n| *n == "x_search") {
+        s.push_str(
+            "X search is ENABLED (x_search): use for breaking/social/primary posts when the question needs recent X content. \
+             Not free — if the tool returns auth/rate-limit notes, say so and fall back to web_search. \
+             Never invent posts or handles. Prefer publisher web_fetch for long-form verification.\n",
         );
     }
     s
@@ -112,6 +122,14 @@ mod tests {
         assert!(p.contains("web_search"));
         assert!(p.contains("Web research is ENABLED"));
         assert!(p.contains("Do not refuse web research"));
+        assert!(p.contains("packs"));
+    }
+
+    #[test]
+    fn system_policy_lists_x_when_enabled() {
+        let p = system_policy_with_tools(&["web_search", "x_search"]);
+        assert!(p.contains("X search is ENABLED"));
+        assert!(p.contains("x_search"));
     }
 
     #[test]

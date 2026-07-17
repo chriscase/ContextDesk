@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 /// Stable keychain ref for Confluence personal access token (never the token itself).
 pub const CONFLUENCE_PAT_REF: &str = "confluence/default/pat";
 
+/// Stable keychain ref for X (Twitter) API bearer token (never the token itself).
+pub const X_API_KEY_REF: &str = "x/default/api_key";
+
 /// Confluence connector settings (token lives in keychain under [`CONFLUENCE_PAT_REF`]).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ConfluenceSettings {
@@ -26,6 +29,27 @@ pub struct ConfluenceSettings {
     /// Keychain reference id when a PAT has been saved (never the secret).
     #[serde(default)]
     pub pat_ref: Option<String>,
+}
+
+/// X (Twitter) search connector (bearer token in keychain under [`X_API_KEY_REF`]).
+///
+/// Not free RSS: search requires a paid/usable X API plan. When disabled or
+/// missing a key, `x_search` is not registered for the agent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct XSettings {
+    /// When false, connector is ignored even if a key exists.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Keychain reference id when a bearer has been saved (never the secret).
+    #[serde(default)]
+    pub api_key_ref: Option<String>,
+}
+
+impl XSettings {
+    /// True when enabled and a keychain ref is recorded (host still checks key presence).
+    pub fn is_configured(&self) -> bool {
+        self.enabled && self.api_key_ref.is_some()
+    }
 }
 
 impl ConfluenceSettings {
@@ -53,6 +77,9 @@ pub struct AppConfig {
     /// Confluence read-only connector.
     #[serde(default)]
     pub confluence: ConfluenceSettings,
+    /// X (Twitter) search connector (optional paid API key).
+    #[serde(default)]
+    pub x: XSettings,
     /// Theme id.
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -140,6 +167,13 @@ fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
             ));
         }
     }
+    if let Some(r) = &cfg.x.api_key_ref {
+        if looks_like_raw_secret(r) {
+            return Err(CoreError::Config(
+                "refusing config that embeds raw X secrets in api_key_ref".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -187,18 +221,36 @@ mod tests {
             pat_ref: Some(CONFLUENCE_PAT_REF.into()),
         };
         cfg.web_research_enabled = true;
+        cfg.x = XSettings {
+            enabled: true,
+            api_key_ref: Some(X_API_KEY_REF.into()),
+        };
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.providers.active().unwrap().id, "ollama-local");
         assert!(loaded.confluence.is_configured());
         assert_eq!(loaded.confluence.spaces, vec!["ENG"]);
         assert!(loaded.web_research_enabled);
+        assert!(loaded.x.is_configured());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("ATATT"));
         assert!(text.contains("wiki.example.com"));
         assert!(text.contains(CONFLUENCE_PAT_REF));
+        assert!(text.contains(X_API_KEY_REF));
         assert!(text.contains("web_research_enabled"));
+    }
+
+    #[test]
+    fn x_defaults_off() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.x.enabled);
+        assert!(!cfg.x.is_configured());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"providers":{"profiles":[],"active_id":null}}"#).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert!(!loaded.x.enabled);
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub mod tool_host;
 pub mod tools;
 pub mod web_research;
 pub mod workspace;
+pub mod x_search;
 
 pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
 pub use error::{CoreError, CoreResult};

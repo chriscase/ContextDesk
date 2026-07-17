@@ -153,6 +153,11 @@ pub fn key_ref_confluence_pat() -> String {
     crate::config::CONFLUENCE_PAT_REF.to_string()
 }
 
+/// Keychain ref for X API bearer token (same constant as config).
+pub fn key_ref_x_api_key() -> String {
+    crate::config::X_API_KEY_REF.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

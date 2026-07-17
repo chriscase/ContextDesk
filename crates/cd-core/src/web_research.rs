@@ -504,18 +504,25 @@ pub fn condense_search_query(q: &str) -> String {
 /// Multi-backend public web search (no API keys).
 ///
 /// 1. Google News RSS (multi-query variants)
-/// 2. Curated publisher RSS fan-in (`enabled_publisher_ids`)
+/// 2. Curated publisher RSS fan-in (`enabled_publisher_ids`, optionally pack-filtered)
 /// 3. DDG Instant Answer + DDG HTML fill
+///
+/// `packs` — optional publisher pack ids (e.g. `middle_east`). Empty = all enabled.
 pub async fn web_search(
     query: &str,
     limit: usize,
     enabled_publisher_ids: &std::collections::HashSet<String>,
+    packs: &[String],
 ) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
     let q = sanitize_search_query(query)?;
     let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
     let variants = search_query_variants(&q);
     let mut hits: Vec<WebSearchHit> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+
+    let (publisher_ids, pack_notes) =
+        crate::news_sources::filter_ids_by_packs(enabled_publisher_ids, packs);
+    notes.extend(pack_notes);
 
     let gnews_cap = (limit.max(4) * 2 / 3).max(4).min(limit);
     let per = ((gnews_cap + variants.len() - 1) / variants.len()).clamp(3, gnews_cap);
@@ -538,9 +545,9 @@ pub async fn web_search(
         }
     }
 
-    if !enabled_publisher_ids.is_empty() {
+    if !publisher_ids.is_empty() {
         let (pub_hits, pub_notes) =
-            crate::news_sources::search_publisher_feeds(&q, limit, enabled_publisher_ids).await;
+            crate::news_sources::search_publisher_feeds(&q, limit, &publisher_ids).await;
         notes.extend(pub_notes);
         merge_hits(&mut hits, pub_hits, limit);
     }
@@ -584,7 +591,7 @@ pub async fn web_search_default_publishers(
     limit: usize,
 ) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
     let enabled = crate::news_sources::enabled_ids(&std::collections::HashMap::new());
-    web_search(query, limit, &enabled).await
+    web_search(query, limit, &enabled, &[]).await
 }
 
 fn truncate_note(s: &str, max: usize) -> String {

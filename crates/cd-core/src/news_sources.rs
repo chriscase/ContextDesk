@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// UI / config grouping for source packs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewsSourceGroup {
     /// Public broadcasters / wire-style international.
@@ -44,6 +44,43 @@ impl NewsSourceGroup {
             Self::Progressive => "Progressive / investigative",
             Self::Conservative => "Conservative / libertarian",
         }
+    }
+
+    /// Stable pack id for `web_search` packs argument / Settings group key.
+    pub fn pack_id(self) -> &'static str {
+        match self {
+            Self::PublicIntl => "public_intl",
+            Self::UsMainstream => "us_mainstream",
+            Self::MiddleEast => "middle_east",
+            Self::Security => "security",
+            Self::Progressive => "progressive",
+            Self::Conservative => "conservative",
+        }
+    }
+
+    /// Parse pack id; unknown → None.
+    pub fn from_pack_id(id: &str) -> Option<Self> {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "public_intl" | "public" | "intl" | "international" => Some(Self::PublicIntl),
+            "us_mainstream" | "us" | "mainstream" => Some(Self::UsMainstream),
+            "middle_east" | "me" | "mena" => Some(Self::MiddleEast),
+            "security" | "defense" | "defence" => Some(Self::Security),
+            "progressive" | "left" | "investigative" => Some(Self::Progressive),
+            "conservative" | "right" | "libertarian" => Some(Self::Conservative),
+            _ => None,
+        }
+    }
+
+    /// All pack ids (stable order).
+    pub fn all_pack_ids() -> &'static [&'static str] {
+        &[
+            "public_intl",
+            "us_mainstream",
+            "middle_east",
+            "security",
+            "progressive",
+            "conservative",
+        ]
     }
 }
 
@@ -386,15 +423,7 @@ pub fn list_sources_dto(overrides: &HashMap<String, bool>) -> Vec<NewsSourceDto>
         .map(|s| NewsSourceDto {
             id: s.id.into(),
             label: s.label.into(),
-            group: match s.group {
-                NewsSourceGroup::PublicIntl => "public_intl",
-                NewsSourceGroup::UsMainstream => "us_mainstream",
-                NewsSourceGroup::MiddleEast => "middle_east",
-                NewsSourceGroup::Security => "security",
-                NewsSourceGroup::Progressive => "progressive",
-                NewsSourceGroup::Conservative => "conservative",
-            }
-            .into(),
+            group: s.group.pack_id().into(),
             group_label: s.group.label().into(),
             enabled: *enabled.get(s.id).unwrap_or(&s.default_enabled),
             default_enabled: s.default_enabled,
@@ -411,6 +440,62 @@ pub fn enabled_ids(overrides: &HashMap<String, bool>) -> HashSet<String> {
         .filter(|(_, en)| *en)
         .map(|(id, _)| id)
         .collect()
+}
+
+/// Intersect user-enabled source ids with optional pack filters.
+///
+/// - Empty / missing packs → return `enabled` unchanged + note `packs:all`.
+/// - Known packs → only sources in those groups that are also user-enabled.
+/// - Unknown pack ids → ignored with notes (not a hard fail).
+/// - If all packs invalid or intersection empty → empty set + notes (caller may fall back).
+pub fn filter_ids_by_packs(
+    enabled: &HashSet<String>,
+    packs: &[String],
+) -> (HashSet<String>, Vec<String>) {
+    let mut notes = Vec::new();
+    if packs.is_empty() {
+        notes.push("packs:all".into());
+        return (enabled.clone(), notes);
+    }
+
+    let mut groups: HashSet<NewsSourceGroup> = HashSet::new();
+    let mut unknown = Vec::new();
+    for p in packs {
+        match NewsSourceGroup::from_pack_id(p) {
+            Some(g) => {
+                groups.insert(g);
+            }
+            None => unknown.push(p.trim().to_string()),
+        }
+    }
+    for u in &unknown {
+        notes.push(format!("packs:unknown:{u}"));
+    }
+    if groups.is_empty() {
+        notes.push("packs:none_valid".into());
+        // Fall back to all enabled so a typo does not zero-out research.
+        notes.push("packs:fallback_all".into());
+        return (enabled.clone(), notes);
+    }
+
+    let pack_list: Vec<&str> = groups.iter().map(|g| g.pack_id()).collect();
+    notes.push(format!("packs:{}", pack_list.join(",")));
+
+    let mut out = HashSet::new();
+    for s in NEWS_SOURCES {
+        if !enabled.contains(s.id) {
+            continue;
+        }
+        if groups.contains(&s.group) {
+            out.insert(s.id.to_string());
+        }
+    }
+    if out.is_empty() {
+        notes.push("packs:intersection_empty".into());
+    } else {
+        notes.push(format!("packs:sources:{}", out.len()));
+    }
+    (out, notes)
 }
 
 // --- Feed cache + parse ---
@@ -852,6 +937,26 @@ mod tests {
         let m = resolve_enabled_map(&o);
         assert_eq!(m.get("bbc_world"), Some(&false));
         assert_eq!(m.get("al_jazeera"), Some(&true));
+    }
+
+    #[test]
+    fn filter_ids_by_packs_narrows_and_falls_back() {
+        let enabled = enabled_ids(&HashMap::new());
+        let (all, notes) = filter_ids_by_packs(&enabled, &[]);
+        assert_eq!(all.len(), enabled.len());
+        assert!(notes.iter().any(|n| n == "packs:all"));
+
+        let (me, notes) = filter_ids_by_packs(&enabled, &["middle_east".into()]);
+        assert!(!me.is_empty());
+        assert!(me.len() < enabled.len());
+        assert!(me.contains("al_jazeera") || me.contains("anadolu") || me.contains("jpost"));
+        assert!(!me.contains("fox_news"));
+        assert!(notes.iter().any(|n| n.starts_with("packs:middle_east") || n.contains("middle_east")));
+
+        let (fallback, notes) = filter_ids_by_packs(&enabled, &["not_a_real_pack".into()]);
+        assert_eq!(fallback.len(), enabled.len());
+        assert!(notes.iter().any(|n| n.contains("unknown")));
+        assert!(notes.iter().any(|n| n.contains("fallback_all")));
     }
 
     #[test]

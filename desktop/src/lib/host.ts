@@ -599,6 +599,43 @@ export async function hostTestConfluence(): Promise<string> {
   return invoke<string>("test_confluence_config");
 }
 
+export type XSettingsDto = {
+  enabled: boolean;
+  api_key_ref: string | null;
+};
+
+export async function hostGetX(): Promise<XSettingsDto | null> {
+  if (!isTauri()) return null;
+  return invoke<XSettingsDto>("get_x_settings");
+}
+
+export async function hostSaveX(args: {
+  enabled: boolean;
+  apiKey?: string;
+}): Promise<XSettingsDto> {
+  if (!isTauri()) {
+    throw new Error("X settings require Tauri host");
+  }
+  return invoke<XSettingsDto>("save_x_settings", {
+    req: {
+      enabled: args.enabled,
+      api_key: args.apiKey ?? null,
+    },
+  });
+}
+
+export async function hostXHasToken(): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("x_has_token");
+}
+
+export async function hostTestX(): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Test requires Tauri host");
+  }
+  return invoke<string>("test_x_config");
+}
+
 export async function hostGetWebResearchEnabled(): Promise<boolean | null> {
   if (!isTauri()) return null;
   return invoke<boolean>("get_web_research_enabled");

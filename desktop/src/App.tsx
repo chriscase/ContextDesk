@@ -96,6 +96,9 @@ function loadSetup(): AppSetupState {
       if (parsed.webResearchEnabled === undefined) {
         parsed.webResearchEnabled = false;
       }
+      if (!parsed.x) {
+        parsed.x = { enabled: false, hasToken: false };
+      }
       return parsed;
     }
   } catch {
@@ -119,6 +122,7 @@ function loadSetup(): AppSetupState {
       spaces: "",
       hasToken: false,
     },
+    x: { enabled: false, hasToken: false },
     webResearchEnabled: false,
   };
 }
@@ -1499,6 +1503,19 @@ export function App() {
 
   return (
     <div className="app-shell">
+      {settingsOpen ? (
+      <SettingsModal
+        open={settingsOpen}
+        initialSection={settingsSection}
+        setup={setup}
+        theme={theme}
+        onThemeChange={setTheme}
+        onClose={closeSettings}
+        onSaveSetup={onSaveSetup}
+        onRecheckHost={refreshHostPreflight}
+        hostReport={hostPreflightReport}
+      />
+      ) : (
       <div className="app-chrome">
       <header className="titlebar">
         <div className="titlebar__brand">
@@ -2056,18 +2073,7 @@ export function App() {
         </span>
       </footer>
       </div>
-
-      <SettingsModal
-        open={settingsOpen}
-        initialSection={settingsSection}
-        setup={setup}
-        theme={theme}
-        onThemeChange={setTheme}
-        onClose={closeSettings}
-        onSaveSetup={onSaveSetup}
-        onRecheckHost={refreshHostPreflight}
-        hostReport={hostPreflightReport}
-      />
+      )}
 
       <PermissionModal prompt={permission} onRespond={onPermissionRespond} />
 

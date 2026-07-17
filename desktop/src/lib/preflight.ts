@@ -23,6 +23,11 @@ export type ConfluenceSetup = {
   hasToken: boolean;
 };
 
+export type XSetup = {
+  enabled: boolean;
+  hasToken: boolean;
+};
+
 export type AppSetupState = {
   dataDirWritable: boolean;
   workspaceName: string | null;
@@ -38,6 +43,8 @@ export type AppSetupState = {
   ollamaReachable: boolean | null;
   remoteReachable: boolean | null;
   confluence: ConfluenceSetup;
+  /** Optional X search (API key in keychain). */
+  x?: XSetup;
   /** Opt-in open-web tools (web_search / web_fetch). Default off. */
   webResearchEnabled?: boolean;
 };
