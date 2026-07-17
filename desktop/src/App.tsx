@@ -342,10 +342,48 @@ export function App() {
         const forceLocal =
           setup.providerKind === "ollama" && setup.ollamaReachable === false;
         const events = await agentTurn(sessionId, text, forceLocal);
+
+        // Progressive append of real text_delta chunks from the agent host
+        // (batch IPC; UI materializes tokens — not a hardcoded demo shell).
+        const textEvents = events.filter((e) => e.kind === "text_delta");
+        const prefersReduced =
+          typeof window !== "undefined" &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        const delayMs = prefersReduced ? 0 : 18;
+
+        for (const ev of textEvents) {
+          const chunk = String(ev.payload?.text ?? "");
+          if (!chunk) continue;
+          setMessages((m) => {
+            const idx = m.findIndex((x) => x.id === assistantId);
+            if (idx < 0) return m;
+            const next = [...m];
+            next[idx] = {
+              ...next[idx],
+              content: next[idx].content + chunk,
+              streaming: true,
+            };
+            return next;
+          });
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+        }
+
+        // Tools, citations, trail, permissions (once).
         setMessages((m) => {
           const idx = m.findIndex((x) => x.id === assistantId);
           if (idx < 0) return m;
-          const { msg, permission: perm } = applyEventsToMessage(m[idx], events);
+          const streamedContent = m[idx].content;
+          const { msg, permission: perm } = applyEventsToMessage(
+            { ...m[idx], content: streamedContent },
+            events.filter((e) => e.kind !== "text_delta"),
+          );
+          const merged: Msg = {
+            ...msg,
+            content: streamedContent || msg.content,
+            streaming: false,
+          };
           if (perm) {
             setPermission(perm);
             try {
@@ -358,7 +396,7 @@ export function App() {
               setPendingToolArgs({});
             }
           }
-          const cite = msg.citations?.[0];
+          const cite = merged.citations?.[0];
           if (cite) {
             setSourcePath(cite.id);
             void hostReadFile(cite.id)
@@ -372,12 +410,11 @@ export function App() {
                 );
               });
           }
-          // Refresh memory if save_memory tool ran
-          if (msg.tools?.some((t) => t.name === "save_memory" && t.ok)) {
+          if (merged.tools?.some((t) => t.name === "save_memory" && t.ok)) {
             void refreshMemory();
           }
           const next = [...m];
-          next[idx] = msg;
+          next[idx] = merged;
           return next;
         });
       } catch (e) {
