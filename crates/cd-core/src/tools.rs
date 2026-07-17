@@ -38,6 +38,10 @@ pub mod names {
     pub const SAVE_MEMORY: &str = "save_memory";
     /// Propose authoring a skill markdown playbook (SoftWrite + Accept).
     pub const SAVE_SKILL: &str = "save_skill";
+    /// Confluence CQL search (read-only; PAT from host).
+    pub const CONFLUENCE_SEARCH: &str = "confluence_search";
+    /// Confluence page fetch (read-only).
+    pub const CONFLUENCE_GET_PAGE: &str = "confluence_get_page";
 }
 
 /// MVP tool specifications (schemas only; execution is host/agent work).
@@ -101,6 +105,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "allows_write": { "type": "boolean", "description": "If true, skill is saved disabled until user enables" }
                 },
                 "required": ["id", "name", "description", "body_markdown"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_SEARCH.into(),
+            description: "Search Confluence (read-only CQL). Requires connector enabled + PAT in keychain. Space allowlist applied."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "CQL or free text (wrapped as text~)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_GET_PAGE.into(),
+            description: "Fetch a Confluence page body (read-only). Space must be allowlisted."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string" }
+                },
+                "required": ["page_id"]
             }),
         },
     ]

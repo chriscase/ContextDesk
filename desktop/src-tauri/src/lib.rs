@@ -55,7 +55,18 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     let audit = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("audit.jsonl"));
-    let host = build_host(ws, audit).map_err(|e| e.to_string())?;
+    let mut host = build_host(ws, audit).map_err(|e| e.to_string())?;
+    // Attach Confluence RO when enabled (PAT from keychain only).
+    if cfg.confluence.enabled && cfg.confluence.is_configured() {
+        let pat = state
+            .secrets
+            .get(&key_ref_confluence_pat())
+            .ok()
+            .flatten();
+        host.set_confluence(Some(cfg.confluence.to_ro_config()), pat);
+    } else {
+        host.set_confluence(None, None);
+    }
     *state.host.lock().expect("host") = Some(host);
     Ok(())
 }

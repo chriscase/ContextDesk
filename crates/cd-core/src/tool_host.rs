@@ -1,6 +1,7 @@
 //! Tool host: validate, gate side-effects, execute MVP tools.
 
 use crate::audit::AuditLog;
+use crate::confluence_ro::{self, ConfluenceRoConfig};
 use crate::error::{CoreError, CoreResult};
 use crate::events::{StreamEvent, ToolPhase};
 use crate::index::KeywordIndex;
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Result of a tool invocation.
@@ -53,6 +55,13 @@ pub struct ToolHost {
     pending: std::collections::HashMap<String, PermissionRequest>,
     /// Single-use grants after UI AllowOnce (request_id → tool name + target).
     approved_once: std::collections::HashMap<String, (String, String)>,
+    /// Optional Confluence RO (host supplies PAT; never stored in webview).
+    confluence: Option<ConfluenceRoConfig>,
+    /// Confluence PAT for RO tools (host keychain).
+    confluence_pat: Option<String>,
+    /// Rate-limit: min interval between Confluence HTTP calls.
+    confluence_min_interval: Duration,
+    last_confluence_call: Option<Instant>,
 }
 
 impl ToolHost {
@@ -71,7 +80,29 @@ impl ToolHost {
             memory_dir,
             pending: std::collections::HashMap::new(),
             approved_once: std::collections::HashMap::new(),
+            confluence: None,
+            confluence_pat: None,
+            // Rate-limit friendly: ≥400ms between Confluence HTTP calls
+            confluence_min_interval: Duration::from_millis(400),
+            last_confluence_call: None,
         }
+    }
+
+    /// Attach Confluence RO config + PAT (from host keychain only).
+    pub fn set_confluence(&mut self, cfg: Option<ConfluenceRoConfig>, pat: Option<String>) {
+        self.confluence = cfg;
+        self.confluence_pat = pat;
+    }
+
+    /// Tool specs; Confluence tools omitted when connector not configured.
+    pub fn specs_for_model(&self) -> Vec<ToolSpec> {
+        let mut specs = mvp_tool_specs();
+        if self.confluence.is_none() || self.confluence_pat.is_none() {
+            specs.retain(|t| {
+                t.name != names::CONFLUENCE_SEARCH && t.name != names::CONFLUENCE_GET_PAGE
+            });
+        }
+        specs
     }
 
     /// Register a UI decision for a pending request id.
@@ -115,7 +146,7 @@ impl ToolHost {
 
     /// Tool specs for the model.
     pub fn specs(&self) -> Vec<ToolSpec> {
-        mvp_tool_specs()
+        self.specs_for_model()
     }
 
     /// Rebuild index.
@@ -213,6 +244,8 @@ impl ToolHost {
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
             names::SAVE_MEMORY => self.tool_save_memory(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
+            names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments)?,
+            names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments)?,
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
             }
@@ -369,6 +402,112 @@ impl ToolHost {
             format!("saved {}", path.display()),
             content,
             Some(path.display().to_string()),
+        ))
+    }
+
+    fn throttle_confluence(&mut self) -> CoreResult<()> {
+        if let Some(last) = self.last_confluence_call {
+            let elapsed = last.elapsed();
+            if elapsed < self.confluence_min_interval {
+                std::thread::sleep(self.confluence_min_interval - elapsed);
+            }
+        }
+        self.last_confluence_call = Some(Instant::now());
+        Ok(())
+    }
+
+    fn tool_confluence_search(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let q = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if q.is_empty() {
+            return Err(CoreError::Message(
+                "confluence_search requires query".into(),
+            ));
+        }
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .min(25) as usize;
+        // Free text → simple CQL text search
+        let cql = if q.to_lowercase().contains("space") || q.contains('=') {
+            q.to_string()
+        } else {
+            format!("text ~ \"{}\"", q.replace('"', "\\\""))
+        };
+        self.throttle_confluence()?;
+        let hits = block_on_confluence(confluence_ro::cql_search(&cfg, &cql, &pat, limit))?;
+        let mut lines = Vec::new();
+        let mut first = None;
+        for h in &hits {
+            if first.is_none() {
+                first = Some(format!("confluence:{}", h.id));
+            }
+            lines.push(format!(
+                "- [{}] {} (space {}) — {}",
+                h.id, h.title, h.space, h.excerpt
+            ));
+        }
+        let raw = if lines.is_empty() {
+            format!("No Confluence hits for `{q}` (check spaces allowlist).")
+        } else {
+            lines.join("\n")
+        };
+        Ok((
+            true,
+            format!("{} Confluence hit(s)", hits.len()),
+            raw,
+            first,
+        ))
+    }
+
+    fn tool_confluence_get_page(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let page_id = args
+            .get("page_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if page_id.is_empty() {
+            return Err(CoreError::Message(
+                "confluence_get_page requires page_id".into(),
+            ));
+        }
+        self.throttle_confluence()?;
+        let body = block_on_confluence(confluence_ro::fetch_page(&cfg, page_id, &pat))?;
+        Ok((
+            true,
+            format!("fetched confluence page {page_id}"),
+            body,
+            Some(format!("confluence:{page_id}")),
         ))
     }
 
@@ -560,6 +699,22 @@ fn preview_args(args: &Value) -> String {
     }
 }
 
+fn block_on_confluence<F, T>(fut: F) -> CoreResult<T>
+where
+    F: std::future::Future<Output = CoreResult<T>>,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => tokio::task::block_in_place(|| h.block_on(fut)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| CoreError::Message(format!("runtime: {e}")))?;
+            rt.block_on(fut)
+        }
+    }
+}
+
 /// Serialize tool specs to OpenAI tools array.
 pub fn openai_tools_json() -> Value {
     let tools: Vec<Value> = mvp_tool_specs()
@@ -649,6 +804,51 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, StreamEvent::PermissionRequired { .. })));
+    }
+
+    #[test]
+    fn confluence_tools_hidden_without_config() {
+        let (_tmp, host) = host_with_docs();
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n == names::CONFLUENCE_SEARCH));
+        assert!(!names.iter().any(|n| n == names::CONFLUENCE_GET_PAGE));
+    }
+
+    #[test]
+    fn confluence_search_requires_pat() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_confluence(
+            Some(ConfluenceRoConfig {
+                base_url: "https://wiki.example.com".into(),
+                spaces: vec!["ENG".into()],
+            }),
+            None,
+        );
+        let err = host
+            .execute(names::CONFLUENCE_SEARCH, &json!({"query": "auth"}), None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("PAT") || err.to_string().contains("secure"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn confluence_is_read_only_side_effect() {
+        let specs = mvp_tool_specs();
+        let s = specs
+            .iter()
+            .find(|t| t.name == names::CONFLUENCE_SEARCH)
+            .unwrap();
+        assert_eq!(s.side_effect, ToolSideEffect::Read);
+        let g = specs
+            .iter()
+            .find(|t| t.name == names::CONFLUENCE_GET_PAGE)
+            .unwrap();
+        assert_eq!(g.side_effect, ToolSideEffect::Read);
     }
 
     #[test]
