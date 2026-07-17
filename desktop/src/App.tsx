@@ -197,8 +197,12 @@ export function App() {
     id: string;
     title: string;
     messages: Msg[];
-    /** Compacted older turns (full messages retained in messages). */
+    /**
+     * When set, UI folds older turns into a banner and only shows the last
+     * `compactKeepLast` messages. Full `messages` array is never deleted.
+     */
     compactSummary: string | null;
+    /** How many recent messages stay visible while compacted. */
     compactKeepLast: number;
   };
 
@@ -207,7 +211,7 @@ export function App() {
     title,
     messages: [],
     compactSummary: null,
-    compactKeepLast: 12,
+    compactKeepLast: 6,
   });
 
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
@@ -233,6 +237,46 @@ export function App() {
     );
   };
   const sessionId = activeSession?.id ?? "";
+  const compactKeep = activeSession?.compactKeepLast ?? 6;
+  const isCompacted = Boolean(activeSession?.compactSummary);
+  const canCompact = messages.length > compactKeep;
+  const hiddenCount =
+    isCompacted && messages.length > compactKeep
+      ? messages.length - compactKeep
+      : 0;
+  /** Visible transcript — folds older turns when Compact is active. */
+  const visibleMessages =
+    isCompacted && hiddenCount > 0 ? messages.slice(-compactKeep) : messages;
+
+  const compactActiveSession = () => {
+    setSessions((all) =>
+      all.map((s) => {
+        if (s.id !== resolvedSessionId) return s;
+        const keep = s.compactKeepLast;
+        if (s.messages.length <= keep) {
+          return { ...s, compactSummary: null };
+        }
+        const older = s.messages.slice(0, -keep);
+        const lines = older.map((m) => {
+          const snip = m.content.replace(/\s+/g, " ").trim().slice(0, 100);
+          return `• ${m.role}: ${snip}${m.content.length > 100 ? "…" : ""}`;
+        });
+        return {
+          ...s,
+          compactSummary: lines.join("\n"),
+        };
+      }),
+    );
+  };
+
+  const expandActiveSession = () => {
+    setSessions((all) =>
+      all.map((s) =>
+        s.id === resolvedSessionId ? { ...s, compactSummary: null } : s,
+      ),
+    );
+  };
+
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
@@ -758,48 +802,51 @@ export function App() {
                 </button>
                 <button
                   type="button"
-                  className="btn btn--ghost"
-                  title="Compact older turns (full history kept)"
-                  disabled={messages.length < 4}
+                  className="btn btn--ghost btn--sm"
+                  title={
+                    isCompacted
+                      ? "Show all messages in this chat"
+                      : canCompact
+                        ? `Hide older messages; keep the last ${compactKeep} visible (nothing is deleted)`
+                        : `Need more than ${compactKeep} messages to compact`
+                  }
+                  disabled={!isCompacted && !canCompact}
                   onClick={() => {
-                    setSessions((all) =>
-                      all.map((s) => {
-                        if (s.id !== resolvedSessionId) return s;
-                        const keep = s.compactKeepLast;
-                        if (s.messages.length <= keep) {
-                          return { ...s, compactSummary: null };
-                        }
-                        const older = s.messages.slice(0, -keep);
-                        const lines = older.map((m) => {
-                          const snip = m.content.slice(0, 120);
-                          return `- ${m.role}: ${snip}`;
-                        });
-                        return {
-                          ...s,
-                          compactSummary: lines.join("\n"),
-                        };
-                      }),
-                    );
+                    if (isCompacted) expandActiveSession();
+                    else compactActiveSession();
                   }}
                 >
-                  Compact
+                  {isCompacted ? "Show all" : "Compact"}
                 </button>
               </div>
               <div className="chat-scroll">
-                {activeSession?.compactSummary ? (
-                  <details className="compact-banner">
-                    <summary>
-                      Earlier conversation compacted (expand full retained
-                      history)
-                    </summary>
-                    <pre className="tool-row__detail">
-                      {activeSession.compactSummary}
-                    </pre>
-                    <p className="field__hint">
-                      Full messages remain in the session; only the model
-                      context summary is compact.
-                    </p>
-                  </details>
+                {isCompacted && hiddenCount > 0 ? (
+                  <div className="compact-banner" role="status">
+                    <div className="compact-banner__main">
+                      <strong>
+                        {hiddenCount} earlier message
+                        {hiddenCount === 1 ? "" : "s"} hidden
+                      </strong>
+                      <span className="compact-banner__meta">
+                        Showing last {compactKeep} · full history kept in session
+                      </span>
+                    </div>
+                    <div className="compact-banner__actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={expandActiveSession}
+                      >
+                        Show all
+                      </button>
+                    </div>
+                    <details className="compact-banner__details">
+                      <summary>Preview hidden turns</summary>
+                      <pre className="tool-row__detail">
+                        {activeSession?.compactSummary}
+                      </pre>
+                    </details>
+                  </div>
                 ) : null}
                 {messages.length === 0 ? (
                   <div className="empty-state">
@@ -819,7 +866,7 @@ export function App() {
                     </button>
                   </div>
                 ) : (
-                  messages.map((m) => (
+                  visibleMessages.map((m) => (
                     <article key={m.id} className="msg" data-role={m.role}>
                       <div className="msg__role">{m.role}</div>
                       {m.tools ? <ToolCallList tools={m.tools} /> : null}
