@@ -1012,14 +1012,16 @@ export function App() {
             </div>
           ) : null}
           <div className="sidebar__label">Setup</div>
-          <button
-            type="button"
-            className="session-list__item"
-            data-warn={preflight.hasBlocking ? "true" : undefined}
-            onClick={() => openSettings("preflight")}
-          >
-            Preflight {preflight.hasBlocking ? "· issues" : "· ok"}
-          </button>
+          {preflight.hasBlocking ? (
+            <button
+              type="button"
+              className="session-list__item"
+              data-warn="true"
+              onClick={() => openSettings("preflight")}
+            >
+              Preflight · issues
+            </button>
+          ) : null}
           <button
             type="button"
             className="session-list__item"
