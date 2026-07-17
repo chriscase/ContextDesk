@@ -56,6 +56,7 @@ export async function agentTurn(
   sessionId: string,
   text: string,
   forceLocal = false,
+  chatModel?: string | null,
 ): Promise<EventDto[]> {
   if (!isTauri()) {
     // Browser-only: use same offline research contract via local server if present,
@@ -83,7 +84,12 @@ export async function agentTurn(
     );
   }
   return invoke<EventDto[]>("agent_turn", {
-    req: { session_id: sessionId, text, force_local: forceLocal },
+    req: {
+      session_id: sessionId,
+      text,
+      force_local: forceLocal,
+      chat_model: chatModel?.trim() || null,
+    },
   });
 }
 
@@ -336,7 +342,31 @@ export type ChatSessionDto = {
   archived: boolean;
   pinned: boolean;
   title_locked: boolean;
+  chat_model?: string | null;
 };
+
+export type ModelOptionDto = {
+  id: string;
+  label: string;
+  provider_id: string;
+  provider_label: string;
+  is_default: boolean;
+};
+
+export async function hostListChatModels(): Promise<ModelOptionDto[]> {
+  if (!isTauri()) return [];
+  return invoke<ModelOptionDto[]>("list_chat_models");
+}
+
+export async function hostGetDefaultChatModel(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("get_default_chat_model");
+}
+
+export async function hostSetDefaultChatModel(model: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("set_default_chat_model", { model });
+}
 
 export type SessionMetaDto = {
   id: string;

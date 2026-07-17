@@ -22,6 +22,8 @@ import {
   hostDeleteChatSession,
   hostGetBranding,
   hostGetConfig,
+  hostGetDefaultChatModel,
+  hostListChatModels,
   hostListChatSessions,
   hostListMemory,
   hostLoadChatSession,
@@ -30,12 +32,14 @@ import {
   hostReadFile,
   hostRenameChatSession,
   hostSaveChatSession,
+  hostSetDefaultChatModel,
   hostSetWorkspace,
   hostSuggestChatTitle,
   hostWriteMemory,
   type BrandingDto,
   type ChatSessionDto,
   type EventDto,
+  type ModelOptionDto,
 } from "./lib/host";
 import {
   runClientPreflight,
@@ -218,11 +222,16 @@ export function App() {
     updatedAt: string;
     archived: boolean;
     pinned: boolean;
+    /** Model for this chat; null uses app default. */
+    chatModel: string | null;
   };
 
   const nowIso = () => new Date().toISOString();
 
-  const newSession = (title = "Chat"): ChatSession => {
+  const newSession = (
+    title = "Chat",
+    chatModel: string | null = null,
+  ): ChatSession => {
     const t = nowIso();
     return {
       id: crypto.randomUUID(),
@@ -235,6 +244,7 @@ export function App() {
       updatedAt: t,
       archived: false,
       pinned: false,
+      chatModel,
     };
   };
 
@@ -325,6 +335,7 @@ export function App() {
     updatedAt: dto.updated_at,
     archived: dto.archived,
     pinned: dto.pinned ?? false,
+    chatModel: dto.chat_model ?? null,
   });
 
   const sessionToDto = (s: ChatSession): ChatSessionDto => ({
@@ -345,6 +356,7 @@ export function App() {
     archived: s.archived,
     pinned: s.pinned,
     title_locked: s.titleLocked,
+    chat_model: s.chatModel,
   });
 
   const foldPreview = (msgs: Msg[], keep: number): string => {
@@ -423,7 +435,7 @@ export function App() {
         const metas = await hostListChatSessions();
         if (cancelled) return;
         if (metas.length === 0) {
-          const s = newSession("Chat 1");
+          const s = newSession("Chat 1", null);
           setSessions([s]);
           setActiveSessionId(s.id);
           setSessionsReady(true);
@@ -437,7 +449,7 @@ export function App() {
         }
         if (cancelled) return;
         if (loaded.length === 0) {
-          const s = newSession("Chat 1");
+          const s = newSession("Chat 1", null);
           setSessions([s]);
           setActiveSessionId(s.id);
         } else {
@@ -446,7 +458,7 @@ export function App() {
         }
       } catch {
         if (!cancelled) {
-          const s = newSession("Chat 1");
+          const s = newSession("Chat 1", null);
           setSessions([s]);
           setActiveSessionId(s.id);
         }
@@ -488,6 +500,33 @@ export function App() {
     return "chat";
   });
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
+  const [modelOptions, setModelOptions] = useState<ModelOptionDto[]>([]);
+  const [defaultChatModel, setDefaultChatModel] = useState<string>(
+    () => setup.chatModel || "mistral",
+  );
+
+  const refreshModels = useCallback(async () => {
+    try {
+      const [listed, def] = await Promise.all([
+        hostListChatModels(),
+        hostGetDefaultChatModel(),
+      ]);
+      setModelOptions(listed);
+      if (def?.trim()) {
+        setDefaultChatModel(def.trim());
+        setSetup((s) =>
+          s.chatModel === def.trim() ? s : { ...s, chatModel: def.trim() },
+        );
+      }
+    } catch {
+      /* browser / host */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModels();
+  }, [refreshModels, setup.providerKind, setup.baseUrl]);
+
   useEffect(() => {
     localStorage.setItem("cd-pane", pane);
   }, [pane]);
@@ -675,7 +714,15 @@ export function App() {
         // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
         const forceLocal =
           setup.providerKind === "ollama" && setup.ollamaReachable === false;
-        const events = await agentTurn(sessionId, text, forceLocal);
+        const sessionModel =
+          sessions.find((s) => s.id === sessionId)?.chatModel ??
+          defaultChatModel;
+        const events = await agentTurn(
+          sessionId,
+          text,
+          forceLocal,
+          sessionModel,
+        );
 
         // Progressive append of real text_delta chunks from the agent host
         // (batch IPC; UI materializes tokens — not a hardcoded demo shell).
@@ -797,6 +844,7 @@ export function App() {
       sessionId,
       resolvedSessionId,
       sessions,
+      defaultChatModel,
       setup.ollamaReachable,
       setup.providerKind,
       refreshMemory,
@@ -805,8 +853,50 @@ export function App() {
     ],
   );
 
+  const effectiveChatModel =
+    activeSession?.chatModel?.trim() ||
+    defaultChatModel ||
+    setup.chatModel ||
+    "mistral";
+
+  const setSessionModel = (modelId: string) => {
+    if (!activeSession) return;
+    setSessions((all) =>
+      all.map((s) =>
+        s.id === activeSession.id
+          ? { ...s, chatModel: modelId, updatedAt: nowIso() }
+          : s,
+      ),
+    );
+    // Persist model choice if session already has content (or still save empty later).
+    const cur = sessions.find((s) => s.id === activeSession.id);
+    if (cur && cur.messages.length > 0) {
+      void hostSaveChatSession(
+        sessionToDto({ ...cur, chatModel: modelId, updatedAt: nowIso() }),
+      ).catch(() => {
+        /* ignore */
+      });
+    }
+  };
+
+  const setAppDefaultModel = async (modelId: string) => {
+    try {
+      const saved = await hostSetDefaultChatModel(modelId);
+      const next = saved?.trim() || modelId;
+      setDefaultChatModel(next);
+      setSetup((s) => ({ ...s, chatModel: next }));
+      setModelOptions((opts) =>
+        opts.map((m) => ({ ...m, is_default: m.id === next })),
+      );
+      // New empty session without explicit model follows default; leave active override.
+      void refreshModels();
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const createSession = () => {
-    const s = newSession(`Chat ${sessions.length + 1}`);
+    const s = newSession(`Chat ${sessions.length + 1}`, defaultChatModel);
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
     setPane("chat");
@@ -1398,6 +1488,10 @@ export function App() {
                   onSubmit={onSubmit}
                   disabled={busy}
                   busy={busy}
+                  models={modelOptions}
+                  selectedModel={effectiveChatModel}
+                  onModelChange={setSessionModel}
+                  onSetDefaultModel={(id) => void setAppDefaultModel(id)}
                   onStop={() => {
                     setBusy(false);
                     setAgentError("Turn stopped (cooperative cancel).");
@@ -1468,11 +1562,11 @@ export function App() {
           <button type="button" onClick={() => openSettings("ai")}>
             {egressLabel}
           </button>
-          {setup.chatModel ? (
+          {effectiveChatModel ? (
             <>
               <span aria-hidden>·</span>
-              <span className="mono" title="Chat model">
-                {setup.chatModel}
+              <span className="mono" title="Model for this chat">
+                {effectiveChatModel}
               </span>
             </>
           ) : null}

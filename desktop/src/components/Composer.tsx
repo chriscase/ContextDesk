@@ -1,5 +1,6 @@
 import { useCallback, useId, useState } from "react";
 import { IconClose, IconExpand, IconSend } from "./icons";
+import type { ModelOptionDto } from "../lib/host";
 
 type Props = {
   onSubmit: (text: string) => void;
@@ -7,9 +8,25 @@ type Props = {
   disabled?: boolean;
   busy?: boolean;
   onStop?: () => void;
+  /** Models available from the active provider. */
+  models?: ModelOptionDto[];
+  /** Model id for this chat. */
+  selectedModel?: string;
+  onModelChange?: (modelId: string) => void;
+  /** Mark selected model as default for new chats. */
+  onSetDefaultModel?: (modelId: string) => void;
 };
 
-export function Composer({ onSubmit, disabled, busy, onStop }: Props) {
+export function Composer({
+  onSubmit,
+  disabled,
+  busy,
+  onStop,
+  models = [],
+  selectedModel,
+  onModelChange,
+  onSetDefaultModel,
+}: Props) {
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const id = useId();
@@ -26,6 +43,20 @@ export function Composer({ onSubmit, disabled, busy, onStop }: Props) {
     setExpanded(true);
   };
 
+  const modelOptions =
+    selectedModel && !models.some((m) => m.id === selectedModel)
+      ? [
+          {
+            id: selectedModel,
+            label: selectedModel,
+            provider_id: "",
+            provider_label: "",
+            is_default: false,
+          },
+          ...models,
+        ]
+      : models;
+
   return (
     <div className="composer" data-expanded={expanded ? "true" : "false"}>
       <div className="composer__toolbar">
@@ -33,6 +64,37 @@ export function Composer({ onSubmit, disabled, busy, onStop }: Props) {
           Enter to send · Shift+Enter newline · /skill id …
         </span>
         <div className="row">
+          {modelOptions.length > 0 && onModelChange ? (
+            <label className="composer__model">
+              <span className="composer__model-label">Model</span>
+              <select
+                className="composer__model-select"
+                value={selectedModel ?? modelOptions[0]?.id ?? ""}
+                disabled={busy}
+                aria-label="Chat model"
+                title="Model for this chat (can change mid-conversation)"
+                onChange={(e) => onModelChange(e.target.value)}
+              >
+                {modelOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                    {m.is_default ? " · default" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {selectedModel && onSetDefaultModel ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              title="Use this model for new chats"
+              disabled={busy || models.find((m) => m.id === selectedModel)?.is_default}
+              onClick={() => onSetDefaultModel(selectedModel)}
+            >
+              Set default
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn btn--ghost"

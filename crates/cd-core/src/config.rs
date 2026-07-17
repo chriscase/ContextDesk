@@ -59,6 +59,9 @@ pub struct AppConfig {
     /// Skip first-run banner.
     #[serde(default)]
     pub setup_completed: bool,
+    /// Default chat model for new sessions (falls back to active profile model).
+    #[serde(default)]
+    pub default_chat_model: Option<String>,
 }
 
 fn default_theme() -> String {

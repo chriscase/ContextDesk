@@ -30,6 +30,38 @@
   color: var(--text-faint);
 }
 
+.composer__model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.composer__model-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.composer__model-select {
+  max-width: 11rem;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.composer__model-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
 .composer__textarea {
   width: 100%;
   resize: none;

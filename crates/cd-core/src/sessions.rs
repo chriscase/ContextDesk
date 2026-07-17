@@ -76,6 +76,9 @@ pub struct Session {
     /// True once the user explicitly renames (blocks auto-title).
     #[serde(default)]
     pub title_locked: bool,
+    /// Chat model id for this session (None → app default / active profile).
+    #[serde(default)]
+    pub chat_model: Option<String>,
 }
 
 fn default_keep_last() -> usize {
@@ -118,6 +121,7 @@ impl Session {
             archived: false,
             pinned: false,
             title_locked: false,
+            chat_model: None,
         }
     }
 

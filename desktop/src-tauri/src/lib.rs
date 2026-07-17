@@ -633,6 +633,9 @@ struct AgentTurnReq {
     /// Force offline retrieval (no LLM).
     #[serde(default)]
     force_local: bool,
+    /// Optional per-turn / per-chat model override.
+    #[serde(default)]
+    chat_model: Option<String>,
 }
 
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
@@ -721,11 +724,27 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
             }
         }
     }
-    let profile = cfg
+    let mut profile = cfg
         .providers
         .active()
         .cloned()
         .unwrap_or_else(ProviderProfile::ollama_local);
+    // Per-chat model override (mid-chat switch), else app default, else profile model.
+    if let Some(m) = req
+        .chat_model
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        profile.chat_model = m.to_string();
+    } else if let Some(m) = cfg
+        .default_chat_model
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        profile.chat_model = m.to_string();
+    }
     let api_key = profile
         .api_key_ref
         .as_ref()
@@ -911,6 +930,165 @@ fn search_chat_sessions(
             include_archived.unwrap_or(false),
         )
         .map_err(|e| e.to_string())
+}
+
+/// A selectable chat model for the UI.
+#[derive(Debug, Clone, Serialize)]
+struct ModelOptionDto {
+    id: String,
+    label: String,
+    /// Provider profile this model is valid for.
+    provider_id: String,
+    provider_label: String,
+    /// True when this is the app default for new chats.
+    is_default: bool,
+}
+
+fn resolve_default_model(cfg: &AppConfig) -> String {
+    if let Some(m) = cfg
+        .default_chat_model
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return m.to_string();
+    }
+    cfg.providers
+        .active()
+        .map(|p| p.chat_model.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "mistral".into())
+}
+
+/// List models from the active provider (validated via list/tags when possible).
+#[tauri::command]
+async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionDto>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .active()
+        .cloned()
+        .unwrap_or_else(ProviderProfile::ollama_local);
+    let default_model = resolve_default_model(&cfg);
+    let api_key = profile
+        .api_key_ref
+        .as_ref()
+        .and_then(|r| state.secrets.get(r).ok().flatten());
+
+    let mut ids: Vec<String> = Vec::new();
+    match profile.kind {
+        ProviderKind::Ollama => {
+            if let Ok(client) =
+                cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
+            {
+                if let Ok(tags) = client.list_tags().await {
+                    ids.extend(tags);
+                }
+            }
+        }
+        ProviderKind::OpenAiCompatible => {
+            let policy = if profile.local_only {
+                SsrfPolicy::local_only()
+            } else {
+                SsrfPolicy::default()
+            };
+            if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+            ) {
+                if let Ok(listed) = client.list_models().await {
+                    ids.extend(listed);
+                }
+            }
+        }
+        ProviderKind::XaiGrokBuild => {
+            // Known chat models + whatever the API lists when session works.
+            ids.extend(
+                ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision-1212"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+            let base = if profile.base_url.trim().is_empty() {
+                "https://api.x.ai/v1"
+            } else {
+                profile.base_url.trim()
+            };
+            if cd_core::grok_auth::assert_grok_base_allowed(base).is_ok() {
+                if let Ok(creds) = cd_core::grok_auth::load_grok_session_credentials() {
+                    if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                        base,
+                        None,
+                        &profile.chat_model,
+                        &SsrfPolicy::default(),
+                    ) {
+                        let client = client.with_extra_headers(creds.request_headers());
+                        if let Ok(listed) = client.list_models().await {
+                            for m in listed {
+                                if !ids.iter().any(|x| x == &m) {
+                                    ids.push(m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ProviderKind::Anthropic => {}
+    }
+
+    // Always include profile model + app default so the UI never has an empty list.
+    for m in [&profile.chat_model, &default_model] {
+        let m = m.trim();
+        if !m.is_empty() && !ids.iter().any(|x| x == m) {
+            ids.insert(0, m.to_string());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+
+    Ok(ids
+        .into_iter()
+        .map(|id| ModelOptionDto {
+            is_default: id == default_model,
+            label: id.clone(),
+            id,
+            provider_id: profile.id.clone(),
+            provider_label: profile.label.clone(),
+        })
+        .collect())
+}
+
+/// Set the default model for new chats (also updates active profile chat_model).
+#[tauri::command]
+fn set_default_chat_model(state: State<'_, AppState>, model: String) -> Result<String, String> {
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("model id is required".into());
+    }
+    let mut cfg = state.config.lock().expect("config");
+    cfg.default_chat_model = Some(model.clone());
+    if let Some(active_id) = cfg.providers.active_id.clone() {
+        if let Some(p) = cfg
+            .providers
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == active_id)
+        {
+            p.chat_model = model.clone();
+        }
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    Ok(model)
+}
+
+/// Read resolved default chat model.
+#[tauri::command]
+fn get_default_chat_model(state: State<'_, AppState>) -> String {
+    let cfg = state.config.lock().expect("config");
+    resolve_default_model(&cfg)
 }
 
 /// One-shot LLM title (falls back to short heuristic if model unavailable).
@@ -1187,6 +1365,9 @@ pub fn run() {
             pin_chat_session,
             archive_chat_session,
             search_chat_sessions,
+            list_chat_models,
+            set_default_chat_model,
+            get_default_chat_model,
             suggest_chat_title,
             retitle_chat_session,
             agent_turn,
