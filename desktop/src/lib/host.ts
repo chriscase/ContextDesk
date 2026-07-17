@@ -163,6 +163,42 @@ export async function hostProviderHasSecret(profileId: string): Promise<boolean 
   return invoke<boolean>("provider_has_secret", { profileId });
 }
 
+export type LocalCandidateDto = {
+  id: string;
+  label: string;
+  kind: string;
+  base_url: string | null;
+  credentials_present: boolean;
+  notes: string[];
+};
+
+/** Local AI candidates (no secrets — presence flags only). */
+export async function hostListLocalCandidates(): Promise<LocalCandidateDto[]> {
+  if (!isTauri()) {
+    return [
+      {
+        id: "ollama-local",
+        label: "Ollama (local)",
+        kind: "ollama",
+        base_url: "http://127.0.0.1:11434",
+        credentials_present: false,
+        notes: ["Browser mode stub"],
+      },
+    ];
+  }
+  return invoke<LocalCandidateDto[]>("list_local_candidates");
+}
+
+export async function hostProbeUrl(
+  baseUrl: string,
+  allowPrivate = false,
+): Promise<{ ok: boolean; effective_base: string; candidates: string[]; error?: string | null }> {
+  if (!isTauri()) {
+    return { ok: false, effective_base: baseUrl, candidates: [], error: "Requires Tauri host" };
+  }
+  return invoke("probe_url", { req: { base_url: baseUrl, allow_private: allowPrivate } });
+}
+
 export type ProviderDto = {
   id: string;
   kind: string;

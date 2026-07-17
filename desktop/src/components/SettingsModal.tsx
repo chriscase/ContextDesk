@@ -3,13 +3,16 @@ import {
   hostCheckOllama,
   hostConfluenceHasToken,
   hostGetConfluence,
+  hostListLocalCandidates,
   hostPreflight,
+  hostProbeUrl,
   hostProviderHasSecret,
   hostSaveActiveProvider,
   hostSaveConfluence,
   hostTestConfluence,
   hostValidateWorkspacePath,
   profileIdForKind,
+  type LocalCandidateDto,
 } from "../lib/host";
 import {
   runClientPreflight,
@@ -76,6 +79,8 @@ export function SettingsModal({
   const [cfTokenDraft, setCfTokenDraft] = useState("");
   /** Transient API key typed in UI — never written to localStorage / setup state. */
   const [apiKeyDraft, setApiKeyDraft] = useState("");
+  const [candidates, setCandidates] = useState<LocalCandidateDto[]>([]);
+  const [probeNote, setProbeNote] = useState<string | null>(null);
   const baseId = useId();
 
   useEffect(() => {
@@ -106,6 +111,8 @@ export function SettingsModal({
             setDraft((d) => ({ ...d, hasApiKey: keyOk }));
           }
         }
+        const cands = await hostListLocalCandidates();
+        setCandidates(cands);
       })();
     }
   }, [open, setup, initialSection]);
@@ -179,19 +186,25 @@ export function SettingsModal({
           setDraft((d) => ({ ...d, ollamaReachable: null }));
         }
       } else if (draft.providerKind === "openai_compatible") {
+        const probe = await hostProbeUrl(draft.baseUrl, false);
+        if (probe.ok) {
+          setProbeNote(
+            `URL ok · effective ${probe.effective_base} · ${probe.candidates.length} candidate base(s)`,
+          );
+          setDraft((d) => ({ ...d, remoteReachable: true }));
+        } else {
+          setProbeNote(probe.error ?? "Probe failed");
+          setDraft((d) => ({ ...d, remoteReachable: false }));
+        }
         const hostPf = await hostPreflight();
         if (hostPf) {
           const remote = hostPf.items.find((i) => i.id === "provider.remote");
-          setDraft((d) => ({
-            ...d,
-            remoteReachable: remote?.level === "pass",
-          }));
-        } else {
-          const ok =
-            !validateBaseUrl(draft.baseUrl) &&
-            draft.hasApiKey &&
-            draft.chatModel.trim().length > 0;
-          setDraft((d) => ({ ...d, remoteReachable: ok ? null : false }));
+          if (remote) {
+            setDraft((d) => ({
+              ...d,
+              remoteReachable: remote.level === "pass" || probe.ok,
+            }));
+          }
         }
       }
       setProbeTick((n) => n + 1);
@@ -411,6 +424,50 @@ export function SettingsModal({
                   Discover or configure models here. Keys go to the OS keychain;
                   profiles never need a hand-edited secrets file.
                 </p>
+                {candidates.length > 0 ? (
+                  <div className="field">
+                    <span className="field__label">Local candidates</span>
+                    <ul className="session-list">
+                      {candidates.map((c) => (
+                        <li key={c.id}>
+                          <div className="session-list__item row--between">
+                            <span>
+                              {c.label}
+                              {c.credentials_present ? " · credentials present" : ""}
+                              {c.notes[0] ? ` · ${c.notes[0]}` : ""}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn--ghost"
+                              onClick={() => {
+                                const kind =
+                                  c.kind === "ollama"
+                                    ? "ollama"
+                                    : c.kind === "openai_compatible" ||
+                                        c.kind === "OpenAiCompatible"
+                                      ? "openai_compatible"
+                                      : "none";
+                                if (kind === "none") return;
+                                setDraft((d) => ({
+                                  ...d,
+                                  providerKind: kind,
+                                  providerLabel: c.label,
+                                  baseUrl: c.base_url ?? d.baseUrl,
+                                }));
+                              }}
+                            >
+                              Use
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <span className="field__hint">
+                      Grok session presence is metadata only — never used until
+                      explicit Phase 2 opt-in.
+                    </span>
+                  </div>
+                ) : null}
                 <SelectField
                   id={`${baseId}-kind`}
                   label="Provider"
@@ -531,6 +588,11 @@ export function SettingsModal({
                     {checking ? "Testing…" : "Test connection"}
                   </button>
                 </div>
+                {probeNote ? (
+                  <p className="field__hint" role="status">
+                    {probeNote}
+                  </p>
+                ) : null}
               </div>
             ) : null}
 
