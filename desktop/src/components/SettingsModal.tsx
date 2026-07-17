@@ -32,7 +32,16 @@ import {
   useDebouncedAsyncCheck,
 } from "./forms";
 import { PreflightPanel } from "./PreflightPanel";
-import { IconClose, IconSettings } from "./icons";
+import type { ReactNode } from "react";
+import {
+  IconAi,
+  IconAppearance,
+  IconClose,
+  IconConnectors,
+  IconPreflight,
+  IconSliders,
+  IconWorkspace,
+} from "./icons";
 
 export type SettingsSection =
   | "preflight"
@@ -54,13 +63,13 @@ type Props = {
   hostReport?: PreflightReport | null;
 };
 
-const NAV: { id: SettingsSection; label: string }[] = [
-  { id: "preflight", label: "Preflight" },
-  { id: "workspace", label: "Workspace" },
-  { id: "ai", label: "AI / Models" },
-  { id: "connectors", label: "Connectors" },
-  { id: "appearance", label: "Appearance" },
-  { id: "general", label: "General" },
+const NAV: { id: SettingsSection; label: string; icon: ReactNode }[] = [
+  { id: "preflight", label: "Preflight", icon: <IconPreflight /> },
+  { id: "workspace", label: "Workspace", icon: <IconWorkspace /> },
+  { id: "ai", label: "AI / Models", icon: <IconAi /> },
+  { id: "connectors", label: "Connectors", icon: <IconConnectors /> },
+  { id: "appearance", label: "Appearance", icon: <IconAppearance /> },
+  { id: "general", label: "General", icon: <IconSliders /> },
 ];
 
 export function SettingsModal({
@@ -394,7 +403,7 @@ export function SettingsModal({
               onClick={() => setSection(item.id)}
             >
               <span className="settings-nav__icon" aria-hidden>
-                {item.id === "preflight" ? "◎" : <IconSettings />}
+                {item.icon}
               </span>
               <span className="settings-nav__label">{item.label}</span>
             </button>
