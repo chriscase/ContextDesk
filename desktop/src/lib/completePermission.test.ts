@@ -30,6 +30,7 @@ describe("completePermission DTO", () => {
         "save_memory",
         { title: "t", body_markdown: "b" },
         decision === "allow_once" ? "WRITE" : undefined,
+        "sess-1",
       );
       expect(invoke).toHaveBeenCalledTimes(1);
       expect(invoke).toHaveBeenCalledWith("complete_permission_cmd", {
@@ -39,6 +40,7 @@ describe("completePermission DTO", () => {
           typed: decision === "allow_once" ? "WRITE" : null,
           tool_name: "save_memory",
           arguments: { title: "t", body_markdown: "b" },
+          session_id: "sess-1",
         },
       });
     }

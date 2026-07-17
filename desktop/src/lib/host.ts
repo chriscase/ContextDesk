@@ -146,6 +146,7 @@ export async function completePermission(
   toolName: string,
   argumentsJson: Record<string, unknown>,
   typed?: string,
+  sessionId?: string | null,
 ): Promise<EventDto[]> {
   if (!isTauri()) {
     throw new Error("Permission grants require Tauri host");
@@ -157,6 +158,8 @@ export async function completePermission(
       typed: typed ?? null,
       tool_name: toolName,
       arguments: argumentsJson,
+      // So grant outcome is appended to this session's model history (#111).
+      session_id: sessionId?.trim() || null,
     },
   });
 }

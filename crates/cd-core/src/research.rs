@@ -5,7 +5,8 @@ use crate::agent::{
 };
 use crate::audit::AuditLog;
 use crate::chat::{
-    ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, ToolCallMsg,
+    ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role,
+    ToolCallMsg,
 };
 use crate::error::CoreError;
 use crate::error::CoreResult;
@@ -383,10 +384,8 @@ pub async fn research_turn_with_cancel(
                     Some(profile.chat_model.clone()),
                 );
                 opts.cancel = cancel;
-                return run_agent_turn_with_sink(
-                    &backend, host, user_text, history, &opts, None, live,
-                )
-                .await;
+                return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live)
+                    .await;
             }
         }
         let ev = research_local(host, user_text, session_id)?;
@@ -413,8 +412,7 @@ pub async fn research_turn_with_cancel(
             Some(profile.chat_model.clone()),
         );
         opts.cancel = cancel;
-        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, None, live)
-            .await;
+        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
     }
 
     // Explicit opt-in only: load ~/.grok/auth.json session, pin host to api.x.ai.
@@ -467,8 +465,7 @@ pub async fn research_turn_with_cancel(
             Some(profile.chat_model.clone()),
         );
         opts.cancel = cancel;
-        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, None, live)
-            .await;
+        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
     }
 
     let ev = research_local(host, user_text, session_id)?;
@@ -521,7 +518,6 @@ pub async fn research_scripted_tool_turn(
             max_results_per_source: 8,
             cancel: None,
         },
-        None,
     )
     .await?;
 
@@ -546,6 +542,10 @@ pub async fn research_scripted_tool_turn(
 ///
 /// Uses **host-stored** tool arguments from the pending request when the client
 /// supplies empty/`null` arguments (preview is human text, not JSON).
+///
+/// When `history` is provided (#111), appends a paired
+/// `Role::Assistant(tool_calls)` + `Role::Tool(result)` so the next model turn
+/// sees the outcome. Denials append a short model-visible note instead.
 pub fn grant_and_execute(
     host: &mut ToolHost,
     request_id: &str,
@@ -553,9 +553,13 @@ pub fn grant_and_execute(
     typed: Option<&str>,
     name: &str,
     arguments: &serde_json::Value,
+    history: Option<&mut Vec<ChatMessage>>,
 ) -> CoreResult<Vec<StreamEvent>> {
     let (req, dec) = host.complete_permission(request_id, decision, typed)?;
     if matches!(dec, PermissionDecision::Deny) {
+        if let Some(h) = history {
+            append_grant_deny_note(h, &req.tool_name, &req.target);
+        }
         return Ok(vec![StreamEvent::Error {
             code: "denied".into(),
             message: "User denied write".into(),
@@ -580,14 +584,209 @@ pub fn grant_and_execute(
         name
     };
     let result = host.execute(tool_name, args, rid)?;
+    if let Some(h) = history {
+        append_grant_tool_outcome(h, tool_name, args, &result.detail_for_model);
+    }
     Ok(result.events)
+}
+
+/// Append assistant(tool_calls) + tool(result) so OpenAI-style validation passes.
+fn append_grant_tool_outcome(
+    history: &mut Vec<ChatMessage>,
+    tool_name: &str,
+    args: &serde_json::Value,
+    detail_for_model: &str,
+) {
+    let call_id = format!("grant_{}", uuid::Uuid::new_v4());
+    history.push(ChatMessage {
+        role: Role::Assistant,
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: Some(vec![ToolCallMsg {
+            id: call_id.clone(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: tool_name.into(),
+                arguments: args.to_string(),
+            },
+        }]),
+    });
+    history.push(ChatMessage {
+        role: Role::Tool,
+        content: detail_for_model.into(),
+        tool_call_id: Some(call_id),
+        tool_calls: None,
+    });
+}
+
+/// Model-visible denial so the agent does not silently retry the same write.
+fn append_grant_deny_note(history: &mut Vec<ChatMessage>, tool_name: &str, target: &str) {
+    history.push(ChatMessage {
+        role: Role::User,
+        content: format!(
+            "[permission] User denied write for tool `{tool_name}` on `{target}`. \
+             Do not retry the same write unless the user explicitly asks."
+        ),
+        tool_call_id: None,
+        tool_calls: None,
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::PermissionDecision;
     use std::fs;
     use tempfile::tempdir;
+
+    /// #111: after approving save_memory, history has assistant(tool_calls)+tool(result).
+    #[test]
+    fn grant_appends_tool_outcome_to_history() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let args = serde_json::json!({
+            "title": "notes",
+            "body_markdown": "JWT auth lives in middleware."
+        });
+        let pending = host.execute("save_memory", &args, None).unwrap();
+        assert!(!pending.ok);
+        let rid = pending
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("permission required");
+
+        let mut history: Vec<ChatMessage> = vec![];
+        let events = grant_and_execute(
+            &mut host,
+            &rid,
+            PermissionDecision::AllowOnce,
+            None,
+            "save_memory",
+            &serde_json::json!({}),
+            Some(&mut history),
+        )
+        .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Tool { ok: Some(true), .. })));
+
+        // Paired assistant(tool_calls) then tool(result) — no orphan tool message.
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history[0].role, Role::Assistant));
+        let tcs = history[0].tool_calls.as_ref().expect("tool_calls");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].function.name, "save_memory");
+        let call_id = tcs[0].id.clone();
+        assert!(matches!(history[1].role, Role::Tool));
+        assert_eq!(history[1].tool_call_id.as_deref(), Some(call_id.as_str()));
+        assert!(
+            history[1].content.contains("JWT")
+                || history[1].content.to_lowercase().contains("memory")
+                || history[1].content.contains("notes")
+                || !history[1].content.is_empty(),
+            "tool result content={:?}",
+            history[1].content
+        );
+
+        // Follow-up scripted turn sees the grant outcome in messages handed to backend.
+        struct CaptureBackend {
+            saw_tool_result: std::sync::Mutex<bool>,
+        }
+        #[async_trait]
+        impl ChatBackend for CaptureBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let saw = messages.iter().any(|m| {
+                    matches!(m.role, Role::Tool)
+                        && (m.content.contains("JWT")
+                            || m.content.to_lowercase().contains("memory")
+                            || m.content.contains("notes"))
+                });
+                *self.saw_tool_result.lock().unwrap() = saw;
+                Ok(ChatCompletion {
+                    content: if saw {
+                        "Yes, that save wrote JWT notes.".into()
+                    } else {
+                        "I do not know if it saved.".into()
+                    },
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+        let backend = CaptureBackend {
+            saw_tool_result: std::sync::Mutex::new(false),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events2 = rt
+            .block_on(run_agent_turn(
+                &backend,
+                &mut host,
+                "did that save?",
+                &mut history,
+                &AgentOptions::default(),
+            ))
+            .unwrap();
+        assert!(
+            *backend.saw_tool_result.lock().unwrap(),
+            "follow-up turn must receive prior tool result in history"
+        );
+        let text: String = events2
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("save") || text.contains("JWT"), "text={text}");
+    }
+
+    #[test]
+    fn grant_deny_appends_model_visible_note() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let args = serde_json::json!({"title": "x", "body_markdown": "y"});
+        let pending = host.execute("save_memory", &args, None).unwrap();
+        let rid = pending
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut history = vec![];
+        let _ = grant_and_execute(
+            &mut host,
+            &rid,
+            PermissionDecision::Deny,
+            None,
+            "save_memory",
+            &args,
+            Some(&mut history),
+        )
+        .unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(matches!(history[0].role, Role::User));
+        assert!(
+            history[0].content.contains("denied") && history[0].content.contains("save_memory"),
+            "content={}",
+            history[0].content
+        );
+        assert!(!dir.path().join(".contextdesk/memory/x.md").exists());
+    }
 
     #[test]
     fn research_local_cites_fixture() {

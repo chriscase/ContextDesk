@@ -1713,6 +1713,9 @@ struct GrantReq {
     typed: Option<String>,
     tool_name: String,
     arguments: serde_json::Value,
+    /// Session whose model history should receive the grant outcome (#111).
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[tauri::command]
@@ -1725,6 +1728,17 @@ fn complete_permission_cmd(
         "allow_session_path" => PermissionDecision::AllowSessionPath,
         _ => PermissionDecision::Deny,
     };
+    let session_key = req
+        .session_id
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // Clone history under its lock, then release before taking host (avoid deadlock
+    // with agent_turn which also touches both maps).
+    let mut history_buf = session_key.as_ref().map(|sid| {
+        let mut histories = state.histories.lock().expect("hist");
+        histories.entry(sid.clone()).or_default().clone()
+    });
     let mut host_guard = state.host.lock().expect("host");
     let host = host_guard.as_mut().ok_or("host missing")?;
     let events = grant_and_execute(
@@ -1734,8 +1748,14 @@ fn complete_permission_cmd(
         req.typed.as_deref(),
         &req.tool_name,
         &req.arguments,
+        history_buf.as_mut(),
     )
     .map_err(|e| e.to_string())?;
+    drop(host_guard);
+    if let (Some(sid), Some(h)) = (session_key, history_buf) {
+        let mut histories = state.histories.lock().expect("hist");
+        histories.insert(sid, h);
+    }
     Ok(events_to_dto(&events))
 }
 

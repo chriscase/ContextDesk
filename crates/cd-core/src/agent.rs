@@ -6,7 +6,6 @@ use crate::chat::{
 use crate::error::{CoreError, CoreResult};
 use crate::events::StreamEvent;
 use crate::injection::{system_policy_with_tools, wrap_untrusted};
-use crate::permissions::PermissionDecision;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
 use async_trait::async_trait;
@@ -159,10 +158,8 @@ pub async fn run_agent_turn(
     user_text: &str,
     history: &mut Vec<ChatMessage>,
     opts: &AgentOptions,
-    // Optional grants for soft writes in this turn (AllowOnce for pending writes).
-    auto_grant: Option<PermissionDecision>,
 ) -> CoreResult<Vec<StreamEvent>> {
-    run_agent_turn_with_sink(backend, host, user_text, history, opts, auto_grant, None).await
+    run_agent_turn_with_sink(backend, host, user_text, history, opts, None).await
 }
 
 /// Run agent loop with optional live event sink (for Channel streaming to UI).
@@ -172,7 +169,6 @@ pub async fn run_agent_turn_with_sink(
     user_text: &str,
     history: &mut Vec<ChatMessage>,
     opts: &AgentOptions,
-    auto_grant: Option<PermissionDecision>,
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     let mut out = EventCollector {
@@ -325,9 +321,8 @@ pub async fn run_agent_turn_with_sink(
                 .unwrap_or_else(|_| serde_json::json!({}));
             trail.push(format!("tool:{}", tc.function.name));
             // Never free-float grants into execute. SoftWrite must go through
-            // PermissionRequired → complete_permission. auto_grant only used for
-            // tests that pre-approve via host API before re-issue.
-            let _ = auto_grant;
+            // PermissionRequired → complete_permission → grant_and_execute, which
+            // appends the outcome to session history for the next turn (#111).
             // Tool execution errors must not kill the whole turn (e.g. HTTP 401
             // on a news site). Feed the failure back as tool content so the
             // model can try another URL or answer from search snippets.
@@ -403,7 +398,6 @@ pub fn prefetch_context(host: &mut ToolHost, query: &str) -> CoreResult<String> 
 mod tests {
     use super::*;
     use crate::index::KeywordIndex;
-    use crate::permissions::PermissionDecision;
     use crate::workspace::Workspace;
     use std::fs;
     use tempfile::tempdir;
@@ -445,7 +439,6 @@ mod tests {
             "Where is billing?",
             &mut history,
             &AgentOptions::default(),
-            Some(PermissionDecision::AllowOnce),
         )
         .await
         .unwrap();
@@ -492,7 +485,6 @@ mod tests {
                 cancel: Some(Arc::clone(&flag)),
                 ..Default::default()
             },
-            None,
         )
         .await
         .unwrap();
@@ -544,7 +536,6 @@ mod tests {
                 model: None,
                 cancel: None,
             },
-            None,
         )
         .await
         .unwrap();
@@ -599,7 +590,6 @@ mod tests {
                 model: None,
                 cancel: None,
             },
-            None,
         )
         .await
         .unwrap();
@@ -648,7 +638,6 @@ mod tests {
             "alpha?",
             &mut history,
             &AgentOptions::default(),
-            None,
             Some(&mut sink),
         )
         .await
