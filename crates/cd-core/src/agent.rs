@@ -84,6 +84,8 @@ pub struct AgentOptions {
     pub model: Option<String>,
     /// Cooperative cancel flag (checked each round). When true, stop cleanly.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Keep last N messages in model context (full history retained in `history`).
+    pub compact_keep_last: usize,
 }
 
 impl Default for AgentOptions {
@@ -96,6 +98,7 @@ impl Default for AgentOptions {
             session_id: "session".into(),
             model: None,
             cancel: None,
+            compact_keep_last: crate::sessions::default_compact_keep_last(),
         }
     }
 }
@@ -115,6 +118,7 @@ impl AgentOptions {
             session_id: session_id.into(),
             model,
             cancel: None,
+            compact_keep_last: crate::sessions::default_compact_keep_last(),
         }
     }
 }
@@ -247,6 +251,10 @@ pub async fn run_agent_turn_with_sink(
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
+        // #112: send pairing-safe compacted context to the model; keep full history.
+        let keep = opts.compact_keep_last.max(1);
+        let summary = crate::sessions::recompact_chat_history(history, keep);
+        let model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
         let completion = {
             let mut on_text = |t: String| {
                 if !t.is_empty() {
@@ -255,7 +263,7 @@ pub async fn run_agent_turn_with_sink(
                 }
             };
             backend
-                .complete_streaming(history, &specs, &mut on_text, cancel_ref)
+                .complete_streaming(&model_ctx, &specs, &mut on_text, cancel_ref)
                 .await
         };
         let completion = match completion {
@@ -535,6 +543,7 @@ mod tests {
                 session_id: "s".into(),
                 model: None,
                 cancel: None,
+                ..Default::default()
             },
         )
         .await
@@ -589,6 +598,7 @@ mod tests {
                 session_id: "s".into(),
                 model: None,
                 cancel: None,
+                ..Default::default()
             },
         )
         .await
@@ -596,6 +606,88 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
         ));
+    }
+
+    /// #112: model sees compacted context while full history grows unbounded.
+    #[tokio::test]
+    async fn agent_sends_compacted_context_not_full_history() {
+        struct CaptureLenBackend {
+            max_msgs: std::sync::Mutex<usize>,
+        }
+        #[async_trait]
+        impl ChatBackend for CaptureLenBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let mut g = self.max_msgs.lock().unwrap();
+                *g = (*g).max(messages.len());
+                // Prove compaction summary when history is long.
+                let _has_compact = messages
+                    .iter()
+                    .any(|m| m.content.contains("Compacted earlier conversation"));
+                Ok(ChatCompletion {
+                    content: "ok".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        // Pre-seed a long history (well above keep=4).
+        let mut history = vec![ChatMessage {
+            role: Role::System,
+            content: "policy".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..20 {
+            history.push(ChatMessage {
+                role: Role::User,
+                content: format!("old message {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            history.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("old answer {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let full_before = history.len();
+        let backend = CaptureLenBackend {
+            max_msgs: std::sync::Mutex::new(0),
+        };
+        let _ = run_agent_turn(
+            &backend,
+            &mut host,
+            "new question",
+            &mut history,
+            &AgentOptions {
+                compact_keep_last: 4,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sent = *backend.max_msgs.lock().unwrap();
+        // Model context bounded: summary + keep window, far below full history.
+        assert!(
+            sent < full_before,
+            "model saw {sent} msgs but full history was {full_before}"
+        );
+        assert!(sent <= 12, "compacted context should be small, got {sent}");
+        // Full history retained (grew by user + assistant at least).
+        assert!(
+            history.len() > full_before,
+            "full history must grow, len={}",
+            history.len()
+        );
     }
 
     /// #108: live sink receives each event as produced (same order as final batch).

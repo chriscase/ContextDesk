@@ -517,6 +517,7 @@ pub async fn research_scripted_tool_turn(
             deadline_ms: 60_000,
             max_results_per_source: 8,
             cancel: None,
+            ..Default::default()
         },
     )
     .await?;
