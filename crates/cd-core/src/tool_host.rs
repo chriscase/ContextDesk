@@ -570,12 +570,17 @@ impl ToolHost {
         // Sanitize early for clearer errors before network.
         let q = web_research::sanitize_search_query(q)?;
         self.throttle_web()?;
-        let hits = block_on_http(web_research::web_search_ddg(&q, limit))?;
-        let raw = web_research::format_search_hits(&hits, &q);
+        let (hits, notes) = block_on_http(web_research::web_search(&q, limit))?;
+        let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
         let first = hits.first().map(|h| h.url.clone());
+        let ok = !hits.is_empty();
         Ok((
-            true,
-            format!("{} web result(s) for `{q}`", hits.len()),
+            ok,
+            if ok {
+                format!("{} web result(s) for `{q}`", hits.len())
+            } else {
+                format!("no web results for `{q}` ({})", notes.join(", "))
+            },
             raw,
             first,
         ))

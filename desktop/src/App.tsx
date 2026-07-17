@@ -49,6 +49,7 @@ import {
   type BrandingDto,
   type ChatSessionDto,
   type EventDto,
+  type MessageMetaDto,
   type ModelOptionDto,
 } from "./lib/host";
 import {
@@ -65,6 +66,8 @@ type Msg = {
   citations?: { id: string; label: string }[];
   trail?: string[];
   streaming?: boolean;
+  /** Model / gateway used for this assistant response (persisted). */
+  meta?: MessageMetaDto;
 };
 
 type PaneId = "chat" | "archive" | "memory" | "source" | "todos";
@@ -207,8 +210,65 @@ function applyEventsToMessage(
       citations: citations.length ? citations : undefined,
       trail: trail.length ? trail : undefined,
       streaming: false,
+      meta: base.meta,
     },
     permission,
+  };
+}
+
+function formatMsgMetaFooter(meta: MessageMetaDto): string {
+  const parts: string[] = [];
+  if (meta.model) parts.push(meta.model);
+  if (meta.provider_label) parts.push(meta.provider_label);
+  else if (meta.provider_kind) parts.push(meta.provider_kind);
+  if (meta.base_url) {
+    try {
+      const u = new URL(meta.base_url);
+      parts.push(u.host);
+    } catch {
+      parts.push(meta.base_url);
+    }
+  }
+  return parts.join(" · ");
+}
+
+function snapshotMessageMeta(args: {
+  sessionModel: string | null;
+  sessionProvider: string | null;
+  modelOptions: ModelOptionDto[];
+  defaultModelKey: string;
+  setup: AppSetupState;
+}): MessageMetaDto {
+  const { sessionModel, sessionProvider, modelOptions, defaultModelKey, setup } =
+    args;
+  let selectionKey = "";
+  if (sessionModel && sessionProvider) {
+    selectionKey = modelSelectionKey(sessionProvider, sessionModel);
+  } else if (sessionModel) {
+    selectionKey =
+      modelOptions.find((m) => m.id === sessionModel)?.selection_key || "";
+  }
+  if (!selectionKey) {
+    selectionKey =
+      defaultModelKey ||
+      modelOptions.find((m) => m.is_default)?.selection_key ||
+      modelOptions[0]?.selection_key ||
+      "";
+  }
+  const parsed = parseModelSelectionKey(selectionKey);
+  const model = sessionModel || parsed.modelId || setup.chatModel || undefined;
+  const match = modelOptions.find(
+    (m) =>
+      m.selection_key === selectionKey ||
+      (sessionModel != null && m.id === sessionModel),
+  );
+  return {
+    model: model || undefined,
+    provider_label: match?.provider_label || setup.providerLabel || undefined,
+    provider_id:
+      sessionProvider || match?.provider_id || parsed.providerId || undefined,
+    provider_kind: setup.providerKind || undefined,
+    base_url: setup.baseUrl?.trim() || undefined,
   };
 }
 
@@ -339,6 +399,7 @@ export function App() {
         ? (m.citations as { id: string; label: string }[])
         : undefined,
       trail: m.trail ?? undefined,
+      meta: m.meta ?? undefined,
     };
   };
 
@@ -370,6 +431,7 @@ export function App() {
       tools: m.tools,
       citations: m.citations,
       trail: m.trail,
+      meta: m.meta ?? null,
     })),
     compact_keep_last: s.compactKeepLast,
     show_full_history: s.showFullHistory,
@@ -867,13 +929,22 @@ export function App() {
         void upgradeTitleWithLlm(sessionId, text);
       }
 
+      // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
+      const forceLocal =
+        setup.providerKind === "ollama" && setup.ollamaReachable === false;
+      const sess = sessions.find((s) => s.id === sessionId);
+      const sessionModel = sess?.chatModel ?? null;
+      const sessionProvider = sess?.providerProfileId ?? null;
+      // Snapshot provenance at send time (footer survives model switches later).
+      const metaAtSend = snapshotMessageMeta({
+        sessionModel,
+        sessionProvider,
+        modelOptions,
+        defaultModelKey,
+        setup,
+      });
+
       try {
-        // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
-        const forceLocal =
-          setup.providerKind === "ollama" && setup.ollamaReachable === false;
-        const sess = sessions.find((s) => s.id === sessionId);
-        const sessionModel = sess?.chatModel ?? null;
-        const sessionProvider = sess?.providerProfileId ?? null;
         const events = await agentTurn(
           sessionId,
           text,
@@ -926,6 +997,7 @@ export function App() {
             ...msg,
             content: streamedContent || msg.content,
             streaming: false,
+            meta: metaAtSend,
           };
           if (perm) {
             setPermission(perm);
@@ -982,6 +1054,7 @@ export function App() {
                     ...x,
                     streaming: false,
                     content: `**Host error:** ${err}`,
+                    meta: metaAtSend,
                   }
                 : x,
             ),
@@ -1006,6 +1079,11 @@ export function App() {
       sessions,
       setup.ollamaReachable,
       setup.providerKind,
+      setup.providerLabel,
+      setup.chatModel,
+      setup.baseUrl,
+      modelOptions,
+      defaultModelKey,
       refreshMemory,
       persistSession,
       upgradeTitleWithLlm,
@@ -1712,6 +1790,24 @@ export function App() {
                           </div>
                         )}
                       </div>
+                      {m.role === "assistant" &&
+                      m.meta &&
+                      !m.streaming &&
+                      formatMsgMetaFooter(m.meta) ? (
+                        <footer
+                          className="msg__meta"
+                          title={[
+                            m.meta.model,
+                            m.meta.provider_label,
+                            m.meta.provider_id,
+                            m.meta.base_url,
+                          ]
+                            .filter(Boolean)
+                            .join("\n")}
+                        >
+                          {formatMsgMetaFooter(m.meta)}
+                        </footer>
+                      ) : null}
                     </article>
                   ))
                 )}

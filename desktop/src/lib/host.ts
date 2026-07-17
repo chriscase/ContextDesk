@@ -322,6 +322,15 @@ export async function hostReadFile(path: string): Promise<string> {
   return invoke<string>("read_workspace_file_cmd", { path });
 }
 
+/** Per-response generation provenance (footer). */
+export type MessageMetaDto = {
+  model?: string;
+  provider_label?: string;
+  provider_id?: string;
+  base_url?: string;
+  provider_kind?: string;
+};
+
 /** Durable chat session (host Session JSON). */
 export type StoredMessageDto = {
   id: string;
@@ -330,6 +339,7 @@ export type StoredMessageDto = {
   tools?: unknown;
   citations?: unknown;
   trail?: string[] | null;
+  meta?: MessageMetaDto | null;
 };
 
 export type ChatSessionDto = {

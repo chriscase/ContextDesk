@@ -72,10 +72,11 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
         .any(|n| *n == "web_search" || *n == "web_fetch")
     {
         s.push_str(
-            "Web research is ENABLED: for current events, call web_search first (snippets are often enough). \
-             Use web_fetch selectively. If web_fetch returns HTTP 401/403/429 (common on Reuters/NYT/etc.), \
-             that is NOT a host crash — try another URL or answer from snippets. Prefer open sources. \
-             Do not refuse web research or redirect the user to Google/DuckDuckGo in the browser.\n",
+            "Web research is ENABLED: for current events, call web_search first — it uses Google News RSS \
+             and other public backends; snippets in the tool result are often enough for a brief. \
+             Use web_fetch selectively on open sources. If web_fetch returns HTTP 401/403/429 \
+             (common on Reuters/NYT/etc.), that is NOT a host crash — try another URL or answer from snippets. \
+             Do not refuse web research or tell the user to open Google themselves when tools returned data.\n",
         );
     }
     s

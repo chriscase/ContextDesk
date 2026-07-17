@@ -109,6 +109,9 @@ pub struct StoredMessage {
     /// Optional search trail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<Vec<String>>,
+    /// Optional generation metadata (model, provider, base URL) for footers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 impl Session {
@@ -606,6 +609,7 @@ mod tests {
                 tools: None,
                 citations: None,
                 trail: None,
+                meta: None,
             });
         }
         s.recompact();
@@ -628,6 +632,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         store.save(&s).unwrap();
         let loaded = store.load(&s.id).unwrap();
@@ -681,6 +686,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         s.maybe_auto_title_from_first_user();
         assert!(s.title.contains("Ollama") || s.title.contains("configure"));
@@ -703,6 +709,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         a.touch();
         store.save(&a).unwrap();
@@ -716,6 +723,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         b.touch();
         store.save(&b).unwrap();
@@ -739,6 +747,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         store.save(&a).unwrap();
         let mut b = Session::new("Unrelated");
@@ -750,6 +759,7 @@ mod tests {
             tools: None,
             citations: None,
             trail: None,
+            meta: None,
         });
         store.save(&b).unwrap();
         let hits = store.search("ollama", 10, false).unwrap();

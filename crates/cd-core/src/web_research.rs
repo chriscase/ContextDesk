@@ -9,6 +9,7 @@
 use crate::error::{CoreError, CoreResult};
 use crate::ssrf::{validate_provider_url, SsrfPolicy};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use url::Url;
 
 /// Max raw HTTP body bytes retained for extraction.
@@ -402,19 +403,304 @@ pub fn clamp_search_limit(limit: Option<u64>) -> usize {
         .clamp(1, MAX_SEARCH_LIMIT as u64) as usize
 }
 
-/// DuckDuckGo HTML lite search (best-effort, no API key).
+/// Multi-backend public web search (no API keys).
 ///
-/// On block/parse failure returns empty `Ok(vec![])` with no panic — callers
-/// surface a graceful summary.
-pub async fn web_search_ddg(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
+/// Order:
+/// 1. **Google News RSS** — reliable for current events (no CAPTCHA in practice)
+/// 2. **DuckDuckGo Instant Answer** — Wikipedia-style abstract + related topics
+/// 3. **DuckDuckGo HTML** — best-effort; often CAPTCHA-blocked for automated clients
+///
+/// Returns hits (deduped by URL) plus short notes about which backends contributed.
+pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
     let q = sanitize_search_query(query)?;
     let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
-    // Official-ish HTML endpoint used by many scrapers; fragile.
+    let mut hits: Vec<WebSearchHit> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+
+    match web_search_google_news(&q, limit).await {
+        Ok(n) if !n.is_empty() => {
+            notes.push(format!("google_news_rss:{} hits", n.len()));
+            merge_hits(&mut hits, n, limit);
+        }
+        Ok(_) => notes.push("google_news_rss:empty".into()),
+        Err(e) => notes.push(format!("google_news_rss:err({e})")),
+    }
+
+    if hits.len() < limit {
+        match web_search_ddg_instant(&q, limit).await {
+            Ok(n) if !n.is_empty() => {
+                notes.push(format!("ddg_instant:{} hits", n.len()));
+                merge_hits(&mut hits, n, limit);
+            }
+            Ok(_) => notes.push("ddg_instant:empty".into()),
+            Err(e) => notes.push(format!("ddg_instant:err({e})")),
+        }
+    }
+
+    if hits.len() < limit {
+        match web_search_ddg_html(&q, limit).await {
+            Ok(n) if !n.is_empty() => {
+                notes.push(format!("ddg_html:{} hits", n.len()));
+                merge_hits(&mut hits, n, limit);
+            }
+            Ok(_) => notes.push("ddg_html:empty_or_captcha".into()),
+            Err(e) => notes.push(format!("ddg_html:err({e})")),
+        }
+    }
+
+    Ok((hits, notes))
+}
+
+fn merge_hits(into: &mut Vec<WebSearchHit>, extra: Vec<WebSearchHit>, limit: usize) {
+    for h in extra {
+        if into.len() >= limit {
+            break;
+        }
+        if into.iter().any(|x| x.url == h.url) {
+            continue;
+        }
+        into.push(h);
+    }
+}
+
+/// Google News RSS search (current events; no API key).
+pub async fn web_search_google_news(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
+    let q = sanitize_search_query(query)?;
+    let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
+    let url = format!(
+        "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
+        urlencoding_encode(&q)
+    );
+    let _ = validate_web_url(&url)?;
+    let client = build_client()?;
+    let resp = client
+        .get(&url)
+        .header(
+            "Accept",
+            "application/rss+xml, application/xml, text/xml, */*",
+        )
+        .send()
+        .await
+        .map_err(|e| CoreError::Message(format!("google news: {e}")))?;
+    if !resp.status().is_success() {
+        return Ok(vec![]);
+    }
+    let bytes = read_body_capped(resp).await?;
+    let xml = String::from_utf8_lossy(&bytes);
+    Ok(parse_google_news_rss(&xml, limit))
+}
+
+/// Parse Google News RSS XML (fixture-friendly).
+pub fn parse_google_news_rss(xml: &str, limit: usize) -> Vec<WebSearchHit> {
+    let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
+    let mut hits = Vec::new();
+    let mut rest = xml;
+    while hits.len() < limit {
+        let Some(start) = rest.find("<item>") else {
+            break;
+        };
+        let Some(end_rel) = rest[start..].find("</item>") else {
+            break;
+        };
+        let item = &rest[start..start + end_rel];
+        rest = &rest[start + end_rel + 7..];
+
+        let title = collapse_ws(&strip_tags(&extract_xml_tag(item, "title")));
+        let link = extract_xml_tag(item, "link").trim().to_string();
+        let desc_raw = extract_xml_tag(item, "description");
+        let snippet = collapse_ws(&strip_tags(&decode_basic_entities(&desc_raw)));
+        let pub_date = extract_xml_tag(item, "pubDate");
+
+        if title.is_empty() {
+            continue;
+        }
+        // Google News links are https://news.google.com/... (public, SSRF-ok).
+        let url = if link.is_empty() {
+            format!(
+                "https://news.google.com/search?q={}",
+                urlencoding_encode(&title)
+            )
+        } else {
+            link
+        };
+        if validate_web_url(&url).is_err() {
+            continue;
+        }
+        let mut snip = snippet.chars().take(400).collect::<String>();
+        if !pub_date.is_empty() {
+            if !snip.is_empty() {
+                snip.push_str(" · ");
+            }
+            snip.push_str(&pub_date.chars().take(40).collect::<String>());
+        }
+        hits.push(WebSearchHit {
+            title: title.chars().take(200).collect(),
+            url,
+            snippet: snip,
+        });
+    }
+    hits
+}
+
+fn extract_xml_tag(block: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let Some(s) = block.find(&open) else {
+        // CDATA or attributes on open tag
+        let open2 = format!("<{tag} ");
+        if let Some(s2) = block.find(&open2) {
+            if let Some(gt) = block[s2..].find('>') {
+                let start = s2 + gt + 1;
+                if let Some(e) = block[start..].find(&close) {
+                    return strip_cdata(&block[start..start + e]).to_string();
+                }
+            }
+        }
+        return String::new();
+    };
+    let start = s + open.len();
+    let Some(e) = block[start..].find(&close) else {
+        return String::new();
+    };
+    strip_cdata(&block[start..start + e]).to_string()
+}
+
+fn strip_cdata(s: &str) -> &str {
+    let t = s.trim();
+    if let Some(inner) = t
+        .strip_prefix("<![CDATA[")
+        .and_then(|x| x.strip_suffix("]]>"))
+    {
+        inner
+    } else {
+        t
+    }
+}
+
+fn decode_basic_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// DuckDuckGo Instant Answer API (no key; sparse for breaking news but unblocked).
+pub async fn web_search_ddg_instant(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
+    let q = sanitize_search_query(query)?;
+    let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
+    let url = format!(
+        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
+        urlencoding_encode(&q)
+    );
+    let _ = validate_web_url(&url)?;
+    let client = build_client()?;
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| CoreError::Message(format!("ddg instant: {e}")))?;
+    if !resp.status().is_success() {
+        return Ok(vec![]);
+    }
+    let bytes = read_body_capped(resp).await?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(parse_ddg_instant_json(&text, limit))
+}
+
+/// Parse DDG Instant Answer JSON.
+pub fn parse_ddg_instant_json(text: &str, limit: usize) -> Vec<WebSearchHit> {
+    let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
+    let Ok(v) = serde_json::from_str::<JsonValue>(text) else {
+        return vec![];
+    };
+    let mut hits = Vec::new();
+    let abstract_text = v
+        .get("AbstractText")
+        .or_else(|| v.get("Abstract"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    let abstract_url = v
+        .get("AbstractURL")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    let heading = v
+        .get("Heading")
+        .and_then(|x| x.as_str())
+        .unwrap_or("Overview")
+        .trim();
+    if !abstract_text.is_empty() && !abstract_url.is_empty() {
+        if validate_web_url(abstract_url).is_ok() {
+            hits.push(WebSearchHit {
+                title: heading.chars().take(200).collect(),
+                url: abstract_url.to_string(),
+                snippet: abstract_text.chars().take(400).collect(),
+            });
+        }
+    }
+    if let Some(arr) = v.get("RelatedTopics").and_then(|a| a.as_array()) {
+        for item in arr {
+            if hits.len() >= limit {
+                break;
+            }
+            // Nested topics under Name/Topics
+            if let Some(nested) = item.get("Topics").and_then(|t| t.as_array()) {
+                for n in nested {
+                    if hits.len() >= limit {
+                        break;
+                    }
+                    push_ddg_related(&mut hits, n);
+                }
+                continue;
+            }
+            push_ddg_related(&mut hits, item);
+        }
+    }
+    hits.truncate(limit);
+    hits
+}
+
+fn push_ddg_related(hits: &mut Vec<WebSearchHit>, item: &JsonValue) {
+    let text = item.get("Text").and_then(|t| t.as_str()).unwrap_or("");
+    let url = item.get("FirstURL").and_then(|u| u.as_str()).unwrap_or("");
+    if text.is_empty() || url.is_empty() {
+        return;
+    }
+    // FirstURL is often https://duckduckgo.com/Topic — skip pure DDG shells
+    // when we already have enough, but keep Wikipedia-style AbstractURL paths.
+    if url.contains("duckduckgo.com/") && !url.contains("wikipedia") {
+        // Convert DDG topic URLs are not useful for fetch; still show as title context
+        // only if no better hits — skip for cleanliness.
+        return;
+    }
+    if validate_web_url(url).is_err() {
+        return;
+    }
+    if hits.iter().any(|h| h.url == url) {
+        return;
+    }
+    let title = text.split(" - ").next().unwrap_or(text);
+    hits.push(WebSearchHit {
+        title: title.chars().take(200).collect(),
+        url: url.to_string(),
+        snippet: text.chars().take(400).collect(),
+    });
+}
+
+/// DuckDuckGo HTML lite search (best-effort, no API key).
+///
+/// On CAPTCHA/block/parse failure returns empty `Ok(vec![])`.
+pub async fn web_search_ddg_html(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
+    let q = sanitize_search_query(query)?;
+    let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
     let search_url = format!(
         "https://html.duckduckgo.com/html/?q={}",
         urlencoding_encode(&q)
     );
-    // Validate our own search URL under SSRF (public HTTPS).
     let _ = validate_web_url(&search_url)?;
 
     let client = build_client()?;
@@ -426,7 +712,6 @@ pub async fn web_search_ddg(query: &str, limit: usize) -> CoreResult<Vec<WebSear
         .map_err(|e| CoreError::Message(format!("web_search: {e}")))?;
 
     if !resp.status().is_success() {
-        // Graceful empty (rate limit / block)
         tracing::warn!(status = %resp.status(), "web_search DDG non-success");
         return Ok(vec![]);
     }
@@ -439,7 +724,26 @@ pub async fn web_search_ddg(query: &str, limit: usize) -> CoreResult<Vec<WebSear
         }
     };
     let html = String::from_utf8_lossy(&bytes);
+    if is_ddg_bot_challenge(&html) {
+        tracing::warn!("web_search DDG HTML returned bot challenge");
+        return Ok(vec![]);
+    }
     Ok(parse_ddg_html(&html, limit))
+}
+
+/// Detect DDG anomaly/CAPTCHA interstitial.
+pub fn is_ddg_bot_challenge(html: &str) -> bool {
+    let l = html.to_ascii_lowercase();
+    l.contains("anomaly-modal")
+        || l.contains("bots use duckduckgo")
+        || l.contains("challenge-form")
+        || l.contains("select all squares containing a duck")
+}
+
+/// Back-compat alias used by older call sites / tests.
+pub async fn web_search_ddg(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
+    let (hits, _) = web_search(query, limit).await?;
+    Ok(hits)
 }
 
 /// Read response body stopping after [`MAX_BODY_BYTES`] (does not buffer full multi-MB pages).
@@ -654,12 +958,30 @@ fn percent_decode(s: &str) -> String {
 
 /// Format search hits for the model/UI trail.
 pub fn format_search_hits(hits: &[WebSearchHit], query: &str) -> String {
+    format_search_hits_with_notes(hits, query, &[])
+}
+
+/// Format hits plus backend notes (for debugging empty results).
+pub fn format_search_hits_with_notes(
+    hits: &[WebSearchHit],
+    query: &str,
+    notes: &[String],
+) -> String {
     if hits.is_empty() {
+        let backends = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" Backends: {}.", notes.join("; "))
+        };
         return format!(
-            "No web search results for `{query}` (engine empty, blocked, or parse failed). Try a simpler query or web_fetch a known URL."
+            "No web search results for `{query}`.{backends} \
+             Engines may be CAPTCHA-blocked or empty. Try a shorter query, or web_fetch a known open URL (BBC, Wikipedia, gov)."
         );
     }
     let mut lines = Vec::new();
+    if !notes.is_empty() {
+        lines.push(format!("[sources: {}]", notes.join(", ")));
+    }
     for (i, h) in hits.iter().enumerate() {
         lines.push(format!(
             "{}. {}\n   URL: {}\n   {}",
@@ -811,5 +1133,65 @@ mod tests {
         let fmt = format_fetch_result(&r);
         assert!(fmt.contains("failed (soft)"));
         assert!(fmt.contains("401"));
+    }
+
+    #[test]
+    fn parse_google_news_rss_fixture() {
+        let xml = r#"<?xml version="1.0"?>
+        <rss><channel>
+          <item>
+            <title>Iran war live: US intensifies attacks - Al Jazeera</title>
+            <link>https://news.google.com/rss/articles/CBMiabc</link>
+            <pubDate>Thu, 16 Jul 2026 23:59:10 GMT</pubDate>
+            <description>&lt;a href="https://example.com"&gt;Live updates from the region.&lt;/a&gt;</description>
+          </item>
+          <item>
+            <title>Second story - BBC</title>
+            <link>https://news.google.com/rss/articles/CBMidef</link>
+            <description>More context here</description>
+          </item>
+        </channel></rss>"#;
+        let hits = parse_google_news_rss(xml, 10);
+        assert_eq!(hits.len(), 2);
+        assert!(hits[0].title.contains("Al Jazeera"));
+        assert!(hits[0].url.contains("news.google.com"));
+        assert!(hits[0].snippet.contains("Live updates") || hits[0].snippet.contains("2026"));
+    }
+
+    #[test]
+    fn parse_ddg_instant_fixture() {
+        let j = r#"{
+          "Heading":"Iran-Israel conflict",
+          "AbstractText":"A long-standing confrontation.",
+          "AbstractURL":"https://en.wikipedia.org/wiki/Iran-Israel_conflict",
+          "RelatedTopics":[]
+        }"#;
+        let hits = parse_ddg_instant_json(j, 5);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].url.contains("wikipedia.org"));
+    }
+
+    #[test]
+    fn detects_ddg_captcha() {
+        assert!(is_ddg_bot_challenge(
+            r#"<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>"#
+        ));
+        assert!(!is_ddg_bot_challenge(
+            r#"<a class="result__a" href="https://example.com">x</a>"#
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn live_multi_backend_search() {
+        let (hits, notes) = web_search("Iran Israel war today", 6).await.unwrap();
+        eprintln!("notes={notes:?}");
+        for h in &hits {
+            eprintln!("- {} | {}", h.title, h.url);
+        }
+        assert!(
+            !hits.is_empty(),
+            "expected hits from google news or instant; notes={notes:?}"
+        );
     }
 }
