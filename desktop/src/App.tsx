@@ -13,11 +13,13 @@ import {
   PermissionModal,
   type PermissionPrompt,
 } from "./components/PermissionModal";
+import { RenameChatModal } from "./components/RenameChatModal";
 import {
   SettingsModal,
   type SettingsSection,
 } from "./components/SettingsModal";
 import { ToolCallList, type ToolCallView } from "./components/ToolCallList";
+import { dialogConfirm } from "./lib/dialogs";
 import { SourceCitations } from "./components/SourceCitations";
 import { ChatArchivePane } from "./components/panes/ChatArchivePane";
 import { MemoryPane, type MemoryDoc } from "./components/panes/MemoryPane";
@@ -573,6 +575,13 @@ export function App() {
   /** When the current turn started waiting for the model (for elapsed UI). */
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [permission, setPermission] = useState<PermissionPrompt | null>(null);
+  /** In-app rename (plugin-dialog has no text prompt). */
+  const [renameTarget, setRenameTarget] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  /** Halt client-side text materialization only — true host cancel is #90. */
+  const stopRef = useRef(false);
   const [pendingToolArgs, setPendingToolArgs] = useState<Record<
     string,
     unknown
@@ -800,11 +809,12 @@ export function App() {
   }, [preflight.hasBlocking, dismissSetupPrompt]);
 
   const onSubmit = useCallback(
-    async (text: string) => {
+    async (text: string): Promise<boolean> => {
       if (preflight.hasBlocking) {
         openSettings("preflight");
-        return;
+        return false;
       }
+      stopRef.current = false;
       setAgentError(null);
       setBusy(true);
       setTurnStartedAt(Date.now());
@@ -885,6 +895,8 @@ export function App() {
         const delayMs = prefersReduced ? 0 : 28;
 
         for (const ev of textEvents) {
+          // Local Stop only ends materialization (#105); host cancel is #90.
+          if (stopRef.current) break;
           const chunk = String(ev.payload?.text ?? "");
           if (!chunk) continue;
           setMessages((m) => {
@@ -993,6 +1005,7 @@ export function App() {
         setBusy(false);
         setTurnStartedAt(null);
       }
+      return true;
     },
     [
       preflight.hasBlocking,
@@ -1155,12 +1168,17 @@ export function App() {
   const renameSessionById = async (id: string) => {
     const target = sessions.find((s) => s.id === id);
     if (!target) return;
-    const next = window.prompt("Rename chat", target.title);
-    if (next === null) return;
-    const title = next.trim();
-    if (!title) return;
+    setRenameTarget({ id: target.id, title: target.title });
+  };
+
+  const applyRename = async (title: string) => {
+    const target = renameTarget;
+    setRenameTarget(null);
+    if (!target) return;
+    const next = title.trim();
+    if (!next) return;
     try {
-      const saved = await hostRenameChatSession(id, title);
+      const saved = await hostRenameChatSession(target.id, next);
       if (saved) {
         setSessions((all) =>
           all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
@@ -1173,8 +1191,8 @@ export function App() {
     }
     setSessions((all) =>
       all.map((s) =>
-        s.id === id
-          ? { ...s, title, titleLocked: true, updatedAt: nowIso() }
+        s.id === target.id
+          ? { ...s, title: next, titleLocked: true, updatedAt: nowIso() }
           : s,
       ),
     );
@@ -1230,8 +1248,9 @@ export function App() {
   const trashSessionById = async (id: string) => {
     const target = sessions.find((s) => s.id === id);
     if (!target) return;
-    const ok = window.confirm(
+    const ok = await dialogConfirm(
       `Move “${target.title}” to Trash?\n\nYou can restore it from Archive → Trash. Permanent delete is only from Trash.`,
+      { title: "Move to Trash", kind: "warning" },
     );
     if (!ok) return;
     try {
@@ -1861,8 +1880,13 @@ export function App() {
                   onModelChange={setSessionModel}
                   onSetDefaultModel={(key) => void setAppDefaultModel(key)}
                   onStop={() => {
+                    // #90 owns true host/provider cancellation. This only
+                    // stops client-side materialization of already-returned text.
+                    stopRef.current = true;
                     setBusy(false);
-                    setAgentError("Turn stopped (cooperative cancel).");
+                    setAgentError(
+                      "Stopped showing the response (the model turn may have already completed).",
+                    );
                   }}
                 />
               </div>
@@ -1944,6 +1968,13 @@ export function App() {
       )}
 
       <PermissionModal prompt={permission} onRespond={onPermissionRespond} />
+
+      <RenameChatModal
+        open={Boolean(renameTarget)}
+        initialTitle={renameTarget?.title ?? ""}
+        onCancel={() => setRenameTarget(null)}
+        onConfirm={(t) => void applyRename(t)}
+      />
 
       {chatCtxMenu
         ? (() => {

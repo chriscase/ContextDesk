@@ -1,9 +1,11 @@
 {
   "identifier": "default",
-  "description": "Default capabilities — no shell; dialog open for folders only.",
+  "description": "Default capabilities — no shell. dialog:allow-open for workspace folder picker; dialog:allow-confirm and dialog:allow-message for WKWebView-safe confirms/alerts (rename uses in-app modal, not a save dialog).",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-confirm",
+    "dialog:allow-message"
   ]
 }

@@ -778,6 +778,7 @@ pub fn parse_ollama_chat_response(text: &str) -> CoreResult<ChatCompletion> {
 }
 
 /// Parse JSON tool call fallback from model prose.
+#[allow(clippy::string_slice)] // safe: sliced at ASCII fence delimiters from find()
 pub fn parse_json_tool_fallback(content: &str) -> Option<(String, Value)> {
     let content = content.trim();
     // Look for ```json ... ``` or raw object with "tool"

@@ -5,6 +5,9 @@
 //! pure policy and tools live here.
 
 #![deny(missing_docs)]
+// Fail CI (-D warnings) on new raw `&str` byte-index slicing unless scoped-allowed.
+// Prefer `text::truncate_bytes` / `floor_char_boundary` for untrusted multi-byte text.
+#![warn(clippy::string_slice)]
 
 pub mod agent;
 pub mod audit;

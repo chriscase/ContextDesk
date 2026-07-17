@@ -3,7 +3,8 @@ import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 
 type Props = {
-  onSubmit: (text: string) => void;
+  /** Return `false` to reject the send (draft is preserved). */
+  onSubmit: (text: string) => boolean | Promise<boolean> | void;
   disabled?: boolean;
   busy?: boolean;
   onStop?: () => void;
@@ -28,11 +29,15 @@ export function Composer({
   const id = useId();
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  const submit = useCallback(() => {
+  const submit = useCallback(async () => {
     const t = value.trim();
     if (!t || disabled || busy) return;
-    onSubmit(t);
-    setValue("");
+    const res = onSubmit(t);
+    const accepted = res instanceof Promise ? await res : res;
+    // Only clear when parent did not explicitly reject.
+    if (accepted !== false) {
+      setValue("");
+    }
   }, [value, disabled, busy, onSubmit]);
 
   const insertSnippet = (snippet: string) => {
@@ -75,7 +80,6 @@ export function Composer({
       data-expanded={expanded ? "true" : "false"}
       data-busy={busy ? "true" : "false"}
       onMouseDown={(e) => {
-        // Click empty shell chrome focuses the field (not on buttons/selects).
         const t = e.target as HTMLElement;
         if (t.closest("button, select, a, label, textarea")) return;
         taRef.current?.focus();
@@ -92,9 +96,15 @@ export function Composer({
         disabled={disabled && !busy}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          // Do not submit while IME is composing (CJK etc.).
+          if (
+            e.key === "Enter" &&
+            !e.shiftKey &&
+            !e.nativeEvent.isComposing &&
+            e.keyCode !== 229
+          ) {
             e.preventDefault();
-            submit();
+            void submit();
           }
         }}
       />
@@ -176,7 +186,7 @@ export function Composer({
               type="button"
               className="composer__stop"
               onClick={onStop}
-              title="Stop generation"
+              title="Stop showing the response"
             >
               <IconClose />
               Stop
@@ -185,7 +195,7 @@ export function Composer({
           <button
             type="button"
             className="composer__send"
-            onClick={submit}
+            onClick={() => void submit()}
             disabled={!canSend}
             title="Send message"
             aria-label="Send"

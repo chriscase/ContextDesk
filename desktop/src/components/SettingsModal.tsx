@@ -223,16 +223,20 @@ export function SettingsModal({
   }, [newsSources]);
 
   const requestClose = () => {
-    if (dirty) {
-      const ok = window.confirm(
-        "You have unsaved settings changes. Discard them?",
-      );
-      if (!ok) return;
-    }
-    setApiKeyDraft("");
-    setCfTokenDraft("");
-    setXTokenDraft("");
-    onClose();
+    void (async () => {
+      if (dirty) {
+        const { dialogConfirm } = await import("../lib/dialogs");
+        const ok = await dialogConfirm(
+          "You have unsaved settings changes. Discard them?",
+          { title: "Discard changes", kind: "warning" },
+        );
+        if (!ok) return;
+      }
+      setApiKeyDraft("");
+      setCfTokenDraft("");
+      setXTokenDraft("");
+      onClose();
+    })();
   };
 
   if (!open) return null;
@@ -319,13 +323,22 @@ export function SettingsModal({
       /* not in Tauri */
     }
     if (!path) {
-      path = window.prompt("Folder path to allowlist:");
+      const { dialogMessage } = await import("../lib/dialogs");
+      await dialogMessage(
+        "Folder pick requires the desktop app. Use Browse… under Tauri, or paste a path is not available here — run npm run tauri:dev.",
+        { title: "Add folder", kind: "info" },
+      );
+      return;
     }
     if (!path?.trim()) return;
     const trimmed = path.trim();
     const check = await hostValidateWorkspacePath(trimmed);
     if (!check.ok) {
-      window.alert(`Cannot add folder: ${check.detail}`);
+      const { dialogMessage } = await import("../lib/dialogs");
+      await dialogMessage(`Cannot add folder: ${check.detail}`, {
+        title: "Add folder",
+        kind: "error",
+      });
       return;
     }
     appendRoot(trimmed);
@@ -341,15 +354,21 @@ export function SettingsModal({
     try {
       const ensured = await hostEnsureDefaultWorkspace();
       if (!ensured) {
-        window.alert(
+        const { dialogMessage } = await import("../lib/dialogs");
+        await dialogMessage(
           "Default workspace is available in the desktop app (Tauri). Pick a folder instead.",
+          { title: "Default workspace", kind: "info" },
         );
         fix("workspace");
         return;
       }
       const check = await hostValidateWorkspacePath(ensured.path);
       if (!check.ok) {
-        window.alert(`Cannot use default folder: ${check.detail}`);
+        const { dialogMessage } = await import("../lib/dialogs");
+        await dialogMessage(`Cannot use default folder: ${check.detail}`, {
+          title: "Default workspace",
+          kind: "error",
+        });
         return;
       }
       setDefaultWs(ensured);
@@ -406,8 +425,10 @@ export function SettingsModal({
         }
       } catch (e) {
         // Host present but save failed (e.g. no Grok session, bad URL) — don't silent-close.
-        window.alert(
+        const { dialogMessage } = await import("../lib/dialogs");
+        await dialogMessage(
           `Could not save AI provider: ${e instanceof Error ? e.message : String(e)}`,
+          { title: "AI provider", kind: "error" },
         );
         return;
       }
@@ -668,36 +689,51 @@ export function SettingsModal({
                                 onClick={() => {
                                   const kind = normalizeProviderKind(c.kind);
                                   if (kind === "none") {
-                                    window.alert(
-                                      `This candidate (${c.kind}) is not supported yet.`,
+                                    void import("../lib/dialogs").then(
+                                      ({ dialogMessage }) =>
+                                        dialogMessage(
+                                          `This candidate (${c.kind}) is not supported yet.`,
+                                          { title: "Provider", kind: "info" },
+                                        ),
                                     );
                                     return;
                                   }
                                   if (kind === "xai_grok_build") {
-                                    const ok = window.confirm(
-                                      [
-                                        "Use Grok Build session credentials?",
-                                        "",
-                                        "ContextDesk will call api.x.ai using your local",
-                                        "~/.grok/auth.json session (not auto-enabled until you Save).",
-                                        "Tokens stay on this machine and are never written to settings JSON.",
-                                      ].join("\n"),
+                                    void import("../lib/dialogs").then(
+                                      async ({ dialogConfirm }) => {
+                                        const ok = await dialogConfirm(
+                                          [
+                                            "Use Grok Build session credentials?",
+                                            "",
+                                            "ContextDesk will call api.x.ai using your local",
+                                            "~/.grok/auth.json session (not auto-enabled until you Save).",
+                                            "Tokens stay on this machine and are never written to settings JSON.",
+                                          ].join("\n"),
+                                          {
+                                            title: "Grok Build session",
+                                            kind: "warning",
+                                          },
+                                        );
+                                        if (!ok) return;
+                                        setDraft((d) => ({
+                                          ...d,
+                                          providerKind: "xai_grok_build",
+                                          providerLabel: c.label,
+                                          baseUrl:
+                                            c.base_url ?? "https://api.x.ai/v1",
+                                          chatModel:
+                                            d.providerKind === "xai_grok_build" &&
+                                            d.chatModel.trim()
+                                              ? d.chatModel
+                                              : d.chatModel.trim() || "grok-3",
+                                          localOnly: false,
+                                          hasApiKey:
+                                            c.credentials_present || d.hasApiKey,
+                                          ollamaReachable: null,
+                                          remoteReachable: null,
+                                        }));
+                                      },
                                     );
-                                    if (!ok) return;
-                                    setDraft((d) => ({
-                                      ...d,
-                                      providerKind: "xai_grok_build",
-                                      providerLabel: c.label,
-                                      baseUrl: c.base_url ?? "https://api.x.ai/v1",
-                                      chatModel:
-                                        d.providerKind === "xai_grok_build" && d.chatModel.trim()
-                                          ? d.chatModel
-                                          : "grok-3",
-                                      localOnly: false,
-                                      hasApiKey: c.credentials_present,
-                                      ollamaReachable: null,
-                                      remoteReachable: null,
-                                    }));
                                     return;
                                   }
                                   setDraft((d) => ({

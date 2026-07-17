@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { IconAlert } from "./icons";
 
 export type PermissionPrompt = {
@@ -13,21 +13,105 @@ export type PermissionPrompt = {
 
 type Props = {
   prompt: PermissionPrompt | null;
-  onRespond: (decision: "deny" | "allow_once" | "allow_session_path", typed?: string) => void;
+  onRespond: (
+    decision: "deny" | "allow_once" | "allow_session_path",
+    typed?: string,
+  ) => void;
 };
 
+/**
+ * Wrapper always mounted so hooks stay stable; body mounts only when prompted
+ * so focus capture/restore runs cleanly per request.
+ */
 export function PermissionModal({ prompt, onRespond }: Props) {
-  const [typed, setTyped] = useState("");
   if (!prompt) return null;
+  return <PermissionModalBody prompt={prompt} onRespond={onRespond} />;
+}
+
+function PermissionModalBody({
+  prompt,
+  onRespond,
+}: {
+  prompt: PermissionPrompt;
+  onRespond: Props["onRespond"];
+}) {
+  const [typed, setTyped] = useState("");
+  const panelRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+
   const needsType = Boolean(prompt.typeConfirmPhrase);
   const typeOk = !needsType || typed.trim() === prompt.typeConfirmPhrase;
 
+  // Reset typed phrase whenever the request changes (new mount per requestId
+  // also works; effect covers same-instance swaps).
+  useEffect(() => {
+    setTyped("");
+  }, [prompt.requestId]);
+
+  // Capture focus restore target, autofocus, trap Tab, Escape=deny.
+  useEffect(() => {
+    restoreFocusRef.current =
+      (document.activeElement as HTMLElement | null) ?? null;
+
+    const focusFirst = () => {
+      if (needsType) {
+        inputRef.current?.focus();
+      } else {
+        cancelRef.current?.focus();
+      }
+    };
+    // Defer so panel is in the DOM.
+    const t = window.setTimeout(focusFirst, 0);
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onRespond("deny");
+        return;
+      }
+      if (e.key !== "Tab" || !panelRef.current) return;
+      const focusable = panelRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("keydown", onKey, true);
+      restoreFocusRef.current?.focus?.();
+    };
+  }, [prompt.requestId, needsType, onRespond]);
+
   return (
-    <div className="settings-overlay" role="alertdialog" aria-modal="true" aria-label="Permission required">
-      <div className="settings-panel settings-panel--narrow">
+    <div
+      className="settings-overlay"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+    >
+      <div
+        className="settings-panel settings-panel--narrow"
+        ref={panelRef}
+      >
         <div className="settings-body">
           <header className="settings-header">
-            <div className="settings-header__title">
+            <div className="settings-header__title" id={titleId}>
               <IconAlert /> Permission needed: write
             </div>
           </header>
@@ -39,17 +123,22 @@ export function PermissionModal({ prompt, onRespond }: Props) {
             <p className="section-lead">Why: {prompt.reason}</p>
             <p className="section-lead">Risk: {prompt.risk}</p>
             {prompt.toolName === "save_skill" ? (
-              <p className="field__label">Skill draft preview (Accept writes this file)</p>
+              <p className="field__label">
+                Skill draft preview (Accept writes this file)
+              </p>
             ) : (
               <p className="field__label">Preview</p>
             )}
-            <pre className="tool-row__detail tool-row__detail--tall">{prompt.preview}</pre>
+            <pre className="tool-row__detail tool-row__detail--tall">
+              {prompt.preview}
+            </pre>
             {needsType ? (
               <div className="field">
                 <label className="field__label" htmlFor="type-confirm">
                   Type <code>{prompt.typeConfirmPhrase}</code> to confirm
                 </label>
                 <input
+                  ref={inputRef}
                   id="type-confirm"
                   className="field__control"
                   value={typed}
@@ -60,7 +149,12 @@ export function PermissionModal({ prompt, onRespond }: Props) {
             ) : null}
           </div>
           <footer className="settings-footer">
-            <button type="button" className="btn btn--ghost" onClick={() => onRespond("deny")}>
+            <button
+              ref={cancelRef}
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => onRespond("deny")}
+            >
               Cancel
             </button>
             {!needsType ? (

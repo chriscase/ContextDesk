@@ -56,9 +56,13 @@ pub fn normalize_gateway_input(raw: &str) -> String {
     let mut s = strip_slash(raw);
     let lower = s.to_lowercase();
     if lower.ends_with("/models") {
-        s = s[..s.len() - "/models".len()]
-            .trim_end_matches('/')
-            .to_string();
+        // ASCII suffix strip — never mid-char (suffix is pure ASCII).
+        #[allow(clippy::string_slice)] // safe: ASCII "/models" suffix length
+        {
+            s = s[..s.len() - "/models".len()]
+                .trim_end_matches('/')
+                .to_string();
+        }
     }
     s
 }

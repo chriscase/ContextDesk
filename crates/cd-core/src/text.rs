@@ -16,6 +16,7 @@ pub fn floor_char_boundary(s: &str, idx: usize) -> usize {
 /// Longest prefix of `s` that is ≤ `max_bytes` bytes and ends on a char boundary.
 ///
 /// Returns a subslice of `s` (empty when `max_bytes == 0`).
+#[allow(clippy::string_slice)] // safe: index from floor_char_boundary
 pub fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..floor_char_boundary(s, max_bytes)]
 }
@@ -59,3 +60,4 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 99), 4);
     }
 }
+

@@ -56,6 +56,7 @@ pub fn parse_skill_file(path: &Path) -> CoreResult<Option<Skill>> {
     }))
 }
 
+#[allow(clippy::string_slice)] // safe: frontmatter fences are ASCII "---"
 fn split_frontmatter(text: &str) -> (std::collections::HashMap<String, String>, String) {
     let mut map = std::collections::HashMap::new();
     let t = text.trim_start();

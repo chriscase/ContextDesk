@@ -1,4 +1,6 @@
 //! Curated publisher RSS sources for current-events research fan-in.
+// XML/RSS scanners slice at ASCII tag delimiters from find().
+#![allow(clippy::string_slice)]
 //!
 //! Feeds are fixed public URLs (no API keys). Results are keyword-filtered
 //! against the user query and merged into `web_search`. Per-source enablement

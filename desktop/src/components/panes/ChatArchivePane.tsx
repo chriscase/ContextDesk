@@ -238,14 +238,17 @@ export function ChatArchivePane({
                         type="button"
                         className="btn btn--ghost btn--sm"
                         onClick={() => {
-                          if (
-                            !window.confirm(
+                          void (async () => {
+                            const { dialogConfirm } = await import(
+                              "../../lib/dialogs"
+                            );
+                            const ok = await dialogConfirm(
                               `Permanently delete “${m.title}”?\n\nThis cannot be undone.`,
-                            )
-                          ) {
-                            return;
-                          }
-                          void mutate(() => hostDeleteChatSession(m.id));
+                              { title: "Delete forever", kind: "warning" },
+                            );
+                            if (!ok) return;
+                            void mutate(() => hostDeleteChatSession(m.id));
+                          })();
                         }}
                       >
                         Delete forever
@@ -278,14 +281,17 @@ export function ChatArchivePane({
                         type="button"
                         className="btn btn--ghost btn--sm"
                         onClick={() => {
-                          if (
-                            !window.confirm(
+                          void (async () => {
+                            const { dialogConfirm } = await import(
+                              "../../lib/dialogs"
+                            );
+                            const ok = await dialogConfirm(
                               `Move “${m.title}” to Trash?\n\nYou can restore it later from the Trash tab.`,
-                            )
-                          ) {
-                            return;
-                          }
-                          void mutate(() => hostTrashChatSession(m.id));
+                              { title: "Move to Trash", kind: "warning" },
+                            );
+                            if (!ok) return;
+                            void mutate(() => hostTrashChatSession(m.id));
+                          })();
                         }}
                       >
                         Trash

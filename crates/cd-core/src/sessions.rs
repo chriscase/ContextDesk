@@ -335,9 +335,13 @@ pub fn title_from_prompt(prompt: &str, max_chars: usize) -> String {
         .or_else(|| collapsed.find([';', ',']))
         .filter(|&i| i >= 12 && i <= max_chars.max(24));
     let base = if let Some(i) = cut_at {
-        collapsed[..i]
-            .trim_end_matches(['.', '?', '!', ';', ','])
-            .trim()
+        // cut_at is from find on ASCII punctuation.
+        #[allow(clippy::string_slice)] // safe: index from find of ASCII punctuation
+        {
+            collapsed[..i]
+                .trim_end_matches(['.', '?', '!', ';', ','])
+                .trim()
+        }
     } else {
         collapsed.as_str()
     };

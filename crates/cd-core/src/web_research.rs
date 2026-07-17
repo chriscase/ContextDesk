@@ -1,4 +1,6 @@
 //! Opt-in open-web research tools: SSRF-safe fetch + DuckDuckGo HTML search.
+// HTML scanners index at ASCII delimiter finds; length caps use text::floor_char_boundary.
+#![allow(clippy::string_slice)]
 //!
 //! Default off. Agent-callable only when the host enables web research.
 //! Not unrestricted curl: scheme/host/IP policy, no credentials in URL,
