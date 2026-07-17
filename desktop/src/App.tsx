@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { Composer } from "./components/Composer";
 import { MarkdownBody } from "./components/MarkdownBody";
 import {
@@ -925,14 +932,49 @@ export function App() {
     }
   };
 
-  const renameActiveSession = async () => {
-    if (!activeSession) return;
-    const next = window.prompt("Rename chat", activeSession.title);
+  type ChatCtxMenu = { sessionId: string; x: number; y: number };
+  const [chatCtxMenu, setChatCtxMenu] = useState<ChatCtxMenu | null>(null);
+
+  useEffect(() => {
+    if (!chatCtxMenu) return;
+    const close = () => setChatCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [chatCtxMenu]);
+
+  const openChatCtxMenu = (
+    e: ReactMouseEvent,
+    sessionId: string,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Keep menu on-screen
+    const pad = 8;
+    const w = 180;
+    const h = 160;
+    const x = Math.min(e.clientX, window.innerWidth - w - pad);
+    const y = Math.min(e.clientY, window.innerHeight - h - pad);
+    setChatCtxMenu({ sessionId, x: Math.max(pad, x), y: Math.max(pad, y) });
+  };
+
+  const renameSessionById = async (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (!target) return;
+    const next = window.prompt("Rename chat", target.title);
     if (next === null) return;
     const title = next.trim();
     if (!title) return;
     try {
-      const saved = await hostRenameChatSession(activeSession.id, title);
+      const saved = await hostRenameChatSession(id, title);
       if (saved) {
         setSessions((all) =>
           all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
@@ -945,19 +987,20 @@ export function App() {
     }
     setSessions((all) =>
       all.map((s) =>
-        s.id === activeSession.id
+        s.id === id
           ? { ...s, title, titleLocked: true, updatedAt: nowIso() }
           : s,
       ),
     );
   };
 
-  const togglePinActive = async () => {
-    if (!activeSession) return;
-    const nextPinned = !activeSession.pinned;
+  const togglePinById = async (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (!target) return;
+    const nextPinned = !target.pinned;
     try {
-      if (activeSession.messages.length > 0) {
-        const saved = await hostPinChatSession(activeSession.id, nextPinned);
+      if (target.messages.length > 0) {
+        const saved = await hostPinChatSession(id, nextPinned);
         if (saved) {
           setSessions((all) =>
             all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
@@ -971,20 +1014,18 @@ export function App() {
     }
     setSessions((all) =>
       all.map((s) =>
-        s.id === activeSession.id
-          ? { ...s, pinned: nextPinned, updatedAt: nowIso() }
-          : s,
+        s.id === id ? { ...s, pinned: nextPinned, updatedAt: nowIso() } : s,
       ),
     );
   };
 
-  const deleteActiveSession = async () => {
-    if (!activeSession) return;
+  const deleteSessionById = async (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (!target) return;
     const ok = window.confirm(
-      `Delete chat “${activeSession.title}”? This cannot be undone.`,
+      `Delete chat “${target.title}”? This cannot be undone.`,
     );
     if (!ok) return;
-    const id = activeSession.id;
     try {
       await hostDeleteChatSession(id);
     } catch {
@@ -998,7 +1039,9 @@ export function App() {
         setActiveSessionId(s.id);
         return [s];
       }
-      setActiveSessionId(next[0].id);
+      if (resolvedSessionId === id) {
+        setActiveSessionId(next[0].id);
+      }
       return next;
     });
   };
@@ -1196,14 +1239,12 @@ export function App() {
                     type="button"
                     className="session-list__item"
                     data-active={s.id === resolvedSessionId ? "true" : undefined}
-                    title={s.messages[0]?.content?.slice(0, 120) || s.title}
+                    title={`${s.title} — right-click for options`}
                     onClick={() => {
                       setActiveSessionId(s.id);
                       setPane("chat");
                     }}
-                    onDoubleClick={() => {
-                      if (s.id === resolvedSessionId) void renameActiveSession();
-                    }}
+                    onContextMenu={(e) => openChatCtxMenu(e, s.id)}
                   >
                     <span className="session-list__title">
                       {s.pinned ? "📌 " : ""}
@@ -1227,36 +1268,6 @@ export function App() {
           >
             Chat archive
           </button>
-          {activeSession && pane === "chat" ? (
-            <div className="session-list__actions">
-              <button
-                type="button"
-                className="btn btn--ghost btn--sm"
-                onClick={() => void renameActiveSession()}
-              >
-                Rename
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost btn--sm"
-                onClick={() => void togglePinActive()}
-                title={
-                  activeSession.pinned
-                    ? "Unpin from sidebar"
-                    : "Pin to sidebar"
-                }
-              >
-                {activeSession.pinned ? "Unpin" : "Pin"}
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost btn--sm"
-                onClick={() => void deleteActiveSession()}
-              >
-                Delete
-              </button>
-            </div>
-          ) : null}
         </aside>
         <div className="workspace">
           <div className="pane-tabs" role="tablist">
@@ -1317,6 +1328,10 @@ export function App() {
                   role="tab"
                   className="session-tab"
                   data-active="true"
+                  title="Right-click for rename, pin, delete"
+                  onContextMenu={(e) => {
+                    if (activeSession) openChatCtxMenu(e, activeSession.id);
+                  }}
                 >
                   {activeSession?.title ?? "Chat"}
                 </button>
@@ -1587,6 +1602,80 @@ export function App() {
       />
 
       <PermissionModal prompt={permission} onRespond={onPermissionRespond} />
+
+      {chatCtxMenu
+        ? (() => {
+            const target = sessions.find((s) => s.id === chatCtxMenu.sessionId);
+            if (!target) return null;
+            return (
+              <div
+                className="chat-ctx-menu"
+                role="menu"
+                style={{ left: chatCtxMenu.x, top: chatCtxMenu.y }}
+                onClick={(e) => e.stopPropagation()}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-ctx-menu__item"
+                  onClick={() => {
+                    setChatCtxMenu(null);
+                    setActiveSessionId(target.id);
+                    setPane("chat");
+                  }}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-ctx-menu__item"
+                  onClick={() => {
+                    setChatCtxMenu(null);
+                    void renameSessionById(target.id);
+                  }}
+                >
+                  Rename…
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-ctx-menu__item"
+                  onClick={() => {
+                    setChatCtxMenu(null);
+                    void togglePinById(target.id);
+                  }}
+                >
+                  {target.pinned ? "Unpin from sidebar" : "Pin to sidebar"}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-ctx-menu__item"
+                  onClick={() => {
+                    setChatCtxMenu(null);
+                    setPane("archive");
+                  }}
+                >
+                  Open archive
+                </button>
+                <div className="chat-ctx-menu__sep" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="chat-ctx-menu__item chat-ctx-menu__item--danger"
+                  onClick={() => {
+                    setChatCtxMenu(null);
+                    void deleteSessionById(target.id);
+                  }}
+                >
+                  Delete…
+                </button>
+              </div>
+            );
+          })()
+        : null}
     </div>
   );
 }

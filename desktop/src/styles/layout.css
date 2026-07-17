@@ -201,18 +201,49 @@
   color: var(--text-faint);
 }
 
-.session-list__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px var(--space-1) var(--space-2);
-  border-bottom: 1px solid var(--border-soft);
-  margin-bottom: var(--space-2);
-}
-
 .session-list__loading {
   padding: 6px 8px;
   list-style: none;
+}
+
+/* Chat context menu (right-click) */
+.chat-ctx-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-chrome, var(--bg-panel));
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat-ctx-menu__item {
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.chat-ctx-menu__item:hover {
+  background: var(--bg-hover);
+}
+
+.chat-ctx-menu__item--danger {
+  color: var(--danger);
+}
+
+.chat-ctx-menu__sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--border-soft);
 }
 
 /* Flex column so session tabs / chrome stay compact; chat body takes remaining space.
