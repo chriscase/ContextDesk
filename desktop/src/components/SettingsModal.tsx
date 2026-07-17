@@ -4,12 +4,14 @@ import {
   hostConfluenceHasToken,
   hostEnsureDefaultWorkspace,
   hostGetConfluence,
+  hostGetWebResearchEnabled,
   hostListLocalCandidates,
   hostPreflight,
   hostProbeUrl,
   hostProviderHasSecret,
   hostSaveActiveProvider,
   hostSaveConfluence,
+  hostSetWebResearchEnabled,
   hostSuggestDefaultWorkspace,
   hostTestConfluence,
   hostValidateWorkspacePath,
@@ -108,6 +110,7 @@ export function SettingsModal({
       void (async () => {
         const cf = await hostGetConfluence();
         const has = await hostConfluenceHasToken();
+        const webOn = await hostGetWebResearchEnabled();
         if (cf) {
           setDraft((d) => ({
             ...d,
@@ -117,6 +120,12 @@ export function SettingsModal({
               spaces: cf.spaces.join(", "),
               hasToken: has ?? Boolean(cf.pat_ref),
             },
+            webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
+          }));
+        } else if (webOn !== null) {
+          setDraft((d) => ({
+            ...d,
+            webResearchEnabled: webOn,
           }));
         }
         if (setup.providerKind !== "none") {
@@ -391,6 +400,19 @@ export function SettingsModal({
       };
     } catch {
       // browser mode: keep in local setup only
+    }
+
+    // Persist web research toggle (rebuilds tool host on Tauri)
+    try {
+      const webOn = await hostSetWebResearchEnabled(
+        draft.webResearchEnabled ?? false,
+      );
+      next = { ...next, webResearchEnabled: webOn };
+    } catch {
+      next = {
+        ...next,
+        webResearchEnabled: draft.webResearchEnabled ?? false,
+      };
     }
 
     setApiKeyDraft("");
@@ -821,10 +843,19 @@ export function SettingsModal({
             {section === "connectors" ? (
               <div>
                 <p className="section-lead">
-                  Optional data sources. Confluence is read-only: set the wiki
-                  base URL and a personal access token (stored in the OS
-                  keychain, never in config files).
+                  Optional data sources. Confluence is read-only (PAT in OS
+                  keychain). Web research is opt-in open-web search/fetch with
+                  SSRF protections — off by default.
                 </p>
+                <ToggleField
+                  id={`${baseId}-web-research`}
+                  label="Enable web research"
+                  hint="Exposes web_search and web_fetch tools to the agent. Public http(s) only; private/loopback/metadata blocked. DuckDuckGo HTML search is best-effort (no API key)."
+                  checked={draft.webResearchEnabled ?? false}
+                  onChange={(webResearchEnabled) =>
+                    setDraft((d) => ({ ...d, webResearchEnabled }))
+                  }
+                />
                 <ToggleField
                   id={`${baseId}-cf-enabled`}
                   label="Enable Confluence (read-only)"

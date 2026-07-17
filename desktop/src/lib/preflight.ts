@@ -38,6 +38,8 @@ export type AppSetupState = {
   ollamaReachable: boolean | null;
   remoteReachable: boolean | null;
   confluence: ConfluenceSetup;
+  /** Opt-in open-web tools (web_search / web_fetch). Default off. */
+  webResearchEnabled?: boolean;
 };
 
 export function runClientPreflight(s: AppSetupState): PreflightReport {

@@ -62,6 +62,10 @@ pub struct AppConfig {
     /// Default chat model for new sessions (falls back to active profile model).
     #[serde(default)]
     pub default_chat_model: Option<String>,
+    /// When true, agent may call `web_search` / `web_fetch` (open web; SSRF-gated).
+    /// Default false — opt-in; no secrets required.
+    #[serde(default)]
+    pub web_research_enabled: bool,
 }
 
 fn default_theme() -> String {
@@ -178,16 +182,31 @@ mod tests {
             spaces: vec!["ENG".into()],
             pat_ref: Some(CONFLUENCE_PAT_REF.into()),
         };
+        cfg.web_research_enabled = true;
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.providers.active().unwrap().id, "ollama-local");
         assert!(loaded.confluence.is_configured());
         assert_eq!(loaded.confluence.spaces, vec!["ENG"]);
+        assert!(loaded.web_research_enabled);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("ATATT"));
         assert!(text.contains("wiki.example.com"));
         assert!(text.contains(CONFLUENCE_PAT_REF));
+        assert!(text.contains("web_research_enabled"));
+    }
+
+    #[test]
+    fn web_research_defaults_off() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.web_research_enabled);
+        // Missing field on disk → false
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"providers":{"profiles":[],"active_id":null}}"#).unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert!(!loaded.web_research_enabled);
     }
 
     #[test]

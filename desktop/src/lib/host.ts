@@ -547,6 +547,20 @@ export async function hostTestConfluence(): Promise<string> {
   return invoke<string>("test_confluence_config");
 }
 
+export async function hostGetWebResearchEnabled(): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("get_web_research_enabled");
+}
+
+export async function hostSetWebResearchEnabled(
+  enabled: boolean,
+): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Web research settings require Tauri host");
+  }
+  return invoke<boolean>("set_web_research_enabled", { enabled });
+}
+
 export function setupToWorkspaceRoots(setup: AppSetupState): string[] {
   return setup.workspaceRoots;
 }

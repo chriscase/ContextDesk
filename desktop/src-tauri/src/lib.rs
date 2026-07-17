@@ -84,6 +84,8 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     } else {
         host.set_confluence(None, None);
     }
+    // Open-web research tools (opt-in; no secrets).
+    host.set_web_research(cfg.web_research_enabled);
     *state.host.lock().expect("host") = Some(host);
     Ok(())
 }
@@ -424,6 +426,30 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
 #[tauri::command]
 fn get_confluence_settings(state: State<'_, AppState>) -> ConfluenceSettings {
     state.config.lock().expect("config").confluence.clone()
+}
+
+#[tauri::command]
+fn get_web_research_enabled(state: State<'_, AppState>) -> bool {
+    state
+        .config
+        .lock()
+        .expect("config")
+        .web_research_enabled
+}
+
+#[tauri::command]
+fn set_web_research_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let mut cfg = state.config.lock().expect("config");
+    cfg.web_research_enabled = enabled;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    // Rebuild host so tool specs update for the next agent turn.
+    let _ = ensure_host(&state);
+    Ok(enabled)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1542,6 +1568,8 @@ pub fn run() {
             save_confluence_settings,
             confluence_has_token,
             test_confluence_config,
+            get_web_research_enabled,
+            set_web_research_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

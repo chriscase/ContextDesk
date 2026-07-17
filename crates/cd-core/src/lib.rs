@@ -40,6 +40,7 @@ pub mod sql_ro;
 pub mod ssrf;
 pub mod tool_host;
 pub mod tools;
+pub mod web_research;
 pub mod workspace;
 
 pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};

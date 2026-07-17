@@ -12,6 +12,7 @@ use crate::permissions::{
 };
 use crate::skills::{self, Skill};
 use crate::tools::{may_auto_execute, mvp_tool_specs, names, ToolSideEffect, ToolSpec};
+use crate::web_research;
 use crate::workspace::Workspace;
 use serde_json::{json, Value};
 use std::fs;
@@ -62,6 +63,11 @@ pub struct ToolHost {
     /// Rate-limit: min interval between Confluence HTTP calls.
     confluence_min_interval: Duration,
     last_confluence_call: Option<Instant>,
+    /// When true, `web_search` / `web_fetch` are registered and executable.
+    web_research_enabled: bool,
+    /// Rate-limit: min interval between open-web HTTP calls.
+    web_min_interval: Duration,
+    last_web_call: Option<Instant>,
 }
 
 impl ToolHost {
@@ -85,6 +91,10 @@ impl ToolHost {
             // Rate-limit friendly: ≥400ms between Confluence HTTP calls
             confluence_min_interval: Duration::from_millis(400),
             last_confluence_call: None,
+            web_research_enabled: false,
+            // Slightly more conservative than Confluence (public engines).
+            web_min_interval: Duration::from_millis(800),
+            last_web_call: None,
         }
     }
 
@@ -94,13 +104,26 @@ impl ToolHost {
         self.confluence_pat = pat;
     }
 
-    /// Tool specs; Confluence tools omitted when connector not configured.
+    /// Enable or disable open-web research tools (Settings toggle).
+    pub fn set_web_research(&mut self, enabled: bool) {
+        self.web_research_enabled = enabled;
+    }
+
+    /// Whether web research tools are available.
+    pub fn web_research_enabled(&self) -> bool {
+        self.web_research_enabled
+    }
+
+    /// Tool specs; Confluence / web tools omitted when not enabled.
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
             specs.retain(|t| {
                 t.name != names::CONFLUENCE_SEARCH && t.name != names::CONFLUENCE_GET_PAGE
             });
+        }
+        if !self.web_research_enabled {
+            specs.retain(|t| t.name != names::WEB_SEARCH && t.name != names::WEB_FETCH);
         }
         specs
     }
@@ -251,6 +274,8 @@ impl ToolHost {
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments)?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments)?,
+            names::WEB_SEARCH => self.tool_web_search(arguments)?,
+            names::WEB_FETCH => self.tool_web_fetch(arguments)?,
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
             }
@@ -457,7 +482,7 @@ impl ToolHost {
             format!("text ~ \"{}\"", q.replace('"', "\\\""))
         };
         self.throttle_confluence()?;
-        let hits = block_on_confluence(confluence_ro::cql_search(&cfg, &cql, &pat, limit))?;
+        let hits = block_on_http(confluence_ro::cql_search(&cfg, &cql, &pat, limit))?;
         let mut lines = Vec::new();
         let mut first = None;
         for h in &hits {
@@ -507,13 +532,86 @@ impl ToolHost {
             ));
         }
         self.throttle_confluence()?;
-        let body = block_on_confluence(confluence_ro::fetch_page(&cfg, page_id, &pat))?;
+        let body = block_on_http(confluence_ro::fetch_page(&cfg, page_id, &pat))?;
         Ok((
             true,
             format!("fetched confluence page {page_id}"),
             body,
             Some(format!("confluence:{page_id}")),
         ))
+    }
+
+    fn throttle_web(&mut self) -> CoreResult<()> {
+        if let Some(last) = self.last_web_call {
+            let elapsed = last.elapsed();
+            if elapsed < self.web_min_interval {
+                std::thread::sleep(self.web_min_interval - elapsed);
+            }
+        }
+        self.last_web_call = Some(Instant::now());
+        Ok(())
+    }
+
+    fn tool_web_search(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.web_research_enabled {
+            return Err(CoreError::Policy(
+                "Web research is disabled. Enable it in Settings → Connectors.".into(),
+            ));
+        }
+        let q = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let limit = web_research::clamp_search_limit(args.get("limit").and_then(|v| v.as_u64()));
+        // Sanitize early for clearer errors before network.
+        let q = web_research::sanitize_search_query(q)?;
+        self.throttle_web()?;
+        let hits = block_on_http(web_research::web_search_ddg(&q, limit))?;
+        let raw = web_research::format_search_hits(&hits, &q);
+        let first = hits.first().map(|h| h.url.clone());
+        Ok((
+            true,
+            format!("{} web result(s) for `{q}`", hits.len()),
+            raw,
+            first,
+        ))
+    }
+
+    fn tool_web_fetch(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.web_research_enabled {
+            return Err(CoreError::Policy(
+                "Web research is disabled. Enable it in Settings → Connectors.".into(),
+            ));
+        }
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if url.is_empty() {
+            return Err(CoreError::Message("web_fetch requires url".into()));
+        }
+        // SSRF validation before any network I/O.
+        let _ = web_research::validate_web_url(url)?;
+        self.throttle_web()?;
+        let fetched = block_on_http(web_research::web_fetch(url))?;
+        let raw = web_research::format_fetch_result(&fetched);
+        let summary = if fetched.title.is_empty() {
+            format!("fetched {}", fetched.url)
+        } else {
+            format!(
+                "fetched “{}”",
+                fetched.title.chars().take(60).collect::<String>()
+            )
+        };
+        Ok((true, summary, raw, Some(fetched.url)))
     }
 
     /// SoftWrite skill author — only called after grant (see execute gate).
@@ -704,7 +802,7 @@ fn preview_args(args: &Value) -> String {
     }
 }
 
-fn block_on_confluence<F, T>(fut: F) -> CoreResult<T>
+fn block_on_http<F, T>(fut: F) -> CoreResult<T>
 where
     F: std::future::Future<Output = CoreResult<T>>,
 {
@@ -817,6 +915,66 @@ mod tests {
         let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
         assert!(!names.iter().any(|n| n == names::CONFLUENCE_SEARCH));
         assert!(!names.iter().any(|n| n == names::CONFLUENCE_GET_PAGE));
+    }
+
+    #[test]
+    fn web_tools_hidden_when_disabled() {
+        let (_tmp, host) = host_with_docs();
+        assert!(!host.web_research_enabled());
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n == names::WEB_SEARCH));
+        assert!(!names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    #[test]
+    fn web_tools_visible_when_enabled() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_web_research(true);
+        let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
+        assert!(names.iter().any(|n| n == names::WEB_SEARCH));
+        assert!(names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    #[test]
+    fn web_fetch_ssrf_denied_without_network() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_web_research(true);
+        let err = host
+            .execute(
+                names::WEB_FETCH,
+                &json!({"url": "http://127.0.0.1:8080/secret"}),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("reject")
+                || err.to_string().to_lowercase().contains("loopback")
+                || err.to_string().to_lowercase().contains("policy")
+                || err.to_string().to_lowercase().contains("not allowed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn web_search_blocked_when_disabled() {
+        let (_tmp, mut host) = host_with_docs();
+        let err = host
+            .execute(names::WEB_SEARCH, &json!({"query": "rust"}), None)
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("disabled"), "{err}");
+    }
+
+    #[test]
+    fn web_fetch_blocked_when_disabled() {
+        let (_tmp, mut host) = host_with_docs();
+        let err = host
+            .execute(
+                names::WEB_FETCH,
+                &json!({"url": "https://example.com/"}),
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("disabled"), "{err}");
     }
 
     #[test]

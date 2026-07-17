@@ -42,6 +42,10 @@ pub mod names {
     pub const CONFLUENCE_SEARCH: &str = "confluence_search";
     /// Confluence page fetch (read-only).
     pub const CONFLUENCE_GET_PAGE: &str = "confluence_get_page";
+    /// Open-web search (opt-in; DuckDuckGo HTML lite by default).
+    pub const WEB_SEARCH: &str = "web_search";
+    /// Open-web page fetch (opt-in; SSRF-safe text extract).
+    pub const WEB_FETCH: &str = "web_fetch";
 }
 
 /// MVP tool specifications (schemas only; execution is host/agent work).
@@ -134,6 +138,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "required": ["page_id"]
             }),
         },
+        ToolSpec {
+            name: names::WEB_SEARCH.into(),
+            description: "Search the public web for current events / public knowledge (read-only). Use when local KB and Confluence are insufficient. Returns title, URL, snippet. Follow with web_fetch for full page text. Requires Web research enabled in Settings."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 15 }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
+            name: names::WEB_FETCH.into(),
+            description: "Fetch a public http(s) URL and return truncated readable text (read-only). SSRF-blocked for private/loopback/metadata. Prefer after web_search. Requires Web research enabled in Settings."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Absolute http(s) URL" }
+                },
+                "required": ["url"]
+            }),
+        },
     ]
 }
 
@@ -152,10 +183,14 @@ mod tests {
         assert!(specs.iter().any(|t| t.name == names::SEARCH_KB));
         assert!(specs.iter().any(|t| t.name == names::SAVE_MEMORY));
         assert!(specs.iter().any(|t| t.name == names::SAVE_SKILL));
+        assert!(specs.iter().any(|t| t.name == names::WEB_SEARCH));
+        assert!(specs.iter().any(|t| t.name == names::WEB_FETCH));
         let save = specs.iter().find(|t| t.name == names::SAVE_MEMORY).unwrap();
         assert_eq!(save.side_effect, ToolSideEffect::SoftWrite);
         let skill = specs.iter().find(|t| t.name == names::SAVE_SKILL).unwrap();
         assert_eq!(skill.side_effect, ToolSideEffect::SoftWrite);
+        let web = specs.iter().find(|t| t.name == names::WEB_SEARCH).unwrap();
+        assert_eq!(web.side_effect, ToolSideEffect::Read);
         assert!(!may_auto_execute(ToolSideEffect::HardWrite));
         assert!(may_auto_execute(ToolSideEffect::Read));
     }

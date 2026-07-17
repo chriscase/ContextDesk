@@ -87,6 +87,9 @@ function loadSetup(): AppSetupState {
           hasToken: false,
         };
       }
+      if (parsed.webResearchEnabled === undefined) {
+        parsed.webResearchEnabled = false;
+      }
       return parsed;
     }
   } catch {
@@ -110,6 +113,7 @@ function loadSetup(): AppSetupState {
       spaces: "",
       hasToken: false,
     },
+    webResearchEnabled: false,
   };
 }
 
