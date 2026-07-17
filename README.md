@@ -57,11 +57,11 @@ Prerequisites: Rust (stable), Node 20+, platform deps for Tauri 2.
 # Library tests
 cargo test -p cd-core
 
-# Desktop (once the shell is wired)
-cd desktop && npm install && npm run tauri dev
+# Desktop (free-port aware — avoids shared Tauri template port 1420)
+cd desktop && npm install && npm run tauri:dev
 ```
 
-See [`docs/DEV.md`](docs/DEV.md) and [`AGENTS.md`](AGENTS.md).
+See [`docs/DEV.md`](docs/DEV.md) (including **Dev ports**) and [`AGENTS.md`](AGENTS.md).
 
 ---
 
