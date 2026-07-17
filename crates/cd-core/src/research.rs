@@ -372,11 +372,10 @@ pub async fn research_turn_with_cancel(
     }
 
     // Ollama: full agent loop with native tools (mistral etc. advertise tools).
-    // Previously we only prefetched search_kb and answered once — models then
-    // correctly said they could not search the web because no tools were offered.
+    // #123: never silently fall back to keyword-only when a chat model is selected.
     if profile.kind == ProviderKind::Ollama {
-        if let Ok(client) = OllamaClient::new(&profile.base_url, &profile.chat_model) {
-            if client.health().await {
+        match OllamaClient::new(&profile.base_url, &profile.chat_model) {
+            Ok(client) if client.health().await => {
                 let backend = OllamaBackend(client);
                 let mut opts = AgentOptions::from_budget(
                     host.router_budget(),
@@ -387,14 +386,20 @@ pub async fn research_turn_with_cancel(
                 return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live)
                     .await;
             }
-        }
-        let ev = research_local(host, user_text, session_id)?;
-        if let Some(sink) = live {
-            for e in &ev {
-                sink(e.clone());
+            _ => {
+                let msg = format!(
+                    "Ollama isn't reachable at {} — start Ollama or choose another provider in Settings.",
+                    profile.base_url
+                );
+                return Ok(emit_provider_error(
+                    "ollama_unreachable",
+                    msg,
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    live,
+                ));
             }
         }
-        return Ok(ev);
     }
 
     if profile.kind == ProviderKind::OpenAiCompatible {
@@ -483,13 +488,47 @@ pub async fn research_turn_with_cancel(
         return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
     }
 
-    let ev = research_local(host, user_text, session_id)?;
+    // Unwired provider kinds (e.g. Anthropic until #121): honest error, not keyword shell.
+    let kind_label = format!("{:?}", profile.kind);
+    let msg = format!(
+        "Provider `{kind_label}` is not wired for chat yet — pick Ollama, an OpenAI-compatible gateway, or Grok Build in Settings."
+    );
+    Ok(emit_provider_error(
+        "provider_not_wired",
+        msg,
+        session_id,
+        Some(profile.chat_model.clone()),
+        live,
+    ))
+}
+
+/// Emit a provider failure as stream events (no keyword-only TextDelta shell) (#123).
+fn emit_provider_error(
+    code: &str,
+    message: String,
+    session_id: &str,
+    model: Option<String>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> Vec<StreamEvent> {
+    let events = vec![
+        StreamEvent::TurnStarted {
+            session_id: session_id.into(),
+            model,
+        },
+        StreamEvent::Error {
+            code: code.into(),
+            message,
+        },
+        StreamEvent::TurnCompleted {
+            reason: code.into(),
+        },
+    ];
     if let Some(sink) = live {
-        for e in &ev {
+        for e in &events {
             sink(e.clone());
         }
     }
-    Ok(ev)
+    events
 }
 
 /// Scripted tool-using turn for golden fixtures (no network).
@@ -802,6 +841,83 @@ mod tests {
             history[0].content
         );
         assert!(!dir.path().join(".contextdesk/memory/x.md").exists());
+    }
+
+    /// #123: non-force_local unwired provider must not synthesize keyword TextDelta.
+    #[tokio::test]
+    async fn unwired_provider_errors_without_keyword_shell() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("hit.md"), "billing secret keyword\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.kind = ProviderKind::Anthropic;
+        profile.label = "Anthropic".into();
+        let mut history = vec![];
+        let events = research_turn_with_cancel(
+            &mut host,
+            &profile,
+            None,
+            "billing",
+            &mut history,
+            "s-unwired",
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                StreamEvent::Error { code, .. } if code == "provider_not_wired"
+            )),
+            "events={events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
+            "must not emit keyword TextDelta shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_unreachable_errors_not_local_shell() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("hit.md"), "billing secret keyword\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let mut profile = ProviderProfile::ollama_local();
+        // Port nothing listens on — health fails without needing a real Ollama.
+        profile.base_url = "http://127.0.0.1:9".into();
+        let mut history = vec![];
+        let events = research_turn_with_cancel(
+            &mut host,
+            &profile,
+            None,
+            "billing",
+            &mut history,
+            "s-ollama",
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                StreamEvent::Error { code, .. } if code == "ollama_unreachable"
+            )),
+            "events={events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
+            "must not emit keyword TextDelta"
+        );
     }
 
     #[test]

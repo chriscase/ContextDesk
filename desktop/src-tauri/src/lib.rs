@@ -1097,22 +1097,8 @@ async fn agent_turn(
                     ),
                 )
             });
-            match res {
-                Ok(ev) => Ok(ev),
-                Err(_) => {
-                    let ev = cd_core::research::research_local_with_skills(
-                        host,
-                        &user_text,
-                        &req.session_id,
-                        &skill_dirs,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    for e in &ev {
-                        sink(e.clone());
-                    }
-                    Ok(ev)
-                }
-            }
+            // #123: never swap a live-model error for silent keyword retrieval.
+            res.map_err(|e| e.to_string())
         } else {
             let ev = cd_core::research::research_local_with_skills(
                 host,
