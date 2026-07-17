@@ -35,6 +35,47 @@ describe("applyEventsToMessage", () => {
     expect(msg.content).toBe("Hello world");
   });
 
+  /** #108 live Channel path: event-by-event fold equals batch fold. */
+  it("incremental single-event fold equals batch fold", () => {
+    const events: EventDto[] = [
+      { kind: "tool", payload: { id: "t1", name: "search_kb", summary: "go", ok: true } },
+      { kind: "text_delta", payload: { text: "Hello" } },
+      { kind: "text_delta", payload: { text: " live" } },
+      {
+        kind: "citation",
+        payload: { source_id: "a.md", label: "a.md", locator: null },
+      },
+      { kind: "turn_completed", payload: { reason: "stop" } },
+    ];
+    let live = base();
+    for (const ev of events) {
+      live = applyEventsToMessage(live, [ev]).msg;
+    }
+    const batch = applyEventsToMessage(base(), events).msg;
+    expect(live.content).toBe(batch.content);
+    expect(live.content).toBe("Hello live");
+    expect(live.tools?.map((t) => t.name)).toEqual(batch.tools?.map((t) => t.name));
+    expect(live.citations?.map((c) => c.id)).toEqual(batch.citations?.map((c) => c.id));
+  });
+
+  it("permission_required surfaces on a single mid-turn event", () => {
+    const { permission } = applyEventsToMessage(base({ content: "partial" }), [
+      {
+        kind: "permission_required",
+        payload: {
+          request_id: "r1",
+          tool_name: "save_memory",
+          target: "notes.md",
+          reason: "write",
+          preview: "x",
+          risk: "local",
+        },
+      },
+    ]);
+    expect(permission?.requestId).toBe("r1");
+    expect(permission?.toolName).toBe("save_memory");
+  });
+
   it("upserts tools by id", () => {
     const events: EventDto[] = [
       {

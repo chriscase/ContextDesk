@@ -878,103 +878,95 @@ export function App() {
       });
 
       try {
-        const events = await agentTurn(
+        // #108: live Channel stream — each EventDto reduces into the assistant
+        // bubble as it arrives. No post-hoc 28ms setTimeout replay.
+        // prefers-reduced-motion is CSS-only on beam/materialize (MarkdownBody).
+        await agentTurn(
           sessionId,
           text,
           forceLocal,
           sessionModel,
           sessionProvider,
-        );
+          (ev) => {
+            if (stopRef.current) return;
 
-        // Progressive append of real text_delta chunks from the agent host
-        // (batch IPC; UI materializes tokens — not a hardcoded demo shell).
-        const textEvents = events.filter((e) => e.kind === "text_delta");
-        const prefersReduced =
-          typeof window !== "undefined" &&
-          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        // Slightly longer than a frame so beam-in chunks are perceptible.
-        const delayMs = prefersReduced ? 0 : 28;
-
-        for (const ev of textEvents) {
-          // Local Stop only ends materialization (#105); host cancel is #90.
-          if (stopRef.current) break;
-          const chunk = String(ev.payload?.text ?? "");
-          if (!chunk) continue;
-          setMessages((m) => {
-            const idx = m.findIndex((x) => x.id === assistantId);
-            if (idx < 0) return m;
-            const next = [...m];
-            next[idx] = {
-              ...next[idx],
-              content: next[idx].content + chunk,
-              streaming: true,
-            };
-            return next;
-          });
-          if (delayMs > 0) {
-            await new Promise((r) => setTimeout(r, delayMs));
-          }
-        }
-
-        // Tools, citations, trail, permissions (once) + durable auto-save.
-        setSessions((all) => {
-          const cur = all.find((s) => s.id === sessionId);
-          if (!cur) return all;
-          const m = cur.messages;
-          const idx = m.findIndex((x) => x.id === assistantId);
-          if (idx < 0) return all;
-          const streamedContent = m[idx].content;
-          const { msg, permission: perm } = applyEventsToMessage(
-            { ...m[idx], content: streamedContent },
-            events.filter((e) => e.kind !== "text_delta"),
-          );
-          const merged: Msg = {
-            ...msg,
-            content: streamedContent || msg.content,
-            streaming: false,
-            meta: metaAtSend,
-          };
-          if (perm) {
-            setPermission(perm);
-            const prev = events.find((e) => e.kind === "permission_required");
-            const args = prev?.payload?.arguments;
-            if (args && typeof args === "object" && !Array.isArray(args)) {
-              setPendingToolArgs(args as Record<string, unknown>);
-            } else {
-              setPendingToolArgs({});
+            // Surface permission modal immediately (mid-turn), not at turn end.
+            if (ev.kind === "permission_required") {
+              const { permission: perm } = applyEventsToMessage(
+                {
+                  id: assistantId,
+                  role: "assistant",
+                  content: "",
+                },
+                [ev],
+              );
+              if (perm) {
+                setPermission(perm);
+                const args = ev.payload?.arguments;
+                if (args && typeof args === "object" && !Array.isArray(args)) {
+                  setPendingToolArgs(args as Record<string, unknown>);
+                } else {
+                  setPendingToolArgs({});
+                }
+              }
             }
-          }
-          const cite = merged.citations?.[0];
-          if (cite) {
-            setSourcePath(cite.id);
-            void hostReadFile(cite.id)
-              .then((body) => {
-                setSourceContent(body);
-                setPane("source");
-              })
-              .catch((err) => {
-                setSourceContent(
-                  `Could not read file:\n${err instanceof Error ? err.message : String(err)}`,
-                );
-              });
-          }
-          if (merged.tools?.some((t) => t.name === "save_memory" && t.ok)) {
-            void refreshMemory();
-          }
-          const nextMsgs = [...m];
-          nextMsgs[idx] = merged;
-          const updated: ChatSession = {
-            ...cur,
-            messages: nextMsgs,
-            updatedAt: nowIso(),
-          };
-          void persistSession(updated).then((saved) => {
-            setSessions((prev) =>
-              prev.map((s) => (s.id === saved.id ? saved : s)),
-            );
-          });
-          return all.map((s) => (s.id === sessionId ? updated : s));
-        });
+
+            setSessions((all) => {
+              const cur = all.find((s) => s.id === sessionId);
+              if (!cur) return all;
+              const m = cur.messages;
+              const idx = m.findIndex((x) => x.id === assistantId);
+              if (idx < 0) return all;
+              const base = m[idx];
+              const done =
+                ev.kind === "turn_completed" || ev.kind === "error";
+              const { msg } = applyEventsToMessage(
+                { ...base, streaming: !done },
+                [ev],
+              );
+              const merged: Msg = {
+                ...msg,
+                streaming: !done,
+                meta: metaAtSend,
+              };
+              if (done) {
+                const cite = merged.citations?.[0];
+                if (cite) {
+                  setSourcePath(cite.id);
+                  void hostReadFile(cite.id)
+                    .then((body) => {
+                      setSourceContent(body);
+                      setPane("source");
+                    })
+                    .catch((err) => {
+                      setSourceContent(
+                        `Could not read file:\n${err instanceof Error ? err.message : String(err)}`,
+                      );
+                    });
+                }
+                if (merged.tools?.some((t) => t.name === "save_memory" && t.ok)) {
+                  void refreshMemory();
+                }
+              }
+              const nextMsgs = [...m];
+              nextMsgs[idx] = merged;
+              const updated: ChatSession = {
+                ...cur,
+                messages: nextMsgs,
+                updatedAt: nowIso(),
+              };
+              // Durable auto-save once the turn completes; transcript = streamed content.
+              if (done) {
+                void persistSession(updated).then((saved) => {
+                  setSessions((prev) =>
+                    prev.map((s) => (s.id === saved.id ? saved : s)),
+                  );
+                });
+              }
+              return all.map((s) => (s.id === sessionId ? updated : s));
+            });
+          },
+        );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         setAgentError(err);

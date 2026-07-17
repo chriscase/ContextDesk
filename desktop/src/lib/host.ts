@@ -65,17 +65,34 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return inv<T>(cmd, args);
 }
 
-/** Run research turn — real agent path via Tauri host. */
+/**
+ * Run research turn — real agent path via Tauri host.
+ *
+ * In Tauri: streams each EventDto through a Channel as produced (#108);
+ * `onEvent` is invoked per message, and the returned array is the full
+ * collected sequence (resolves after the host command completes).
+ *
+ * Browser / cd-server fallback: batched HTTP only (no Channel) — still
+ * calls `onEvent` once per event after the batch arrives, then resolves.
+ */
 export async function agentTurn(
   sessionId: string,
   text: string,
   forceLocal = false,
   chatModel?: string | null,
   providerProfileId?: string | null,
+  onEvent?: (ev: EventDto) => void,
 ): Promise<EventDto[]> {
+  const req = {
+    session_id: sessionId,
+    text,
+    force_local: forceLocal,
+    chat_model: chatModel?.trim() || null,
+    provider_profile_id: providerProfileId?.trim() || null,
+  };
+
   if (!isTauri()) {
-    // Browser-only: use same offline research contract via local server if present,
-    // else return structured error (no demo shell text).
+    // Browser-only: batched path via local server if present (no Channel).
     try {
       const r = await fetch("http://127.0.0.1:8787/v1/research", {
         method: "POST",
@@ -89,7 +106,11 @@ export async function agentTurn(
       });
       if (r.ok) {
         const j = await r.json();
-        return j.events as EventDto[];
+        const events = (j.events as EventDto[]) ?? [];
+        for (const ev of events) {
+          onEvent?.(ev);
+        }
+        return events;
       }
     } catch {
       /* fall through */
@@ -98,15 +119,19 @@ export async function agentTurn(
       "Agent host unavailable. Run via `npm run tauri:dev` or start cd-server on :8787.",
     );
   }
-  return invoke<EventDto[]>("agent_turn", {
-    req: {
-      session_id: sessionId,
-      text,
-      force_local: forceLocal,
-      chat_model: chatModel?.trim() || null,
-      provider_profile_id: providerProfileId?.trim() || null,
-    },
+
+  const { Channel, invoke: inv } = await import("@tauri-apps/api/core");
+  const collected: EventDto[] = [];
+  // Tauri 2 Channel: host sends EventDto as each stream event is produced.
+  const channel = new Channel<EventDto>((ev) => {
+    collected.push(ev);
+    onEvent?.(ev);
   });
+  await inv<void>("agent_turn", {
+    req,
+    onEvent: channel,
+  });
+  return collected;
 }
 
 /** Cooperative cancel for an in-flight agent turn (#109). */

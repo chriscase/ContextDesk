@@ -525,10 +525,7 @@ impl OpenAiCompatibleClient {
             .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
         let status = resp.status();
         if !status.is_success() {
-            let text = resp
-                .text()
-                .await
-                .unwrap_or_default();
+            let text = resp.text().await.unwrap_or_default();
             return Err(CoreError::Message(format!(
                 "stream HTTP {status}: {}",
                 text.chars().take(300).collect::<String>()
@@ -539,10 +536,7 @@ impl OpenAiCompatibleClient {
         let mut line_buf = String::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            if cancel
-                .map(|c| c.load(Ordering::SeqCst))
-                .unwrap_or(false)
-            {
+            if cancel.map(|c| c.load(Ordering::SeqCst)).unwrap_or(false) {
                 return Err(CoreError::Message("cancelled".into()));
             }
             let bytes = chunk.map_err(|e| CoreError::Message(format!("stream chunk: {e}")))?;

@@ -127,6 +127,31 @@ fn cancelled(opts: &AgentOptions) -> bool {
         .unwrap_or(false)
 }
 
+/// Collect + optional live sink for stream events.
+struct EventCollector<'a> {
+    events: Vec<StreamEvent>,
+    live: Option<&'a mut (dyn FnMut(StreamEvent) + Send)>,
+}
+
+impl EventCollector<'_> {
+    fn push(&mut self, e: StreamEvent) {
+        if let Some(f) = self.live.as_mut() {
+            f(e.clone());
+        }
+        self.events.push(e);
+    }
+
+    fn extend_from(&mut self, es: Vec<StreamEvent>) {
+        for e in es {
+            self.push(e);
+        }
+    }
+
+    fn into_events(self) -> Vec<StreamEvent> {
+        self.events
+    }
+}
+
 /// Run agent loop; returns all stream events + final messages.
 pub async fn run_agent_turn(
     backend: &dyn ChatBackend,
@@ -137,10 +162,27 @@ pub async fn run_agent_turn(
     // Optional grants for soft writes in this turn (AllowOnce for pending writes).
     auto_grant: Option<PermissionDecision>,
 ) -> CoreResult<Vec<StreamEvent>> {
-    let mut events = vec![StreamEvent::TurnStarted {
+    run_agent_turn_with_sink(backend, host, user_text, history, opts, auto_grant, None).await
+}
+
+/// Run agent loop with optional live event sink (for Channel streaming to UI).
+pub async fn run_agent_turn_with_sink(
+    backend: &dyn ChatBackend,
+    host: &mut ToolHost,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    opts: &AgentOptions,
+    auto_grant: Option<PermissionDecision>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    let mut out = EventCollector {
+        events: Vec::new(),
+        live,
+    };
+    out.push(StreamEvent::TurnStarted {
         session_id: opts.session_id.clone(),
         model: opts.model.clone(),
-    }];
+    });
 
     let specs = host.specs();
     let tool_names: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
@@ -191,21 +233,21 @@ pub async fn run_agent_turn(
 
     for round in 0..opts.max_rounds {
         if cancelled(opts) {
-            events.push(StreamEvent::TurnCompleted {
+            out.push(StreamEvent::TurnCompleted {
                 reason: "cancel".into(),
             });
-            return Ok(events);
+            return Ok(out.into_events());
         }
         if opts.deadline_ms > 0 && started.elapsed().as_millis() as u64 >= opts.deadline_ms {
             if !trail.is_empty() {
-                events.push(StreamEvent::SearchTrail {
+                out.push(StreamEvent::SearchTrail {
                     steps: trail.clone(),
                 });
             }
-            events.push(StreamEvent::TurnCompleted {
+            out.push(StreamEvent::TurnCompleted {
                 reason: "budget_time".into(),
             });
-            return Ok(events);
+            return Ok(out.into_events());
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
@@ -213,7 +255,7 @@ pub async fn run_agent_turn(
             let mut on_text = |t: String| {
                 if !t.is_empty() {
                     streamed_text = true;
-                    events.push(StreamEvent::TextDelta { text: t });
+                    out.push(StreamEvent::TextDelta { text: t });
                 }
             };
             backend
@@ -223,10 +265,10 @@ pub async fn run_agent_turn(
         let completion = match completion {
             Ok(c) => c,
             Err(e) if e.to_string().contains("cancelled") => {
-                events.push(StreamEvent::TurnCompleted {
+                out.push(StreamEvent::TurnCompleted {
                     reason: "cancel".into(),
                 });
-                return Ok(events);
+                return Ok(out.into_events());
             }
             Err(e) => return Err(e),
         };
@@ -249,7 +291,7 @@ pub async fn run_agent_turn(
         if tool_calls.is_empty() {
             // Default backends may not stream; emit remaining content once.
             if !streamed_text && !completion.content.is_empty() {
-                events.push(StreamEvent::TextDelta {
+                out.push(StreamEvent::TextDelta {
                     text: completion.content.clone(),
                 });
             }
@@ -260,14 +302,14 @@ pub async fn run_agent_turn(
                 tool_calls: None,
             });
             if !trail.is_empty() {
-                events.push(StreamEvent::SearchTrail {
+                out.push(StreamEvent::SearchTrail {
                     steps: trail.clone(),
                 });
             }
-            events.push(StreamEvent::TurnCompleted {
+            out.push(StreamEvent::TurnCompleted {
                 reason: completion.finish_reason,
             });
-            return Ok(events);
+            return Ok(out.into_events());
         }
 
         // Assistant message with tool calls
@@ -299,7 +341,7 @@ pub async fn run_agent_turn(
                         tc.function.name
                     );
                     let wrapped = wrap_untrusted(&format!("tool:{}", tc.function.name), &detail);
-                    events.push(StreamEvent::Tool {
+                    out.push(StreamEvent::Tool {
                         id: id.clone(),
                         name: tc.function.name.clone(),
                         phase: crate::events::ToolPhase::Finished,
@@ -318,10 +360,10 @@ pub async fn run_agent_turn(
                     }
                 }
             };
-            events.extend(result.events);
+            out.extend_from(result.events);
             if let Some(path) = &result.citation_path {
                 if result.ok {
-                    events.push(StreamEvent::Citation {
+                    out.push(StreamEvent::Citation {
                         source_id: path.clone(),
                         label: path.clone(),
                         locator: None,
@@ -337,14 +379,14 @@ pub async fn run_agent_turn(
         }
     }
 
-    events.push(StreamEvent::Error {
+    out.push(StreamEvent::Error {
         code: "budget_rounds".into(),
         message: "Agent reached max tool rounds (router budget)".into(),
     });
-    events.push(StreamEvent::TurnCompleted {
+    out.push(StreamEvent::TurnCompleted {
         reason: "budget_rounds".into(),
     });
-    Ok(events)
+    Ok(out.into_events())
 }
 
 /// Prefetch retrieval when tools unsupported: force search_kb then answer.
@@ -564,5 +606,81 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
         ));
+    }
+
+    /// #108: live sink receives each event as produced (same order as final batch).
+    #[tokio::test]
+    async fn live_sink_receives_events_as_produced() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.md"), "alpha beta\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let tool_resp = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "search_kb".into(),
+                    arguments: r#"{"query":"alpha"}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let final_resp = ChatCompletion {
+            content: "Found alpha.".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        };
+        let backend = ScriptedBackend::new(vec![tool_resp, final_resp]);
+        let mut history = vec![];
+        let live: std::sync::Arc<std::sync::Mutex<Vec<StreamEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let live_c = std::sync::Arc::clone(&live);
+        let mut sink = move |e: StreamEvent| {
+            live_c.lock().expect("live").push(e);
+        };
+        let events = run_agent_turn_with_sink(
+            &backend,
+            &mut host,
+            "alpha?",
+            &mut history,
+            &AgentOptions::default(),
+            None,
+            Some(&mut sink),
+        )
+        .await
+        .unwrap();
+
+        let live_events = live.lock().expect("live").clone();
+        assert_eq!(
+            live_events.len(),
+            events.len(),
+            "live sink must see every event, not a post-hoc subset"
+        );
+        // Order matches final batch (clone equality via Debug kinds).
+        for (i, (a, b)) in live_events.iter().zip(events.iter()).enumerate() {
+            assert_eq!(
+                std::mem::discriminant(a),
+                std::mem::discriminant(b),
+                "event {i} kind mismatch between live and final"
+            );
+        }
+        assert!(live_events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TurnStarted { .. })));
+        assert!(live_events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Tool { .. })));
+        assert!(live_events.iter().any(|e| matches!(
+            e,
+            StreamEvent::TextDelta { text } if text.contains("alpha")
+        )));
+        assert!(live_events.iter().any(|e| matches!(
+            e,
+            StreamEvent::TurnCompleted { reason } if reason == "stop"
+        )));
     }
 }
