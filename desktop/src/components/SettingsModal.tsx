@@ -279,8 +279,12 @@ export function SettingsModal({
     appendRoot(trimmed);
   };
 
-  /** Create/use OS Documents/<product> folder as a workspace root. */
-  const useDefaultWorkspace = async () => {
+  /**
+   * Create/use OS Documents/<product> as a workspace root.
+   * When `persist` is true (preflight accept), write through to host/parent immediately
+   * so first-run does not require a separate Save click.
+   */
+  const useDefaultWorkspace = async (opts?: { persist?: boolean }) => {
     setDefaultWsBusy(true);
     try {
       const ensured = await hostEnsureDefaultWorkspace();
@@ -288,6 +292,7 @@ export function SettingsModal({
         window.alert(
           "Default workspace is available in the desktop app (Tauri). Pick a folder instead.",
         );
+        fix("workspace");
         return;
       }
       const check = await hostValidateWorkspacePath(ensured.path);
@@ -297,8 +302,20 @@ export function SettingsModal({
       }
       setDefaultWs(ensured);
       const folderName =
-        ensured.label.split("/").pop() || ensured.path.split(/[/\\]/).pop() || "Workspace";
-      appendRoot(ensured.path, folderName);
+        ensured.label.split("/").pop() ||
+        ensured.path.split(/[/\\]/).pop() ||
+        "Workspace";
+      const next: AppSetupState = {
+        ...draft,
+        workspaceName: draft.workspaceName ?? folderName,
+        workspaceRoots: draft.workspaceRoots.includes(ensured.path)
+          ? draft.workspaceRoots
+          : [...draft.workspaceRoots, ensured.path],
+      };
+      setDraft(next);
+      if (opts?.persist) {
+        onSaveSetup(next);
+      }
     } finally {
       setDefaultWsBusy(false);
     }
@@ -399,6 +416,11 @@ export function SettingsModal({
                 onRecheck={recheck}
                 onFix={fix}
                 checking={checking}
+                defaultWorkspace={defaultWs}
+                defaultWorkspaceBusy={defaultWsBusy}
+                onUseDefaultWorkspace={() =>
+                  void useDefaultWorkspace({ persist: true })
+                }
               />
             ) : null}
 
@@ -461,7 +483,7 @@ export function SettingsModal({
                       type="button"
                       className="btn btn--ghost"
                       disabled={defaultWsBusy}
-                      onClick={() => void useDefaultWorkspace()}
+                      onClick={() => void useDefaultWorkspace({ persist: false })}
                       title={
                         defaultWs
                           ? `Create or use ${defaultWs.path}`

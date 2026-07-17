@@ -65,7 +65,8 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
       id: "workspace.roots",
       title: "Workspace roots",
       level: "fail",
-      detail: "Add at least one folder in Settings → Workspace.",
+      detail:
+        "No folders allowlisted yet. Accept the OS default (Documents/ContextDesk) on Preflight, or pick folders in Workspace settings.",
       fixAction: "workspace",
     });
   } else {

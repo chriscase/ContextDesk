@@ -105,14 +105,14 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
             id: "workspace.missing".into(),
             title: "Workspace".into(),
             level: PreflightLevel::Fail,
-            detail: "No workspace open. Add at least one folder root.".into(),
+            detail: "No workspace open. Accept the OS default (Documents/<product>) on Preflight, or add a folder in Workspace settings.".into(),
             fix_action: Some("workspace".into()),
         }),
         Some(ws) if ws.roots.is_empty() => items.push(PreflightItem {
             id: "workspace.roots".into(),
             title: "Workspace roots".into(),
             level: PreflightLevel::Fail,
-            detail: "Workspace has no allowlisted folders.".into(),
+            detail: "No allowlisted folders. Accept the OS default (Documents/<product>) on Preflight, or pick folders in Workspace settings.".into(),
             fix_action: Some("workspace".into()),
         }),
         Some(ws) => {

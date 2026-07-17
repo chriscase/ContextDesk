@@ -1,4 +1,5 @@
 import type { PreflightItem, PreflightReport } from "../lib/preflight";
+import type { DefaultWorkspaceDto } from "../lib/host";
 import { IconAlert, IconCheck, IconRefresh, IconWarn } from "./icons";
 
 type Props = {
@@ -6,6 +7,10 @@ type Props = {
   onRecheck: () => void;
   onFix: (section: NonNullable<PreflightItem["fixAction"]>) => void;
   checking?: boolean;
+  /** OS Documents/<product> suggestion for missing workspace roots. */
+  defaultWorkspace?: DefaultWorkspaceDto | null;
+  onUseDefaultWorkspace?: () => void | Promise<void>;
+  defaultWorkspaceBusy?: boolean;
 };
 
 function LevelIcon({ level }: { level: PreflightItem["level"] }) {
@@ -14,9 +19,28 @@ function LevelIcon({ level }: { level: PreflightItem["level"] }) {
   return <IconAlert />;
 }
 
-export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
+export function PreflightPanel({
+  report,
+  onRecheck,
+  onFix,
+  checking,
+  defaultWorkspace,
+  onUseDefaultWorkspace,
+  defaultWorkspaceBusy,
+}: Props) {
   const pass = report.items.filter((i) => i.level === "pass").length;
   const total = report.items.length;
+  const needsWorkspace = report.items.some(
+    (i) =>
+      (i.id === "workspace.roots" || i.id === "workspace.missing") &&
+      i.level === "fail",
+  );
+  const showDefaultOffer =
+    needsWorkspace && Boolean(defaultWorkspace && onUseDefaultWorkspace);
+
+  const isWorkspaceItem = (id: string) =>
+    id === "workspace.roots" || id === "workspace.missing";
+
   return (
     <div>
       <div className="row--between stack-sm preflight-lead">
@@ -29,6 +53,45 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
           {report.hasBlocking ? " blocking" : " ready"}
         </span>
       </div>
+
+      {showDefaultOffer && defaultWorkspace ? (
+        <div className="preflight-offer" role="region" aria-label="Default workspace">
+          <div className="preflight-offer__body">
+            <div className="preflight-offer__title">
+              Use the default workspace folder?
+            </div>
+            <p className="preflight-offer__detail">
+              ContextDesk can create{" "}
+              <span className="mono mono--sm">{defaultWorkspace.label}</span>{" "}
+              on this machine and allowlist it. Path:{" "}
+              <span className="mono mono--sm">{defaultWorkspace.path}</span>
+              {defaultWorkspace.exists ? " (already exists)" : " (will be created)"}.
+              This is under Documents — never your whole home directory.
+            </p>
+          </div>
+          <div className="preflight-offer__actions">
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              disabled={defaultWorkspaceBusy}
+              onClick={() => void onUseDefaultWorkspace?.()}
+            >
+              {defaultWorkspaceBusy
+                ? "Setting up…"
+                : `Yes, use ${defaultWorkspace.label}`}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              disabled={defaultWorkspaceBusy}
+              onClick={() => onFix("workspace")}
+            >
+              Choose a different folder…
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="preflight-actions row">
         <button
           type="button"
@@ -55,13 +118,36 @@ export function PreflightPanel({ report, onRecheck, onFix, checking }: Props) {
             <div>
               <div className="preflight-row__title">{item.title}</div>
               <div className="preflight-row__detail">{item.detail}</div>
-              {item.fixAction && item.level !== "pass" ? (
+              {isWorkspaceItem(item.id) &&
+              item.level !== "pass" &&
+              showDefaultOffer ? (
+                <div className="preflight-row__actions">
+                  <button
+                    type="button"
+                    className="btn btn--primary btn--sm"
+                    disabled={defaultWorkspaceBusy}
+                    onClick={() => void onUseDefaultWorkspace?.()}
+                  >
+                    {defaultWorkspaceBusy
+                      ? "Setting up…"
+                      : `Use ${defaultWorkspace!.label}`}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--linkish"
+                    onClick={() => onFix("workspace")}
+                  >
+                    Choose folder in settings →
+                  </button>
+                </div>
+              ) : item.fixAction && item.level !== "pass" ? (
                 <button
                   type="button"
                   className="btn btn--ghost btn--linkish"
                   onClick={() => onFix(item.fixAction!)}
                 >
-                  Open {item.fixAction === "workspace"
+                  Open{" "}
+                  {item.fixAction === "workspace"
                     ? "workspace"
                     : item.fixAction === "ai"
                       ? "AI"
