@@ -1,7 +1,7 @@
 //! Typed HTTP preset connector (host allowlist; no free-form URL tool).
 
 use crate::error::{CoreError, CoreResult};
-use crate::ssrf::{validate_provider_url, SsrfPolicy};
+use crate::ssrf::{build_pinned_client, validate_provider_url, SsrfPolicy, SystemResolver};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -68,11 +68,17 @@ pub async fn preset_get(
     allow_private: bool,
 ) -> CoreResult<String> {
     let url = build_preset_url(preset, route_template, allow_private)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| CoreError::Message(format!("http: {e}")))?;
+    let policy = if allow_private {
+        SsrfPolicy::allow_private_networks()
+    } else {
+        SsrfPolicy::default()
+    };
+    let client = build_pinned_client(
+        &url,
+        &policy,
+        &SystemResolver,
+        std::time::Duration::from_secs(30),
+    )?;
     let mut req = client.get(url);
     if let Some(b) = bearer {
         req = req.bearer_auth(b);

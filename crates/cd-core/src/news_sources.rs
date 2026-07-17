@@ -7,7 +7,7 @@
 //! lives in app config; missing keys default to [`NewsSourceDef::default_enabled`].
 
 use crate::error::{CoreError, CoreResult};
-use crate::ssrf::{validate_provider_url, SsrfPolicy};
+use crate::ssrf::SsrfPolicy;
 use crate::web_research::{
     condense_search_query, host_display_label, urlencoding_encode, WebSearchHit, MAX_BODY_BYTES,
     REQUEST_TIMEOUT_SECS,
@@ -546,20 +546,26 @@ async fn fetch_feed_xml(feed_url: &str) -> CoreResult<String> {
         block_private: true,
         allow_loopback: false,
     };
-    let _ = validate_provider_url(feed_url, &policy)
-        .map_err(|e| CoreError::Policy(format!("feed URL rejected: {e}")))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS.min(15)))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent(concat!(
-            "Mozilla/5.0 (compatible; ContextDesk/",
-            env!("CARGO_PKG_VERSION"),
-            "; web research)"
-        ))
-        .build()
-        .map_err(|e| CoreError::Message(format!("http client: {e}")))?;
+    // #141: no auto-redirects (limited(3) could 302 to metadata); pin via SystemResolver.
+    let (url, client) = crate::ssrf::build_pinned_client_for_url(
+        feed_url,
+        &policy,
+        &crate::ssrf::SystemResolver,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS.min(15)),
+    )
+    .map_err(|e| CoreError::Policy(format!("feed URL rejected: {e}")))?;
+    // User-Agent via default headers would need ClientBuilder; keep simple GET.
+    let _ = url;
     let resp = client
         .get(feed_url)
+        .header(
+            "User-Agent",
+            concat!(
+                "Mozilla/5.0 (compatible; ContextDesk/",
+                env!("CARGO_PKG_VERSION"),
+                "; web research)"
+            ),
+        )
         .header(
             "Accept",
             "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
