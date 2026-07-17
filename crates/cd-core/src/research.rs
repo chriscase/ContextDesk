@@ -5,8 +5,8 @@ use crate::agent::{
 };
 use crate::audit::AuditLog;
 use crate::chat::{
-    ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role,
-    ToolCallMsg,
+    AnthropicClient, ChatCompletion, ChatMessage, FunctionCall, OllamaClient,
+    OpenAiCompatibleClient, Role, StreamDelta, ToolCallMsg,
 };
 use crate::error::CoreError;
 use crate::error::CoreResult;
@@ -300,7 +300,7 @@ impl ChatBackend for OpenAiBackend {
                 messages,
                 Some(tools),
                 |d| {
-                    if let crate::chat::StreamDelta::Text(t) = d {
+                    if let StreamDelta::Text(t) = d {
                         if !t.is_empty() {
                             on_text(t);
                         }
@@ -314,6 +314,61 @@ impl ChatBackend for OpenAiBackend {
             Err(e) if e.to_string().contains("cancelled") => Err(e),
             Err(_) => {
                 // Fall back to non-stream; emit once.
+                let c = self.0.complete(messages, Some(tools)).await?;
+                if !c.content.is_empty() && c.tool_calls.is_empty() {
+                    on_text(c.content.clone());
+                }
+                Ok(c)
+            }
+        }
+    }
+}
+
+struct AnthropicBackend(AnthropicClient);
+
+#[async_trait]
+impl ChatBackend for AnthropicBackend {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        match self
+            .0
+            .complete_stream_cb(messages, Some(tools), |_| {}, None)
+            .await
+        {
+            Ok(c) => Ok(c),
+            Err(_) => self.0.complete(messages, Some(tools)).await,
+        }
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        match self
+            .0
+            .complete_stream_cb(
+                messages,
+                Some(tools),
+                |d| {
+                    if let StreamDelta::Text(t) = d {
+                        if !t.is_empty() {
+                            on_text(t);
+                        }
+                    }
+                },
+                cancel,
+            )
+            .await
+        {
+            Ok(c) => Ok(c),
+            Err(e) if e.to_string().contains("cancelled") => Err(e),
+            Err(_) => {
                 let c = self.0.complete(messages, Some(tools)).await?;
                 if !c.content.is_empty() && c.tool_calls.is_empty() {
                     on_text(c.content.clone());
@@ -411,6 +466,25 @@ pub async fn research_turn_with_cancel(
         let client =
             OpenAiCompatibleClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
         let backend = OpenAiBackend(client);
+        let mut opts = AgentOptions::from_budget(
+            host.router_budget(),
+            session_id,
+            Some(profile.chat_model.clone()),
+        );
+        opts.cancel = cancel;
+        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
+    }
+
+    // Native Anthropic Messages API (#121) — no longer falls through as unwired.
+    if profile.kind == ProviderKind::Anthropic {
+        let policy = if profile.local_only {
+            SsrfPolicy::local_only()
+        } else {
+            SsrfPolicy::default()
+        };
+        let client =
+            AnthropicClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
+        let backend = AnthropicBackend(client);
         let mut opts = AgentOptions::from_budget(
             host.router_budget(),
             session_id,
@@ -843,9 +917,10 @@ mod tests {
         assert!(!dir.path().join(".contextdesk/memory/x.md").exists());
     }
 
-    /// #123: non-force_local unwired provider must not synthesize keyword TextDelta.
+    /// #123: Anthropic without API key must fail honestly (not keyword shell).
+    /// (Wired path is #121; missing key is still not a silent degrade.)
     #[tokio::test]
-    async fn unwired_provider_errors_without_keyword_shell() {
+    async fn anthropic_missing_key_errors_without_keyword_shell() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("hit.md"), "billing secret keyword\n").unwrap();
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
@@ -853,32 +928,26 @@ mod tests {
         let mut profile = ProviderProfile::ollama_local();
         profile.kind = ProviderKind::Anthropic;
         profile.label = "Anthropic".into();
+        profile.base_url = "https://api.anthropic.com".into();
         let mut history = vec![];
-        let events = research_turn_with_cancel(
+        let result = research_turn_with_cancel(
             &mut host,
             &profile,
             None,
             "billing",
             &mut history,
-            "s-unwired",
+            "s-anthropic",
             false,
             None,
             None,
         )
-        .await
-        .unwrap();
+        .await;
+        // Missing key → CoreError (not Ok(keyword shell)).
+        assert!(result.is_err(), "expected key error, got {result:?}");
+        let err = result.unwrap_err().to_string();
         assert!(
-            events.iter().any(|e| matches!(
-                e,
-                StreamEvent::Error { code, .. } if code == "provider_not_wired"
-            )),
-            "events={events:?}"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
-            "must not emit keyword TextDelta shell"
+            err.to_lowercase().contains("key") || err.to_lowercase().contains("anthropic"),
+            "err={err}"
         );
     }
 

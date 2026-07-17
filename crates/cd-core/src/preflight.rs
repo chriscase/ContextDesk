@@ -235,16 +235,7 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
                 }
             }
 
-            // #123: Anthropic (and similar) not yet on the chat path — never green-light as healthy.
-            if p.kind == ProviderKind::Anthropic {
-                items.push(PreflightItem {
-                    id: "provider.wired".into(),
-                    title: "Chat backend".into(),
-                    level: PreflightLevel::Fail,
-                    detail: "Anthropic Messages API is not wired for chat yet — pick Ollama, OpenAI-compatible, or Grok Build.".into(),
-                    fix_action: Some("ai".into()),
-                });
-            }
+            // #121: Anthropic is wired; key check above covers credentials.
 
             if matches!(
                 p.kind,
