@@ -18,6 +18,7 @@ import {
   type SettingsSection,
 } from "./components/SettingsModal";
 import { ToolCallList, type ToolCallView } from "./components/ToolCallList";
+import { SourceCitations } from "./components/SourceCitations";
 import { ChatArchivePane } from "./components/panes/ChatArchivePane";
 import { MemoryPane, type MemoryDoc } from "./components/panes/MemoryPane";
 import { SourcePreviewPane } from "./components/panes/SourcePreviewPane";
@@ -63,7 +64,8 @@ type Msg = {
   role: "user" | "assistant";
   content: string;
   tools?: ToolCallView[];
-  citations?: { id: string; label: string }[];
+  /** id = url/path, label = short source, title = article/page title */
+  citations?: { id: string; label: string; title?: string }[];
   trail?: string[];
   streaming?: boolean;
   /** Model / gateway used for this assistant response (persisted). */
@@ -126,7 +128,7 @@ function applyEventsToMessage(
 ): { msg: Msg; permission: PermissionPrompt | null } {
   let content = base.content;
   const tools: ToolCallView[] = [...(base.tools ?? [])];
-  const citations: { id: string; label: string }[] = [
+  const citations: { id: string; label: string; title?: string }[] = [
     ...(base.citations ?? []),
   ];
   const trail: string[] = [...(base.trail ?? [])];
@@ -163,8 +165,13 @@ function applyEventsToMessage(
         if (/^https?:\/\//i.test(label) || label.length > 48) {
           label = shortSourceLabel(label, id);
         }
+        const titleRaw = p.locator != null ? String(p.locator) : "";
+        const title =
+          titleRaw && titleRaw !== id && titleRaw !== label
+            ? titleRaw
+            : undefined;
         if (id && !citations.some((c) => c.id === id)) {
-          citations.push({ id, label });
+          citations.push({ id, label, title });
         }
         break;
       }
@@ -198,18 +205,7 @@ function applyEventsToMessage(
     }
   }
 
-  // When retrieval produced citations, ensure content can reference them as chips
-  // (short labels only — full URL stays in #cite: target / chip link button).
-  if (citations.length && content && !content.includes("#cite:")) {
-    const refs = citations
-      .slice(0, 8)
-      .map((c) => `[${c.label}](#cite:${c.id})`)
-      .join(" ");
-    const hasAnyLabel = citations.some((c) => content.includes(c.label));
-    if (!hasAnyLabel) {
-      content = `${content.trim()}\n\nSources: ${refs}`;
-    }
-  }
+  // Sources UI is the expandable Sources control — do not dump URL lists into body.
 
   return {
     msg: {
@@ -446,7 +442,7 @@ export function App() {
       content: m.content,
       tools: Array.isArray(m.tools) ? (m.tools as ToolCallView[]) : undefined,
       citations: Array.isArray(m.citations)
-        ? (m.citations as { id: string; label: string }[])
+        ? (m.citations as { id: string; label: string; title?: string }[])
         : undefined,
       trail: m.trail ?? undefined,
       meta: m.meta ?? undefined,
@@ -1812,57 +1808,29 @@ export function App() {
                         </div>
                       ) : null}
                       {m.citations?.length ? (
-                        <div className="citation-row" aria-label="Sources">
-                          {m.citations.map((c) => {
-                            const name = shortSourceLabel(c.label, c.id);
-                            const external = isHttpUrl(c.id);
-                            return (
-                              <span
-                                key={c.id + name}
-                                className="citation-chip"
-                                data-kind={external ? "web" : "file"}
-                              >
-                                <span className="citation-chip__name" title={c.id}>
-                                  {name}
-                                </span>
-                                {external ? (
-                                  <button
-                                    type="button"
-                                    className="citation-chip__link"
-                                    title={c.id}
-                                    onClick={() => openExternalUrl(c.id)}
-                                  >
-                                    Link
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="citation-chip__link"
-                                    title={c.id}
-                                    onClick={() => {
-                                      setSourcePath(c.id);
-                                      setPane("source");
-                                      setSourceContent("Loading…");
-                                      void hostReadFile(c.id)
-                                        .then((body) => setSourceContent(body))
-                                        .catch((err) =>
-                                          setSourceContent(
-                                            `Could not read ${c.id}:\n${
-                                              err instanceof Error
-                                                ? err.message
-                                                : String(err)
-                                            }`,
-                                          ),
-                                        );
-                                    }}
-                                  >
-                                    Open
-                                  </button>
-                                )}
-                              </span>
-                            );
-                          })}
-                        </div>
+                        <SourceCitations
+                          citations={m.citations.map((c) => ({
+                            id: c.id,
+                            label: shortSourceLabel(c.label, c.id),
+                            title: c.title,
+                          }))}
+                          onOpenFile={(path) => {
+                            setSourcePath(path);
+                            setPane("source");
+                            setSourceContent("Loading…");
+                            void hostReadFile(path)
+                              .then((body) => setSourceContent(body))
+                              .catch((err) =>
+                                setSourceContent(
+                                  `Could not read ${path}:\n${
+                                    err instanceof Error
+                                      ? err.message
+                                      : String(err)
+                                  }`,
+                                ),
+                              );
+                          }}
+                        />
                       ) : null}
                       <div className="msg__bubble">
                         {m.role === "assistant" ? (

@@ -208,3 +208,34 @@ export function IconSliders({ className }: IconProps) {
     </Svg>
   );
 }
+
+/** External link (corner arrow). */
+export function IconLink({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <path d="M15 3h6v6" />
+      <path d="m10 14 11-11" />
+    </Svg>
+  );
+}
+
+/** Document / workspace file. */
+export function IconFile({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6M8 13h8M8 17h6" />
+    </Svg>
+  );
+}
+
+/** Globe for web sources. */
+export function IconWeb({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+    </Svg>
+  );
+}

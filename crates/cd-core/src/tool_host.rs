@@ -267,7 +267,8 @@ impl ToolHost {
             ok: None,
         };
 
-        let mut web_cites: Vec<(String, String)> = Vec::new();
+        // (source_id, short label, optional title for expanded UI)
+        let mut web_cites: Vec<(String, String, Option<String>)> = Vec::new();
         let (ok, summary, raw, citation) = match name {
             names::SEARCH_KB => self.tool_search(arguments)?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
@@ -277,16 +278,16 @@ impl ToolHost {
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments)?,
             names::WEB_SEARCH => {
                 let (ok, summary, raw, cites) = self.tool_web_search(arguments)?;
-                let first = cites.first().map(|(u, _)| u.clone());
+                let first = cites.first().map(|(u, _, _)| u.clone());
                 web_cites = cites;
                 (ok, summary, raw, first)
             }
             names::WEB_FETCH => {
                 let (ok, summary, raw, cite) = self.tool_web_fetch(arguments)?;
-                if let Some((url, label)) = cite.clone() {
-                    web_cites.push((url, label));
+                if let Some((url, label, title)) = cite.clone() {
+                    web_cites.push((url, label, title));
                 }
-                (ok, summary, raw, cite.map(|(u, _)| u))
+                (ok, summary, raw, cite.map(|(u, _, _)| u))
             }
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
@@ -304,12 +305,12 @@ impl ToolHost {
 
         let mut events = vec![started, finished];
         if !web_cites.is_empty() {
-            // Friendly labels (publisher/domain) — full URL stays in source_id for Link.
-            for (url, label) in web_cites {
+            // Short label for icon monogram; title in locator for expand list.
+            for (url, label, title) in web_cites {
                 events.push(StreamEvent::Citation {
                     source_id: url,
                     label,
-                    locator: None,
+                    locator: title,
                 });
             }
         } else if let Some(ref path) = citation {
@@ -317,7 +318,7 @@ impl ToolHost {
             events.push(StreamEvent::Citation {
                 source_id: path.clone(),
                 label,
-                locator: None,
+                locator: Some(path.clone()),
             });
         }
 
@@ -574,11 +575,11 @@ impl ToolHost {
         Ok(())
     }
 
-    /// Returns (ok, summary, raw, citations as (url, label)).
+    /// Returns (ok, summary, raw, citations as (url, label, title)).
     fn tool_web_search(
         &mut self,
         args: &Value,
-    ) -> CoreResult<(bool, String, String, Vec<(String, String)>)> {
+    ) -> CoreResult<(bool, String, String, Vec<(String, String, Option<String>)>)> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -595,13 +596,16 @@ impl ToolHost {
         self.throttle_web()?;
         let (hits, notes) = block_on_http(web_research::web_search(&q, limit))?;
         let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
-        let cites: Vec<(String, String)> = hits
+        let cites: Vec<(String, String, Option<String>)> = hits
             .iter()
             .take(8)
             .map(|h| {
+                let label = web_research::source_display_label(Some(&h.title), &h.url);
+                let title = web_research::headline_without_publisher(&h.title);
                 (
                     h.url.clone(),
-                    web_research::source_display_label(Some(&h.title), &h.url),
+                    label,
+                    if title.is_empty() { None } else { Some(title) },
                 )
             })
             .collect();
@@ -618,11 +622,16 @@ impl ToolHost {
         ))
     }
 
-    /// Returns (ok, summary, raw, optional (url, label)).
+    /// Returns (ok, summary, raw, optional (url, label, title)).
     fn tool_web_fetch(
         &mut self,
         args: &Value,
-    ) -> CoreResult<(bool, String, String, Option<(String, String)>)> {
+    ) -> CoreResult<(
+        bool,
+        String,
+        String,
+        Option<(String, String, Option<String>)>,
+    )> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -652,7 +661,7 @@ impl ToolHost {
                     false,
                     format!("web_fetch failed ({label})"),
                     raw,
-                    Some((url.to_string(), label)),
+                    Some((url.to_string(), label, None)),
                 ));
             }
         };
@@ -666,6 +675,11 @@ impl ToolHost {
             },
             &fetched.url,
         );
+        let title = if fetched.title.is_empty() {
+            None
+        } else {
+            Some(web_research::headline_without_publisher(&fetched.title))
+        };
         let summary = if ok {
             if fetched.title.is_empty() {
                 format!("fetched {label}")
@@ -678,7 +692,7 @@ impl ToolHost {
         } else {
             format!("web_fetch HTTP {} ({label})", fetched.status)
         };
-        Ok((ok, summary, raw, Some((fetched.url, label))))
+        Ok((ok, summary, raw, Some((fetched.url, label, title))))
     }
 
     /// SoftWrite skill author — only called after grant (see execute gate).
