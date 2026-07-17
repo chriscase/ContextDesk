@@ -65,6 +65,8 @@ fn hash_key(k: &str) -> [u8; 32] {
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Result<(), StatusCode> {
+    // Empty keys: intentional for **loopback-only** single-user dev (#144).
+    // Startup `guard_exposure` refuses non-loopback + no-key before bind.
     if state.key_hashes.is_empty() {
         return Ok(());
     }
@@ -279,12 +281,6 @@ async fn main() {
     }
 
     let addr: SocketAddr = args.bind.parse().expect("invalid --bind address");
-    if !addr.ip().is_loopback() && !args.allow_lan {
-        eprintln!(
-            "Refusing non-loopback bind {addr}. Pass --allow-lan (and use TLS at reverse proxy)."
-        );
-        std::process::exit(2);
-    }
 
     let keys: Vec<String> = args
         .api_keys
@@ -294,6 +290,19 @@ async fn main() {
         .map(str::to_string)
         .collect();
     let key_hashes: Vec<[u8; 32]> = keys.iter().map(|k| hash_key(k)).collect();
+
+    match guard_exposure(&addr, args.allow_lan, key_hashes.len()) {
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        Ok(warnings) => {
+            for w in warnings {
+                eprintln!("WARNING: {w}");
+                tracing::warn!("{w}");
+            }
+        }
+    }
 
     let mut workspaces = HashMap::new();
     if let Some(root) = args.root {
@@ -327,14 +336,115 @@ async fn main() {
     axum::serve(listener, app).await.expect("serve");
 }
 
+/// Pure bind/auth exposure policy (#144). Offline-testable; does not bind sockets.
+///
+/// Returns `Ok(warnings)` to print, or `Err(message)` to refuse startup.
+pub fn guard_exposure(
+    addr: &SocketAddr,
+    allow_lan: bool,
+    key_count: usize,
+) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    let loopback = addr.ip().is_loopback();
+
+    if !loopback && !allow_lan {
+        return Err(format!(
+            "Refusing non-loopback bind {addr}. Pass --allow-lan (and use TLS at a reverse proxy)."
+        ));
+    }
+
+    if !loopback && key_count == 0 {
+        return Err(format!(
+            "Refusing non-loopback bind {addr} with no API keys. \
+             Set --api-keys / CD_API_KEYS (comma-separated) before --allow-lan exposure. \
+             Unauthenticated LAN bind is not allowed."
+        ));
+    }
+
+    if allow_lan && !loopback {
+        warnings.push(format!(
+            "cd-server is bound beyond loopback ({addr}) via --allow-lan. \
+             Expect TLS at a reverse proxy and rotate API keys; traffic is not encrypted by cd-server itself."
+        ));
+    }
+
+    if loopback && key_count == 0 {
+        tracing::info!(
+            %addr,
+            "API auth disabled (no --api-keys); bind is loopback-only"
+        );
+    }
+
+    Ok(warnings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::fs;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use tempfile::tempdir;
     use tower::ServiceExt;
+
+    fn loopback_v4() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8787)
+    }
+    fn lan_v4() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8787)
+    }
+    fn lan_public() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 8787)
+    }
+
+    #[test]
+    fn guard_loopback_no_key_ok() {
+        let r = guard_exposure(&loopback_v4(), false, 0);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(r.unwrap().is_empty());
+    }
+
+    #[test]
+    fn guard_lan_no_key_err() {
+        let r = guard_exposure(&lan_v4(), true, 0);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("no API keys") || msg.contains("API key"),
+            "{msg}"
+        );
+        assert!(!msg.contains("sk-"));
+    }
+
+    #[test]
+    fn guard_lan_without_flag_err() {
+        let r = guard_exposure(&lan_public(), false, 1);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("allow-lan"));
+    }
+
+    #[test]
+    fn guard_lan_with_key_warns() {
+        let r = guard_exposure(&lan_v4(), true, 1).unwrap();
+        assert!(
+            r.iter()
+                .any(|w| w.contains("allow-lan") || w.contains("beyond loopback")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn guard_loopback_with_key_ok() {
+        let r = guard_exposure(&loopback_v4(), false, 2).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn guard_v6_loopback_no_key_ok() {
+        let a = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8787);
+        assert!(guard_exposure(&a, false, 0).is_ok());
+    }
 
     fn test_state(root: PathBuf, keys: &[(&str, &str)]) -> AppState {
         // keys: (api_key, workspace_id)
