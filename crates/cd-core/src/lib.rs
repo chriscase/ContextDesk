@@ -23,6 +23,7 @@ pub mod grok_auth;
 pub mod home_source;
 pub mod http_preset;
 pub mod index;
+pub mod index_watch;
 pub mod injection;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;

@@ -27,7 +27,7 @@ use cd_core::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 struct AppState {
@@ -36,10 +36,13 @@ struct AppState {
     secrets: KeychainSecretStore,
     /// Session id -> chat history
     histories: Mutex<HashMap<String, Vec<ChatMessage>>>,
-    /// Live tool host (rebuilt when workspace changes)
-    host: Mutex<Option<ToolHost>>,
+    /// Live tool host (rebuilt when workspace changes). Arc so the index
+    /// watcher callback can reindex without holding AppState.
+    host: Arc<Mutex<Option<ToolHost>>>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Debounced FS watcher for incremental index refresh (#116).
+    index_watch: Mutex<Option<cd_core::index_watch::IndexWatchHandle>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -87,12 +90,17 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
 }
 
 fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
+    // Stop previous watcher before replacing the host (#116).
+    if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
+        prev.stop();
+    }
     let audit = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("audit.jsonl"));
     let index_cache = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("index"));
+    let roots = ws.roots.clone();
     let mut host = cd_core::research::build_host_with_options(
         ws,
         audit,
@@ -103,6 +111,20 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     .map_err(|e| e.to_string())?;
     apply_host_connectors(&mut host, &cfg, state);
     *state.host.lock().expect("host") = Some(host);
+
+    // Start debounced FS watcher → incremental reindex (host-agnostic API).
+    let host_arc = Arc::clone(&state.host);
+    let on_refresh = Arc::new(move || {
+        if let Ok(mut g) = host_arc.lock() {
+            if let Some(h) = g.as_mut() {
+                if let Err(e) = h.reindex() {
+                    tracing::warn!(error = %e, "index watcher refresh failed");
+                }
+            }
+        }
+    });
+    let handle = cd_core::index_watch::spawn_index_watcher(roots, on_refresh);
+    *state.index_watch.lock().expect("watch") = Some(handle);
     Ok(())
 }
 
@@ -1836,8 +1858,9 @@ pub fn run() {
         config: Mutex::new(config),
         secrets: KeychainSecretStore::new(),
         histories: Mutex::new(HashMap::new()),
-        host: Mutex::new(None),
+        host: Arc::new(Mutex::new(None)),
         cancels: Mutex::new(HashMap::new()),
+        index_watch: Mutex::new(None),
     };
     let _ = ensure_host(&state);
 
