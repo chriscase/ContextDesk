@@ -32,19 +32,19 @@ Last audit: 2026-07-17. Update when closing.
 | 3 | Epic tools | PARTIAL | |
 | 4 | Epic KB/agent | PARTIAL | |
 | 5 | Epic desktop UI | PARTIAL | |
-| 14 | Profile model | PARTIAL | ProviderProfile + AppConfig |
+| 14 | Profile model | DONE | ProviderProfile + AppConfig save/load + tests |
 | 15 | Gateway probe | PARTIAL | expand + SSRF; live model list incomplete |
 | 16 | OpenAI chat+tools | PARTIAL | Client + parse tests; stream incomplete |
 | 17 | Ollama | PARTIAL | Client + health |
 | 18 | Local discovery | PARTIAL | discover_local |
 | 19 | Grok session | PARTIAL | Module + host pin; full wire incomplete |
 | 20 | AI settings UI | PARTIAL | Form exists |
-| 21 | Tool host | PARTIAL | Real tools + grants |
-| 22 | Permission grants | PARTIAL | request-bound |
+| 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
+| 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
 | 23 | Permission modal UI | PARTIAL | Mounted + wired |
 | 24 | Audit log | PARTIAL | JSONL |
-| 25 | MVP tools | PARTIAL | search/read/save |
-| 26 | Indexer | PARTIAL | keyword |
+| 25 | MVP tools | DONE | search/read/save + allowlist + line caps |
+| 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
 | 27 | Agent loop | PARTIAL | research_local + scripted |
 | 28 | Citations UI | PARTIAL | chips + hostReadFile |
 | 29 | Router budgets | PARTIAL | module |
@@ -55,9 +55,9 @@ Last audit: 2026-07-17. Update when closing.
 | 34 | Multi-session tabs | TODO/PARTIAL | single session mostly |
 | 35 | SVG icons | PARTIAL | icons.tsx |
 | 58 | Golden harness | PARTIAL | fixtures + tests |
-| 61 | SSRF | PARTIAL | strong unit tests |
+| 61 | SSRF | DONE | Unit tests + probe_url policy + DEV.md override |
 | 62 | Injection | PARTIAL | wrap_untrusted |
-| 63 | Path policy | PARTIAL | |
+| 63 | Path policy | DONE | symlink escape; .env deny; no root session grant |
 | 64 | Egress/local-only | PARTIAL | profile flag; UI badge weak |
 | 65 | Phase 1 DoD | TODO | not honestly closable yet |
 | 72 | AI form live probe | PARTIAL | |
