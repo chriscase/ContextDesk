@@ -430,13 +430,13 @@ export function App() {
           };
           if (perm) {
             setPermission(perm);
-            try {
-              const prev = events.find((e) => e.kind === "permission_required");
-              if (prev?.payload?.preview) {
-                const raw = String(prev.payload.preview);
-                setPendingToolArgs(JSON.parse(raw) as Record<string, unknown>);
-              }
-            } catch {
+            // Prefer structured arguments from host (not human preview text).
+            const prev = events.find((e) => e.kind === "permission_required");
+            const args = prev?.payload?.arguments;
+            if (args && typeof args === "object" && !Array.isArray(args)) {
+              setPendingToolArgs(args as Record<string, unknown>);
+            } else {
+              // Host re-executes with stored args when client sends {}.
               setPendingToolArgs({});
             }
           }

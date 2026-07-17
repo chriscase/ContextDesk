@@ -4,6 +4,7 @@
 
 use crate::tools::ToolSideEffect;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// How the user responded to a permission prompt.
@@ -31,8 +32,11 @@ pub struct PermissionRequest {
     pub target: String,
     /// Model-provided reason (untrusted text).
     pub reason: String,
-    /// Preview excerpt.
+    /// Human-readable preview (may be non-JSON; for UI only).
     pub preview: String,
+    /// Original tool arguments for re-execute after Accept (host-authoritative).
+    #[serde(default)]
+    pub arguments: Value,
     /// Risk: `local` | `remote` | `destructive`.
     pub risk: String,
     /// If set, type-to-confirm phrase required (remote/destructive).
@@ -49,6 +53,27 @@ impl PermissionRequest {
         preview: impl Into<String>,
         risk: impl Into<String>,
     ) -> Self {
+        Self::with_arguments(
+            tool_name,
+            side_effect,
+            target,
+            reason,
+            preview,
+            risk,
+            Value::Null,
+        )
+    }
+
+    /// Create a request that retains original tool arguments for grant re-execute.
+    pub fn with_arguments(
+        tool_name: impl Into<String>,
+        side_effect: ToolSideEffect,
+        target: impl Into<String>,
+        reason: impl Into<String>,
+        preview: impl Into<String>,
+        risk: impl Into<String>,
+        arguments: Value,
+    ) -> Self {
         let risk_s = risk.into();
         let type_confirm_phrase = match risk_s.as_str() {
             "remote" | "destructive" => Some("WRITE".into()),
@@ -61,6 +86,7 @@ impl PermissionRequest {
             target: target.into(),
             reason: reason.into(),
             preview: preview.into(),
+            arguments,
             risk: risk_s,
             type_confirm_phrase,
         }

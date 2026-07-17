@@ -106,12 +106,13 @@ impl ToolHost {
     }
 
     /// Register a UI decision for a pending request id.
+    /// Returns the stored request (including original tool arguments) and decision.
     pub fn complete_permission(
         &mut self,
         request_id: &str,
         decision: PermissionDecision,
         typed: Option<&str>,
-    ) -> CoreResult<(String, PermissionDecision)> {
+    ) -> CoreResult<(PermissionRequest, PermissionDecision)> {
         let req = self
             .pending
             .remove(request_id)
@@ -129,7 +130,7 @@ impl ToolHost {
                 self.permissions.allow_session_path(&req.target);
             }
         }
-        Ok((req.tool_name, decision))
+        Ok((req, decision))
     }
 
     fn consume_grant(&mut self, request_id: &str, name: &str, target: &str) -> bool {
@@ -178,13 +179,16 @@ impl ToolHost {
                     ));
                 }
             } else {
-                let req = PermissionRequest::new(
+                // Store original arguments on the request so Accept can re-execute
+                // without trusting the UI to re-parse human preview text as JSON.
+                let req = PermissionRequest::with_arguments(
                     name,
                     side,
                     &target,
                     "tool requested write",
                     preview_args(arguments),
                     risk_for(side, name),
+                    arguments.clone(),
                 );
                 let request_id = req.request_id.clone();
                 self.pending.insert(request_id.clone(), req.clone());
@@ -199,11 +203,12 @@ impl ToolHost {
                     },
                     StreamEvent::PermissionRequired {
                         request_id,
-                        tool_name: req.tool_name,
-                        target: req.target,
-                        reason: req.reason,
-                        preview: req.preview,
-                        risk: req.risk,
+                        tool_name: req.tool_name.clone(),
+                        target: req.target.clone(),
+                        reason: req.reason.clone(),
+                        preview: req.preview.clone(),
+                        risk: req.risk.clone(),
+                        arguments: req.arguments.clone(),
                     },
                 ];
                 events.push(StreamEvent::Tool {
@@ -864,18 +869,22 @@ mod tests {
             "body_markdown": "1. Search auth\n2. Cite files",
             "allows_write": false
         });
-        // Without grant → PermissionRequired with draft preview
+        // Without grant → PermissionRequired with human draft + structured arguments
         let r = host.execute(names::SAVE_SKILL, &args, None).unwrap();
         assert!(!r.ok);
-        let preview = r
+        let (preview, stored_args, rid) = r
             .events
             .iter()
             .find_map(|e| match e {
                 StreamEvent::PermissionRequired {
-                    preview, tool_name, ..
+                    preview,
+                    tool_name,
+                    arguments,
+                    request_id,
+                    ..
                 } => {
                     assert_eq!(tool_name, names::SAVE_SKILL);
-                    Some(preview.clone())
+                    Some((preview.clone(), arguments.clone(), request_id.clone()))
                 }
                 _ => None,
             })
@@ -884,11 +893,54 @@ mod tests {
             preview.contains("skill draft preview") && preview.contains("auth-trace"),
             "preview={preview}"
         );
-        // File must not exist yet
+        // Human preview is NOT valid JSON (UI must not JSON.parse it as tool args)
+        assert!(serde_json::from_str::<Value>(&preview).is_err());
+        assert_eq!(stored_args["id"], "auth-trace");
+        assert!(stored_args["body_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Search auth"));
         let skill_path = dir.path().join(".contextdesk/skills/auth-trace.md");
         assert!(!skill_path.exists());
 
-        // Grant AllowOnce and execute
+        // Simulate UI Accept with empty args (what App sends when preview is non-JSON).
+        // Host must re-execute using stored arguments.
+        let events = crate::research::grant_and_execute(
+            &mut host,
+            &rid,
+            PermissionDecision::AllowOnce,
+            None,
+            names::SAVE_SKILL,
+            &json!({}),
+        )
+        .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                StreamEvent::Tool {
+                    ok: Some(true),
+                    name,
+                    ..
+                } if name == names::SAVE_SKILL
+            )),
+            "events={events:?}"
+        );
+        assert!(
+            skill_path.is_file(),
+            "skill file missing after Accept with empty client args"
+        );
+        let catalog = skills::discover_skills(std::slice::from_ref(&skills::workspace_skills_dir(
+            dir.path(),
+        )))
+        .unwrap();
+        assert!(catalog.iter().any(|s| s.id == "auth-trace"));
+    }
+
+    #[test]
+    fn save_memory_accept_with_empty_client_args_uses_host_store() {
+        let (dir, mut host) = host_with_docs();
+        let args = json!({"title": "arch", "body_markdown": "We use JWT."});
+        let r = host.execute("save_memory", &args, None).unwrap();
         let rid = r
             .events
             .iter()
@@ -897,14 +949,20 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
-            .unwrap();
-        let r2 = host.execute(names::SAVE_SKILL, &args, Some(&rid)).unwrap();
-        assert!(r2.ok, "summary={}", r2.summary);
-        assert!(skill_path.is_file(), "skill file missing");
-        // Immediately in catalog
-        let catalog = skills::discover_skills(&[skills::workspace_skills_dir(dir.path())]).unwrap();
-        assert!(catalog.iter().any(|s| s.id == "auth-trace"));
+        // Empty client args — host must still write using stored args
+        let events = crate::research::grant_and_execute(
+            &mut host,
+            &rid,
+            PermissionDecision::AllowOnce,
+            None,
+            "save_memory",
+            &json!({}),
+        )
+        .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Tool { ok: Some(true), .. })));
+        assert!(dir.path().join(".contextdesk/memory/arch.md").exists());
     }
 
     #[test]

@@ -72,10 +72,13 @@ pub enum StreamEvent {
         target: String,
         /// Why the model wants this.
         reason: String,
-        /// Preview of content or diff excerpt.
+        /// Human preview of content or draft (may be non-JSON).
         preview: String,
         /// Risk hint: local | remote | destructive.
         risk: String,
+        /// Original tool arguments for Accept re-execute (host also stores these).
+        #[serde(default)]
+        arguments: serde_json::Value,
     },
     /// Turn ended.
     TurnCompleted {

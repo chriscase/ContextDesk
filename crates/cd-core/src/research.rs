@@ -78,6 +78,7 @@ pub fn events_to_dto(events: &[StreamEvent]) -> Vec<EventDto> {
                     reason,
                     preview,
                     risk,
+                    arguments,
                 } => (
                     "permission_required",
                     serde_json::json!({
@@ -87,6 +88,7 @@ pub fn events_to_dto(events: &[StreamEvent]) -> Vec<EventDto> {
                         "reason": reason,
                         "preview": preview,
                         "risk": risk,
+                        "arguments": arguments,
                     }),
                 ),
                 StreamEvent::TurnCompleted { reason } => {
@@ -406,6 +408,9 @@ pub async fn research_scripted_tool_turn(
 }
 
 /// Approve a pending write and re-run the tool.
+///
+/// Uses **host-stored** tool arguments from the pending request when the client
+/// supplies empty/`null` arguments (preview is human text, not JSON).
 pub fn grant_and_execute(
     host: &mut ToolHost,
     request_id: &str,
@@ -414,7 +419,7 @@ pub fn grant_and_execute(
     name: &str,
     arguments: &serde_json::Value,
 ) -> CoreResult<Vec<StreamEvent>> {
-    let (_tool, dec) = host.complete_permission(request_id, decision, typed)?;
+    let (req, dec) = host.complete_permission(request_id, decision, typed)?;
     if matches!(dec, PermissionDecision::Deny) {
         return Ok(vec![StreamEvent::Error {
             code: "denied".into(),
@@ -426,7 +431,20 @@ pub fn grant_and_execute(
     } else {
         None
     };
-    let result = host.execute(name, arguments, rid)?;
+    // Prefer host-stored args: UI may only have human preview, not parseable JSON.
+    let use_stored =
+        arguments.is_null() || arguments.as_object().map(|o| o.is_empty()).unwrap_or(false);
+    let args = if use_stored && !req.arguments.is_null() {
+        &req.arguments
+    } else {
+        arguments
+    };
+    let tool_name = if name.is_empty() {
+        req.tool_name.as_str()
+    } else {
+        name
+    };
+    let result = host.execute(tool_name, args, rid)?;
     Ok(result.events)
 }
 
