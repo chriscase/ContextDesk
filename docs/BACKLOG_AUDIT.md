@@ -2,7 +2,7 @@
 
 Legend: **DONE** = AC met + tests | **PARTIAL** = real code, AC incomplete | **TODO** = missing or stub
 
-Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
+Last audit: 2026-07-17 (updated same day: 2026-07-17 honesty pass — prior pass over-reported DONE; CI green only after #97/#158 remediation).
 
 ## Phase 0 — Foundation
 
@@ -67,10 +67,12 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | # | Status | Notes |
 |---|--------|-------|
 | 6–7, 36–43 | DONE | Skills + multi-pane; SoftWrite Accept uses host-stored args (fixed) |
-| 8, 44–48, 75 | DONE | Connectors + Confluence RO tools on host; PAT keychain; RO only |
-| 9–10, 49–53 | DONE | cd-server auth/SSE/workspaces; PROTOCOL + host-adapter sketch |
+| 8, 44–45, 47–48, 75 | PARTIAL | Confluence RO + SQLite RO + X/web wired; **#46 Postgres/timeouts TODO**; MCP/HTTP presets not in Settings (#93) |
+| 9–10, 49, 51–53 | PARTIAL | cd-server auth/SSE basics; **#50 team roles/audit residual** (#167); PROTOCOL snake_case DTOs vs sketch (#181) |
 | 19 | DONE | refresh_token + expiry + offline mock tests; ToS docs |
-| 54–56 | DONE | slate skin, packaging checklist, composer markdown assist |
+| 54 | PARTIAL | slate skin CSS exists; Settings skin picker incomplete |
+| 55 | TODO | No tagged multi-OS release workflow (only ci.yml); see #172 |
+| 56 | DONE | composer markdown assist |
 
 ## Close policy
 

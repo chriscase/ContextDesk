@@ -11,20 +11,21 @@ It is a **research & synthesis** product—not a code-editing agent. Pair it wit
 | **Stack** | Rust core · Tauri 2 desktop · React · optional headless server |
 | **License** | [Apache-2.0](LICENSE) |
 | **Status** | Early development — see [Issues](https://github.com/chriscase/ContextDesk/issues) · live CI badge above |
-| **Identity** | Rename-friendly — see [`branding.toml`](branding.toml) |
+| **Identity** | Rename via [`branding.toml`](branding.toml) (runtime load of all slug paths: [roadmap #179](https://github.com/chriscase/ContextDesk/issues/179)) |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md) |
 
 ---
 
 ## What it does
 
-- **Locate** knowledge across allowlisted files, markdown memory, databases (read-first), MCP servers, and other connectors
+- **Locate** knowledge across allowlisted files, markdown memory, SQLite (read-only), Confluence RO, X search, and web research
 - **Synthesize** answers as streaming markdown with **citations** and a visible search trail
 - **Remember** durable notes (project memory) and optional **skills** (markdown playbooks)
 - **Act safely** with read / soft-write / hard-write permission tiers and explicit user confirmation
 - **Connect models** via discovery-first AI settings: local Ollama, OpenAI-compatible gateways, optional Grok Build session reuse, and more
-- **Embed** into other Rust/Tauri hosts via a stable library/event protocol (planned)
-- **Collaborate** via an optional headless server for team memory (planned)
+- **Embed** into other Rust/Tauri hosts via a stable library/event protocol *(roadmap)*
+- **Collaborate** via an optional headless server for team memory *(roadmap)*
+- **MCP stdio / HTTP OpenAPI presets / Postgres** connectors *(roadmap — core stubs only; not in Settings yet)*
 
 ## What it does *not* do (non-goals)
 
