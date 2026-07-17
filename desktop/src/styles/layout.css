@@ -167,6 +167,10 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
   transition: background var(--motion-fast), color var(--motion-fast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 .session-list__item:hover {
@@ -181,6 +185,34 @@
 
 .session-list__item[data-warn="true"] {
   color: var(--warning);
+}
+
+.session-list__title {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.session-list__meta {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.session-list__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: var(--space-2);
+}
+
+.session-list__loading {
+  padding: 6px 8px;
+  list-style: none;
 }
 
 /* Flex column so session tabs / chrome stay compact; chat body takes remaining space.

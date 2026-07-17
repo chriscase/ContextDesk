@@ -20,6 +20,7 @@ use cd_core::keychain_store::{
     SecretStore,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
+use cd_core::sessions::{Session, SessionMeta, SessionStore};
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,19 @@ fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
         name: w.name.clone(),
         roots: w.roots.clone(),
     })
+}
+
+fn session_store(state: &AppState) -> Result<SessionStore, String> {
+    let dir = ensure_config_dir(&state.branding)
+        .map_err(|e| e.to_string())?
+        .join("sessions");
+    Ok(SessionStore::new(dir))
+}
+
+fn seed_history_from_session(state: &AppState, session: &Session) {
+    let hist = session.to_chat_history();
+    let mut histories = state.histories.lock().expect("hist");
+    histories.insert(session.id.clone(), hist);
 }
 
 fn ensure_host(state: &AppState) -> Result<(), String> {
@@ -783,6 +797,69 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
     Ok(events_to_dto(&events))
 }
 
+/// List durable chat sessions (newest first).
+#[tauri::command]
+fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<SessionMeta>, String> {
+    session_store(&state)?
+        .list_meta()
+        .map_err(|e| e.to_string())
+}
+
+/// Load one session and seed in-memory agent history.
+#[tauri::command]
+fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let store = session_store(&state)?;
+    let session = store.load(&id).map_err(|e| e.to_string())?;
+    seed_history_from_session(&state, &session);
+    Ok(session)
+}
+
+/// Persist full UI session (auto-save path). Seeds agent history.
+#[tauri::command]
+fn save_chat_session(state: State<'_, AppState>, mut session: Session) -> Result<Session, String> {
+    session.maybe_auto_title_from_first_user();
+    session.touch();
+    // Do not persist empty never-messaged drafts under placeholder titles.
+    if session.messages.is_empty() {
+        return Ok(session);
+    }
+    let store = session_store(&state)?;
+    store.save(&session).map_err(|e| e.to_string())?;
+    seed_history_from_session(&state, &session);
+    Ok(session)
+}
+
+/// Rename session; locks auto-title when title is non-placeholder.
+#[tauri::command]
+fn rename_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<Session, String> {
+    let store = session_store(&state)?;
+    let mut session = store.load(&id).map_err(|e| e.to_string())?;
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title cannot be empty".into());
+    }
+    session.title = title;
+    session.title_locked = !cd_core::sessions::is_placeholder_title(&session.title);
+    session.touch();
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Delete session file and drop in-memory history.
+#[tauri::command]
+fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    session_store(&state)?
+        .delete(&id)
+        .map_err(|e| e.to_string())?;
+    let mut histories = state.histories.lock().expect("hist");
+    histories.remove(&id);
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct GrantReq {
     request_id: String,
@@ -917,6 +994,11 @@ pub fn run() {
             validate_workspace_path,
             suggest_default_workspace,
             ensure_default_workspace,
+            list_chat_sessions,
+            load_chat_session,
+            save_chat_session,
+            rename_chat_session,
+            delete_chat_session,
             agent_turn,
             complete_permission_cmd,
             list_skills_cmd,

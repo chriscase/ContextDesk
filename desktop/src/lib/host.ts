@@ -314,6 +314,69 @@ export async function hostReadFile(path: string): Promise<string> {
   return invoke<string>("read_workspace_file_cmd", { path });
 }
 
+/** Durable chat session (host Session JSON). */
+export type StoredMessageDto = {
+  id: string;
+  role: string;
+  content: string;
+  tools?: unknown;
+  citations?: unknown;
+  trail?: string[] | null;
+};
+
+export type ChatSessionDto = {
+  id: string;
+  title: string;
+  messages: StoredMessageDto[];
+  compact_summary?: string | null;
+  compact_keep_last: number;
+  show_full_history: boolean;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+  title_locked: boolean;
+};
+
+export type SessionMetaDto = {
+  id: string;
+  title: string;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  preview: string;
+};
+
+export async function hostListChatSessions(): Promise<SessionMetaDto[]> {
+  if (!isTauri()) return [];
+  return invoke<SessionMetaDto[]>("list_chat_sessions");
+}
+
+export async function hostLoadChatSession(id: string): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("load_chat_session", { id });
+}
+
+export async function hostSaveChatSession(
+  session: ChatSessionDto,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("save_chat_session", { session });
+}
+
+export async function hostRenameChatSession(
+  id: string,
+  title: string,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("rename_chat_session", { id, title });
+}
+
+export async function hostDeleteChatSession(id: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("delete_chat_session", { id });
+}
+
 export type MemoryFileDto = {
   path: string;
   relative: string;

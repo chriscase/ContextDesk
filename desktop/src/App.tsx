@@ -18,14 +18,20 @@ import {
   agentTurn,
   completePermission,
   hostCheckOllama,
+  hostDeleteChatSession,
   hostGetBranding,
   hostGetConfig,
+  hostListChatSessions,
   hostListMemory,
+  hostLoadChatSession,
   hostPreflight,
   hostReadFile,
+  hostRenameChatSession,
+  hostSaveChatSession,
   hostSetWorkspace,
   hostWriteMemory,
   type BrandingDto,
+  type ChatSessionDto,
   type EventDto,
 } from "./lib/host";
 import {
@@ -204,14 +210,95 @@ export function App() {
      * Full `messages` are never deleted — fold is view-only.
      */
     showFullHistory: boolean;
+    titleLocked: boolean;
+    createdAt: string;
+    updatedAt: string;
+    archived: boolean;
   };
 
-  const newSession = (title = "Chat"): ChatSession => ({
-    id: crypto.randomUUID(),
-    title,
-    messages: [],
-    compactKeepLast: 6,
-    showFullHistory: false,
+  const nowIso = () => new Date().toISOString();
+
+  const newSession = (title = "Chat"): ChatSession => {
+    const t = nowIso();
+    return {
+      id: crypto.randomUUID(),
+      title,
+      messages: [],
+      compactKeepLast: 6,
+      showFullHistory: false,
+      titleLocked: false,
+      createdAt: t,
+      updatedAt: t,
+      archived: false,
+    };
+  };
+
+  const isPlaceholderTitle = (title: string) => {
+    const t = title.trim().toLowerCase();
+    if (!t || t === "chat") return true;
+    if (t.startsWith("chat ")) {
+      return [...t.slice(5)].every((c) => c >= "0" && c <= "9");
+    }
+    return false;
+  };
+
+  const titleFromPrompt = (prompt: string, max = 56) => {
+    const line =
+      prompt
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l.length > 0) ?? "";
+    const collapsed = line.replace(/\s+/g, " ").trim();
+    if (!collapsed) return "";
+    if (collapsed.length <= max) return collapsed;
+    return `${collapsed.slice(0, max).trimEnd()}…`;
+  };
+
+  const msgFromStored = (m: ChatSessionDto["messages"][number]): Msg | null => {
+    if (m.role !== "user" && m.role !== "assistant") return null;
+    return {
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      tools: Array.isArray(m.tools) ? (m.tools as ToolCallView[]) : undefined,
+      citations: Array.isArray(m.citations)
+        ? (m.citations as { id: string; label: string }[])
+        : undefined,
+      trail: m.trail ?? undefined,
+    };
+  };
+
+  const sessionFromDto = (dto: ChatSessionDto): ChatSession => ({
+    id: dto.id,
+    title: dto.title,
+    messages: dto.messages
+      .map(msgFromStored)
+      .filter((m): m is Msg => m !== null),
+    compactKeepLast: dto.compact_keep_last || 6,
+    showFullHistory: dto.show_full_history,
+    titleLocked: dto.title_locked,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+    archived: dto.archived,
+  });
+
+  const sessionToDto = (s: ChatSession): ChatSessionDto => ({
+    id: s.id,
+    title: s.title,
+    messages: s.messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      tools: m.tools,
+      citations: m.citations,
+      trail: m.trail,
+    })),
+    compact_keep_last: s.compactKeepLast,
+    show_full_history: s.showFullHistory,
+    created_at: s.createdAt,
+    updated_at: s.updatedAt,
+    archived: s.archived,
+    title_locked: s.titleLocked,
   });
 
   const foldPreview = (msgs: Msg[], keep: number): string => {
@@ -226,9 +313,8 @@ export function App() {
   };
 
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
-  const [sessions, setSessions] = useState<ChatSession[]>(() => {
-    return [newSession("Chat 1")];
-  });
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [sessionsReady, setSessionsReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const resolvedSessionId = activeSessionId ?? sessions[0]?.id ?? "";
   const activeSession =
@@ -243,7 +329,7 @@ export function App() {
         if (s.id !== sid) return s;
         const next =
           typeof updater === "function" ? updater(s.messages) : updater;
-        return { ...s, messages: next };
+        return { ...s, messages: next, updatedAt: nowIso() };
       }),
     );
   };
@@ -263,6 +349,69 @@ export function App() {
       ),
     );
   };
+
+  const persistSession = useCallback(async (s: ChatSession) => {
+    if (s.messages.length === 0) return s;
+    let next = { ...s, updatedAt: nowIso() };
+    if (!next.titleLocked && isPlaceholderTitle(next.title)) {
+      const firstUser = next.messages.find((m) => m.role === "user");
+      if (firstUser) {
+        const auto = titleFromPrompt(firstUser.content);
+        if (auto) next = { ...next, title: auto };
+      }
+    }
+    try {
+      const saved = await hostSaveChatSession(sessionToDto(next));
+      if (saved) return sessionFromDto(saved);
+    } catch {
+      /* browser / host unavailable — keep local state */
+    }
+    return next;
+  }, []);
+
+  // Hydrate sessions from host store on launch.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const metas = await hostListChatSessions();
+        if (cancelled) return;
+        if (metas.length === 0) {
+          const s = newSession("Chat 1");
+          setSessions([s]);
+          setActiveSessionId(s.id);
+          setSessionsReady(true);
+          return;
+        }
+        const loaded: ChatSession[] = [];
+        for (const meta of metas) {
+          if (meta.archived) continue;
+          const dto = await hostLoadChatSession(meta.id);
+          if (dto) loaded.push(sessionFromDto(dto));
+        }
+        if (cancelled) return;
+        if (loaded.length === 0) {
+          const s = newSession("Chat 1");
+          setSessions([s]);
+          setActiveSessionId(s.id);
+        } else {
+          setSessions(loaded);
+          setActiveSessionId(loaded[0].id);
+        }
+      } catch {
+        if (!cancelled) {
+          const s = newSession("Chat 1");
+          setSessions([s]);
+          setActiveSessionId(s.id);
+        }
+      } finally {
+        if (!cancelled) setSessionsReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -441,7 +590,23 @@ export function App() {
         content: "",
         streaming: true,
       };
-      setMessages((m) => [...m, user, assistant]);
+      // Auto-title from first prompt when still a placeholder.
+      setSessions((all) =>
+        all.map((s) => {
+          if (s.id !== resolvedSessionId) return s;
+          let title = s.title;
+          if (!s.titleLocked && isPlaceholderTitle(s.title)) {
+            const auto = titleFromPrompt(text);
+            if (auto) title = auto;
+          }
+          return {
+            ...s,
+            title,
+            messages: [...s.messages, user, assistant],
+            updatedAt: nowIso(),
+          };
+        }),
+      );
       setPane("chat");
 
       try {
@@ -477,10 +642,13 @@ export function App() {
           }
         }
 
-        // Tools, citations, trail, permissions (once).
-        setMessages((m) => {
+        // Tools, citations, trail, permissions (once) + durable auto-save.
+        setSessions((all) => {
+          const cur = all.find((s) => s.id === sessionId);
+          if (!cur) return all;
+          const m = cur.messages;
           const idx = m.findIndex((x) => x.id === assistantId);
-          if (idx < 0) return m;
+          if (idx < 0) return all;
           const streamedContent = m[idx].content;
           const { msg, permission: perm } = applyEventsToMessage(
             { ...m[idx], content: streamedContent },
@@ -493,13 +661,11 @@ export function App() {
           };
           if (perm) {
             setPermission(perm);
-            // Prefer structured arguments from host (not human preview text).
             const prev = events.find((e) => e.kind === "permission_required");
             const args = prev?.payload?.arguments;
             if (args && typeof args === "object" && !Array.isArray(args)) {
               setPendingToolArgs(args as Record<string, unknown>);
             } else {
-              // Host re-executes with stored args when client sends {}.
               setPendingToolArgs({});
             }
           }
@@ -520,24 +686,46 @@ export function App() {
           if (merged.tools?.some((t) => t.name === "save_memory" && t.ok)) {
             void refreshMemory();
           }
-          const next = [...m];
-          next[idx] = merged;
-          return next;
+          const nextMsgs = [...m];
+          nextMsgs[idx] = merged;
+          const updated: ChatSession = {
+            ...cur,
+            messages: nextMsgs,
+            updatedAt: nowIso(),
+          };
+          void persistSession(updated).then((saved) => {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === saved.id ? saved : s)),
+            );
+          });
+          return all.map((s) => (s.id === sessionId ? updated : s));
         });
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
         setAgentError(err);
-        setMessages((m) =>
-          m.map((x) =>
-            x.id === assistantId
-              ? {
-                  ...x,
-                  streaming: false,
-                  content: `**Host error:** ${err}`,
-                }
-              : x,
-          ),
-        );
+        setSessions((all) => {
+          const cur = all.find((s) => s.id === sessionId);
+          if (!cur) return all;
+          const updated: ChatSession = {
+            ...cur,
+            messages: cur.messages.map((x) =>
+              x.id === assistantId
+                ? {
+                    ...x,
+                    streaming: false,
+                    content: `**Host error:** ${err}`,
+                  }
+                : x,
+            ),
+            updatedAt: nowIso(),
+          };
+          void persistSession(updated).then((saved) => {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === saved.id ? saved : s)),
+            );
+          });
+          return all.map((s) => (s.id === sessionId ? updated : s));
+        });
       } finally {
         setBusy(false);
       }
@@ -545,11 +733,69 @@ export function App() {
     [
       preflight.hasBlocking,
       sessionId,
+      resolvedSessionId,
       setup.ollamaReachable,
       setup.providerKind,
       refreshMemory,
+      persistSession,
     ],
   );
+
+  const createSession = () => {
+    const s = newSession(`Chat ${sessions.length + 1}`);
+    setSessions((all) => [s, ...all]);
+    setActiveSessionId(s.id);
+  };
+
+  const renameActiveSession = async () => {
+    if (!activeSession) return;
+    const next = window.prompt("Rename chat", activeSession.title);
+    if (next === null) return;
+    const title = next.trim();
+    if (!title) return;
+    try {
+      const saved = await hostRenameChatSession(activeSession.id, title);
+      if (saved) {
+        setSessions((all) =>
+          all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
+        );
+        return;
+      }
+    } catch {
+      /* local fallback */
+    }
+    setSessions((all) =>
+      all.map((s) =>
+        s.id === activeSession.id
+          ? { ...s, title, titleLocked: true, updatedAt: nowIso() }
+          : s,
+      ),
+    );
+  };
+
+  const deleteActiveSession = async () => {
+    if (!activeSession) return;
+    const ok = window.confirm(
+      `Delete chat “${activeSession.title}”? This cannot be undone.`,
+    );
+    if (!ok) return;
+    const id = activeSession.id;
+    try {
+      await hostDeleteChatSession(id);
+    } catch {
+      /* still drop local */
+    }
+    setSessions((all) => {
+      const next = all.filter((s) => s.id !== id);
+      if (next.length === 0) {
+        const s = newSession("Chat 1");
+        setActiveSessionId(s.id);
+        return [s];
+      }
+      setActiveSessionId(next[0].id);
+      return next;
+    });
+  };
 
   const onPermissionRespond = async (
     decision: "deny" | "allow_once" | "allow_session_path",
@@ -709,18 +955,62 @@ export function App() {
       <div className="app-body">
       <div className="main">
         <aside className="sidebar">
-          <div className="sidebar__label">Sessions</div>
+          <div className="row--between">
+            <div className="sidebar__label">Chats</div>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              title="New chat"
+              onClick={createSession}
+            >
+              +
+            </button>
+          </div>
           <ul className="session-list">
-            <li>
+            {!sessionsReady ? (
+              <li className="field__hint session-list__loading">Loading…</li>
+            ) : (
+              sessions.map((s) => (
+                <li key={s.id}>
+                  <button
+                    type="button"
+                    className="session-list__item"
+                    data-active={s.id === resolvedSessionId ? "true" : undefined}
+                    title={s.messages[0]?.content?.slice(0, 120) || s.title}
+                    onClick={() => setActiveSessionId(s.id)}
+                    onDoubleClick={() => {
+                      if (s.id === resolvedSessionId) void renameActiveSession();
+                    }}
+                  >
+                    <span className="session-list__title">{s.title}</span>
+                    {s.messages.length > 0 ? (
+                      <span className="session-list__meta">
+                        {s.messages.length} msg
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+          {activeSession && activeSession.messages.length > 0 ? (
+            <div className="session-list__actions">
               <button
                 type="button"
-                className="session-list__item"
-                data-active="true"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void renameActiveSession()}
               >
-                Research
+                Rename
               </button>
-            </li>
-          </ul>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void deleteActiveSession()}
+              >
+                Delete
+              </button>
+            </div>
+          ) : null}
           <div className="sidebar__label">Setup</div>
           <button
             type="button"
@@ -777,13 +1067,9 @@ export function App() {
                 ))}
                 <button
                   type="button"
-                  className="btn btn--ghost"
-                  title="New chat session"
-                  onClick={() => {
-                    const s = newSession(`Chat ${sessions.length + 1}`);
-                    setSessions((all) => [...all, s]);
-                    setActiveSessionId(s.id);
-                  }}
+                  className="btn btn--ghost btn--sm"
+                  title="New chat"
+                  onClick={createSession}
                 >
                   +
                 </button>
