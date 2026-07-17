@@ -130,6 +130,55 @@ fn cancelled(opts: &AgentOptions) -> bool {
         .unwrap_or(false)
 }
 
+/// Cheap char-based size estimate for near-limit compaction (#113).
+/// Approximate tokens ≈ chars/4 (no tokenizer dependency).
+pub fn estimate_context_chars(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(|m| m.content.len()).sum()
+}
+
+/// Detect provider "context length exceeded" style errors from status + body.
+pub fn is_context_length_error(status: u16, body: &str) -> bool {
+    if status != 400 && status != 413 {
+        // Also accept errors embedded only in the message string (status 0).
+        if status != 0 {
+            return false;
+        }
+    }
+    let b = body.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "token limit",
+        "maximum context length",
+        "prompt is too long",
+        "context window",
+    ];
+    NEEDLES.iter().any(|n| b.contains(n))
+}
+
+/// Parse status + body from `CoreError::Message("chat HTTP 400: …")` style strings.
+fn classify_context_error(err: &CoreError) -> bool {
+    let s = err.to_string();
+    // "chat HTTP 400: …" / "stream HTTP 400: …"
+    let status = s
+        .split_whitespace()
+        .find_map(|w| {
+            if w.chars().all(|c| c.is_ascii_digit()) {
+                w.parse::<u16>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    is_context_length_error(status, &s)
+}
+
+/// Soft char budget before proactive recompact (~32k tokens * 4).
+const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 120_000;
+
 /// Collect + optional live sink for stream events.
 struct EventCollector<'a> {
     events: Vec<StreamEvent>,
@@ -251,30 +300,71 @@ pub async fn run_agent_turn_with_sink(
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
-        // #112: send pairing-safe compacted context to the model; keep full history.
-        let keep = opts.compact_keep_last.max(1);
-        let summary = crate::sessions::recompact_chat_history(history, keep);
-        let model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
-        let completion = {
+        // #112/#113: pairing-safe compact context; near-limit shrink keep; one 400-retry.
+        let mut keep = opts.compact_keep_last.max(1);
+        let mut summary = crate::sessions::recompact_chat_history(history, keep);
+        let mut model_ctx =
+            crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+        // Proactive near-limit: shrink keep until under char budget or floor.
+        let mut proactive_notice = false;
+        while estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET && keep > 2 {
+            keep = (keep / 2).max(2);
+            summary = crate::sessions::recompact_chat_history(history, keep);
+            model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+            proactive_notice = true;
+        }
+        if proactive_notice {
+            out.push(StreamEvent::Error {
+                code: "context_compacted".into(),
+                message: "Conversation grew large — older turns were compacted for the model. Full history is still saved."
+                    .into(),
+            });
+        }
+        let mut attempt = 0u8;
+        let completion = loop {
             let mut on_text = |t: String| {
                 if !t.is_empty() {
                     streamed_text = true;
                     out.push(StreamEvent::TextDelta { text: t });
                 }
             };
-            backend
+            let result = backend
                 .complete_streaming(&model_ctx, &specs, &mut on_text, cancel_ref)
-                .await
-        };
-        let completion = match completion {
-            Ok(c) => c,
-            Err(e) if e.to_string().contains("cancelled") => {
-                out.push(StreamEvent::TurnCompleted {
-                    reason: "cancel".into(),
-                });
-                return Ok(out.into_events());
+                .await;
+            match result {
+                Ok(c) => break c,
+                Err(e) if e.to_string().contains("cancelled") => {
+                    out.push(StreamEvent::TurnCompleted {
+                        reason: "cancel".into(),
+                    });
+                    return Ok(out.into_events());
+                }
+                Err(e) if attempt == 0 && classify_context_error(&e) => {
+                    // Reactive: harder compact + single retry (#113).
+                    attempt = 1;
+                    keep = (keep / 2).max(2);
+                    summary = crate::sessions::recompact_chat_history(history, keep);
+                    model_ctx =
+                        crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+                    out.push(StreamEvent::Error {
+                        code: "context_compacted".into(),
+                        message: "Provider hit context limit — compacted and retrying once.".into(),
+                    });
+                    continue;
+                }
+                Err(e) if attempt >= 1 && classify_context_error(&e) => {
+                    out.push(StreamEvent::Error {
+                        code: "context_too_long".into(),
+                        message: "This chat is too long for the model even after compaction. Start a new chat or remove older messages."
+                            .into(),
+                    });
+                    out.push(StreamEvent::TurnCompleted {
+                        reason: "context_too_long".into(),
+                    });
+                    return Ok(out.into_events());
+                }
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
         };
         let mut tool_calls = completion.tool_calls.clone();
 
@@ -606,6 +696,79 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
         ));
+    }
+
+    #[test]
+    fn context_length_classifier_fixtures() {
+        assert!(is_context_length_error(
+            400,
+            r#"{"error":{"code":"context_length_exceeded","message":"too many tokens"}}"#
+        ));
+        assert!(is_context_length_error(
+            400,
+            "This model's maximum context length is 8192 tokens"
+        ));
+        assert!(is_context_length_error(413, "prompt is too long"));
+        assert!(!is_context_length_error(400, "invalid api key"));
+        assert!(!is_context_length_error(500, "context length"));
+        assert!(classify_context_error(&CoreError::Message(
+            "stream HTTP 400: context_length_exceeded".into()
+        )));
+    }
+
+    /// #113: context-length 400 → one compact notice + retry success.
+    #[tokio::test]
+    async fn agent_retries_once_on_context_length_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FlakyCtxBackend {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ChatBackend for FlakyCtxBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Err(CoreError::Message(
+                        "chat HTTP 400: context_length_exceeded: too many tokens".into(),
+                    ));
+                }
+                Ok(ChatCompletion {
+                    content: "recovered after compact".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let mut history = vec![];
+        let backend = FlakyCtxBackend {
+            calls: AtomicUsize::new(0),
+        };
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "hello",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::Error { code, .. } if code == "context_compacted"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::TextDelta { text } if text.contains("recovered")
+        )));
     }
 
     /// #112: model sees compacted context while full history grows unbounded.
