@@ -6,11 +6,11 @@ use crate::chat::{
     ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role,
     ToolCallMsg,
 };
+use crate::error::CoreError;
 use crate::error::CoreResult;
 use crate::events::StreamEvent;
 use crate::index::KeywordIndex;
 use crate::permissions::PermissionDecision;
-use crate::error::CoreError;
 use crate::providers::{ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
@@ -379,18 +379,15 @@ pub async fn research_turn(
                         text.chars().take(120).collect::<String>()
                     )));
                 }
-                serde_json::from_str(&text).map_err(|e| CoreError::Message(format!("refresh json: {e}")))
+                serde_json::from_str(&text)
+                    .map_err(|e| CoreError::Message(format!("refresh json: {e}")))
             }
         })
         .await?;
         let headers = creds.request_headers();
-        let client = OpenAiCompatibleClient::new(
-            base,
-            None,
-            &profile.chat_model,
-            &SsrfPolicy::default(),
-        )?
-        .with_extra_headers(headers);
+        let client =
+            OpenAiCompatibleClient::new(base, None, &profile.chat_model, &SsrfPolicy::default())?
+                .with_extra_headers(headers);
         let backend = OpenAiBackend(client);
         return run_agent_turn(
             &backend,

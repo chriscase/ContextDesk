@@ -160,7 +160,8 @@ mod tests {
                 "must not be whole home"
             );
             assert!(
-                path.starts_with(&home) || dirs::document_dir().is_some_and(|d| path.starts_with(d)),
+                path.starts_with(&home)
+                    || dirs::document_dir().is_some_and(|d| path.starts_with(d)),
                 "should sit under home or documents"
             );
         }
@@ -184,6 +185,9 @@ mod tests {
 
     #[test]
     fn label_format() {
-        assert_eq!(default_workspace_label("ContextDesk"), "Documents/ContextDesk");
+        assert_eq!(
+            default_workspace_label("ContextDesk"),
+            "Documents/ContextDesk"
+        );
     }
 }

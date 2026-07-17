@@ -301,7 +301,9 @@ pub fn title_from_prompt(prompt: &str, max_chars: usize) -> String {
         .or_else(|| collapsed.find([';', ',']))
         .filter(|&i| i >= 12 && i <= max_chars.max(24));
     let base = if let Some(i) = cut_at {
-        collapsed[..i].trim_end_matches(['.', '?', '!', ';', ',']).trim()
+        collapsed[..i]
+            .trim_end_matches(['.', '?', '!', ';', ','])
+            .trim()
     } else {
         collapsed.as_str()
     };
@@ -334,7 +336,12 @@ pub fn session_title_llm_prompt(user_message: &str) -> String {
 
 /// Clean model output into a safe sidebar title.
 pub fn sanitize_generated_title(raw: &str, max_chars: usize) -> String {
-    let mut t = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+    let mut t = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
     for prefix in [
         "Title:",
         "title:",
@@ -488,7 +495,12 @@ impl SessionStore {
     /// Keyword search over titles + message bodies (scored, newest break ties).
     ///
     /// Empty query returns all non-archived metas as zero-score hits (archive browse).
-    pub fn search(&self, query: &str, limit: usize, include_archived: bool) -> CoreResult<Vec<SessionSearchHit>> {
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_archived: bool,
+    ) -> CoreResult<Vec<SessionSearchHit>> {
         let terms = tokenize_query(query);
         let mut hits = Vec::new();
         for s in self.load_all()? {
