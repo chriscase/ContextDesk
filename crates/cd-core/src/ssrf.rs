@@ -1,7 +1,11 @@
 //! SSRF policy for provider base URLs and probes.
+//!
+//! Literal-IP and hostname syntax checks live in [`validate_provider_url`].
+//! For hostnames that need private/metadata protection, use
+//! [`resolve_and_validate`] with an injectable [`DnsResolver`] (#140).
 
 use crate::error::{CoreError, CoreResult};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use url::Url;
 
 /// Policy for outbound provider HTTP.
@@ -84,12 +88,119 @@ pub fn validate_provider_url(raw: &str, policy: &SsrfPolicy) -> CoreResult<Url> 
         )));
     }
     // Hostname without resolving: cannot know private IP; allow DNS names when
-    // block_private (public DNS). Callers that need full protection may resolve
-    // separately. Block well-known cloud metadata.
+    // block_private (public DNS). Prefer [`resolve_and_validate`] for full
+    // protection (#140). Block well-known cloud metadata string.
     if host_l == "169.254.169.254" {
         return Err(CoreError::Policy("blocked link-local metadata IP".into()));
     }
     Ok(url)
+}
+
+/// Injectable DNS lookup for offline tests and production system resolution.
+pub trait DnsResolver {
+    /// Resolve `host` (no port) to one or more IPs. Empty vec is an error.
+    fn resolve(&self, host: &str) -> CoreResult<Vec<IpAddr>>;
+}
+
+/// Production resolver: `ToSocketAddrs` via a dummy port (sync, no network in unit tests).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemResolver;
+
+impl DnsResolver for SystemResolver {
+    fn resolve(&self, host: &str) -> CoreResult<Vec<IpAddr>> {
+        // Pair with a dummy port so ToSocketAddrs works for bare hostnames.
+        let addrs: Vec<SocketAddr> = (host, 0u16)
+            .to_socket_addrs()
+            .map_err(|e| CoreError::Config(format!("DNS resolve failed for `{host}`: {e}")))?
+            .collect();
+        if addrs.is_empty() {
+            return Err(CoreError::Config(format!(
+                "DNS resolve returned no addresses for `{host}`"
+            )));
+        }
+        let mut ips: Vec<IpAddr> = addrs.into_iter().map(|a| a.ip()).collect();
+        ips.sort_unstable();
+        ips.dedup();
+        Ok(ips)
+    }
+}
+
+/// Map-based fake resolver for offline unit tests (zero network I/O).
+#[derive(Debug, Clone, Default)]
+pub struct MapResolver {
+    /// Host (lowercase) → resolved addresses.
+    pub map: std::collections::HashMap<String, Vec<IpAddr>>,
+}
+
+impl MapResolver {
+    /// Build from (host, ips) pairs.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (impl Into<String>, Vec<IpAddr>)>) -> Self {
+        let mut map = std::collections::HashMap::new();
+        for (h, ips) in pairs {
+            map.insert(h.into().to_ascii_lowercase(), ips);
+        }
+        Self { map }
+    }
+}
+
+impl DnsResolver for MapResolver {
+    fn resolve(&self, host: &str) -> CoreResult<Vec<IpAddr>> {
+        let key = host.to_ascii_lowercase();
+        self.map
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| CoreError::Config(format!("test DNS: no mapping for `{host}`")))
+    }
+}
+
+/// Validate URL (syntax + literal IP), then resolve hostnames and reject if
+/// **any** resolved address fails the existing private/metadata gates.
+///
+/// Returns the vetted IP set for callers that pin sockets (child #141).
+/// Literal-IP URLs skip DNS and keep byte-identical behavior to
+/// [`validate_provider_url`].
+pub fn resolve_and_validate(
+    url: &Url,
+    policy: &SsrfPolicy,
+    resolver: &impl DnsResolver,
+) -> CoreResult<Vec<IpAddr>> {
+    // Re-run syntactic + literal-IP checks on the serialized form so behavior
+    // matches validate_provider_url for callers that only have a Url.
+    let _validated = validate_provider_url(url.as_str(), policy)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| CoreError::Config("URL missing host".into()))?;
+    let host_l = host.to_ascii_lowercase();
+
+    // Fast path: literal IP — already vetted by validate_provider_url.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+    if let Some(url::Host::Ipv4(v4)) = url.host() {
+        return Ok(vec![IpAddr::V4(v4)]);
+    }
+    if let Some(url::Host::Ipv6(v6)) = url.host() {
+        return Ok(vec![IpAddr::V6(v6)]);
+    }
+
+    // localhost is allowed without resolving when allow_loopback (Ollama).
+    if host_l == "localhost" || host_l.ends_with(".localhost") {
+        if policy.allow_loopback {
+            return Ok(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+        }
+        return Err(CoreError::Policy("loopback host not allowed".into()));
+    }
+
+    let ips = resolver.resolve(host)?;
+    if ips.is_empty() {
+        return Err(CoreError::Config(format!(
+            "DNS resolve returned no addresses for `{host}`"
+        )));
+    }
+    for ip in &ips {
+        check_ip(*ip, policy)?;
+    }
+    Ok(ips)
 }
 
 fn check_ip(ip: IpAddr, policy: &SsrfPolicy) -> CoreResult<()> {
@@ -206,5 +317,105 @@ mod tests {
         assert!(
             validate_provider_url("http://[::ffff:10.0.0.1]/", &SsrfPolicy::default()).is_err()
         );
+    }
+
+    /// #140: hostname that resolves to private/metadata must be rejected offline.
+    #[test]
+    fn resolve_rejects_private_and_metadata_via_fake_dns() {
+        let policy = SsrfPolicy::default();
+        let cases: &[(&str, IpAddr)] = &[
+            (
+                "evil.internal.example",
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            ),
+            (
+                "meta.example",
+                IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            ),
+            (
+                "linklocal.example",
+                IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+            ),
+            ("cgnat.example", IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))),
+            ("ula.example", IpAddr::V6("fd00::1".parse().unwrap())),
+            ("v6ll.example", IpAddr::V6("fe80::1".parse().unwrap())),
+            ("loop.example", IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        ];
+        for (host, ip) in cases {
+            // allow_loopback true still blocks non-literal hostname→loopback when
+            // we resolve and check — actually loopback is allowed under allow_loopback.
+            // For loop.example we expect Ok if allow_loopback.
+            let resolver = MapResolver::from_pairs([(host.to_string(), vec![*ip])]);
+            let url = Url::parse(&format!("https://{host}/v1")).unwrap();
+            let r = resolve_and_validate(&url, &policy, &resolver);
+            if matches!(ip, IpAddr::V4(v) if v.is_loopback())
+                || matches!(ip, IpAddr::V6(v) if v.is_loopback())
+            {
+                assert!(
+                    r.is_ok(),
+                    "loopback should pass under allow_loopback: {host}"
+                );
+            } else {
+                assert!(r.is_err(), "expected reject for {host} → {ip}, got {r:?}");
+            }
+        }
+        // Explicit loopback deny when policy forbids it.
+        let no_lb = SsrfPolicy {
+            block_private: true,
+            allow_loopback: false,
+        };
+        let resolver = MapResolver::from_pairs([(
+            "loop.example".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+        )]);
+        let url = Url::parse("https://loop.example/v1").unwrap();
+        assert!(resolve_and_validate(&url, &no_lb, &resolver).is_err());
+    }
+
+    #[test]
+    fn resolve_allows_public_ip_via_fake_dns() {
+        let resolver = MapResolver::from_pairs([(
+            "api.example.com".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        )]);
+        let url = Url::parse("https://api.example.com/v1").unwrap();
+        let ips = resolve_and_validate(&url, &SsrfPolicy::default(), &resolver).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+    }
+
+    #[test]
+    fn resolve_rejects_if_any_of_multiple_addrs_is_private() {
+        let resolver = MapResolver::from_pairs([(
+            "mixed.example".to_string(),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)),
+            ],
+        )]);
+        let url = Url::parse("https://mixed.example/v1").unwrap();
+        assert!(resolve_and_validate(&url, &SsrfPolicy::default(), &resolver).is_err());
+    }
+
+    #[test]
+    fn resolve_literal_ip_skips_dns_and_matches_validate() {
+        let resolver = MapResolver::default(); // empty — would fail if DNS called
+        let url = Url::parse("http://10.0.0.5/v1").unwrap();
+        assert!(resolve_and_validate(&url, &SsrfPolicy::default(), &resolver).is_err());
+        let url = Url::parse("http://127.0.0.1:11434").unwrap();
+        let ips = resolve_and_validate(&url, &SsrfPolicy::default(), &resolver).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    }
+
+    #[test]
+    fn resolve_honor_private_network_override() {
+        let resolver = MapResolver::from_pairs([(
+            "corp.example".to_string(),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))],
+        )]);
+        let url = Url::parse("https://corp.example/v1").unwrap();
+        assert!(resolve_and_validate(&url, &SsrfPolicy::default(), &resolver).is_err());
+        let ips =
+            resolve_and_validate(&url, &SsrfPolicy::allow_private_networks(), &resolver).unwrap();
+        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))]);
     }
 }
