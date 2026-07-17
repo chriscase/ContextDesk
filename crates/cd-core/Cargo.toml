@@ -26,7 +26,9 @@ async-trait = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Filesystem watch for incremental index invalidation (#116)
 notify = "6.1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+sha2 = "0.10"
