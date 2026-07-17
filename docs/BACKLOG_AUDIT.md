@@ -34,7 +34,7 @@ Last audit: 2026-07-17. Update when closing.
 | 5 | Epic desktop UI | PARTIAL | |
 | 14 | Profile model | DONE | ProviderProfile + AppConfig save/load + tests |
 | 15 | Gateway probe | DONE | URL expand + host probe_url; model list residual thin |
-| 16 | OpenAI chat+tools | PARTIAL | Client + parse tests; stream incomplete |
+| 16 | OpenAI chat+tools | DONE | non-stream + SSE parse/fixtures; research uses stream w/ fallback |
 | 17 | Ollama | DONE | tags + chat + health; embed optional |
 | 18 | Local discovery | DONE | discover_local + Settings candidates list |
 | 19 | Grok session | PARTIAL | Module + host pin; full wire incomplete |

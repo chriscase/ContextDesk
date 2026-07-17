@@ -56,7 +56,7 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
-/// Result of a chat completion (non-stream).
+/// Result of a chat completion (non-stream or fully accumulated stream).
 #[derive(Debug, Clone)]
 pub struct ChatCompletion {
     /// Assistant text (may be empty if only tools).
@@ -65,6 +65,256 @@ pub struct ChatCompletion {
     pub tool_calls: Vec<ToolCallMsg>,
     /// Finish reason.
     pub finish_reason: String,
+}
+
+/// One logical delta from an OpenAI-compatible SSE stream (after `data: ` parse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// Incremental assistant text.
+    Text(String),
+    /// Partial tool call (arguments may be fragmented across deltas).
+    ToolCall {
+        /// Stream index (OpenAI tool_calls[].index).
+        index: usize,
+        /// Call id (present on first fragment).
+        id: Option<String>,
+        /// Function name (present on first fragment).
+        name: Option<String>,
+        /// Arguments JSON fragment.
+        arguments: String,
+    },
+    /// Multiple tool-call fragments in one SSE event (OpenAI may batch).
+    ToolCalls(Vec<StreamDelta>),
+    /// Model finished this choice.
+    Finish(String),
+    /// Stream ended (`data: [DONE]`).
+    Done,
+}
+
+/// Accumulates SSE deltas into a final [`ChatCompletion`].
+#[derive(Debug, Default)]
+pub struct StreamAccumulator {
+    content: String,
+    /// index -> (id, name, arguments buffer)
+    tool_parts: std::collections::BTreeMap<usize, (String, String, String)>,
+    finish_reason: Option<String>,
+}
+
+impl StreamAccumulator {
+    /// Empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply one parsed delta.
+    pub fn push(&mut self, delta: StreamDelta) {
+        match delta {
+            StreamDelta::Text(t) => self.content.push_str(&t),
+            StreamDelta::ToolCall {
+                index,
+                id,
+                name,
+                arguments,
+            } => {
+                let entry = self
+                    .tool_parts
+                    .entry(index)
+                    .or_insert_with(|| (String::new(), String::new(), String::new()));
+                if let Some(i) = id {
+                    if !i.is_empty() {
+                        entry.0 = i;
+                    }
+                }
+                if let Some(n) = name {
+                    if !n.is_empty() {
+                        entry.1 = n;
+                    }
+                }
+                entry.2.push_str(&arguments);
+            }
+            StreamDelta::ToolCalls(parts) => {
+                for p in parts {
+                    self.push(p);
+                }
+            }
+            StreamDelta::Finish(r) => {
+                self.finish_reason = Some(r);
+            }
+            StreamDelta::Done => {}
+        }
+    }
+
+    /// Finish into a completion (same shape as non-stream parse).
+    pub fn into_completion(self) -> ChatCompletion {
+        let mut tool_calls = Vec::new();
+        for (_idx, (id, name, arguments)) in self.tool_parts {
+            if name.is_empty() && arguments.is_empty() {
+                continue;
+            }
+            tool_calls.push(ToolCallMsg {
+                id: if id.is_empty() {
+                    format!("call_{}", tool_calls.len())
+                } else {
+                    id
+                },
+                kind: "function".into(),
+                function: FunctionCall {
+                    name,
+                    arguments: if arguments.is_empty() {
+                        "{}".into()
+                    } else {
+                        arguments
+                    },
+                },
+            });
+        }
+        let finish_reason = self.finish_reason.unwrap_or_else(|| {
+            if tool_calls.is_empty() {
+                "stop".into()
+            } else {
+                "tool_calls".into()
+            }
+        });
+        ChatCompletion {
+            content: self.content,
+            tool_calls,
+            finish_reason,
+        }
+    }
+}
+
+/// Parse a single SSE `data:` payload (JSON object or `[DONE]`).
+/// Returns at most one primary delta; use [`parse_openai_sse_stream`] for finish+delta pairs.
+pub fn parse_openai_sse_data(data: &str) -> CoreResult<Option<StreamDelta>> {
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(None);
+    }
+    if data == "[DONE]" {
+        return Ok(Some(StreamDelta::Done));
+    }
+    let v: Value =
+        serde_json::from_str(data).map_err(|e| CoreError::Message(format!("sse json: {e}")))?;
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("stream error");
+        return Err(CoreError::Message(msg.into()));
+    }
+    let choice = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first());
+    let Some(choice) = choice else {
+        return Ok(None);
+    };
+    if let Some(delta) = choice.get("delta") {
+        if let Some(d) = delta_from_json(delta)? {
+            return Ok(Some(d));
+        }
+    }
+    if let Some(fr) = choice
+        .get("finish_reason")
+        .and_then(|f| f.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
+    {
+        return Ok(Some(StreamDelta::Finish(fr.to_string())));
+    }
+    Ok(None)
+}
+
+fn tool_call_from_json(tc: &Value) -> StreamDelta {
+    let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+    let id = tc.get("id").and_then(|x| x.as_str()).map(str::to_string);
+    let func = tc.get("function").cloned().unwrap_or(json!({}));
+    let name = func
+        .get("name")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let arguments = func
+        .get("arguments")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    StreamDelta::ToolCall {
+        index,
+        id,
+        name,
+        arguments,
+    }
+}
+
+fn delta_from_json(delta: &Value) -> CoreResult<Option<StreamDelta>> {
+    // Prefer tool_calls when present (even alongside empty content).
+    if let Some(arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+        if arr.len() == 1 {
+            return Ok(Some(tool_call_from_json(&arr[0])));
+        }
+        if arr.len() > 1 {
+            let parts: Vec<StreamDelta> = arr.iter().map(tool_call_from_json).collect();
+            return Ok(Some(StreamDelta::ToolCalls(parts)));
+        }
+    }
+    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+        if !content.is_empty() {
+            return Ok(Some(StreamDelta::Text(content.to_string())));
+        }
+    }
+    Ok(None)
+}
+
+/// Parse a full SSE body (recorded fixture or live) into deltas, applying finish reasons.
+pub fn parse_openai_sse_stream(body: &str) -> CoreResult<Vec<StreamDelta>> {
+    let mut out = Vec::new();
+    for raw_line in body.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            // comment / keep-alive
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim_start();
+        // Peek finish_reason on same payload as delta
+        if data != "[DONE]" {
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(choice) = v
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                {
+                    if let Some(delta) = choice.get("delta") {
+                        if let Some(d) = delta_from_json(delta)? {
+                            out.push(d);
+                        }
+                    }
+                    if let Some(fr) = choice
+                        .get("finish_reason")
+                        .and_then(|f| f.as_str())
+                        .filter(|s| !s.is_empty() && *s != "null")
+                    {
+                        out.push(StreamDelta::Finish(fr.to_string()));
+                    }
+                    continue;
+                }
+            }
+        }
+        if let Some(d) = parse_openai_sse_data(data)? {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+/// Accumulate a full SSE body into [`ChatCompletion`] (offline fixture path).
+pub fn accumulate_openai_sse(body: &str) -> CoreResult<ChatCompletion> {
+    let mut acc = StreamAccumulator::new();
+    for d in parse_openai_sse_stream(body)? {
+        acc.push(d);
+    }
+    Ok(acc.into_completion())
 }
 
 /// Convert tool specs to OpenAI tools array.
@@ -109,8 +359,10 @@ impl OpenAiCompatibleClient {
     ) -> CoreResult<Self> {
         let base_url = base_url.into();
         validate_provider_url(&base_url, policy)?;
+        // No redirects: SSRF check is on the user-entered base only.
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| CoreError::Message(format!("http client: {e}")))?;
         Ok(Self {
@@ -169,6 +421,52 @@ impl OpenAiCompatibleClient {
             )));
         }
         parse_openai_completion(&text)
+    }
+
+    /// Streaming chat completion (SSE). Accumulates to [`ChatCompletion`].
+    ///
+    /// When tools are unsupported by the gateway, callers should fall back to
+    /// non-stream `complete` or JSON tool fallback in the agent loop.
+    pub async fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+    ) -> CoreResult<ChatCompletion> {
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+        });
+        if let Some(specs) = tools {
+            if !specs.is_empty() {
+                body["tools"] = tools_to_openai(specs);
+                body["tool_choice"] = json!("auto");
+            }
+        }
+        let mut req = self.http.post(self.chat_url()).json(&body);
+        if let Some(k) = &self.api_key {
+            req = req.bearer_auth(k);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| CoreError::Message(format!("stream request: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| CoreError::Message(format!("stream body: {e}")))?;
+        if !status.is_success() {
+            return Err(CoreError::Message(format!(
+                "stream HTTP {status}: {}",
+                text.chars().take(300).collect::<String>()
+            )));
+        }
+        // Some gateways ignore stream=true and return a full JSON object.
+        if text.trim_start().starts_with('{') && !text.contains("data:") {
+            return parse_openai_completion(&text);
+        }
+        accumulate_openai_sse(&text)
     }
 
     /// List models via GET /v1/models.
@@ -460,5 +758,102 @@ mod tests {
             &SsrfPolicy::default(),
         );
         assert!(err.is_err());
+    }
+
+    /// Recorded OpenAI-style SSE fixture (text only).
+    const SSE_TEXT_FIXTURE: &str = r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"**world**"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+"#;
+
+    /// Recorded fixture: tool call arguments fragmented across SSE chunks.
+    const SSE_TOOLS_FIXTURE: &str = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"search_kb","arguments":""}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"auth JWT\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+"#;
+
+    #[test]
+    fn sse_parse_text_fixture() {
+        let c = accumulate_openai_sse(SSE_TEXT_FIXTURE).unwrap();
+        assert_eq!(c.content, "Hello **world**");
+        assert!(c.tool_calls.is_empty());
+        assert_eq!(c.finish_reason, "stop");
+    }
+
+    #[test]
+    fn sse_parse_tool_call_fragments() {
+        let c = accumulate_openai_sse(SSE_TOOLS_FIXTURE).unwrap();
+        assert!(c.content.is_empty());
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].id, "call_abc");
+        assert_eq!(c.tool_calls[0].function.name, "search_kb");
+        assert_eq!(
+            c.tool_calls[0].function.arguments,
+            r#"{"query":"auth JWT"}"#
+        );
+        assert_eq!(c.finish_reason, "tool_calls");
+        // Arguments must be valid JSON after reassembly
+        let v: Value = serde_json::from_str(&c.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(v["query"], "auth JWT");
+    }
+
+    /// Two tools batched in one SSE delta (index 0 and 1).
+    const SSE_MULTI_TOOL_FIXTURE: &str = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","type":"function","function":{"name":"search_kb","arguments":"{\"query\":\"a\"}"}},{"index":1,"id":"c1","type":"function","function":{"name":"read_file_slice","arguments":"{\"path\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+"#;
+
+    #[test]
+    fn sse_parse_multi_tool_in_one_delta() {
+        let c = accumulate_openai_sse(SSE_MULTI_TOOL_FIXTURE).unwrap();
+        assert_eq!(c.tool_calls.len(), 2);
+        assert_eq!(c.tool_calls[0].function.name, "search_kb");
+        assert_eq!(c.tool_calls[1].function.name, "read_file_slice");
+        assert_eq!(c.finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn sse_error_payload() {
+        let body = r#"data: {"error":{"message":"rate limited","type":"server_error"}}
+"#;
+        let err = parse_openai_sse_stream(body).unwrap_err();
+        assert!(err.to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn sse_done_only() {
+        let c = accumulate_openai_sse("data: [DONE]\n").unwrap();
+        assert!(c.content.is_empty());
+        assert!(c.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn tools_to_openai_shape() {
+        use crate::tools::{ToolSideEffect, ToolSpec};
+        let specs = vec![ToolSpec {
+            name: "search_kb".into(),
+            description: "search".into(),
+            parameters: json!({"type":"object"}),
+            side_effect: ToolSideEffect::Read,
+        }];
+        let v = tools_to_openai(&specs);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "search_kb");
     }
 }

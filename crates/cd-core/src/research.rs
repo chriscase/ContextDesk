@@ -201,7 +201,12 @@ impl ChatBackend for OpenAiBackend {
         messages: &[ChatMessage],
         tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        self.0.complete(messages, Some(tools)).await
+        // Prefer SSE stream path (buffered accumulate); fall back to non-stream
+        // when gateway rejects stream or tools-on-stream.
+        match self.0.complete_stream(messages, Some(tools)).await {
+            Ok(c) => Ok(c),
+            Err(_) => self.0.complete(messages, Some(tools)).await,
+        }
     }
 }
 
