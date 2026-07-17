@@ -209,15 +209,41 @@ impl ToolHost {
             .ok_or_else(|| CoreError::Policy("unknown or expired permission request".into()))?;
         let decision = validate_decision(&req, decision, typed).map_err(CoreError::Policy)?;
         match decision {
-            PermissionDecision::Deny => {}
+            PermissionDecision::Deny => {
+                // #143: denials must leave an audit trail.
+                self.audit_log(
+                    &req.tool_name,
+                    req.side_effect,
+                    &req.target,
+                    crate::audit::outcomes::DENIED,
+                    &req.reason,
+                    0,
+                );
+            }
             PermissionDecision::AllowOnce => {
                 self.approved_once.insert(
                     request_id.to_string(),
                     (req.tool_name.clone(), req.target.clone()),
                 );
+                self.audit_log(
+                    &req.tool_name,
+                    req.side_effect,
+                    &req.target,
+                    crate::audit::outcomes::GRANTED,
+                    "allow_once",
+                    0,
+                );
             }
             PermissionDecision::AllowSessionPath => {
                 self.permissions.allow_session_path(&req.target);
+                self.audit_log(
+                    &req.tool_name,
+                    req.side_effect,
+                    &req.target,
+                    crate::audit::outcomes::GRANTED,
+                    "allow_session_path",
+                    0,
+                );
             }
         }
         Ok((req, decision))
@@ -1480,5 +1506,55 @@ mod tests {
     fn may_auto_read_only() {
         assert!(may_auto_execute(ToolSideEffect::Read));
         assert!(!may_auto_execute(ToolSideEffect::HardWrite));
+    }
+
+    /// #143: Deny leaves an audit trail; AllowOnce + execute ordered outcomes.
+    #[test]
+    fn deny_and_grant_record_audit() {
+        let (dir, mut host) = host_with_docs();
+        let audit_path = dir.path().join("audit.jsonl");
+        let args = json!({"title": "n", "body_markdown": "body"});
+
+        // Pending + deny
+        let r = host.execute("save_memory", &args, None).unwrap();
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        host.complete_permission(&rid, PermissionDecision::Deny, None)
+            .unwrap();
+        let text = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            text.contains("\"outcome\":\"denied\"") || text.contains("\"outcome\": \"denied\""),
+            "deny missing in audit: {text}"
+        );
+        assert!(text.contains("pending"), "pending missing: {text}");
+
+        // Fresh allow + execute
+        let r2 = host.execute("save_memory", &args, None).unwrap();
+        let rid2 = r2
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        host.complete_permission(&rid2, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r3 = host.execute("save_memory", &args, Some(&rid2)).unwrap();
+        assert!(r3.ok);
+        let text2 = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            text2.contains("granted") && text2.contains("allowed"),
+            "grant/allowed missing: {text2}"
+        );
+        // Chain still verifies.
+        let log = AuditLog::new(&audit_path);
+        log.verify_chain().unwrap();
     }
 }
