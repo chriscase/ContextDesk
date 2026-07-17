@@ -24,6 +24,8 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Filesystem watch for incremental index invalidation (#116)
+notify = "6.1"
 
 [dev-dependencies]
 tempfile = "3"
