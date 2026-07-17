@@ -6,12 +6,14 @@ import {
   hostGetConfluence,
   hostGetWebResearchEnabled,
   hostListLocalCandidates,
+  hostListWebResearchSources,
   hostPreflight,
   hostProbeUrl,
   hostProviderHasSecret,
   hostSaveActiveProvider,
   hostSaveConfluence,
   hostSetWebResearchEnabled,
+  hostSetWebResearchSources,
   hostSuggestDefaultWorkspace,
   hostTestConfluence,
   hostValidateWorkspacePath,
@@ -19,6 +21,7 @@ import {
   profileIdForKind,
   type DefaultWorkspaceDto,
   type LocalCandidateDto,
+  type NewsSourceDto,
 } from "../lib/host";
 import {
   runClientPreflight,
@@ -98,6 +101,7 @@ export function SettingsModal({
   const [probeNote, setProbeNote] = useState<string | null>(null);
   const [defaultWs, setDefaultWs] = useState<DefaultWorkspaceDto | null>(null);
   const [defaultWsBusy, setDefaultWsBusy] = useState(false);
+  const [newsSources, setNewsSources] = useState<NewsSourceDto[]>([]);
   const baseId = useId();
 
   useEffect(() => {
@@ -111,6 +115,8 @@ export function SettingsModal({
         const cf = await hostGetConfluence();
         const has = await hostConfluenceHasToken();
         const webOn = await hostGetWebResearchEnabled();
+        const sources = await hostListWebResearchSources();
+        if (sources.length) setNewsSources(sources);
         if (cf) {
           setDraft((d) => ({
             ...d,
@@ -402,12 +408,18 @@ export function SettingsModal({
       // browser mode: keep in local setup only
     }
 
-    // Persist web research toggle (rebuilds tool host on Tauri)
+    // Persist web research toggle + publisher source map (rebuilds tool host)
     try {
       const webOn = await hostSetWebResearchEnabled(
         draft.webResearchEnabled ?? false,
       );
       next = { ...next, webResearchEnabled: webOn };
+      if (newsSources.length) {
+        const map: Record<string, boolean> = {};
+        for (const s of newsSources) map[s.id] = s.enabled;
+        const savedSources = await hostSetWebResearchSources(map);
+        if (savedSources.length) setNewsSources(savedSources);
+      }
     } catch {
       next = {
         ...next,
@@ -419,6 +431,32 @@ export function SettingsModal({
     setCfTokenDraft("");
     onSaveSetup(next);
     onClose();
+  };
+
+  const newsByGroup = useMemo(() => {
+    const groups: { key: string; label: string; items: NewsSourceDto[] }[] =
+      [];
+    const order: string[] = [];
+    for (const s of newsSources) {
+      if (!order.includes(s.group)) {
+        order.push(s.group);
+        groups.push({ key: s.group, label: s.group_label, items: [] });
+      }
+      groups.find((g) => g.key === s.group)?.items.push(s);
+    }
+    return groups;
+  }, [newsSources]);
+
+  const setSourceEnabled = (id: string, enabled: boolean) => {
+    setNewsSources((all) =>
+      all.map((s) => (s.id === id ? { ...s, enabled } : s)),
+    );
+  };
+
+  const setGroupEnabled = (group: string, enabled: boolean) => {
+    setNewsSources((all) =>
+      all.map((s) => (s.group === group ? { ...s, enabled } : s)),
+    );
   };
 
   return (
@@ -850,12 +888,79 @@ export function SettingsModal({
                 <ToggleField
                   id={`${baseId}-web-research`}
                   label="Enable web research"
-                  hint="Exposes web_search and web_fetch tools to the agent. Public http(s) only; private/loopback/metadata blocked. DuckDuckGo HTML search is best-effort (no API key)."
+                  hint="Exposes web_search and web_fetch. Combines Google News with curated publisher RSS (real article URLs). Public http(s) only; SSRF-gated."
                   checked={draft.webResearchEnabled ?? false}
                   onChange={(webResearchEnabled) =>
                     setDraft((d) => ({ ...d, webResearchEnabled }))
                   }
                 />
+                {draft.webResearchEnabled && newsSources.length > 0 ? (
+                  <div className="news-sources">
+                    <p className="field__hint news-sources__lead">
+                      Publisher feeds used for current-events search (in
+                      addition to Google News). All on by default — turn off
+                      any you do not want the agent to query. Feeds are cached
+                      ~8 minutes.
+                    </p>
+                    <div className="news-sources__bulk">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() =>
+                          setNewsSources((all) =>
+                            all.map((s) => ({ ...s, enabled: true })),
+                          )
+                        }
+                      >
+                        Enable all
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() =>
+                          setNewsSources((all) =>
+                            all.map((s) => ({ ...s, enabled: false })),
+                          )
+                        }
+                      >
+                        Disable all
+                      </button>
+                    </div>
+                    {newsByGroup.map((g) => (
+                      <div key={g.key} className="news-sources__group">
+                        <div className="news-sources__group-head">
+                          <span className="news-sources__group-label">
+                            {g.label}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => {
+                              const allOn = g.items.every((i) => i.enabled);
+                              setGroupEnabled(g.key, !allOn);
+                            }}
+                          >
+                            {g.items.every((i) => i.enabled)
+                              ? "Disable group"
+                              : "Enable group"}
+                          </button>
+                        </div>
+                        {g.items.map((s) => (
+                          <ToggleField
+                            key={s.id}
+                            id={`${baseId}-src-${s.id}`}
+                            label={s.label}
+                            hint={s.hint}
+                            checked={s.enabled}
+                            onChange={(enabled) =>
+                              setSourceEnabled(s.id, enabled)
+                            }
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <ToggleField
                   id={`${baseId}-cf-enabled`}
                   label="Enable Confluence (read-only)"

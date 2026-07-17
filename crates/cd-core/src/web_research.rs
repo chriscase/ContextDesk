@@ -187,7 +187,8 @@ fn collapse_ws(s: &str) -> String {
     out.trim().to_string()
 }
 
-fn urlencoding_encode(s: &str) -> String {
+/// Percent-encode for query strings (public for publisher feed helpers).
+pub fn urlencoding_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
@@ -502,23 +503,25 @@ pub fn condense_search_query(q: &str) -> String {
 
 /// Multi-backend public web search (no API keys).
 ///
-/// Runs **several query variants** (keyword-condensed, person-hunt, when:30d)
-/// against Google News RSS, then fills remaining slots with DDG Instant Answer
-/// and DDG HTML (best-effort).
-///
-/// Returns hits (deduped by URL) plus short notes about which backends contributed.
-pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
+/// 1. Google News RSS (multi-query variants)
+/// 2. Curated publisher RSS fan-in (`enabled_publisher_ids`)
+/// 3. DDG Instant Answer + DDG HTML fill
+pub async fn web_search(
+    query: &str,
+    limit: usize,
+    enabled_publisher_ids: &std::collections::HashSet<String>,
+) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
     let q = sanitize_search_query(query)?;
     let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
     let variants = search_query_variants(&q);
     let mut hits: Vec<WebSearchHit> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    // Per-variant budget so multi-query doesn't just fill with the first feed.
-    let per = ((limit + variants.len() - 1) / variants.len()).clamp(3, limit);
+    let gnews_cap = (limit.max(4) * 2 / 3).max(4).min(limit);
+    let per = ((gnews_cap + variants.len() - 1) / variants.len()).clamp(3, gnews_cap);
 
     for (i, v) in variants.iter().enumerate() {
-        if hits.len() >= limit {
+        if hits.len() >= gnews_cap {
             break;
         }
         match web_search_google_news(v, per).await {
@@ -528,11 +531,18 @@ pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchH
                     truncate_note(v, 40),
                     n.len()
                 ));
-                merge_hits(&mut hits, n, limit);
+                merge_hits(&mut hits, n, gnews_cap);
             }
             Ok(_) => notes.push(format!("gnews[{i}]:empty")),
             Err(e) => notes.push(format!("gnews[{i}]:err({e})")),
         }
+    }
+
+    if !enabled_publisher_ids.is_empty() {
+        let (pub_hits, pub_notes) =
+            crate::news_sources::search_publisher_feeds(&q, limit, enabled_publisher_ids).await;
+        notes.extend(pub_notes);
+        merge_hits(&mut hits, pub_hits, limit);
     }
 
     if hits.len() < limit {
@@ -547,7 +557,6 @@ pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchH
     }
 
     if hits.len() < limit {
-        // Prefer condensed form for DDG HTML (shorter = less captcha triggers sometimes).
         let ddg_q = {
             let c = condense_search_query(&q);
             if c.len() >= 8 {
@@ -567,6 +576,15 @@ pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchH
     }
 
     Ok((hits, notes))
+}
+
+/// Search with all default-enabled publishers (tests / back-compat).
+pub async fn web_search_default_publishers(
+    query: &str,
+    limit: usize,
+) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
+    let enabled = crate::news_sources::enabled_ids(&std::collections::HashMap::new());
+    web_search(query, limit, &enabled).await
 }
 
 fn truncate_note(s: &str, max: usize) -> String {
@@ -869,7 +887,7 @@ pub fn is_ddg_bot_challenge(html: &str) -> bool {
 
 /// Back-compat alias used by older call sites / tests.
 pub async fn web_search_ddg(query: &str, limit: usize) -> CoreResult<Vec<WebSearchHit>> {
-    let (hits, _) = web_search(query, limit).await?;
+    let (hits, _) = web_search_default_publishers(query, limit).await?;
     Ok(hits)
 }
 
@@ -1445,7 +1463,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "network"]
     async fn live_multi_backend_search() {
-        let (hits, notes) = web_search("Iran Israel war today", 6).await.unwrap();
+        let (hits, notes) = web_search_default_publishers("Iran Israel war today", 6)
+            .await
+            .unwrap();
         eprintln!("notes={notes:?}");
         for h in &hits {
             eprintln!("- {} | {}", h.title, h.url);

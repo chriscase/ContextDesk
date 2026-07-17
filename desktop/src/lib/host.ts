@@ -613,6 +613,31 @@ export async function hostSetWebResearchEnabled(
   return invoke<boolean>("set_web_research_enabled", { enabled });
 }
 
+export type NewsSourceDto = {
+  id: string;
+  label: string;
+  group: string;
+  group_label: string;
+  enabled: boolean;
+  default_enabled: boolean;
+  hint: string;
+  feed_url: string;
+};
+
+export async function hostListWebResearchSources(): Promise<NewsSourceDto[]> {
+  if (!isTauri()) return [];
+  return invoke<NewsSourceDto[]>("list_web_research_sources");
+}
+
+export async function hostSetWebResearchSources(
+  sources: Record<string, boolean>,
+): Promise<NewsSourceDto[]> {
+  if (!isTauri()) {
+    throw new Error("Web research sources require Tauri host");
+  }
+  return invoke<NewsSourceDto[]>("set_web_research_sources", { sources });
+}
+
 export function setupToWorkspaceRoots(setup: AppSetupState): string[] {
   return setup.workspaceRoots;
 }

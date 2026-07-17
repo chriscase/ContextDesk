@@ -66,6 +66,10 @@ pub struct AppConfig {
     /// Default false — opt-in; no secrets required.
     #[serde(default)]
     pub web_research_enabled: bool,
+    /// Per-publisher RSS enable flags (source id → enabled).
+    /// Missing keys use each source's registry default (typically true).
+    #[serde(default)]
+    pub web_research_sources: std::collections::HashMap<String, bool>,
 }
 
 fn default_theme() -> String {

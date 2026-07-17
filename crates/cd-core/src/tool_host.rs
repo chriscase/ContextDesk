@@ -65,6 +65,8 @@ pub struct ToolHost {
     last_confluence_call: Option<Instant>,
     /// When true, `web_search` / `web_fetch` are registered and executable.
     web_research_enabled: bool,
+    /// Enabled publisher RSS source ids for web_search fan-in.
+    web_research_sources: std::collections::HashSet<String>,
     /// Rate-limit: min interval between open-web HTTP calls.
     web_min_interval: Duration,
     last_web_call: Option<Instant>,
@@ -92,6 +94,9 @@ impl ToolHost {
             confluence_min_interval: Duration::from_millis(400),
             last_confluence_call: None,
             web_research_enabled: false,
+            web_research_sources: crate::news_sources::enabled_ids(
+                &std::collections::HashMap::new(),
+            ),
             // Slightly more conservative than Confluence (public engines).
             web_min_interval: Duration::from_millis(800),
             last_web_call: None,
@@ -107,6 +112,14 @@ impl ToolHost {
     /// Enable or disable open-web research tools (Settings toggle).
     pub fn set_web_research(&mut self, enabled: bool) {
         self.web_research_enabled = enabled;
+    }
+
+    /// Configure which publisher RSS sources participate in `web_search`.
+    pub fn set_web_research_sources(
+        &mut self,
+        overrides: &std::collections::HashMap<String, bool>,
+    ) {
+        self.web_research_sources = crate::news_sources::enabled_ids(overrides);
     }
 
     /// Whether web research tools are available.
@@ -594,7 +607,11 @@ impl ToolHost {
         // Sanitize early for clearer errors before network.
         let q = web_research::sanitize_search_query(q)?;
         self.throttle_web()?;
-        let (hits, notes) = block_on_http(web_research::web_search(&q, limit))?;
+        let (hits, notes) = block_on_http(web_research::web_search(
+            &q,
+            limit,
+            &self.web_research_sources,
+        ))?;
         let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
         let cites: Vec<(String, String, Option<String>)> = hits
             .iter()

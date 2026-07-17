@@ -84,8 +84,9 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     } else {
         host.set_confluence(None, None);
     }
-    // Open-web research tools (opt-in; no secrets).
+    // Open-web research tools (opt-in; no secrets) + publisher RSS enable map.
     host.set_web_research(cfg.web_research_enabled);
+    host.set_web_research_sources(&cfg.web_research_sources);
     *state.host.lock().expect("host") = Some(host);
     Ok(())
 }
@@ -510,6 +511,45 @@ fn set_web_research_enabled(
     // Rebuild host so tool specs update for the next agent turn.
     let _ = ensure_host(&state);
     Ok(enabled)
+}
+
+/// List curated publisher RSS sources with effective enable flags.
+#[tauri::command]
+fn list_web_research_sources(
+    state: State<'_, AppState>,
+) -> Vec<cd_core::news_sources::NewsSourceDto> {
+    let overrides = state
+        .config
+        .lock()
+        .expect("config")
+        .web_research_sources
+        .clone();
+    cd_core::news_sources::list_sources_dto(&overrides)
+}
+
+/// Save per-source enable map (merged with registry defaults on read).
+#[tauri::command]
+fn set_web_research_sources(
+    state: State<'_, AppState>,
+    sources: std::collections::HashMap<String, bool>,
+) -> Result<Vec<cd_core::news_sources::NewsSourceDto>, String> {
+    // Only persist known registry ids.
+    let known: std::collections::HashSet<&str> = cd_core::news_sources::NEWS_SOURCES
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    let filtered: std::collections::HashMap<String, bool> = sources
+        .into_iter()
+        .filter(|(k, _)| known.contains(k.as_str()))
+        .collect();
+    let mut cfg = state.config.lock().expect("config");
+    cfg.web_research_sources = filtered;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    let dto = cd_core::news_sources::list_sources_dto(&cfg.web_research_sources);
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(dto)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1655,6 +1695,8 @@ pub fn run() {
             test_confluence_config,
             get_web_research_enabled,
             set_web_research_enabled,
+            list_web_research_sources,
+            set_web_research_sources,
             open_external_url,
         ])
         .run(tauri::generate_context!())
