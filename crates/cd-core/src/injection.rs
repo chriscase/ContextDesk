@@ -72,13 +72,14 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
         .any(|n| *n == "web_search" || *n == "web_fetch")
     {
         s.push_str(
-            "Web research is ENABLED: for current events, call web_search first — it uses Google News RSS \
-             and other public backends; snippets in the tool result are often enough for a brief. \
-             Use web_fetch selectively on open sources. If web_fetch returns HTTP 401/403/429 \
-             (common on Reuters/NYT/etc.), that is NOT a host crash — try another URL or answer from snippets. \
-             Cite sources by short name (e.g. Al Jazeera, BBC, Wikipedia) — never paste long raw URLs \
-             into the user-facing answer; the UI attaches link chips. \
-             Do not refuse web research or tell the user to open Google themselves when tools returned data.\n",
+            "Web research is ENABLED: for current events, call web_search first (Google News RSS + fallbacks). \
+             For who/killed/commander/officials questions: run 2+ different web_search queries \
+             (e.g. condensed keywords, \"IRGC commander killed\", \"list officials killed\"). \
+             Titles alone are incomplete — when names matter, web_fetch open publishers \
+             (Al Jazeera, Anadolu, Euronews, BBC, Wikipedia). Paywalls (401/403) are soft failures; try another URL. \
+             NEVER assert \"nobody was killed\" or \"no named officials\" from RSS titles alone — \
+             report what titles/snippets show, what you could not verify, and point the user at the Sources chips. \
+             Cite by short name; never paste long raw URLs. Do not refuse web research when tools returned data.\n",
         );
     }
     s

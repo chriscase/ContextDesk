@@ -403,27 +403,136 @@ pub fn clamp_search_limit(limit: Option<u64>) -> usize {
         .clamp(1, MAX_SEARCH_LIMIT as u64) as usize
 }
 
+/// Expand a user/agent query into a few complementary Google News queries.
+///
+/// Long questions get a keyword-condensed form; casualty/name hunts get a
+/// focused “named / list / killed” variant; news-y queries get a 30-day window.
+pub fn search_query_variants(query: &str) -> Vec<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    out.push(q.to_string());
+
+    let condensed = condense_search_query(q);
+    if condensed.len() >= 8 && !eq_ignore_ws(&condensed, q) {
+        out.push(condensed.clone());
+    }
+
+    let lower = q.to_ascii_lowercase();
+    let person_hunt = lower.contains("who")
+        || lower.contains("killed")
+        || lower.contains("assassination")
+        || lower.contains("commander")
+        || lower.contains("general")
+        || lower.contains("minister")
+        || lower.contains("mullah")
+        || lower.contains("official");
+    if person_hunt {
+        let base = if condensed.len() >= 8 {
+            condensed.as_str()
+        } else {
+            q
+        };
+        let named = format!("{base} named killed OR commander OR general");
+        if !out.iter().any(|x| x == &named) {
+            out.push(named);
+        }
+        let list = format!("{base} list officials killed");
+        if !out.iter().any(|x| x == &list) {
+            out.push(list);
+        }
+    }
+
+    // Google News recency operator (best-effort; ignored by non-GNews backends).
+    if looks_like_news_query(q) {
+        let recent = format!("{q} when:30d");
+        if !out.iter().any(|x| x == &recent) {
+            out.push(recent);
+        }
+    }
+
+    out.truncate(4);
+    out
+}
+
+fn eq_ignore_ws(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
+}
+
+fn looks_like_news_query(q: &str) -> bool {
+    let l = q.to_ascii_lowercase();
+    l.contains("today")
+        || l.contains("latest")
+        || l.contains("killed")
+        || l.contains("war")
+        || l.contains("strike")
+        || l.contains("july")
+        || l.contains("2025")
+        || l.contains("2026")
+        || l.contains("who ")
+        || l.contains("news")
+}
+
+/// Drop question fluff so news engines match keywords better.
+pub fn condense_search_query(q: &str) -> String {
+    const STOP: &[&str] = &[
+        "who", "what", "when", "where", "which", "whom", "whose", "how", "why", "is", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "the", "a", "an",
+        "of", "in", "on", "at", "to", "for", "from", "by", "with", "about", "into", "over",
+        "after", "before", "between", "and", "or", "but", "if", "as", "than", "that", "this",
+        "these", "those", "any", "some", "many", "much", "most", "more", "can", "could", "would",
+        "should", "will", "just", "please", "tell", "me", "you", "your", "i", "we", "they",
+        "their", "there", "here", "been", "being",
+    ];
+    let words: Vec<&str> = q
+        .split(|c: char| c.is_whitespace() || "/\\|".contains(c))
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .filter(|w| {
+            let lw = w
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_ascii_lowercase();
+            !lw.is_empty() && !STOP.contains(&lw.as_str())
+        })
+        .collect();
+    words.join(" ")
+}
+
 /// Multi-backend public web search (no API keys).
 ///
-/// Order:
-/// 1. **Google News RSS** — reliable for current events (no CAPTCHA in practice)
-/// 2. **DuckDuckGo Instant Answer** — Wikipedia-style abstract + related topics
-/// 3. **DuckDuckGo HTML** — best-effort; often CAPTCHA-blocked for automated clients
+/// Runs **several query variants** (keyword-condensed, person-hunt, when:30d)
+/// against Google News RSS, then fills remaining slots with DDG Instant Answer
+/// and DDG HTML (best-effort).
 ///
 /// Returns hits (deduped by URL) plus short notes about which backends contributed.
 pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchHit>, Vec<String>)> {
     let q = sanitize_search_query(query)?;
     let limit = limit.clamp(1, MAX_SEARCH_LIMIT);
+    let variants = search_query_variants(&q);
     let mut hits: Vec<WebSearchHit> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    match web_search_google_news(&q, limit).await {
-        Ok(n) if !n.is_empty() => {
-            notes.push(format!("google_news_rss:{} hits", n.len()));
-            merge_hits(&mut hits, n, limit);
+    // Per-variant budget so multi-query doesn't just fill with the first feed.
+    let per = ((limit + variants.len() - 1) / variants.len()).clamp(3, limit);
+
+    for (i, v) in variants.iter().enumerate() {
+        if hits.len() >= limit {
+            break;
         }
-        Ok(_) => notes.push("google_news_rss:empty".into()),
-        Err(e) => notes.push(format!("google_news_rss:err({e})")),
+        match web_search_google_news(v, per).await {
+            Ok(n) if !n.is_empty() => {
+                notes.push(format!(
+                    "gnews[{i}]\"{}\":{} hits",
+                    truncate_note(v, 40),
+                    n.len()
+                ));
+                merge_hits(&mut hits, n, limit);
+            }
+            Ok(_) => notes.push(format!("gnews[{i}]:empty")),
+            Err(e) => notes.push(format!("gnews[{i}]:err({e})")),
+        }
     }
 
     if hits.len() < limit {
@@ -438,7 +547,16 @@ pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchH
     }
 
     if hits.len() < limit {
-        match web_search_ddg_html(&q, limit).await {
+        // Prefer condensed form for DDG HTML (shorter = less captcha triggers sometimes).
+        let ddg_q = {
+            let c = condense_search_query(&q);
+            if c.len() >= 8 {
+                c
+            } else {
+                q.clone()
+            }
+        };
+        match web_search_ddg_html(&ddg_q, limit).await {
             Ok(n) if !n.is_empty() => {
                 notes.push(format!("ddg_html:{} hits", n.len()));
                 merge_hits(&mut hits, n, limit);
@@ -449,6 +567,15 @@ pub async fn web_search(query: &str, limit: usize) -> CoreResult<(Vec<WebSearchH
     }
 
     Ok((hits, notes))
+}
+
+fn truncate_note(s: &str, max: usize) -> String {
+    let t: String = s.chars().take(max).collect();
+    if s.chars().count() > max {
+        format!("{t}…")
+    } else {
+        t
+    }
 }
 
 fn merge_hits(into: &mut Vec<WebSearchHit>, extra: Vec<WebSearchHit>, limit: usize) {
@@ -1049,7 +1176,13 @@ pub fn format_search_hits_with_notes(
         lines.push(format!("[sources: {}]", notes.join(", ")));
     }
     lines.push(
-        "Cite sources by name (e.g. Al Jazeera, BBC). Do not paste full URLs into the user-facing answer."
+        "Cite sources by short name (e.g. Al Jazeera, BBC). Do not paste full URLs into the user-facing answer."
+            .into(),
+    );
+    lines.push(
+        "IMPORTANT: RSS titles/snippets are incomplete. Do NOT claim \"nobody was killed\" / \"no named officials\" \
+         unless you fetched open article bodies and still found none — instead say what the titles show and what is unknown. \
+         Prefer web_fetch on open publishers (Al Jazeera, Anadolu, Euronews, BBC, Wikipedia) for list/name articles."
             .into(),
     );
     for (i, h) in hits.iter().enumerate() {
@@ -1259,6 +1392,26 @@ mod tests {
         assert!(!is_ddg_bot_challenge(
             r#"<a class="result__a" href="https://example.com">x</a>"#
         ));
+    }
+
+    #[test]
+    fn query_variants_condense_and_person_hunt() {
+        let v = search_query_variants(
+            "who in the IRGC / mullah command structure of Iran has been killed in July?",
+        );
+        assert!(v.len() >= 2, "{v:?}");
+        assert!(v[0].contains("IRGC") || v[0].to_ascii_lowercase().contains("irgc"));
+        let joined = v.join(" | ").to_ascii_lowercase();
+        assert!(joined.contains("killed") || joined.contains("commander"));
+        let c = condense_search_query(
+            "who in the IRGC / mullah command structure of Iran has been killed in July?",
+        );
+        assert!(c.to_ascii_lowercase().contains("irgc"));
+        assert!(c.to_ascii_lowercase().contains("july"));
+        assert!(!c
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .any(|w| w == "who"));
     }
 
     #[test]

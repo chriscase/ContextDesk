@@ -140,13 +140,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::WEB_SEARCH.into(),
-            description: "Search the public web for current events / public knowledge (read-only). Returns title, URL, snippet — snippets alone are often enough for a news brief. Prefer open sources. Follow with web_fetch only when you need more body text. Requires Web research enabled in Settings."
+            description: "Search the public web (Google News RSS multi-query + fallbacks). Returns titles/snippets — NOT full articles. For named people / commanders killed / casualty lists, call again with alternate keyword queries, then web_fetch open list articles. Do not conclude absence of names from titles alone. Requires Web research enabled."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "Search query" },
+                    "query": { "type": "string", "description": "Search query — prefer keywords over long questions" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 15 }
                 },
                 "required": ["query"]
@@ -154,7 +154,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::WEB_FETCH.into(),
-            description: "Fetch a public http(s) URL and return truncated readable text (read-only). Many news sites return HTTP 401/403 (paywall/bot block) — that is a soft failure: try another URL or use web_search snippets, do not stop. SSRF-blocked for private/loopback/metadata. Prefer BBC, AP, Wikipedia, gov domains over paywalled wires when possible."
+            description: "Fetch a public http(s) URL for readable text (read-only). Use when you need names/details beyond RSS titles — especially Al Jazeera, Anadolu, Euronews, BBC, Wikipedia. Google News redirect URLs often fail; prefer publisher links when available. HTTP 401/403 is a soft failure: try another URL. SSRF-blocked for private/loopback/metadata."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
