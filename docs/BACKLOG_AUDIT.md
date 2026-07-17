@@ -41,11 +41,11 @@ Last audit: 2026-07-17. Update when closing.
 | 20 | AI settings UI | PARTIAL | Form exists |
 | 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
 | 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
-| 23 | Permission modal UI | PARTIAL | Mounted + wired |
+| 23 | Permission modal UI | DONE | Blocking modal; preview; allow once/session; type-confirm |
 | 24 | Audit log | PARTIAL | JSONL |
 | 25 | MVP tools | DONE | search/read/save + allowlist + line caps |
 | 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
-| 27 | Agent loop | PARTIAL | research_local + scripted |
+| 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
 | 28 | Citations UI | PARTIAL | chips + hostReadFile |
 | 29 | Router budgets | PARTIAL | module |
 | 30 | Streaming markdown | PARTIAL | basic; not full md render |
@@ -56,7 +56,7 @@ Last audit: 2026-07-17. Update when closing.
 | 35 | SVG icons | PARTIAL | icons.tsx |
 | 58 | Golden harness | PARTIAL | fixtures + tests |
 | 61 | SSRF | DONE | Unit tests + probe_url policy + DEV.md override |
-| 62 | Injection | PARTIAL | wrap_untrusted |
+| 62 | Injection | DONE | wrap_untrusted + gate test; write skills disabled |
 | 63 | Path policy | DONE | symlink escape; .env deny; no root session grant |
 | 64 | Egress/local-only | PARTIAL | profile flag; UI badge weak |
 | 65 | Phase 1 DoD | TODO | not honestly closable yet |
