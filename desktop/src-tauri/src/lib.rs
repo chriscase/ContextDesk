@@ -22,7 +22,7 @@ use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
-    SessionStore,
+    SessionSearchHit, SessionStore,
 };
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
@@ -863,6 +863,56 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
     Ok(())
 }
 
+/// Pin / unpin a chat for the sidebar.
+#[tauri::command]
+fn pin_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    pinned: bool,
+) -> Result<Session, String> {
+    let store = session_store(&state)?;
+    let mut session = store.load(&id).map_err(|e| e.to_string())?;
+    session.pinned = pinned;
+    session.touch();
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Soft-archive / unarchive a chat.
+#[tauri::command]
+fn archive_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    archived: bool,
+) -> Result<Session, String> {
+    let store = session_store(&state)?;
+    let mut session = store.load(&id).map_err(|e| e.to_string())?;
+    session.archived = archived;
+    if archived {
+        session.pinned = false;
+    }
+    session.touch();
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Keyword search across the chat archive (title + body scoring).
+#[tauri::command]
+fn search_chat_sessions(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+    include_archived: Option<bool>,
+) -> Result<Vec<SessionSearchHit>, String> {
+    session_store(&state)?
+        .search(
+            &query,
+            limit.unwrap_or(50),
+            include_archived.unwrap_or(false),
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// One-shot LLM title (falls back to short heuristic if model unavailable).
 async fn llm_title_for_prompt(state: &AppState, prompt: &str) -> String {
     let fallback = title_from_prompt(prompt, 40);
@@ -1134,6 +1184,9 @@ pub fn run() {
             save_chat_session,
             rename_chat_session,
             delete_chat_session,
+            pin_chat_session,
+            archive_chat_session,
+            search_chat_sessions,
             suggest_chat_title,
             retitle_chat_session,
             agent_turn,

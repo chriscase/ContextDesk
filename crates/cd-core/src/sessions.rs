@@ -18,8 +18,11 @@ pub struct SessionMeta {
     pub id: String,
     /// Title.
     pub title: String,
-    /// Archived.
+    /// Archived (soft-hide from default lists).
     pub archived: bool,
+    /// Pinned to the app sidebar.
+    #[serde(default)]
+    pub pinned: bool,
     /// Created.
     pub created_at: DateTime<Utc>,
     /// Updated.
@@ -28,6 +31,18 @@ pub struct SessionMeta {
     pub message_count: usize,
     /// Short preview for list rows.
     pub preview: String,
+}
+
+/// Scored search hit for the chat archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    /// Session metadata.
+    pub meta: SessionMeta,
+    /// Relevance score (higher is better).
+    pub score: f32,
+    /// Optional matched snippet from body.
+    #[serde(default)]
+    pub snippet: String,
 }
 
 /// A durable chat session (UI-compatible fields for desktop).
@@ -52,9 +67,12 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// Updated.
     pub updated_at: DateTime<Utc>,
-    /// Archived.
+    /// Archived (soft-hide).
     #[serde(default)]
     pub archived: bool,
+    /// Pinned to sidebar shortcuts.
+    #[serde(default)]
+    pub pinned: bool,
     /// True once the user explicitly renames (blocks auto-title).
     #[serde(default)]
     pub title_locked: bool,
@@ -98,6 +116,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             archived: false,
+            pinned: false,
             title_locked: false,
         }
     }
@@ -222,6 +241,7 @@ impl Session {
             id: self.id.clone(),
             title: self.title.clone(),
             archived: self.archived,
+            pinned: self.pinned,
             created_at: self.created_at,
             updated_at: self.updated_at,
             message_count: self.messages.len(),
@@ -421,8 +441,19 @@ impl SessionStore {
             .collect())
     }
 
-    /// List session metadata, newest `updated_at` first.
+    /// List session metadata, newest `updated_at` first (pinned first among ties).
     pub fn list_meta(&self) -> CoreResult<Vec<SessionMeta>> {
+        let mut sessions = self.load_all()?;
+        sessions.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+        Ok(sessions.iter().map(Session::meta).collect())
+    }
+
+    /// Load every session from disk.
+    pub fn load_all(&self) -> CoreResult<Vec<Session>> {
         self.ensure()?;
         let mut out = Vec::new();
         if let Ok(rd) = fs::read_dir(&self.dir) {
@@ -435,13 +466,98 @@ impl SessionStore {
                     continue;
                 };
                 if let Ok(s) = self.load(stem) {
-                    out.push(s.meta());
+                    out.push(s);
                 }
             }
         }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(out)
     }
+
+    /// Keyword search over titles + message bodies (scored, newest break ties).
+    ///
+    /// Empty query returns all non-archived metas as zero-score hits (archive browse).
+    pub fn search(&self, query: &str, limit: usize, include_archived: bool) -> CoreResult<Vec<SessionSearchHit>> {
+        let terms = tokenize_query(query);
+        let mut hits = Vec::new();
+        for s in self.load_all()? {
+            if s.archived && !include_archived {
+                continue;
+            }
+            if terms.is_empty() {
+                hits.push(SessionSearchHit {
+                    meta: s.meta(),
+                    score: if s.pinned { 0.1 } else { 0.0 },
+                    snippet: s.preview(),
+                });
+                continue;
+            }
+            let (score, snippet) = score_session(&s, &terms);
+            if score > 0.0 {
+                hits.push(SessionSearchHit {
+                    meta: s.meta(),
+                    score,
+                    snippet,
+                });
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.meta.updated_at.cmp(&a.meta.updated_at))
+        });
+        if limit > 0 && hits.len() > limit {
+            hits.truncate(limit);
+        }
+        Ok(hits)
+    }
+}
+
+fn tokenize_query(q: &str) -> Vec<String> {
+    q.split(|c: char| !c.is_alphanumeric())
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| t.len() >= 2)
+        .collect()
+}
+
+fn score_session(s: &Session, terms: &[String]) -> (f32, String) {
+    let title_l = s.title.to_ascii_lowercase();
+    let mut body = String::new();
+    for m in &s.messages {
+        body.push_str(&m.content);
+        body.push('\n');
+    }
+    let body_l = body.to_ascii_lowercase();
+    let mut score = 0.0_f32;
+    let mut snippet = String::new();
+    for term in terms {
+        if title_l.contains(term) {
+            score += 4.0;
+        }
+        if let Some(idx) = body_l.find(term.as_str()) {
+            score += 1.0;
+            if snippet.is_empty() {
+                let start = idx.saturating_sub(40);
+                let end = (idx + term.len() + 60).min(body.len());
+                // Map byte indices carefully — use char boundaries on original body via lower match
+                let raw = body.get(start..end).unwrap_or("").replace('\n', " ");
+                snippet = format!("…{}…", raw.trim());
+            }
+        }
+    }
+    if score <= 0.0 {
+        return (0.0, String::new());
+    }
+    if s.pinned {
+        score += 0.25;
+    }
+    // Mild recency boost only when there was a keyword hit
+    let age_hours = (Utc::now() - s.updated_at).num_hours().max(0) as f32;
+    score += (1.0 / (1.0 + age_hours / 720.0)) * 0.5;
+    if snippet.is_empty() {
+        snippet = s.preview();
+    }
+    (score, snippet)
 }
 
 /// Full history always available even when compact view used.
@@ -584,6 +700,61 @@ mod tests {
         assert_eq!(list[0].id, "bbb");
         store.delete("bbb").unwrap();
         assert_eq!(store.list_meta().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_scores_title_and_body() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut a = Session::new("Ollama setup");
+        a.id = "s1".into();
+        a.messages.push(StoredMessage {
+            id: "1".into(),
+            role: "user".into(),
+            content: "How do I install ollama on macOS?".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+        });
+        store.save(&a).unwrap();
+        let mut b = Session::new("Unrelated");
+        b.id = "s2".into();
+        b.messages.push(StoredMessage {
+            id: "1".into(),
+            role: "user".into(),
+            content: "What is the weather?".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+        });
+        store.save(&b).unwrap();
+        let hits = store.search("ollama", 10, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].meta.id, "s1");
+        assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn pin_sorts_first_in_list_meta() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut a = Session::new("Old");
+        a.id = "old".into();
+        a.pinned = false;
+        a.touch();
+        store.save(&a).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut b = Session::new("New");
+        b.id = "new".into();
+        b.pinned = false;
+        b.touch();
+        store.save(&b).unwrap();
+        // Pin older one
+        a.pinned = true;
+        store.save(&a).unwrap();
+        let list = store.list_meta().unwrap();
+        assert_eq!(list[0].id, "old");
+        assert!(list[0].pinned);
     }
 
     #[test]

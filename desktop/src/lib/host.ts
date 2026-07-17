@@ -334,6 +334,7 @@ export type ChatSessionDto = {
   created_at: string;
   updated_at: string;
   archived: boolean;
+  pinned: boolean;
   title_locked: boolean;
 };
 
@@ -341,10 +342,17 @@ export type SessionMetaDto = {
   id: string;
   title: string;
   archived: boolean;
+  pinned: boolean;
   created_at: string;
   updated_at: string;
   message_count: number;
   preview: string;
+};
+
+export type SessionSearchHitDto = {
+  meta: SessionMetaDto;
+  score: number;
+  snippet: string;
 };
 
 export async function hostListChatSessions(): Promise<SessionMetaDto[]> {
@@ -375,6 +383,35 @@ export async function hostRenameChatSession(
 export async function hostDeleteChatSession(id: string): Promise<void> {
   if (!isTauri()) return;
   await invoke("delete_chat_session", { id });
+}
+
+export async function hostPinChatSession(
+  id: string,
+  pinned: boolean,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("pin_chat_session", { id, pinned });
+}
+
+export async function hostArchiveChatSession(
+  id: string,
+  archived: boolean,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("archive_chat_session", { id, archived });
+}
+
+/** Keyword search over chat archive (title + body scoring). */
+export async function hostSearchChatSessions(
+  query: string,
+  opts?: { limit?: number; includeArchived?: boolean },
+): Promise<SessionSearchHitDto[]> {
+  if (!isTauri()) return [];
+  return invoke<SessionSearchHitDto[]>("search_chat_sessions", {
+    query,
+    limit: opts?.limit ?? 50,
+    includeArchived: opts?.includeArchived ?? false,
+  });
 }
 
 /** Brief title via active model (heuristic fallback if model down). */

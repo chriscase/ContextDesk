@@ -10,6 +10,7 @@ import {
   type SettingsSection,
 } from "./components/SettingsModal";
 import { ToolCallList, type ToolCallView } from "./components/ToolCallList";
+import { ChatArchivePane } from "./components/panes/ChatArchivePane";
 import { MemoryPane, type MemoryDoc } from "./components/panes/MemoryPane";
 import { SourcePreviewPane } from "./components/panes/SourcePreviewPane";
 import { TodoPane } from "./components/panes/TodoPane";
@@ -24,6 +25,7 @@ import {
   hostListChatSessions,
   hostListMemory,
   hostLoadChatSession,
+  hostPinChatSession,
   hostPreflight,
   hostReadFile,
   hostRenameChatSession,
@@ -51,7 +53,7 @@ type Msg = {
   streaming?: boolean;
 };
 
-type PaneId = "chat" | "memory" | "source" | "todos";
+type PaneId = "chat" | "archive" | "memory" | "source" | "todos";
 
 function loadTheme(): "dark" | "light" {
   const t = localStorage.getItem("cd-theme");
@@ -215,6 +217,7 @@ export function App() {
     createdAt: string;
     updatedAt: string;
     archived: boolean;
+    pinned: boolean;
   };
 
   const nowIso = () => new Date().toISOString();
@@ -231,6 +234,7 @@ export function App() {
       createdAt: t,
       updatedAt: t,
       archived: false,
+      pinned: false,
     };
   };
 
@@ -320,6 +324,7 @@ export function App() {
     createdAt: dto.created_at,
     updatedAt: dto.updated_at,
     archived: dto.archived,
+    pinned: dto.pinned ?? false,
   });
 
   const sessionToDto = (s: ChatSession): ChatSessionDto => ({
@@ -338,6 +343,7 @@ export function App() {
     created_at: s.createdAt,
     updated_at: s.updatedAt,
     archived: s.archived,
+    pinned: s.pinned,
     title_locked: s.titleLocked,
   });
 
@@ -470,9 +476,18 @@ export function App() {
   > | null>(null);
   const [pane, setPane] = useState<PaneId>(() => {
     const p = localStorage.getItem("cd-pane");
-    if (p === "memory" || p === "source" || p === "todos" || p === "chat") return p;
+    if (
+      p === "memory" ||
+      p === "source" ||
+      p === "todos" ||
+      p === "chat" ||
+      p === "archive"
+    ) {
+      return p;
+    }
     return "chat";
   });
+  const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   useEffect(() => {
     localStorage.setItem("cd-pane", pane);
   }, [pane]);
@@ -794,6 +809,30 @@ export function App() {
     const s = newSession(`Chat ${sessions.length + 1}`);
     setSessions((all) => [s, ...all]);
     setActiveSessionId(s.id);
+    setPane("chat");
+  };
+
+  const openSessionById = async (id: string) => {
+    const existing = sessions.find((s) => s.id === id);
+    if (existing) {
+      setActiveSessionId(id);
+      setPane("chat");
+      return;
+    }
+    try {
+      const dto = await hostLoadChatSession(id);
+      if (dto) {
+        const s = sessionFromDto(dto);
+        setSessions((all) => {
+          if (all.some((x) => x.id === s.id)) return all;
+          return [s, ...all];
+        });
+        setActiveSessionId(s.id);
+        setPane("chat");
+      }
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const renameActiveSession = async () => {
@@ -808,6 +847,7 @@ export function App() {
         setSessions((all) =>
           all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
         );
+        setArchiveRefreshKey((n) => n + 1);
         return;
       }
     } catch {
@@ -817,6 +857,32 @@ export function App() {
       all.map((s) =>
         s.id === activeSession.id
           ? { ...s, title, titleLocked: true, updatedAt: nowIso() }
+          : s,
+      ),
+    );
+  };
+
+  const togglePinActive = async () => {
+    if (!activeSession) return;
+    const nextPinned = !activeSession.pinned;
+    try {
+      if (activeSession.messages.length > 0) {
+        const saved = await hostPinChatSession(activeSession.id, nextPinned);
+        if (saved) {
+          setSessions((all) =>
+            all.map((s) => (s.id === saved.id ? sessionFromDto(saved) : s)),
+          );
+          setArchiveRefreshKey((n) => n + 1);
+          return;
+        }
+      }
+    } catch {
+      /* local */
+    }
+    setSessions((all) =>
+      all.map((s) =>
+        s.id === activeSession.id
+          ? { ...s, pinned: nextPinned, updatedAt: nowIso() }
           : s,
       ),
     );
@@ -834,6 +900,7 @@ export function App() {
     } catch {
       /* still drop local */
     }
+    setArchiveRefreshKey((n) => n + 1);
     setSessions((all) => {
       const next = all.filter((s) => s.id !== id);
       if (next.length === 0) {
@@ -845,6 +912,16 @@ export function App() {
       return next;
     });
   };
+
+  /** Sidebar: pinned chats + current session if not already listed. */
+  const sidebarSessions = (() => {
+    const pinned = sessions.filter((s) => s.pinned && !s.archived);
+    const ids = new Set(pinned.map((s) => s.id));
+    if (activeSession && !ids.has(activeSession.id) && !activeSession.archived) {
+      return [activeSession, ...pinned];
+    }
+    return pinned;
+  })();
 
   const onPermissionRespond = async (
     decision: "deny" | "allow_once" | "allow_session_path",
@@ -1005,7 +1082,7 @@ export function App() {
       <div className="main">
         <aside className="sidebar">
           <div className="row--between">
-            <div className="sidebar__label">Chats</div>
+            <div className="sidebar__label">Pinned</div>
             <button
               type="button"
               className="btn btn--ghost btn--sm"
@@ -1018,20 +1095,30 @@ export function App() {
           <ul className="session-list">
             {!sessionsReady ? (
               <li className="field__hint session-list__loading">Loading…</li>
+            ) : sidebarSessions.length === 0 ? (
+              <li className="field__hint session-list__loading">
+                Pin chats from Archive
+              </li>
             ) : (
-              sessions.map((s) => (
+              sidebarSessions.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"
                     className="session-list__item"
                     data-active={s.id === resolvedSessionId ? "true" : undefined}
                     title={s.messages[0]?.content?.slice(0, 120) || s.title}
-                    onClick={() => setActiveSessionId(s.id)}
+                    onClick={() => {
+                      setActiveSessionId(s.id);
+                      setPane("chat");
+                    }}
                     onDoubleClick={() => {
                       if (s.id === resolvedSessionId) void renameActiveSession();
                     }}
                   >
-                    <span className="session-list__title">{s.title}</span>
+                    <span className="session-list__title">
+                      {s.pinned ? "📌 " : ""}
+                      {s.title}
+                    </span>
                     {s.messages.length > 0 ? (
                       <span className="session-list__meta">
                         {s.messages.length} msg
@@ -1042,7 +1129,15 @@ export function App() {
               ))
             )}
           </ul>
-          {activeSession && activeSession.messages.length > 0 ? (
+          <button
+            type="button"
+            className="session-list__item"
+            data-active={pane === "archive" ? "true" : undefined}
+            onClick={() => setPane("archive")}
+          >
+            Chat archive
+          </button>
+          {activeSession && pane === "chat" ? (
             <div className="session-list__actions">
               <button
                 type="button"
@@ -1050,6 +1145,18 @@ export function App() {
                 onClick={() => void renameActiveSession()}
               >
                 Rename
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => void togglePinActive()}
+                title={
+                  activeSession.pinned
+                    ? "Unpin from sidebar"
+                    : "Pin to sidebar"
+                }
+              >
+                {activeSession.pinned ? "Unpin" : "Pin"}
               </button>
               <button
                 type="button"
@@ -1084,6 +1191,7 @@ export function App() {
             {(
               [
                 ["chat", "Chat"],
+                ["archive", "Archive"],
                 ["memory", "Memory"],
                 ["source", "Source"],
                 ["todos", "Todos"],
@@ -1101,21 +1209,45 @@ export function App() {
             ))}
           </div>
 
+          {pane === "archive" ? (
+            <ChatArchivePane
+              refreshKey={archiveRefreshKey}
+              activeSessionId={resolvedSessionId}
+              onOpenSession={(id) => void openSessionById(id)}
+              onSessionsChanged={() => {
+                setArchiveRefreshKey((n) => n + 1);
+                // Refresh in-memory session flags from disk for open chats
+                void (async () => {
+                  const metas = await hostListChatSessions();
+                  setSessions((all) =>
+                    all.map((s) => {
+                      const m = metas.find((x) => x.id === s.id);
+                      if (!m) return s;
+                      return {
+                        ...s,
+                        title: m.title,
+                        pinned: m.pinned,
+                        archived: m.archived,
+                        updatedAt: m.updated_at,
+                      };
+                    }),
+                  );
+                })();
+              }}
+            />
+          ) : null}
+
           {pane === "chat" ? (
             <>
-              <div className="session-tabs" role="tablist" aria-label="Chat sessions">
-                {sessions.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    role="tab"
-                    className="session-tab"
-                    data-active={s.id === resolvedSessionId ? "true" : "false"}
-                    onClick={() => setActiveSessionId(s.id)}
-                  >
-                    {s.title}
-                  </button>
-                ))}
+              <div className="session-tabs" role="tablist" aria-label="Open chat">
+                <button
+                  type="button"
+                  role="tab"
+                  className="session-tab"
+                  data-active="true"
+                >
+                  {activeSession?.title ?? "Chat"}
+                </button>
                 <button
                   type="button"
                   className="btn btn--ghost btn--sm"
@@ -1123,6 +1255,14 @@ export function App() {
                   onClick={createSession}
                 >
                   +
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  title="Browse all chats"
+                  onClick={() => setPane("archive")}
+                >
+                  Archive
                 </button>
               </div>
               <div className="chat-scroll">
