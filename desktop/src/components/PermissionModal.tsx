@@ -58,6 +58,16 @@ export function PermissionModal({ prompt, onRespond }: Props) {
             <button type="button" className="btn btn--ghost" onClick={() => onRespond("deny")}>
               Cancel
             </button>
+            {!needsType ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => onRespond("allow_session_path", typed)}
+                title="Allow writes under this path for the rest of the session"
+              >
+                Allow this path (session)
+              </button>
+            ) : null}
             <button
               type="button"
               className="btn btn--primary"

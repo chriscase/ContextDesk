@@ -290,6 +290,7 @@ pub async fn research_turn(
                 session_id: session_id.into(),
                 model: Some(profile.chat_model.clone()),
                 max_rounds: 8,
+                cancel: None,
             },
             None,
         )
@@ -336,6 +337,7 @@ pub async fn research_scripted_tool_turn(
             session_id: session_id.into(),
             model: Some("scripted".into()),
             max_rounds: 4,
+            cancel: None,
         },
         None,
     )

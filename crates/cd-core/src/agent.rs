@@ -62,6 +62,8 @@ pub struct AgentOptions {
     pub session_id: String,
     /// Model label.
     pub model: Option<String>,
+    /// Cooperative cancel flag (checked each round). When true, stop cleanly.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for AgentOptions {
@@ -70,8 +72,16 @@ impl Default for AgentOptions {
             max_rounds: 8,
             session_id: "session".into(),
             model: None,
+            cancel: None,
         }
     }
+}
+
+fn cancelled(opts: &AgentOptions) -> bool {
+    opts.cancel
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 /// Run agent loop; returns all stream events + final messages.
@@ -108,6 +118,12 @@ pub async fn run_agent_turn(
     let mut trail: Vec<String> = vec!["started".into()];
 
     for round in 0..opts.max_rounds {
+        if cancelled(opts) {
+            events.push(StreamEvent::TurnCompleted {
+                reason: "cancel".into(),
+            });
+            return Ok(events);
+        }
         let completion = backend.complete(history, &specs).await?;
         let mut tool_calls = completion.tool_calls.clone();
 
@@ -281,5 +297,42 @@ mod tests {
             })
             .collect();
         assert!(text.contains("payments"));
+    }
+
+    #[tokio::test]
+    async fn agent_stops_on_cancel() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let backend = ScriptedBackend::new(vec![ChatCompletion {
+            content: "should not run".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        }]);
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut history = vec![];
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "hi",
+            &mut history,
+            &AgentOptions {
+                cancel: Some(Arc::clone(&flag)),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "cancel")));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { text } if text.contains("should not"))));
+        assert!(flag.load(Ordering::SeqCst));
     }
 }

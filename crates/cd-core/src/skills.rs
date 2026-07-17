@@ -43,13 +43,15 @@ pub fn parse_skill_file(path: &Path) -> CoreResult<Option<Skill>> {
         .get("allows_write")
         .map(|v| v == "true" || v == "yes")
         .unwrap_or(false);
+    // Agent-authored / write-claiming skills are review-gated: disabled until user enables.
+    let disabled = allows_write;
     Ok(Some(Skill {
         id,
         name,
         description,
         body: body.trim().to_string(),
         path: path.to_path_buf(),
-        disabled: false,
+        disabled,
         allows_write,
     }))
 }
