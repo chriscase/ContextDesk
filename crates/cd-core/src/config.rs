@@ -8,13 +8,51 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// On-disk application configuration (no raw API keys).
+/// Stable keychain ref for Confluence personal access token (never the token itself).
+pub const CONFLUENCE_PAT_REF: &str = "confluence/default/pat";
+
+/// Confluence connector settings (token lives in keychain under [`CONFLUENCE_PAT_REF`]).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ConfluenceSettings {
+    /// When false, connector is ignored.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Wiki base URL, e.g. `https://wiki.example.com` (no trailing path required).
+    #[serde(default)]
+    pub base_url: String,
+    /// Space keys allowlist (empty = all spaces the token can see — prefer setting these).
+    #[serde(default)]
+    pub spaces: Vec<String>,
+    /// Keychain reference id when a PAT has been saved (never the secret).
+    #[serde(default)]
+    pub pat_ref: Option<String>,
+}
+
+impl ConfluenceSettings {
+    /// True when base URL is non-empty and looks configured.
+    pub fn is_configured(&self) -> bool {
+        self.enabled && !self.base_url.trim().is_empty()
+    }
+
+    /// Convert to runtime RO client config.
+    pub fn to_ro_config(&self) -> crate::confluence_ro::ConfluenceRoConfig {
+        crate::confluence_ro::ConfluenceRoConfig {
+            base_url: self.base_url.trim().trim_end_matches('/').to_string(),
+            spaces: self.spaces.clone(),
+        }
+    }
+}
+
+/// On-disk application configuration (no raw API keys / PATs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     /// Provider profiles (keychain refs only).
     pub providers: ProviderConfig,
     /// Last workspace metadata (roots as strings).
     pub workspace: Option<WorkspaceConfig>,
+    /// Confluence read-only connector.
+    #[serde(default)]
+    pub confluence: ConfluenceSettings,
     /// Theme id.
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -90,6 +128,13 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
             }
         }
     }
+    if let Some(r) = &cfg.confluence.pat_ref {
+        if r.len() > 120 || r.contains("ATATT") || r.starts_with("sk-") {
+            return Err(CoreError::Config(
+                "refusing config that embeds raw Confluence secrets in pat_ref".into(),
+            ));
+        }
+    }
     Ok(cfg)
 }
 
@@ -118,10 +163,32 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.providers = ProviderConfig::with_local_ollama();
         cfg.theme = "dark".into();
+        cfg.confluence = ConfluenceSettings {
+            enabled: true,
+            base_url: "https://wiki.example.com".into(),
+            spaces: vec!["ENG".into()],
+            pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+        };
         save_config(&path, &cfg).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.providers.active().unwrap().id, "ollama-local");
+        assert!(loaded.confluence.is_configured());
+        assert_eq!(loaded.confluence.spaces, vec!["ENG"]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-"));
+        assert!(!text.contains("ATATT"));
+        assert!(text.contains("wiki.example.com"));
+        assert!(text.contains(CONFLUENCE_PAT_REF));
+    }
+
+    #[test]
+    fn confluence_not_configured_when_disabled() {
+        let c = ConfluenceSettings {
+            enabled: false,
+            base_url: "https://wiki.example.com".into(),
+            spaces: vec![],
+            pat_ref: None,
+        };
+        assert!(!c.is_configured());
     }
 }

@@ -140,6 +140,49 @@ export async function hostWriteMemory(
   return invoke<string>("write_memory_note", { filename, title, body });
 }
 
+export type ConfluenceSettingsDto = {
+  enabled: boolean;
+  base_url: string;
+  spaces: string[];
+  pat_ref: string | null;
+};
+
+export async function hostGetConfluence(): Promise<ConfluenceSettingsDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ConfluenceSettingsDto>("get_confluence_settings");
+}
+
+export async function hostSaveConfluence(args: {
+  enabled: boolean;
+  baseUrl: string;
+  spaces: string;
+  pat?: string;
+}): Promise<ConfluenceSettingsDto> {
+  if (!isTauri()) {
+    throw new Error("Confluence settings require Tauri host");
+  }
+  return invoke<ConfluenceSettingsDto>("save_confluence_settings", {
+    req: {
+      enabled: args.enabled,
+      base_url: args.baseUrl,
+      spaces: args.spaces,
+      pat: args.pat ?? null,
+    },
+  });
+}
+
+export async function hostConfluenceHasToken(): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("confluence_has_token");
+}
+
+export async function hostTestConfluence(): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Test requires Tauri host");
+  }
+  return invoke<string>("test_confluence_config");
+}
+
 export function setupToWorkspaceRoots(setup: AppSetupState): string[] {
   return setup.workspaceRoots;
 }

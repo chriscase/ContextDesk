@@ -1,5 +1,12 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { hostCheckOllama, hostPreflight } from "../lib/host";
+import {
+  hostCheckOllama,
+  hostConfluenceHasToken,
+  hostGetConfluence,
+  hostPreflight,
+  hostSaveConfluence,
+  hostTestConfluence,
+} from "../lib/host";
 import {
   runClientPreflight,
   validateBaseUrl,
@@ -15,6 +22,7 @@ export type SettingsSection =
   | "preflight"
   | "workspace"
   | "ai"
+  | "connectors"
   | "appearance"
   | "general";
 
@@ -34,6 +42,7 @@ const NAV: { id: SettingsSection; label: string }[] = [
   { id: "preflight", label: "Preflight" },
   { id: "workspace", label: "Workspace" },
   { id: "ai", label: "AI / Models" },
+  { id: "connectors", label: "Connectors" },
   { id: "appearance", label: "Appearance" },
   { id: "general", label: "General" },
 ];
@@ -53,12 +62,31 @@ export function SettingsModal({
   const [draft, setDraft] = useState(setup);
   const [checking, setChecking] = useState(false);
   const [probeTick, setProbeTick] = useState(0);
+  const [cfStatus, setCfStatus] = useState<string | null>(null);
+  const [cfTokenDraft, setCfTokenDraft] = useState("");
   const baseId = useId();
 
   useEffect(() => {
     if (open) {
       setDraft(setup);
       setSection(initialSection);
+      setCfTokenDraft("");
+      setCfStatus(null);
+      void (async () => {
+        const cf = await hostGetConfluence();
+        const has = await hostConfluenceHasToken();
+        if (cf) {
+          setDraft((d) => ({
+            ...d,
+            confluence: {
+              enabled: cf.enabled,
+              baseUrl: cf.base_url,
+              spaces: cf.spaces.join(", "),
+              hasToken: has ?? Boolean(cf.pat_ref),
+            },
+          }));
+        }
+      })();
     }
   }, [open, setup, initialSection]);
 
@@ -112,9 +140,17 @@ export function SettingsModal({
   const fix = (s: NonNullable<PreflightItem["fixAction"]>) => {
     if (s === "workspace") setSection("workspace");
     else if (s === "ai") setSection("ai");
+    else if (s === "connectors") setSection("connectors");
     else if (s === "appearance") setSection("appearance");
     else setSection("general");
   };
+
+  const confluenceUrlError = useMemo(() => {
+    if (!draft.confluence?.enabled) return null;
+    const u = draft.confluence.baseUrl.trim();
+    if (!u) return "Base URL is required when Confluence is enabled.";
+    return validateBaseUrl(u);
+  }, [draft.confluence]);
 
   const addRoot = () => {
     // Native picker lands with Tauri; prompt keeps the form usable in browser.
@@ -127,8 +163,26 @@ export function SettingsModal({
     }));
   };
 
-  const save = () => {
-    onSaveSetup(draft);
+  const save = async () => {
+    // Persist Confluence to host config + keychain when possible
+    try {
+      const saved = await hostSaveConfluence({
+        enabled: draft.confluence?.enabled ?? false,
+        baseUrl: draft.confluence?.baseUrl ?? "",
+        spaces: draft.confluence?.spaces ?? "",
+        pat: cfTokenDraft.trim() || undefined,
+      });
+      const has = await hostConfluenceHasToken();
+      draft.confluence = {
+        enabled: saved.enabled,
+        baseUrl: saved.base_url,
+        spaces: saved.spaces.join(", "),
+        hasToken: has ?? Boolean(saved.pat_ref),
+      };
+    } catch {
+      // browser mode: keep in local setup only
+    }
+    onSaveSetup({ ...draft });
     onClose();
   };
 
@@ -331,12 +385,155 @@ export function SettingsModal({
                   <button
                     type="button"
                     className="btn btn--ghost"
-                    onClick={recheck}
+                    onClick={() => void recheck()}
                     disabled={checking || draft.providerKind === "none"}
                   >
                     {checking ? "Testing…" : "Test connection"}
                   </button>
                 </div>
+              </div>
+            ) : null}
+
+            {section === "connectors" ? (
+              <div>
+                <p className="section-lead">
+                  Optional data sources. Confluence is read-only: set the wiki
+                  base URL and a personal access token (stored in the OS
+                  keychain, never in config files).
+                </p>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={draft.confluence?.enabled ?? false}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        confluence: {
+                          enabled: e.target.checked,
+                          baseUrl: d.confluence?.baseUrl ?? "",
+                          spaces: d.confluence?.spaces ?? "",
+                          hasToken: d.confluence?.hasToken ?? false,
+                        },
+                      }))
+                    }
+                  />
+                  Enable Confluence (read-only)
+                </label>
+                <TextField
+                  id={`${baseId}-cf-url`}
+                  label="Confluence base URL"
+                  hint="e.g. https://wiki.example.com — no API path required"
+                  value={draft.confluence?.baseUrl ?? ""}
+                  error={confluenceUrlError}
+                  ok={
+                    draft.confluence?.enabled &&
+                    draft.confluence.baseUrl &&
+                    !confluenceUrlError
+                      ? "Looks like a valid URL"
+                      : null
+                  }
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      confluence: {
+                        enabled: d.confluence?.enabled ?? true,
+                        baseUrl: e.target.value,
+                        spaces: d.confluence?.spaces ?? "",
+                        hasToken: d.confluence?.hasToken ?? false,
+                      },
+                    }))
+                  }
+                  placeholder="https://your-confluence.example.com"
+                />
+                <SecretField
+                  id={`${baseId}-cf-pat`}
+                  label="Personal access token"
+                  hint="Atlassian/Confluence PAT or API token. Stored in keychain only."
+                  value={
+                    cfTokenDraft
+                      ? cfTokenDraft
+                      : draft.confluence?.hasToken
+                        ? "••••••••••••"
+                        : ""
+                  }
+                  error={
+                    draft.confluence?.enabled && !draft.confluence.hasToken && !cfTokenDraft
+                      ? "Required when Confluence is enabled."
+                      : null
+                  }
+                  ok={
+                    draft.confluence?.hasToken && !cfTokenDraft
+                      ? "Token on file (masked)"
+                      : null
+                  }
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v.includes("•") && draft.confluence?.hasToken) return;
+                    setCfTokenDraft(v);
+                    if (v.trim()) {
+                      setDraft((d) => ({
+                        ...d,
+                        confluence: {
+                          enabled: d.confluence?.enabled ?? true,
+                          baseUrl: d.confluence?.baseUrl ?? "",
+                          spaces: d.confluence?.spaces ?? "",
+                          hasToken: true,
+                        },
+                      }));
+                    }
+                  }}
+                  placeholder="Paste token"
+                />
+                <TextField
+                  id={`${baseId}-cf-spaces`}
+                  label="Space keys (optional allowlist)"
+                  hint="Comma-separated, e.g. ENG, DOCS. Empty = no extra filter."
+                  value={draft.confluence?.spaces ?? ""}
+                  onChange={(e) =>
+                    setDraft((d) => ({
+                      ...d,
+                      confluence: {
+                        enabled: d.confluence?.enabled ?? true,
+                        baseUrl: d.confluence?.baseUrl ?? "",
+                        spaces: e.target.value,
+                        hasToken: d.confluence?.hasToken ?? false,
+                      },
+                    }))
+                  }
+                  placeholder="ENG, DOCS"
+                />
+                <div className="field-row">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          // Save first so test sees latest URL/token
+                          await hostSaveConfluence({
+                            enabled: draft.confluence?.enabled ?? false,
+                            baseUrl: draft.confluence?.baseUrl ?? "",
+                            spaces: draft.confluence?.spaces ?? "",
+                            pat: cfTokenDraft.trim() || undefined,
+                          });
+                          const msg = await hostTestConfluence();
+                          setCfStatus(msg);
+                        } catch (e) {
+                          setCfStatus(
+                            e instanceof Error ? e.message : String(e),
+                          );
+                        }
+                      })();
+                    }}
+                  >
+                    Test configuration
+                  </button>
+                </div>
+                {cfStatus ? (
+                  <p className="section-lead" role="status">
+                    {cfStatus}
+                  </p>
+                ) : null}
               </div>
             ) : null}
 

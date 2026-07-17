@@ -7,12 +7,20 @@ export type PreflightItem = {
   title: string;
   level: PreflightLevel;
   detail: string;
-  fixAction?: "general" | "workspace" | "ai" | "appearance";
+  fixAction?: "general" | "workspace" | "ai" | "appearance" | "connectors";
 };
 
 export type PreflightReport = {
   items: PreflightItem[];
   hasBlocking: boolean;
+};
+
+export type ConfluenceSetup = {
+  enabled: boolean;
+  baseUrl: string;
+  /** Comma-separated space keys */
+  spaces: string;
+  hasToken: boolean;
 };
 
 export type AppSetupState = {
@@ -27,6 +35,7 @@ export type AppSetupState = {
   /** Simulated / later real probes */
   ollamaReachable: boolean | null;
   remoteReachable: boolean | null;
+  confluence: ConfluenceSetup;
 };
 
 export function runClientPreflight(s: AppSetupState): PreflightReport {
@@ -201,6 +210,52 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
         });
       }
     }
+  }
+
+  // Confluence optional (warn only — never blocks core chat)
+  if (s.confluence?.enabled) {
+    if (!s.confluence.baseUrl.trim()) {
+      items.push({
+        id: "confluence.url",
+        title: "Confluence base URL",
+        level: "warn",
+        detail: "Enabled but base URL is empty.",
+        fixAction: "connectors",
+      });
+    } else if (!looksLikeUrl(s.confluence.baseUrl)) {
+      items.push({
+        id: "confluence.url",
+        title: "Confluence base URL",
+        level: "warn",
+        detail: "Base URL should be http(s).",
+        fixAction: "connectors",
+      });
+    } else {
+      items.push({
+        id: "confluence.url",
+        title: "Confluence base URL",
+        level: "pass",
+        detail: s.confluence.baseUrl,
+        fixAction: "connectors",
+      });
+    }
+    items.push(
+      s.confluence.hasToken
+        ? {
+            id: "confluence.pat",
+            title: "Confluence token",
+            level: "pass",
+            detail: "Token stored securely (masked in UI).",
+            fixAction: "connectors",
+          }
+        : {
+            id: "confluence.pat",
+            title: "Confluence token",
+            level: "warn",
+            detail: "Paste a personal access token in Settings → Connectors.",
+            fixAction: "connectors",
+          },
+    );
   }
 
   return {

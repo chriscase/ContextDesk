@@ -53,7 +53,18 @@ function loadTheme(): "dark" | "light" {
 function loadSetup(): AppSetupState {
   try {
     const raw = localStorage.getItem("cd-setup");
-    if (raw) return JSON.parse(raw) as AppSetupState;
+    if (raw) {
+      const parsed = JSON.parse(raw) as AppSetupState;
+      if (!parsed.confluence) {
+        parsed.confluence = {
+          enabled: false,
+          baseUrl: "",
+          spaces: "",
+          hasToken: false,
+        };
+      }
+      return parsed;
+    }
   } catch {
     /* ignore */
   }
@@ -68,6 +79,12 @@ function loadSetup(): AppSetupState {
     hasApiKey: false,
     ollamaReachable: null,
     remoteReachable: null,
+    confluence: {
+      enabled: false,
+      baseUrl: "",
+      spaces: "",
+      hasToken: false,
+    },
   };
 }
 
@@ -190,8 +207,13 @@ export function App() {
         level: i.level,
         detail: i.detail,
         fixAction:
-          (i.fix_action as "workspace" | "ai" | "general" | "appearance" | undefined) ??
-          undefined,
+          (i.fix_action as
+            | "workspace"
+            | "ai"
+            | "connectors"
+            | "general"
+            | "appearance"
+            | undefined) ?? undefined,
       })),
       hasBlocking: report.has_blocking,
     });

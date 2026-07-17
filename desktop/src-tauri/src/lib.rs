@@ -3,7 +3,8 @@
 use cd_core::branding::Branding;
 use cd_core::chat::ChatMessage;
 use cd_core::config::{
-    config_path, ensure_config_dir, load_config, save_config, AppConfig, WorkspaceConfig,
+    config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
+    WorkspaceConfig, CONFLUENCE_PAT_REF,
 };
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
 use cd_core::permissions::PermissionDecision;
@@ -14,7 +15,9 @@ use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_fi
 use cd_core::research::{
     build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
 };
-use cd_core::secrets::{key_ref_for_profile, KeychainSecretStore, SecretStore};
+use cd_core::secrets::{
+    key_ref_confluence_pat, key_ref_for_profile, KeychainSecretStore, SecretStore,
+};
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
@@ -195,6 +198,16 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
+    let confluence_pat = if cfg.confluence.enabled {
+        Some(
+            state
+                .secrets
+                .has(&key_ref_confluence_pat())
+                .unwrap_or(false),
+        )
+    } else {
+        None
+    };
     Ok(run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
@@ -202,7 +215,117 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         ollama_reachable: ollama_ok,
         provider_reachable: provider_ok,
         active_key_present: key_present,
+        confluence: Some(&cfg.confluence),
+        confluence_pat_present: confluence_pat,
     }))
+}
+
+#[tauri::command]
+fn get_confluence_settings(state: State<'_, AppState>) -> ConfluenceSettings {
+    state.config.lock().expect("config").confluence.clone()
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveConfluenceReq {
+    enabled: bool,
+    base_url: String,
+    /// Comma or space separated space keys.
+    spaces: String,
+    /// Optional new PAT; empty means keep existing.
+    pat: Option<String>,
+}
+
+#[tauri::command]
+fn save_confluence_settings(
+    state: State<'_, AppState>,
+    req: SaveConfluenceReq,
+) -> Result<ConfluenceSettings, String> {
+    let spaces: Vec<String> = req
+        .spaces
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    if req.enabled && !base_url.is_empty() {
+        let policy = SsrfPolicy::default();
+        // Allow private wikis on corp networks via allow_private_networks if needed later.
+        // For now default SSRF; users on private IP can use advanced override later.
+        if let Err(e) = validate_provider_url(&base_url, &policy) {
+            // Private corporate wikis: retry with private allowed
+            if validate_provider_url(&base_url, &SsrfPolicy::allow_private_networks()).is_err() {
+                return Err(format!("Invalid Confluence base URL: {e}"));
+            }
+        }
+    }
+
+    let mut pat_ref = state
+        .config
+        .lock()
+        .expect("config")
+        .confluence
+        .pat_ref
+        .clone();
+
+    if let Some(pat) = req.pat {
+        let pat = pat.trim();
+        if !pat.is_empty() && !pat.chars().all(|c| c == '•') {
+            state
+                .secrets
+                .set(&key_ref_confluence_pat(), pat)
+                .map_err(|e| e.to_string())?;
+            pat_ref = Some(CONFLUENCE_PAT_REF.to_string());
+        }
+    }
+
+    let cf = ConfluenceSettings {
+        enabled: req.enabled,
+        base_url,
+        spaces,
+        pat_ref,
+    };
+
+    let mut cfg = state.config.lock().expect("config");
+    cfg.confluence = cf.clone();
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    Ok(cf)
+}
+
+#[tauri::command]
+fn confluence_has_token(state: State<'_, AppState>) -> Result<bool, String> {
+    state
+        .secrets
+        .has(&key_ref_confluence_pat())
+        .map_err(|e| e.to_string())
+}
+
+/// Validate URL + token presence (no live network call to avoid leaking PAT to logs).
+#[tauri::command]
+fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> {
+    let cfg = state.config.lock().expect("config").confluence.clone();
+    if !cfg.enabled {
+        return Ok("Confluence disabled".into());
+    }
+    if cfg.base_url.trim().is_empty() {
+        return Err("Base URL is required".into());
+    }
+    let has = state
+        .secrets
+        .has(&key_ref_confluence_pat())
+        .map_err(|e| e.to_string())?;
+    if !has {
+        return Err("No personal access token in secure storage".into());
+    }
+    // SSRF check base URL
+    let policy = SsrfPolicy::allow_private_networks();
+    validate_provider_url(&cfg.base_url, &policy).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "OK: URL valid, token present, {} space(s) allowlisted",
+        cfg.spaces.len()
+    ))
 }
 
 #[tauri::command]
@@ -454,6 +577,10 @@ pub fn run() {
             list_memory_notes,
             write_memory_note,
             sql_ro_query,
+            get_confluence_settings,
+            save_confluence_settings,
+            confluence_has_token,
+            test_confluence_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

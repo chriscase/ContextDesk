@@ -2,6 +2,7 @@
 //!
 //! Network probes are optional hooks; pure checks run offline in CI.
 
+use crate::config::ConfluenceSettings;
 use crate::providers::{ProviderConfig, ProviderKind};
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,10 @@ pub struct PreflightInput<'a> {
     pub provider_reachable: Option<bool>,
     /// Host-reported: keychain has key for active profile when required.
     pub active_key_present: Option<bool>,
+    /// Confluence settings (optional connector).
+    pub confluence: Option<&'a ConfluenceSettings>,
+    /// Host-reported: Confluence PAT present in keychain.
+    pub confluence_pat_present: Option<bool>,
 }
 
 /// Run offline + host-supplied reachability checks.
@@ -260,6 +265,61 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
         }
     }
 
+    // Confluence (optional — never blocking for core chat)
+    if let Some(cf) = input.confluence {
+        if cf.enabled {
+            if cf.base_url.trim().is_empty() {
+                items.push(PreflightItem {
+                    id: "confluence.url".into(),
+                    title: "Confluence base URL".into(),
+                    level: PreflightLevel::Warn,
+                    detail: "Confluence is enabled but base URL is empty.".into(),
+                    fix_action: Some("connectors".into()),
+                });
+            } else {
+                items.push(PreflightItem {
+                    id: "confluence.url".into(),
+                    title: "Confluence base URL".into(),
+                    level: PreflightLevel::Pass,
+                    detail: format!("Base URL: {}", cf.base_url.trim()),
+                    fix_action: Some("connectors".into()),
+                });
+            }
+            match input.confluence_pat_present {
+                Some(true) => items.push(PreflightItem {
+                    id: "confluence.pat".into(),
+                    title: "Confluence token".into(),
+                    level: PreflightLevel::Pass,
+                    detail: "Personal access token present in secure storage.".into(),
+                    fix_action: Some("connectors".into()),
+                }),
+                Some(false) => items.push(PreflightItem {
+                    id: "confluence.pat".into(),
+                    title: "Confluence token".into(),
+                    level: PreflightLevel::Warn,
+                    detail: "No token in keychain — paste a PAT in Settings → Connectors.".into(),
+                    fix_action: Some("connectors".into()),
+                }),
+                None => items.push(PreflightItem {
+                    id: "confluence.pat".into(),
+                    title: "Confluence token".into(),
+                    level: PreflightLevel::Warn,
+                    detail: "Token presence not checked yet.".into(),
+                    fix_action: Some("connectors".into()),
+                }),
+            }
+            if cf.spaces.is_empty() {
+                items.push(PreflightItem {
+                    id: "confluence.spaces".into(),
+                    title: "Confluence spaces".into(),
+                    level: PreflightLevel::Warn,
+                    detail: "No space allowlist — consider restricting to known keys.".into(),
+                    fix_action: Some("connectors".into()),
+                });
+            }
+        }
+    }
+
     PreflightReport::from_items(items)
 }
 
@@ -280,6 +340,8 @@ mod tests {
             ollama_reachable: Some(true),
             provider_reachable: None,
             active_key_present: None,
+            confluence: None,
+            confluence_pat_present: None,
         });
         assert!(report.has_blocking);
         assert!(report
@@ -300,7 +362,37 @@ mod tests {
             ollama_reachable: Some(true),
             provider_reachable: None,
             active_key_present: None,
+            confluence: None,
+            confluence_pat_present: None,
         });
         assert!(!report.has_blocking);
+    }
+
+    #[test]
+    fn confluence_warns_when_enabled_without_token() {
+        use crate::config::ConfluenceSettings;
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let providers = ProviderConfig::with_local_ollama();
+        let cf = ConfluenceSettings {
+            enabled: true,
+            base_url: "https://wiki.example.com".into(),
+            spaces: vec!["ENG".into()],
+            pat_ref: None,
+        };
+        let report = run_preflight(PreflightInput {
+            workspace: Some(&ws),
+            providers: &providers,
+            data_dir_writable: true,
+            ollama_reachable: Some(true),
+            provider_reachable: None,
+            active_key_present: None,
+            confluence: Some(&cf),
+            confluence_pat_present: Some(false),
+        });
+        assert!(!report.has_blocking);
+        assert!(report.items.iter().any(|i| {
+            i.id == "confluence.pat" && i.level == PreflightLevel::Warn
+        }));
     }
 }
