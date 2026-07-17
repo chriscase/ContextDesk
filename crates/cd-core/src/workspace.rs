@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 /// A project workspace the assistant may operate on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Workspace {
     /// Stable id.
     pub id: String,

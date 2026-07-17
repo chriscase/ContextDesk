@@ -1,9 +1,11 @@
 import { useEffect, useId, useMemo, useState } from "react";
+import { hostCheckOllama, hostPreflight } from "../lib/host";
 import {
   runClientPreflight,
   validateBaseUrl,
   type AppSetupState,
   type PreflightItem,
+  type PreflightReport,
 } from "../lib/preflight";
 import { SecretField, SelectField, TextField } from "./forms/Field";
 import { PreflightPanel } from "./PreflightPanel";
@@ -24,6 +26,8 @@ type Props = {
   onThemeChange: (t: "dark" | "light") => void;
   onClose: () => void;
   onSaveSetup: (next: AppSetupState) => void;
+  onRecheckHost?: () => void | Promise<void>;
+  hostReport?: PreflightReport | null;
 };
 
 const NAV: { id: SettingsSection; label: string }[] = [
@@ -42,6 +46,8 @@ export function SettingsModal({
   onThemeChange,
   onClose,
   onSaveSetup,
+  onRecheckHost,
+  hostReport,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [draft, setDraft] = useState(setup);
@@ -61,28 +67,46 @@ export function SettingsModal({
     return validateBaseUrl(draft.baseUrl);
   }, [draft.providerKind, draft.baseUrl]);
 
-  const report = useMemo(() => runClientPreflight(draft), [draft, probeTick]);
+  const clientReport = useMemo(() => runClientPreflight(draft), [draft, probeTick]);
+  const report = hostReport ?? clientReport;
 
   if (!open) return null;
 
-  const recheck = () => {
+  const recheck = async () => {
     setChecking(true);
-    // Simulate host probes until Tauri is wired (#70).
-    window.setTimeout(() => {
-      setDraft((d) => {
-        if (d.providerKind === "ollama") {
-          return { ...d, ollamaReachable: true };
+    try {
+      if (onRecheckHost) {
+        await onRecheckHost();
+      }
+      // Live Ollama probe from host when available
+      if (draft.providerKind === "ollama") {
+        const ok = await hostCheckOllama(draft.baseUrl);
+        if (ok !== null) {
+          setDraft((d) => ({ ...d, ollamaReachable: ok }));
+        } else {
+          // Browser without Tauri: mark warn via null, not fake true
+          setDraft((d) => ({ ...d, ollamaReachable: null }));
         }
-        if (d.providerKind === "openai_compatible") {
+      } else if (draft.providerKind === "openai_compatible") {
+        const hostPf = await hostPreflight();
+        if (hostPf) {
+          const remote = hostPf.items.find((i) => i.id === "provider.remote");
+          setDraft((d) => ({
+            ...d,
+            remoteReachable: remote?.level === "pass",
+          }));
+        } else {
           const ok =
-            !validateBaseUrl(d.baseUrl) && d.hasApiKey && d.chatModel.trim().length > 0;
-          return { ...d, remoteReachable: ok };
+            !validateBaseUrl(draft.baseUrl) &&
+            draft.hasApiKey &&
+            draft.chatModel.trim().length > 0;
+          setDraft((d) => ({ ...d, remoteReachable: ok ? null : false }));
         }
-        return d;
-      });
+      }
       setProbeTick((n) => n + 1);
+    } finally {
       setChecking(false);
-    }, 450);
+    }
   };
 
   const fix = (s: NonNullable<PreflightItem["fixAction"]>) => {

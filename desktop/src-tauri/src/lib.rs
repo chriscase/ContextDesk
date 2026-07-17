@@ -1,17 +1,25 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 use cd_core::branding::Branding;
+use cd_core::chat::ChatMessage;
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, WorkspaceConfig,
 };
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
+use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
-use cd_core::providers::{ProviderConfig, ProviderKind};
+use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
+use cd_core::research::{
+    build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
+};
 use cd_core::secrets::{key_ref_for_profile, KeychainSecretStore, SecretStore};
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
+use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -19,6 +27,32 @@ struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
     secrets: KeychainSecretStore,
+    /// Session id -> chat history
+    histories: Mutex<HashMap<String, Vec<ChatMessage>>>,
+    /// Live tool host (rebuilt when workspace changes)
+    host: Mutex<Option<ToolHost>>,
+}
+
+fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
+    cfg.workspace.as_ref().map(|w| Workspace {
+        id: w.id.clone(),
+        name: w.name.clone(),
+        roots: w.roots.clone(),
+    })
+}
+
+fn ensure_host(state: &AppState) -> Result<(), String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let ws = workspace_from_cfg(&cfg).ok_or_else(|| "no workspace configured".to_string())?;
+    if ws.roots.is_empty() {
+        return Err("workspace has no roots".into());
+    }
+    let audit = ensure_config_dir(&state.branding)
+        .ok()
+        .map(|d| d.join("audit.jsonl"));
+    let host = build_host(ws, audit).map_err(|e| e.to_string())?;
+    *state.host.lock().expect("host") = Some(host);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -48,7 +82,6 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
 
 #[tauri::command]
 fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), String> {
-    // Never accept raw secrets in api_key_ref
     for p in &cfg.providers.profiles {
         if let Some(r) = &p.api_key_ref {
             if r.starts_with("sk-") || r.starts_with("xai-") {
@@ -59,6 +92,8 @@ fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), Str
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config lock") = cfg;
+    // rebuild host
+    let _ = ensure_host(&state);
     Ok(())
 }
 
@@ -128,29 +163,44 @@ async fn check_ollama(base_url: String) -> bool {
 }
 
 #[tauri::command]
-fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport, String> {
+async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport, String> {
     let cfg = state.config.lock().expect("config lock").clone();
-    let ws = cfg.workspace.as_ref().map(|w| Workspace {
-        id: w.id.clone(),
-        name: w.name.clone(),
-        roots: w.roots.clone(),
-    });
-    let active_key = cfg.providers.active().and_then(|p| {
-        p.api_key_ref.as_ref().map(|r| state.secrets.has(r).unwrap_or(false))
-    });
-    // For ollama, key not required
-    let active_key_present = match cfg.providers.active().map(|p| p.kind) {
-        Some(ProviderKind::Ollama) | None => None,
-        _ => active_key,
-    };
+    let ws = workspace_from_cfg(&cfg);
+    let active = cfg.providers.active().cloned();
+    let mut ollama_ok = None;
+    let mut provider_ok = None;
+    let mut key_present = None;
+    if let Some(p) = &active {
+        match p.kind {
+            ProviderKind::Ollama => {
+                ollama_ok = Some(ollama_reachable(&p.base_url).await);
+            }
+            ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => {
+                let ref_id = p
+                    .api_key_ref
+                    .clone()
+                    .unwrap_or_else(|| key_ref_for_profile(&p.id));
+                key_present = Some(state.secrets.has(&ref_id).unwrap_or(false));
+                let policy = if p.local_only {
+                    SsrfPolicy::local_only()
+                } else {
+                    SsrfPolicy::default()
+                };
+                provider_ok = Some(validate_provider_url(&p.base_url, &policy).is_ok());
+            }
+            ProviderKind::XaiGrokBuild => {
+                key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
+            }
+        }
+    }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
     Ok(run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
         data_dir_writable: data_ok,
-        ollama_reachable: None,
-        provider_reachable: None,
-        active_key_present,
+        ollama_reachable: ollama_ok,
+        provider_reachable: provider_ok,
+        active_key_present: key_present,
     }))
 }
 
@@ -165,23 +215,154 @@ fn set_workspace_roots(
         .workspace
         .as_ref()
         .map(|w| w.id.clone())
-        .unwrap_or_else(|| uuid_simple());
+        .unwrap_or_else(|| format!("ws-{}", chrono_like()));
     cfg.workspace = Some(WorkspaceConfig {
         id,
         name,
-        roots: roots.into_iter().map(Into::into).collect(),
+        roots: roots.into_iter().map(PathBuf::from).collect(),
     });
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
-    save_config(&path, &cfg).map_err(|e| e.to_string())
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    ensure_host(&state)
 }
 
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+fn chrono_like() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("ws-{t}")
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentTurnReq {
+    session_id: String,
+    text: String,
+    /// Force offline retrieval (no LLM).
+    #[serde(default)]
+    force_local: bool,
+}
+
+#[tauri::command]
+async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec<EventDto>, String> {
+    ensure_host(&state)?;
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .active()
+        .cloned()
+        .unwrap_or_else(ProviderProfile::ollama_local);
+    let api_key = profile
+        .api_key_ref
+        .as_ref()
+        .and_then(|r| state.secrets.get(r).ok().flatten());
+
+    let mut history = {
+        let mut histories = state.histories.lock().expect("hist");
+        histories
+            .entry(req.session_id.clone())
+            .or_default()
+            .clone()
+    };
+
+    // Always use local research when forced or for reliability without holding locks
+    // across await: run local path under mutex (sync). Live model path uses block_in_place.
+    let events = if req.force_local || profile.kind == cd_core::providers::ProviderKind::Ollama {
+        let mut host_guard = state.host.lock().expect("host");
+        let host = host_guard.as_mut().ok_or("host missing")?;
+        // Try ollama via block_in_place only if not force_local
+        if !req.force_local {
+            let res = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(research_turn(
+                    host,
+                    &profile,
+                    api_key.clone(),
+                    &req.text,
+                    &mut history,
+                    &req.session_id,
+                    false,
+                ))
+            });
+            match res {
+                Ok(ev) => ev,
+                Err(_) => research_local(host, &req.text, &req.session_id)
+                    .map_err(|e| e.to_string())?,
+            }
+        } else {
+            research_local(host, &req.text, &req.session_id).map_err(|e| e.to_string())?
+        }
+    } else {
+        let mut host_guard = state.host.lock().expect("host");
+        let host = host_guard.as_mut().ok_or("host missing")?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(research_turn(
+                host,
+                &profile,
+                api_key,
+                &req.text,
+                &mut history,
+                &req.session_id,
+                false,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+    };
+
+    {
+        let mut histories = state.histories.lock().expect("hist");
+        histories.insert(req.session_id.clone(), history);
+    }
+    Ok(events_to_dto(&events))
+}
+
+#[derive(Debug, Deserialize)]
+struct GrantReq {
+    request_id: String,
+    decision: String,
+    typed: Option<String>,
+    tool_name: String,
+    arguments: serde_json::Value,
+}
+
+#[tauri::command]
+fn complete_permission_cmd(
+    state: State<'_, AppState>,
+    req: GrantReq,
+) -> Result<Vec<EventDto>, String> {
+    let decision = match req.decision.as_str() {
+        "allow_once" => PermissionDecision::AllowOnce,
+        "allow_session_path" => PermissionDecision::AllowSessionPath,
+        _ => PermissionDecision::Deny,
+    };
+    let mut host_guard = state.host.lock().expect("host");
+    let host = host_guard.as_mut().ok_or("host missing")?;
+    let events = grant_and_execute(
+        host,
+        &req.request_id,
+        decision,
+        req.typed.as_deref(),
+        &req.tool_name,
+        &req.arguments,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(events_to_dto(&events))
+}
+
+#[tauri::command]
+fn reindex(state: State<'_, AppState>) -> Result<(), String> {
+    ensure_host(&state)?;
+    let mut host_guard = state.host.lock().expect("host");
+    let host = host_guard.as_mut().ok_or("host missing")?;
+    host.reindex().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_memory_file(state: State<'_, AppState>, relative: String) -> Result<String, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+    let path = cd_core::paths::resolve_allowed_path(&ws, &relative, false)
+        .map_err(|e| e.to_string())?;
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -202,7 +383,10 @@ pub fn run() {
         branding,
         config: Mutex::new(config),
         secrets: KeychainSecretStore::new(),
+        histories: Mutex::new(HashMap::new()),
+        host: Mutex::new(None),
     };
+    let _ = ensure_host(&state);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -218,6 +402,10 @@ pub fn run() {
             check_ollama,
             run_preflight_cmd,
             set_workspace_roots,
+            agent_turn,
+            complete_permission_cmd,
+            reindex,
+            read_memory_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

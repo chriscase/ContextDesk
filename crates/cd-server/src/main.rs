@@ -1,16 +1,20 @@
-//! ContextDesk headless server — localhost by default, API key auth.
+//! ContextDesk headless server — localhost by default, API key auth, research + SSE.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cd_core::index::KeywordIndex;
+use cd_core::research::{build_host, events_to_dto, research_local};
 use cd_core::workspace::Workspace;
 use clap::Parser;
+use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,23 +24,14 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(name = "cd-server", version, about = "ContextDesk headless server")]
 struct Args {
-    /// Print branding and exit.
     #[arg(long)]
     print_branding: bool,
-
-    /// Bind address (default loopback only).
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: String,
-
-    /// API keys (comma-separated). Hashed at rest in memory.
     #[arg(long, env = "CD_API_KEYS", default_value = "")]
     api_keys: String,
-
-    /// Allow non-loopback bind (requires explicit flag).
     #[arg(long, default_value_t = false)]
     allow_lan: bool,
-
-    /// Workspace root to index (optional).
     #[arg(long)]
     root: Option<PathBuf>,
 }
@@ -44,12 +39,15 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     key_hashes: Arc<Vec<[u8; 32]>>,
+    /// workspace_id -> data (isolation boundary)
     workspaces: Arc<Mutex<HashMap<String, WorkspaceData>>>,
+    /// api key hash -> allowed workspace ids (empty vec = all if single-tenant dev)
+    key_workspaces: Arc<HashMap<[u8; 32], Vec<String>>>,
 }
 
 struct WorkspaceData {
+    workspace: Workspace,
     index: KeywordIndex,
-    /// Shared memory notes.
     memory: Vec<MemoryNote>,
 }
 
@@ -66,9 +64,8 @@ fn hash_key(k: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), StatusCode> {
+fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Result<(), StatusCode> {
     if state.key_hashes.is_empty() {
-        // Dev mode: no keys configured → allow localhost only is caller's duty
         return Ok(());
     }
     let auth = headers
@@ -84,11 +81,15 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> Result<(), StatusCode> {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let h = hash_key(token);
-    if state.key_hashes.iter().any(|k| k == &h) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    if !state.key_hashes.iter().any(|k| k == &h) {
+        return Err(StatusCode::UNAUTHORIZED);
     }
+    if let Some(allowed) = state.key_workspaces.get(&h) {
+        if !allowed.is_empty() && !allowed.iter().any(|w| w == workspace_id) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(())
 }
 
 async fn health() -> impl IntoResponse {
@@ -100,18 +101,24 @@ async fn health() -> impl IntoResponse {
     }))
 }
 
+#[derive(Deserialize)]
+struct SearchBody {
+    workspace_id: String,
+    query: String,
+    limit: Option<usize>,
+}
+
 async fn search(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SearchBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    authorize(&headers, &state)?;
-    let ws_id = body.workspace_id.as_str();
+    authorize(&headers, &state, &body.workspace_id)?;
     let map = state
         .workspaces
         .lock()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let data = map.get(ws_id).ok_or(StatusCode::NOT_FOUND)?;
+    let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
     let hits = data
         .index
         .search(&body.query, body.limit.unwrap_or(8).min(50));
@@ -131,10 +138,10 @@ async fn search(
 }
 
 #[derive(Deserialize)]
-struct SearchBody {
+struct PublishBody {
     workspace_id: String,
-    query: String,
-    limit: Option<usize>,
+    title: String,
+    body: String,
 }
 
 async fn publish_memory(
@@ -142,7 +149,7 @@ async fn publish_memory(
     headers: HeaderMap,
     Json(body): Json<PublishBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    authorize(&headers, &state)?;
+    authorize(&headers, &state, &body.workspace_id)?;
     let mut map = state
         .workspaces
         .lock()
@@ -160,10 +167,8 @@ async fn publish_memory(
 }
 
 #[derive(Deserialize)]
-struct PublishBody {
+struct WsBody {
     workspace_id: String,
-    title: String,
-    body: String,
 }
 
 async fn list_memory(
@@ -171,7 +176,7 @@ async fn list_memory(
     headers: HeaderMap,
     Json(body): Json<WsBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    authorize(&headers, &state)?;
+    authorize(&headers, &state, &body.workspace_id)?;
     let map = state
         .workspaces
         .lock()
@@ -181,8 +186,79 @@ async fn list_memory(
 }
 
 #[derive(Deserialize)]
-struct WsBody {
+struct ResearchBody {
     workspace_id: String,
+    query: String,
+    session_id: Option<String>,
+    #[serde(default)]
+    force_local: bool,
+}
+
+async fn research(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ResearchBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    let ws = {
+        let map = state
+            .workspaces
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
+        data.workspace.clone()
+    };
+    let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sid = body.session_id.unwrap_or_else(|| "server".into());
+    let _ = body.force_local;
+    let events = research_local(&mut host, &body.query, &sid)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "events": events_to_dto(&events),
+    })))
+}
+
+#[derive(Deserialize)]
+struct StreamQuery {
+    workspace_id: String,
+    query: String,
+}
+
+async fn research_sse(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    authorize(&headers, &state, &q.workspace_id)?;
+    let ws = {
+        let map = state
+            .workspaces
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let data = map.get(&q.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
+        data.workspace.clone()
+    };
+    let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let events = research_local(&mut host, &q.query, "sse")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let dtos = events_to_dto(&events);
+    let stream = stream::iter(dtos.into_iter().map(|dto| {
+        let data = serde_json::to_string(&dto).unwrap_or_else(|_| "{}".into());
+        Ok(Event::default().event(dto.kind).data(data))
+    }));
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn build_app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/search", post(search))
+        .route("/v1/memory/publish", post(publish_memory))
+        .route("/v1/memory/list", post(list_memory))
+        .route("/v1/research", post(research))
+        .route("/v1/research/stream", get(research_sse))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .with_state(state)
 }
 
 #[tokio::main]
@@ -205,19 +281,19 @@ async fn main() {
     let addr: SocketAddr = args.bind.parse().expect("invalid --bind address");
     if !addr.ip().is_loopback() && !args.allow_lan {
         eprintln!(
-            "Refusing non-loopback bind {}. Pass --allow-lan (and use TLS at reverse proxy).",
-            addr
+            "Refusing non-loopback bind {addr}. Pass --allow-lan (and use TLS at reverse proxy)."
         );
         std::process::exit(2);
     }
 
-    let key_hashes: Vec<[u8; 32]> = args
+    let keys: Vec<String> = args
         .api_keys
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(hash_key)
+        .map(str::to_string)
         .collect();
+    let key_hashes: Vec<[u8; 32]> = keys.iter().map(|k| hash_key(k)).collect();
 
     let mut workspaces = HashMap::new();
     if let Some(root) = args.root {
@@ -226,26 +302,142 @@ async fn main() {
         workspaces.insert(
             "default".into(),
             WorkspaceData {
+                workspace: ws,
                 index,
                 memory: vec![],
             },
         );
     }
 
+    // Map each key to default workspace only when keys present
+    let mut key_workspaces = HashMap::new();
+    for h in &key_hashes {
+        key_workspaces.insert(*h, vec!["default".into()]);
+    }
+
     let state = AppState {
         key_hashes: Arc::new(key_hashes),
         workspaces: Arc::new(Mutex::new(workspaces)),
+        key_workspaces: Arc::new(key_workspaces),
     };
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/v1/search", post(search))
-        .route("/v1/memory/publish", post(publish_memory))
-        .route("/v1/memory/list", post(list_memory))
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
-        .with_state(state);
-
+    let app = build_app(state);
     tracing::info!(%addr, "cd-server listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     axum::serve(listener, app).await.expect("serve");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::fs;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    fn test_state(root: PathBuf, keys: &[(&str, &str)]) -> AppState {
+        // keys: (api_key, workspace_id)
+        let ws_a = Workspace::new("a", vec![root.join("a")]);
+        let ws_b = Workspace::new("b", vec![root.join("b")]);
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        fs::write(root.join("a/secret-a.md"), "alpha only data\n").unwrap();
+        fs::write(root.join("b/secret-b.md"), "beta only data\n").unwrap();
+        let mut workspaces = HashMap::new();
+        workspaces.insert(
+            "ws-a".into(),
+            WorkspaceData {
+                index: KeywordIndex::build(&ws_a).unwrap(),
+                workspace: ws_a,
+                memory: vec![],
+            },
+        );
+        workspaces.insert(
+            "ws-b".into(),
+            WorkspaceData {
+                index: KeywordIndex::build(&ws_b).unwrap(),
+                workspace: ws_b,
+                memory: vec![],
+            },
+        );
+        let mut key_hashes = Vec::new();
+        let mut key_workspaces = HashMap::new();
+        for (key, ws) in keys {
+            let h = hash_key(key);
+            key_hashes.push(h);
+            key_workspaces.insert(h, vec![(*ws).into()]);
+        }
+        AppState {
+            key_hashes: Arc::new(key_hashes),
+            workspaces: Arc::new(Mutex::new(workspaces)),
+            key_workspaces: Arc::new(key_workspaces),
+        }
+    }
+
+    #[tokio::test]
+    async fn isolation_key_a_cannot_search_b() {
+        let dir = tempdir().unwrap();
+        let state = test_state(
+            dir.path().to_path_buf(),
+            &[("key-a", "ws-a"), ("key-b", "ws-b")],
+        );
+        let app = build_app(state);
+
+        // key-a searching ws-b -> 403
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/search")
+            .header("authorization", "Bearer key-a")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-b","query":"beta"}"#))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // key-a searching ws-a -> 200
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/search")
+            .header("authorization", "Bearer key-a")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-a","query":"alpha"}"#))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn research_returns_events() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a/x.md"), "payments gateway\n").unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[("k", "ws-a")]);
+        // fix workspace root content already set
+        let app = build_app(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/research")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws-a","query":"payments","force_local":true}"#,
+            ))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_ok() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[]);
+        let app = build_app(state);
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
 }

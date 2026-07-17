@@ -1,14 +1,30 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Composer } from "./components/Composer";
 import {
+  PermissionModal,
+  type PermissionPrompt,
+} from "./components/PermissionModal";
+import {
   SettingsModal,
   type SettingsSection,
 } from "./components/SettingsModal";
 import { ToolCallList, type ToolCallView } from "./components/ToolCallList";
+import { MemoryPane, type MemoryDoc } from "./components/panes/MemoryPane";
+import { SourcePreviewPane } from "./components/panes/SourcePreviewPane";
+import { TodoPane } from "./components/panes/TodoPane";
 import { IconMoon, IconSettings, IconSpark, IconSun } from "./components/icons";
+import {
+  agentTurn,
+  completePermission,
+  hostCheckOllama,
+  hostPreflight,
+  hostSetWorkspace,
+  type EventDto,
+} from "./lib/host";
 import {
   runClientPreflight,
   type AppSetupState,
+  type PreflightReport,
 } from "./lib/preflight";
 
 const PRODUCT_NAME = "ContextDesk";
@@ -20,8 +36,11 @@ type Msg = {
   role: "user" | "assistant";
   content: string;
   tools?: ToolCallView[];
+  citations?: { id: string; label: string }[];
   streaming?: boolean;
 };
+
+type PaneId = "chat" | "memory" | "source" | "todos";
 
 function loadTheme(): "dark" | "light" {
   const t = localStorage.getItem("cd-theme");
@@ -49,6 +68,79 @@ function loadSetup(): AppSetupState {
   };
 }
 
+function applyEventsToMessage(
+  base: Msg,
+  events: EventDto[],
+): { msg: Msg; permission: PermissionPrompt | null } {
+  let content = base.content;
+  const tools: ToolCallView[] = [...(base.tools ?? [])];
+  const citations: { id: string; label: string }[] = [
+    ...(base.citations ?? []),
+  ];
+  let permission: PermissionPrompt | null = null;
+
+  for (const ev of events) {
+    const p = ev.payload;
+    switch (ev.kind) {
+      case "text_delta":
+        content += String(p.text ?? "");
+        break;
+      case "tool": {
+        const id = String(p.id ?? crypto.randomUUID());
+        const existing = tools.find((t) => t.id === id);
+        if (existing) {
+          existing.summary = String(p.summary ?? existing.summary);
+          if (p.detail) existing.detail = String(p.detail);
+          if (p.ok !== undefined && p.ok !== null) existing.ok = Boolean(p.ok);
+        } else {
+          tools.push({
+            id,
+            name: String(p.name ?? "tool"),
+            summary: String(p.summary ?? ""),
+            detail: p.detail ? String(p.detail) : undefined,
+            ok: p.ok === undefined || p.ok === null ? undefined : Boolean(p.ok),
+          });
+        }
+        break;
+      }
+      case "citation":
+        citations.push({
+          id: String(p.source_id ?? p.label ?? ""),
+          label: String(p.label ?? p.source_id ?? "source"),
+        });
+        break;
+      case "permission_required":
+        permission = {
+          requestId: String(p.request_id ?? ""),
+          toolName: String(p.tool_name ?? ""),
+          target: String(p.target ?? ""),
+          reason: String(p.reason ?? ""),
+          preview: String(p.preview ?? ""),
+          risk: String(p.risk ?? "local"),
+          typeConfirmPhrase:
+            p.risk === "remote" || p.risk === "destructive" ? "WRITE" : null,
+        };
+        break;
+      case "error":
+        content += `\n\n**Error:** ${String(p.message ?? "unknown")}\n`;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return {
+    msg: {
+      ...base,
+      content,
+      tools: tools.length ? tools : undefined,
+      citations: citations.length ? citations : undefined,
+      streaming: false,
+    },
+    permission,
+  };
+}
+
 export function App() {
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -57,6 +149,21 @@ export function App() {
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("preflight");
   const [dismissedBanner, setDismissedBanner] = useState(false);
+  const [sessionId] = useState(() => crypto.randomUUID());
+  const [busy, setBusy] = useState(false);
+  const [permission, setPermission] = useState<PermissionPrompt | null>(null);
+  const [pendingToolArgs, setPendingToolArgs] = useState<Record<
+    string,
+    unknown
+  > | null>(null);
+  const [pane, setPane] = useState<PaneId>("chat");
+  const [hostPreflightReport, setHostPreflightReport] =
+    useState<PreflightReport | null>(null);
+  const [memoryDocs, setMemoryDocs] = useState<MemoryDoc[]>([]);
+  const [memoryPath, setMemoryPath] = useState<string | null>(null);
+  const [sourcePath, setSourcePath] = useState<string | null>(null);
+  const [sourceContent, setSourceContent] = useState("");
+  const [agentError, setAgentError] = useState<string | null>(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -67,10 +174,38 @@ export function App() {
     localStorage.setItem("cd-setup", JSON.stringify(setup));
   }, [setup]);
 
-  const preflight = useMemo(() => runClientPreflight(setup), [setup]);
+  const clientPreflight = useMemo(() => runClientPreflight(setup), [setup]);
+  const preflight = hostPreflightReport ?? clientPreflight;
+
+  const refreshHostPreflight = useCallback(async () => {
+    const report = await hostPreflight();
+    if (!report) return;
+    setHostPreflightReport({
+      items: report.items.map((i) => ({
+        id: i.id,
+        title: i.title,
+        level: i.level,
+        detail: i.detail,
+        fixAction: (i.fix_action as AppSetupState extends never
+          ? never
+          : "workspace" | "ai" | "general" | "appearance") ?? undefined,
+      })),
+      hasBlocking: report.has_blocking,
+    });
+    // also refresh ollama flag on setup for client merge
+    if (setup.providerKind === "ollama") {
+      const ok = await hostCheckOllama(setup.baseUrl);
+      if (ok !== null) {
+        setSetup((s) => ({ ...s, ollamaReachable: ok }));
+      }
+    }
+  }, [setup.baseUrl, setup.providerKind]);
 
   useEffect(() => {
-    // First-run: open preflight when blocking issues exist.
+    void refreshHostPreflight();
+  }, [setup.workspaceRoots, setup.providerKind, setup.chatModel]);
+
+  useEffect(() => {
     if (preflight.hasBlocking && !localStorage.getItem("cd-setup-seen")) {
       setSettingsOpen(true);
       setSettingsSection("preflight");
@@ -84,49 +219,128 @@ export function App() {
   };
 
   const onSubmit = useCallback(
-    (text: string) => {
+    async (text: string) => {
       if (preflight.hasBlocking) {
         openSettings("preflight");
         return;
       }
+      setAgentError(null);
+      setBusy(true);
       const user: Msg = {
         id: crypto.randomUUID(),
         role: "user",
         content: text,
       };
-      const demoTools: ToolCallView[] = [
-        {
-          id: "t1",
-          name: "search_kb",
-          summary: `query: ${text.slice(0, 48)}…`,
-          detail: JSON.stringify({ query: text, limit: 8 }, null, 2),
-          ok: true,
-        },
-      ];
+      const assistantId = crypto.randomUUID();
       const assistant: Msg = {
-        id: crypto.randomUUID(),
+        id: assistantId,
         role: "assistant",
+        content: "",
         streaming: true,
-        tools: demoTools,
-        content:
-          "Shell demo reply. Wire the agent loop next — configuration already flows through **Settings** and **Preflight**, not hand-edited config files.\n",
       };
       setMessages((m) => [...m, user, assistant]);
-      window.setTimeout(() => {
+      setPane("chat");
+
+      try {
+        // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
+        const forceLocal =
+          setup.providerKind === "ollama" && setup.ollamaReachable === false;
+        const events = await agentTurn(sessionId, text, forceLocal);
+        setMessages((m) => {
+          const idx = m.findIndex((x) => x.id === assistantId);
+          if (idx < 0) return m;
+          const { msg, permission: perm } = applyEventsToMessage(m[idx], events);
+          if (perm) {
+            setPermission(perm);
+            try {
+              const prev = events.find((e) => e.kind === "permission_required");
+              if (prev?.payload?.preview) {
+                const raw = String(prev.payload.preview);
+                setPendingToolArgs(JSON.parse(raw) as Record<string, unknown>);
+              }
+            } catch {
+              setPendingToolArgs({});
+            }
+          }
+          // Open source pane on first citation
+          const cite = msg.citations?.[0];
+          if (cite) {
+            setSourcePath(cite.id);
+          }
+          const next = [...m];
+          next[idx] = msg;
+          return next;
+        });
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        setAgentError(err);
         setMessages((m) =>
           m.map((x) =>
-            x.id === assistant.id ? { ...x, streaming: false } : x,
+            x.id === assistantId
+              ? {
+                  ...x,
+                  streaming: false,
+                  content: `**Host error:** ${err}`,
+                }
+              : x,
           ),
         );
-      }, 400);
+      } finally {
+        setBusy(false);
+      }
     },
-    [preflight.hasBlocking],
+    [preflight.hasBlocking, sessionId, setup.ollamaReachable, setup.providerKind],
   );
+
+  const onPermissionRespond = async (
+    decision: "deny" | "allow_once" | "allow_session_path",
+    typed?: string,
+  ) => {
+    if (!permission) return;
+    try {
+      const events = await completePermission(
+        permission.requestId,
+        decision,
+        permission.toolName,
+        pendingToolArgs ?? {},
+        typed,
+      );
+      setPermission(null);
+      setPendingToolArgs(null);
+      // Append tool results as a system-visible assistant follow-up
+      setMessages((m) => {
+        const { msg } = applyEventsToMessage(
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: decision === "deny" ? "Write denied." : "",
+          },
+          events,
+        );
+        return [...m, msg];
+      });
+    } catch (e) {
+      setAgentError(e instanceof Error ? e.message : String(e));
+      setPermission(null);
+    }
+  };
 
   const scopeLabel =
     setup.workspaceRoots.length > 0
       ? `${setup.workspaceRoots.length} root${setup.workspaceRoots.length === 1 ? "" : "s"}`
       : "No workspace";
+
+  const onSaveSetup = async (next: AppSetupState) => {
+    setSetup(next);
+    if (next.workspaceName && next.workspaceRoots.length) {
+      try {
+        await hostSetWorkspace(next.workspaceName, next.workspaceRoots);
+      } catch {
+        /* browser mode */
+      }
+    }
+    void refreshHostPreflight();
+  };
 
   return (
     <div className="app-shell">
@@ -189,6 +403,19 @@ export function App() {
         </div>
       ) : null}
 
+      {agentError ? (
+        <div className="banner" role="alert">
+          <span>{agentError}</span>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            onClick={() => setAgentError(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
       <div className="main">
         <aside className="sidebar">
           <div className="sidebar__label">Sessions</div>
@@ -220,43 +447,114 @@ export function App() {
           </button>
         </aside>
         <div className="workspace">
-          <div className="chat-scroll">
-            {messages.length === 0 ? (
-              <div className="empty-state">
-                <div className="empty-state__title">{PRODUCT_NAME}</div>
-                <p className="empty-state__body">{TAGLINE}</p>
-                <p className="empty-state__body">
-                  Use <strong>Settings</strong> for workspace folders and AI
-                  providers. Preflight shows what is healthy before you chat.
-                </p>
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={() => openSettings("preflight")}
-                >
-                  Open Preflight
-                </button>
-              </div>
-            ) : (
-              messages.map((m) => (
-                <article key={m.id} className="msg" data-role={m.role}>
-                  <div className="msg__role">{m.role}</div>
-                  {m.tools ? <ToolCallList tools={m.tools} /> : null}
-                  <div className="msg__bubble">
-                    <div
-                      className="msg__content"
-                      data-streaming={m.streaming ? "true" : "false"}
+          <div className="pane-tabs" role="tablist">
+            {(
+              [
+                ["chat", "Chat"],
+                ["memory", "Memory"],
+                ["source", "Source"],
+                ["todos", "Todos"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="tab"
+                data-active={pane === id ? "true" : "false"}
+                onClick={() => setPane(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {pane === "chat" ? (
+            <>
+              <div className="chat-scroll">
+                {messages.length === 0 ? (
+                  <div className="empty-state">
+                    <div className="empty-state__title">{PRODUCT_NAME}</div>
+                    <p className="empty-state__body">{TAGLINE}</p>
+                    <p className="empty-state__body">
+                      Configure workspace + AI in Settings. Asks run through the
+                      real agent/tool host (Tauri or cd-server), not a demo
+                      shell.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      onClick={() => openSettings("preflight")}
                     >
-                      {m.content}
-                    </div>
+                      Open Preflight
+                    </button>
                   </div>
-                </article>
-              ))
-            )}
-          </div>
-          <div className="composer-dock">
-            <Composer onSubmit={onSubmit} />
-          </div>
+                ) : (
+                  messages.map((m) => (
+                    <article key={m.id} className="msg" data-role={m.role}>
+                      <div className="msg__role">{m.role}</div>
+                      {m.tools ? <ToolCallList tools={m.tools} /> : null}
+                      {m.citations?.length ? (
+                        <div>
+                          {m.citations.map((c) => (
+                            <button
+                              key={c.id + c.label}
+                              type="button"
+                              className="citation-chip"
+                              onClick={() => {
+                                setSourcePath(c.id);
+                                setSourceContent(
+                                  `(open via host) ${c.label}\nPath: ${c.id}`,
+                                );
+                                setPane("source");
+                              }}
+                            >
+                              {c.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="msg__bubble">
+                        <div
+                          className="msg__content"
+                          data-streaming={m.streaming ? "true" : "false"}
+                        >
+                          {m.content}
+                        </div>
+                      </div>
+                    </article>
+                  ))
+                )}
+              </div>
+              <div className="composer-dock">
+                <Composer onSubmit={onSubmit} disabled={busy} />
+              </div>
+            </>
+          ) : null}
+
+          {pane === "memory" ? (
+            <MemoryPane
+              docs={memoryDocs}
+              activePath={memoryPath}
+              onSelect={setMemoryPath}
+              onSave={(path, body) => {
+                setMemoryDocs((docs) => {
+                  const title =
+                    docs.find((d) => d.path === path)?.title ?? path;
+                  const next = docs.filter((d) => d.path !== path);
+                  next.push({ path, title, body });
+                  return next;
+                });
+              }}
+            />
+          ) : null}
+
+          {pane === "source" ? (
+            <SourcePreviewPane path={sourcePath} content={sourceContent} />
+          ) : null}
+
+          {pane === "todos" ? (
+            <TodoPane storageKey={`cd-todos-${sessionId}`} />
+          ) : null}
         </div>
       </div>
 
@@ -267,8 +565,12 @@ export function App() {
         theme={theme}
         onThemeChange={setTheme}
         onClose={() => setSettingsOpen(false)}
-        onSaveSetup={setSetup}
+        onSaveSetup={onSaveSetup}
+        onRecheckHost={refreshHostPreflight}
+        hostReport={hostPreflightReport}
       />
+
+      <PermissionModal prompt={permission} onRespond={onPermissionRespond} />
     </div>
   );
 }

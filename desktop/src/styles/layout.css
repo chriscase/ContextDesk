@@ -99,7 +99,7 @@
 
 .workspace {
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto 1fr auto;
   min-height: 0;
   min-width: 0;
 }
@@ -114,4 +114,59 @@
   border-top: 1px solid var(--border);
   background: linear-gradient(180deg, transparent, var(--bg-app) 28%);
   padding: var(--space-3) var(--space-5) var(--space-4);
+}
+
+.pane-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.pane-tabs button {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.pane-tabs button[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.pane {
+  padding: var(--space-3) var(--space-4);
+  min-height: 0;
+  overflow: auto;
+}
+
+.pane__header {
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+.pane__split {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: var(--space-3);
+}
+
+.pane__editor textarea {
+  min-height: 240px;
+  margin-bottom: var(--space-2);
+}
+
+.citation-chip {
+  display: inline-flex;
+  margin: 2px 4px 2px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  cursor: pointer;
 }
