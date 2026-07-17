@@ -1420,21 +1420,19 @@ export function App() {
     }
   }, [defaultModelKey, resolvedSessionId]);
 
-  /** Sidebar: pinned chats + current session if not already listed. */
-  const sidebarSessions = (() => {
-    const pinned = sessions.filter(
-      (s) => s.pinned && !s.archived && !s.trashed,
-    );
-    const ids = new Set(pinned.map((s) => s.id));
-    if (
-      activeSession &&
-      !ids.has(activeSession.id) &&
-      !activeSession.archived &&
-      !activeSession.trashed
-    ) {
-      return [activeSession, ...pinned];
-    }
-    return pinned;
+  /**
+   * All open chats (in-memory, not archived/trashed).
+   * Used for the chat tab strip and sidebar — not pin-only.
+   */
+  const openChatSessions = (() => {
+    return sessions
+      .filter((s) => !s.archived && !s.trashed)
+      .slice()
+      .sort((a, b) => {
+        // Pinned first, then most recently updated.
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return b.updatedAt.localeCompare(a.updatedAt);
+      });
   })();
 
   const onPermissionRespond = async (
@@ -1596,7 +1594,7 @@ export function App() {
       <div className="main">
         <aside className="sidebar">
           <div className="row--between">
-            <div className="sidebar__label">Pinned</div>
+            <div className="sidebar__label">Chats</div>
             <button
               type="button"
               className="btn btn--ghost btn--sm"
@@ -1609,12 +1607,12 @@ export function App() {
           <ul className="session-list">
             {!sessionsReady ? (
               <li className="field__hint session-list__loading">Loading…</li>
-            ) : sidebarSessions.length === 0 ? (
+            ) : openChatSessions.length === 0 ? (
               <li className="field__hint session-list__loading">
-                Pin chats from Archive
+                No open chats — press + to start
               </li>
             ) : (
-              sidebarSessions.map((s) => (
+              openChatSessions.map((s) => (
                 <li key={s.id}>
                   <button
                     type="button"
@@ -1647,7 +1645,7 @@ export function App() {
             data-active={pane === "archive" ? "true" : undefined}
             onClick={() => setPane("archive")}
           >
-            Chat archive
+            Archive & trash
           </button>
         </aside>
         <div className="workspace">
@@ -1687,35 +1685,53 @@ export function App() {
 
           {pane === "chat" ? (
             <>
-              <div className="session-tabs" role="tablist" aria-label="Open chat">
-                <button
-                  type="button"
-                  role="tab"
-                  className="session-tab"
-                  data-active="true"
-                  title="Right-click for rename, pin, delete"
-                  onContextMenu={(e) => {
-                    if (activeSession) openChatCtxMenu(e, activeSession.id);
-                  }}
-                >
-                  {activeSession?.title ?? "Chat"}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  title="New chat"
-                  onClick={createSession}
-                >
-                  +
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  title="Browse all chats"
-                  onClick={() => setPane("archive")}
-                >
-                  Archive
-                </button>
+              <div
+                className="session-tabs"
+                role="tablist"
+                aria-label="Open chats"
+              >
+                <div className="session-tabs__list">
+                  {openChatSessions.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      role="tab"
+                      className="session-tab"
+                      data-active={
+                        s.id === resolvedSessionId ? "true" : "false"
+                      }
+                      aria-selected={s.id === resolvedSessionId}
+                      title={`${s.title} — right-click for options`}
+                      onClick={() => setActiveSessionId(s.id)}
+                      onContextMenu={(e) => openChatCtxMenu(e, s.id)}
+                    >
+                      {s.pinned ? (
+                        <span className="session-tab__pin" aria-hidden>
+                          📌
+                        </span>
+                      ) : null}
+                      <span className="session-tab__title">{s.title}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="session-tabs__actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    title="New chat"
+                    onClick={createSession}
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    title="Browse archive & trash"
+                    onClick={() => setPane("archive")}
+                  >
+                    Archive
+                  </button>
+                </div>
               </div>
               <div className="chat-scroll-wrap">
               <div

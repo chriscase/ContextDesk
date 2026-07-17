@@ -307,21 +307,61 @@
 .session-tabs {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
+  align-items: flex-end;
+  gap: var(--space-2);
   padding: 4px var(--space-3) 0;
   border-bottom: 1px solid var(--border-soft);
-  flex-wrap: wrap;
   background: var(--bg-app);
+  min-height: 0;
+}
+
+.session-tabs__list {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  padding-bottom: 0;
+}
+
+.session-tabs__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding-bottom: 4px;
 }
 
 .session-tab {
-  padding: var(--space-1) var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 11rem;
+  padding: 6px 12px;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   font-size: var(--text-sm);
   color: var(--text-muted);
   border: 1px solid transparent;
   border-bottom: none;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.session-tab__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.session-tab__pin {
+  font-size: 10px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .session-tab[data-active="true"] {
@@ -334,6 +374,10 @@
 .session-tab:hover {
   color: var(--text);
   background: var(--bg-hover);
+}
+
+.session-tab[data-active="true"]:hover {
+  background: var(--bg-panel);
 }
 
 .compact-banner {
