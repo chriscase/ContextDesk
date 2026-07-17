@@ -33,16 +33,16 @@ Last audit: 2026-07-17. Update when closing.
 | 4 | Epic KB/agent | PARTIAL | |
 | 5 | Epic desktop UI | PARTIAL | |
 | 14 | Profile model | DONE | ProviderProfile + AppConfig save/load + tests |
-| 15 | Gateway probe | PARTIAL | expand + SSRF; live model list incomplete |
+| 15 | Gateway probe | DONE | URL expand + host probe_url; model list residual thin |
 | 16 | OpenAI chat+tools | PARTIAL | Client + parse tests; stream incomplete |
-| 17 | Ollama | PARTIAL | Client + health |
-| 18 | Local discovery | PARTIAL | discover_local |
+| 17 | Ollama | DONE | tags + chat + health; embed optional |
+| 18 | Local discovery | DONE | discover_local + Settings candidates list |
 | 19 | Grok session | PARTIAL | Module + host pin; full wire incomplete |
-| 20 | AI settings UI | PARTIAL | Form exists |
+| 20 | AI settings UI | PARTIAL | Form + candidates + probe; live models residual |
 | 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
 | 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
 | 23 | Permission modal UI | DONE | Blocking modal; preview; allow once/session; type-confirm |
-| 24 | Audit log | PARTIAL | JSONL |
+| 24 | Audit log | DONE | JSONL + scrub |
 | 25 | MVP tools | DONE | search/read/save + allowlist + line caps |
 | 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
 | 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
