@@ -8,7 +8,7 @@ Last audit: 2026-07-17. Update when closing.
 
 | # | Title | Status | Notes |
 |---|--------|--------|-------|
-| 1 | Epic Foundation | PARTIAL | Docs/CI/core exist; epic open until children honest |
+| 1 | Epic Foundation | DONE | CI green; branding; AGENTS/docs; Phase 0 children closed |
 | 11 | CI fmt/clippy/test | DONE | Closed honestly; CI green a444fdb |
 | 12 | Tauri shell + theming | DONE | tokens/themes; theme toggle; branding host; no inline style soup |
 | 13 | RENAME.md | DONE | `docs/RENAME.md` |
