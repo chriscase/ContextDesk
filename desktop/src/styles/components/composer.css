@@ -1,66 +1,30 @@
+/* Composer shell — single surface; toolbar is chrome, not a second clickable zone. */
+
 .composer {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-inset), 0 8px 24px rgb(0 0 0 / 0.22);
-  padding: 6px;
-  transition: border-color var(--motion-fast), box-shadow var(--motion-med);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.04) inset,
+    0 10px 28px rgb(0 0 0 / 0.22);
+  overflow: hidden;
+  transition:
+    border-color var(--motion-fast),
+    box-shadow var(--motion-med);
+  cursor: text;
 }
 
 .composer:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent),
-    0 10px 28px rgb(0 0 0 / 0.3);
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent),
+    0 12px 32px rgb(0 0 0 / 0.28);
 }
 
-.composer__toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 2px var(--space-2) 0;
-  min-height: 24px;
-}
-
-.composer__hint {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-}
-
-.composer__model {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-}
-
-.composer__model-label {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 600;
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
-.composer__model-select {
-  max-width: 14rem;
-  min-width: 9rem;
-  padding: 3px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-soft);
-  background: var(--bg-input);
-  color: var(--text);
-  font-size: var(--text-xs);
-}
-
-.composer__model-select:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
+.composer[data-busy="true"] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
 }
 
 .composer__textarea {
@@ -68,33 +32,256 @@
   resize: none;
   border: none;
   background: transparent;
-  padding: var(--space-2) var(--space-3);
+  padding: 0.7rem 0.95rem 0.45rem;
   min-height: var(--composer-min-h);
   max-height: var(--composer-max-h);
   line-height: 1.5;
+  font-size: var(--text-sm);
   color: var(--text);
+  cursor: text;
+}
+
+.composer__textarea:focus {
+  outline: none;
 }
 
 .composer__textarea::placeholder {
   color: var(--text-faint);
+  opacity: 0.9;
 }
 
 .composer[data-expanded="true"] .composer__textarea {
-  min-height: 128px;
+  min-height: 140px;
+  max-height: min(42vh, 320px);
+  resize: vertical;
 }
 
-.composer__actions {
+/* Footer bar: same shell, subtle divider only — not a different “button” slab */
+.composer__bar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2);
-  padding: 4px var(--space-1) 4px;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem 0.4rem 0.5rem;
   border-top: 1px solid var(--border-soft);
-  margin-top: 2px;
-  background: var(--overlay-soft);
-  border-radius: 0 0 calc(var(--radius-lg) - 2px) calc(var(--radius-lg) - 2px);
+  background: transparent;
+  cursor: default;
 }
 
+.composer__bar-left,
+.composer__bar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.composer__bar-left {
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.composer__bar-right {
+  flex-shrink: 0;
+}
+
+/* Model source pill */
+.composer__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 13rem;
+  height: 28px;
+  padding: 0 0.25rem 0 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-input);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast);
+}
+
+.composer__pill:hover {
+  border-color: var(--border);
+  background: var(--surface-chip, var(--bg-hover));
+}
+
+.composer__pill-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.composer__pill-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%238b919c' d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
+    no-repeat right 0.2rem center;
+  color: var(--text);
+  font-size: 11.5px;
+  font-family: inherit;
+  padding: 0.2rem 1.05rem 0.2rem 0.1rem;
+  max-width: 9rem;
+  min-width: 0;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+.composer__pill-select:focus {
+  outline: none;
+}
+
+.composer__pill-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Quiet tool chips — not big ghost buttons */
+.composer__chip {
+  height: 28px;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  transition:
+    color var(--motion-fast),
+    border-color var(--motion-fast),
+    background var(--motion-fast);
+}
+
+.composer__chip svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.composer__chip:hover {
+  color: var(--text);
+  border-color: var(--border-soft);
+  background: var(--overlay-faint, rgb(255 255 255 / 0.04));
+}
+
+.composer__chip.is-on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-soft));
+  background: var(--accent-soft);
+}
+
+.composer__chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.composer__chip-text {
+  line-height: 1;
+}
+
+.composer__hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  padding: 0 0.35rem;
+  white-space: nowrap;
+  user-select: none;
+}
+
+@media (max-width: 720px) {
+  .composer__hint {
+    display: none;
+  }
+  .composer__chip-text {
+    display: none;
+  }
+}
+
+/* Stop — soft danger, pill */
+.composer__stop {
+  height: 30px;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: 11.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  transition: background var(--motion-fast), border-color var(--motion-fast);
+}
+
+.composer__stop svg {
+  width: 14px;
+  height: 14px;
+}
+
+.composer__stop:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+
+/* Send — round primary, not a wide rectangle */
+.composer__send {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-on, #0b1020);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.16) inset;
+  transition:
+    transform var(--motion-fast),
+    opacity var(--motion-fast),
+    background var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.composer__send svg {
+  width: 16px;
+  height: 16px;
+  margin-left: 1px; /* optical center for send glyph */
+}
+
+.composer__send:hover:not(:disabled) {
+  background: var(--accent-strong);
+  transform: translateY(-1px);
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.2) inset,
+    0 4px 12px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.composer__send:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.composer__send:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Shared app buttons (settings, etc.) — kept here historically */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -104,8 +291,11 @@
   font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.2;
-  transition: background var(--motion-fast), color var(--motion-fast),
-    border-color var(--motion-fast), opacity var(--motion-fast);
+  transition:
+    background var(--motion-fast),
+    color var(--motion-fast),
+    border-color var(--motion-fast),
+    opacity var(--motion-fast);
 }
 
 .btn--ghost {
@@ -132,4 +322,11 @@
 .btn--primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.btn--sm {
+  padding: 3px 8px;
+  font-size: var(--text-xs);
+  min-height: 22px;
+  gap: 4px;
 }

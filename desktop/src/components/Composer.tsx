@@ -1,19 +1,15 @@
-import { useCallback, useId, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useRef, useState } from "react";
 import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 
 type Props = {
   onSubmit: (text: string) => void;
-  /** When true, Send is disabled and Stop is offered if onStop provided. */
   disabled?: boolean;
   busy?: boolean;
   onStop?: () => void;
-  /** Models available from configured providers (grouped by source). */
   models?: ModelOptionDto[];
-  /** Full selection key `provider::model` for this chat. */
   selectedModelKey?: string;
   onModelChange?: (selectionKey: string) => void;
-  /** Mark selected model as default for new chats. */
   onSetDefaultModel?: (selectionKey: string) => void;
 };
 
@@ -30,6 +26,7 @@ export function Composer({
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const id = useId();
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
   const submit = useCallback(() => {
     const t = value.trim();
@@ -41,6 +38,7 @@ export function Composer({
   const insertSnippet = (snippet: string) => {
     setValue((v) => (v ? `${v}\n${snippet}` : snippet));
     setExpanded(true);
+    requestAnimationFrame(() => taRef.current?.focus());
   };
 
   const groups = useMemo(() => {
@@ -69,22 +67,48 @@ export function Composer({
     models.find((m) => m.selection_key === selectValue)?.is_default,
   );
 
+  const canSend = !disabled && !busy && Boolean(value.trim());
+
   return (
-    <div className="composer" data-expanded={expanded ? "true" : "false"}>
-      <div className="composer__toolbar">
-        <span className="composer__hint" id={`${id}-hint`}>
-          Enter to send · Shift+Enter newline · /skill id …
-        </span>
-        <div className="row">
+    <div
+      className="composer"
+      data-expanded={expanded ? "true" : "false"}
+      data-busy={busy ? "true" : "false"}
+      onMouseDown={(e) => {
+        // Click empty shell chrome focuses the field (not on buttons/selects).
+        const t = e.target as HTMLElement;
+        if (t.closest("button, select, a, label, textarea")) return;
+        taRef.current?.focus();
+      }}
+    >
+      <textarea
+        ref={taRef}
+        className="composer__textarea"
+        id={`${id}-input`}
+        aria-describedby={`${id}-hint`}
+        placeholder="Message ContextDesk…"
+        value={value}
+        rows={expanded ? 8 : 2}
+        disabled={disabled && !busy}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
+
+      <div className="composer__bar">
+        <div className="composer__bar-left">
           {groups.length > 0 && onModelChange ? (
-            <label className="composer__model">
-              <span className="composer__model-label">Model</span>
+            <label className="composer__pill" title="Model for this chat">
+              <span className="composer__pill-label">Model</span>
               <select
-                className="composer__model-select"
+                className="composer__pill-select"
                 value={selectValue}
                 disabled={busy}
                 aria-label="Chat model by source"
-                title="Model for this chat — grouped by provider source"
                 onChange={(e) => onModelChange(e.target.value)}
               >
                 {groups.map(([group, opts]) => (
@@ -100,20 +124,22 @@ export function Composer({
               </select>
             </label>
           ) : null}
-          {selectValue && onSetDefaultModel ? (
+
+          {selectValue && onSetDefaultModel && !selectedIsDefault ? (
             <button
               type="button"
-              className="btn btn--ghost btn--sm"
+              className="composer__chip"
               title="Use this model for new chats"
-              disabled={busy || selectedIsDefault}
+              disabled={busy}
               onClick={() => onSetDefaultModel(selectValue)}
             >
-              Set default
+              Default
             </button>
           ) : null}
+
           <button
             type="button"
-            className="btn btn--ghost"
+            className="composer__chip"
             title="Insert bullet list"
             onClick={() => insertSnippet("- item\n- item")}
           >
@@ -121,7 +147,7 @@ export function Composer({
           </button>
           <button
             type="button"
-            className="btn btn--ghost"
+            className="composer__chip"
             title="Insert code fence"
             onClick={() => insertSnippet("```\n\n```")}
           >
@@ -129,47 +155,44 @@ export function Composer({
           </button>
           <button
             type="button"
-            className="btn btn--ghost"
+            className={`composer__chip${expanded ? " is-on" : ""}`}
             onClick={() => setExpanded((e) => !e)}
             aria-pressed={expanded}
-            title={expanded ? "Collapse composer" : "Expand composer"}
+            title={expanded ? "Collapse" : "Expand"}
           >
             <IconExpand />
-            {expanded ? "Collapse" : "Expand"}
+            <span className="composer__chip-text">
+              {expanded ? "Less" : "More"}
+            </span>
           </button>
         </div>
-      </div>
-      <textarea
-        className="composer__textarea"
-        aria-labelledby={`${id}-hint`}
-        placeholder="Ask where something lives, how a system works, or what we already know…"
-        value={value}
-        rows={expanded ? 8 : 2}
-        disabled={disabled && !busy}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <div className="composer__actions">
-        {busy && onStop ? (
-          <button type="button" className="btn btn--ghost" onClick={onStop}>
-            <IconClose />
-            Stop
+
+        <div className="composer__bar-right">
+          <span className="composer__hint" id={`${id}-hint`}>
+            Enter ↵ · Shift+Enter newline
+          </span>
+          {busy && onStop ? (
+            <button
+              type="button"
+              className="composer__stop"
+              onClick={onStop}
+              title="Stop generation"
+            >
+              <IconClose />
+              Stop
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="composer__send"
+            onClick={submit}
+            disabled={!canSend}
+            title="Send message"
+            aria-label="Send"
+          >
+            <IconSend />
           </button>
-        ) : null}
-        <button
-          type="button"
-          className="btn btn--primary"
-          onClick={submit}
-          disabled={disabled || busy || !value.trim()}
-        >
-          <IconSend />
-          Send
-        </button>
+        </div>
       </div>
     </div>
   );
