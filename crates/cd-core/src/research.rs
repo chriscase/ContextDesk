@@ -3,8 +3,7 @@
 use crate::agent::{run_agent_turn, AgentOptions, ChatBackend, ScriptedBackend};
 use crate::audit::AuditLog;
 use crate::chat::{
-    ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role,
-    ToolCallMsg,
+    ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, ToolCallMsg,
 };
 use crate::error::CoreError;
 use crate::error::CoreResult;
@@ -228,10 +227,12 @@ impl ChatBackend for OllamaBackend {
     async fn complete(
         &self,
         messages: &[ChatMessage],
-        _tools: &[ToolSpec],
+        tools: &[ToolSpec],
     ) -> CoreResult<ChatCompletion> {
-        // Ollama path: no native tools — agent uses JSON fallback or local prefetch.
-        self.0.complete(messages).await
+        // Pass tools when present (mistral/llama tool-capable models). Empty
+        // tools still works for plain chat; agent JSON fallback remains.
+        let tools = if tools.is_empty() { None } else { Some(tools) };
+        self.0.complete(messages, tools).await
     }
 }
 
@@ -263,58 +264,31 @@ pub async fn research_turn(
     session_id: &str,
     force_local: bool,
 ) -> CoreResult<Vec<StreamEvent>> {
-    if force_local || profile.kind == ProviderKind::Ollama {
-        // Try Ollama agent first if not forced local-only retrieval
-        if !force_local && profile.kind == ProviderKind::Ollama {
-            if let Ok(client) = OllamaClient::new(&profile.base_url, &profile.chat_model) {
-                if client.health().await {
-                    // Prefetch then answer with ollama (tools via JSON fallback after prefetch)
-                    let ctx = crate::agent::prefetch_context(host, user_text)?;
-                    history.push(ChatMessage {
-                        role: Role::System,
-                        content: format!(
-                            "{}\n\nRetrieved context:\n{ctx}",
-                            crate::injection::SYSTEM_POLICY
-                        ),
-                        tool_call_id: None,
-                        tool_calls: None,
-                    });
-                    // Scripted: use ollama for final answer only via one complete
-                    let backend = OllamaBackend(client);
-                    history.push(ChatMessage {
-                        role: Role::User,
-                        content: user_text.into(),
-                        tool_call_id: None,
-                        tool_calls: None,
-                    });
-                    let mut events = vec![StreamEvent::TurnStarted {
+    if force_local {
+        return research_local(host, user_text, session_id);
+    }
+
+    // Ollama: full agent loop with native tools (mistral etc. advertise tools).
+    // Previously we only prefetched search_kb and answered once — models then
+    // correctly said they could not search the web because no tools were offered.
+    if profile.kind == ProviderKind::Ollama {
+        if let Ok(client) = OllamaClient::new(&profile.base_url, &profile.chat_model) {
+            if client.health().await {
+                let backend = OllamaBackend(client);
+                return run_agent_turn(
+                    &backend,
+                    host,
+                    user_text,
+                    history,
+                    &AgentOptions {
                         session_id: session_id.into(),
                         model: Some(profile.chat_model.clone()),
-                    }];
-                    events.push(StreamEvent::SearchTrail {
-                        steps: vec!["source:Files".into(), "prefetch:search_kb".into()],
-                    });
-                    match backend.complete(history, &[]).await {
-                        Ok(c) => {
-                            for chunk in chunk_text(&c.content, 48) {
-                                events.push(StreamEvent::TextDelta { text: chunk });
-                            }
-                            history.push(ChatMessage {
-                                role: Role::Assistant,
-                                content: c.content,
-                                tool_call_id: None,
-                                tool_calls: None,
-                            });
-                            events.push(StreamEvent::TurnCompleted {
-                                reason: c.finish_reason,
-                            });
-                            return Ok(events);
-                        }
-                        Err(_) => {
-                            // fall through to local
-                        }
-                    }
-                }
+                        max_rounds: 8,
+                        cancel: None,
+                    },
+                    None,
+                )
+                .await;
             }
         }
         return research_local(host, user_text, session_id);

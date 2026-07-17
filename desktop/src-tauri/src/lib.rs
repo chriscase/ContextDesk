@@ -1314,7 +1314,7 @@ async fn llm_title_for_prompt(state: &AppState, prompt: &str) -> String {
             else {
                 return fallback;
             };
-            match client.complete(&messages).await {
+            match client.complete(&messages, None).await {
                 Ok(c) => c.content,
                 Err(_) => return fallback,
             }

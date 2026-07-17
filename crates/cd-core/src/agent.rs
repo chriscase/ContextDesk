@@ -5,7 +5,7 @@ use crate::chat::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::events::StreamEvent;
-use crate::injection::{wrap_untrusted, SYSTEM_POLICY};
+use crate::injection::{system_policy_with_tools, wrap_untrusted};
 use crate::permissions::PermissionDecision;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
@@ -99,13 +99,33 @@ pub async fn run_agent_turn(
         model: opts.model.clone(),
     }];
 
+    let specs = host.specs();
+    let tool_names: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
+    let system_content = system_policy_with_tools(&tool_names);
+
     if history.is_empty() {
         history.push(ChatMessage {
             role: Role::System,
-            content: SYSTEM_POLICY.into(),
+            content: system_content,
             tool_call_id: None,
             tool_calls: None,
         });
+    } else if !history.iter().any(|m| matches!(m.role, Role::System)) {
+        // Loaded sessions may lack system — inject once so tools are visible.
+        history.insert(
+            0,
+            ChatMessage {
+                role: Role::System,
+                content: system_content,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+    } else {
+        // Refresh system message so newly enabled tools (e.g. web research) appear.
+        if let Some(sys) = history.iter_mut().find(|m| matches!(m.role, Role::System)) {
+            sys.content = system_content;
+        }
     }
     history.push(ChatMessage {
         role: Role::User,
@@ -114,7 +134,6 @@ pub async fn run_agent_turn(
         tool_calls: None,
     });
 
-    let specs = host.specs();
     let mut trail: Vec<String> = vec!["started".into()];
 
     for round in 0..opts.max_rounds {

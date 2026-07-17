@@ -629,27 +629,24 @@ impl OllamaClient {
         Ok(out)
     }
 
-    /// Non-stream chat.
-    pub async fn complete(&self, messages: &[ChatMessage]) -> CoreResult<ChatCompletion> {
-        let omsgs: Vec<Value> = messages
-            .iter()
-            .map(|m| {
-                json!({
-                    "role": match m.role {
-                        Role::System => "system",
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                        Role::Tool => "tool",
-                    },
-                    "content": m.content,
-                })
-            })
-            .collect();
-        let body = json!({
+    /// Non-stream chat. When `tools` is non-empty, passes OpenAI-shaped tool
+    /// schemas (Ollama `/api/chat` `tools` field) and parses `message.tool_calls`.
+    pub async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+    ) -> CoreResult<ChatCompletion> {
+        let omsgs: Vec<Value> = messages.iter().map(message_to_ollama).collect();
+        let mut body = json!({
             "model": self.model,
             "messages": omsgs,
             "stream": false,
         });
+        if let Some(specs) = tools {
+            if !specs.is_empty() {
+                body["tools"] = tools_to_openai(specs);
+            }
+        }
         let url = format!("{}/api/chat", self.base_url);
         let resp = self
             .http
@@ -669,23 +666,115 @@ impl OllamaClient {
                 text.chars().take(200).collect::<String>()
             )));
         }
-        let v: Value = serde_json::from_str(&text)?;
-        let content = v
-            .pointer("/message/content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-        Ok(ChatCompletion {
-            content,
-            tool_calls: vec![],
-            finish_reason: "stop".into(),
-        })
+        parse_ollama_chat_response(&text)
     }
 
     /// Health: tags reachable.
     pub async fn health(&self) -> bool {
         self.list_tags().await.is_ok()
     }
+}
+
+/// Serialize a chat message for Ollama `/api/chat` (includes tool_calls).
+fn message_to_ollama(m: &ChatMessage) -> Value {
+    let role = match m.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut v = json!({
+        "role": role,
+        "content": m.content,
+    });
+    if let Some(id) = &m.tool_call_id {
+        v["tool_call_id"] = json!(id);
+    }
+    if let Some(tcs) = &m.tool_calls {
+        let arr: Vec<Value> = tcs
+            .iter()
+            .map(|tc| {
+                // Ollama commonly wants arguments as a JSON object, not a string.
+                let args: Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
+                json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": args,
+                    }
+                })
+            })
+            .collect();
+        v["tool_calls"] = Value::Array(arr);
+    }
+    v
+}
+
+/// Parse Ollama `/api/chat` non-stream response (tool_calls + content).
+pub fn parse_ollama_chat_response(text: &str) -> CoreResult<ChatCompletion> {
+    let v: Value = serde_json::from_str(text)?;
+    let message = v.get("message").cloned().unwrap_or(json!({}));
+    let content = message
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut tool_calls = Vec::new();
+    if let Some(arr) = message.get("tool_calls").and_then(|t| t.as_array()) {
+        for (i, tc) in arr.iter().enumerate() {
+            let id = tc
+                .get("id")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("ollama_{i}"));
+            // Ollama: { function: { name, arguments } } — args may be object or string.
+            let func = tc
+                .get("function")
+                .cloned()
+                .or_else(|| {
+                    // Older shapes put name at top level
+                    if tc.get("name").is_some() {
+                        Some(tc.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(json!({}));
+            let name = func
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let arguments = match func.get("arguments") {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => "{}".into(),
+            };
+            tool_calls.push(ToolCallMsg {
+                id,
+                kind: "function".into(),
+                function: FunctionCall { name, arguments },
+            });
+        }
+    }
+    let finish_reason = if tool_calls.is_empty() {
+        v.get("done_reason")
+            .and_then(|d| d.as_str())
+            .unwrap_or("stop")
+            .to_string()
+    } else {
+        "tool_calls".into()
+    };
+    Ok(ChatCompletion {
+        content,
+        tool_calls,
+        finish_reason,
+    })
 }
 
 /// Parse JSON tool call fallback from model prose.
@@ -764,6 +853,34 @@ mod tests {
         .unwrap();
         assert_eq!(n, "search_kb");
         assert_eq!(a["query"], "x");
+    }
+
+    #[test]
+    fn parse_ollama_tool_calls_object_args() {
+        // Live-shaped fixture from Ollama mistral (arguments as object).
+        let raw = r#"{
+          "model":"mistral",
+          "message":{
+            "role":"assistant",
+            "content":"",
+            "tool_calls":[{
+              "id":"call_abc",
+              "function":{
+                "index":0,
+                "name":"web_search",
+                "arguments":{"query":"latest rust release","limit":10}
+              }
+            }]
+          },
+          "done":true,
+          "done_reason":"stop"
+        }"#;
+        let c = parse_ollama_chat_response(raw).unwrap();
+        assert_eq!(c.tool_calls.len(), 1);
+        assert_eq!(c.tool_calls[0].function.name, "web_search");
+        assert_eq!(c.finish_reason, "tool_calls");
+        let args: Value = serde_json::from_str(&c.tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["query"], "latest rust release");
     }
 
     #[test]
