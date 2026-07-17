@@ -28,16 +28,16 @@ Last audit: 2026-07-17. Update when closing.
 
 | # | Title | Status | Notes |
 |---|--------|--------|-------|
-| 2 | Epic providers | PARTIAL | |
-| 3 | Epic tools | PARTIAL | |
-| 4 | Epic KB/agent | PARTIAL | |
-| 5 | Epic desktop UI | PARTIAL | |
+| 2 | Epic providers | DONE | Phase1 children closed; #19 deferred Phase2 |
+| 3 | Epic tools | DONE | host+grants+audit closed |
+| 4 | Epic KB/agent | DONE | tools+agent+citations+router+golden |
+| 5 | Epic desktop UI | DONE | stream+tools+composer+sessions |
 | 14 | Profile model | DONE | ProviderProfile + AppConfig save/load + tests |
 | 15 | Gateway probe | DONE | URL expand + host probe_url; model list residual thin |
 | 16 | OpenAI chat+tools | DONE | non-stream + SSE parse/fixtures; research uses stream w/ fallback |
 | 17 | Ollama | DONE | tags + chat + health; embed optional |
 | 18 | Local discovery | DONE | discover_local + Settings candidates list |
-| 19 | Grok session | PARTIAL | Module + host pin; full wire incomplete |
+| 19 | Grok session | PARTIAL | Phase2 deferred; presence-only in Phase1 |
 | 20 | AI settings UI | DONE | discover candidates + probe; no secrets full |
 | 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
 | 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
@@ -47,19 +47,19 @@ Last audit: 2026-07-17. Update when closing.
 | 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
 | 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
 | 28 | Citations UI | DONE | chips + trail + markdown #cite links |
-| 29 | Router budgets | PARTIAL | module |
+| 29 | Router budgets | DONE | rank + trail + tests |
 | 30 | Streaming markdown | DONE | progressive text_delta + MarkdownBody + materialize |
 | 31 | Compact tools UI | DONE | status icons; collapse threshold 4 |
 | 32 | Composer | DONE | expand; Enter/Shift+Enter; stop SVG; list/code assist |
-| 33 | Compaction | PARTIAL | sessions module; UI thin |
-| 34 | Multi-session tabs | TODO/PARTIAL | single session mostly |
-| 35 | SVG icons | PARTIAL | icons.tsx |
-| 58 | Golden harness | PARTIAL | fixtures + tests |
+| 33 | Compaction | DONE | core + UI compact; history retained |
+| 34 | Multi-session tabs | DONE | session tabs + per-session state |
+| 35 | SVG icons | DONE | icons.tsx used across UI |
+| 58 | Golden harness | DONE | golden_research offline |
 | 61 | SSRF | DONE | Unit tests + probe_url policy + DEV.md override |
 | 62 | Injection | DONE | wrap_untrusted + gate test; write skills disabled |
 | 63 | Path policy | DONE | symlink escape; .env deny; no root session grant |
-| 64 | Egress/local-only | PARTIAL | local-only toggle + host SSRF; badge residual |
-| 65 | Phase 1 DoD | TODO | not honestly closable yet |
+| 64 | Egress/local-only | DONE | titlebar badge + refuse remote when local-only |
+| 65 | Phase 1 DoD | DONE | fixtures+grants+CI offline; README/ROADMAP linked |
 | 72 | AI form live probe | DONE | validation; test connection; keychain save; local-only |
 
 ## Phase 2+
