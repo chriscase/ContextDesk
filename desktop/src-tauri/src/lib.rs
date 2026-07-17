@@ -976,7 +976,8 @@ fn propose_save_skill_cmd(
 async fn agent_turn(
     state: State<'_, AppState>,
     req: AgentTurnReq,
-) -> Result<Vec<EventDto>, String> {
+    on_event: tauri::ipc::Channel<EventDto>,
+) -> Result<(), String> {
     ensure_host(&state)?;
     let cfg = state.config.lock().expect("config").clone();
     let skill_dirs = skill_dirs_for(&state, &cfg);
@@ -1050,9 +1051,15 @@ async fn agent_turn(
         cancels.insert(req.session_id.clone(), cancel.clone());
     }
 
+    let channel = on_event;
+    let mut sink = |ev: cd_core::events::StreamEvent| {
+        let dto = cd_core::research::event_to_dto(&ev);
+        let _ = channel.send(dto);
+    };
+
     // Always use local research when forced or for reliability without holding locks
     // across await: run local path under mutex (sync). Live model path uses block_in_place.
-    let events = if req.force_local || profile.kind == cd_core::providers::ProviderKind::Ollama {
+    let result = if req.force_local || profile.kind == cd_core::providers::ProviderKind::Ollama {
         let mut host_guard = state.host.lock().expect("host");
         let host = host_guard.as_mut().ok_or("host missing")?;
         // Try ollama via block_in_place only if not force_local
@@ -1068,27 +1075,38 @@ async fn agent_turn(
                         &req.session_id,
                         false,
                         Some(cancel.clone()),
+                        Some(&mut sink),
                     ),
                 )
             });
             match res {
-                Ok(ev) => ev,
-                Err(_) => cd_core::research::research_local_with_skills(
-                    host,
-                    &user_text,
-                    &req.session_id,
-                    &skill_dirs,
-                )
-                .map_err(|e| e.to_string())?,
+                Ok(ev) => Ok(ev),
+                Err(_) => {
+                    let ev = cd_core::research::research_local_with_skills(
+                        host,
+                        &user_text,
+                        &req.session_id,
+                        &skill_dirs,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    for e in &ev {
+                        sink(e.clone());
+                    }
+                    Ok(ev)
+                }
             }
         } else {
-            cd_core::research::research_local_with_skills(
+            let ev = cd_core::research::research_local_with_skills(
                 host,
                 &user_text,
                 &req.session_id,
                 &skill_dirs,
             )
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+            for e in &ev {
+                sink(e.clone());
+            }
+            Ok(ev)
         }
     } else {
         let mut host_guard = state.host.lock().expect("host");
@@ -1104,10 +1122,11 @@ async fn agent_turn(
                     &req.session_id,
                     false,
                     Some(cancel.clone()),
+                    Some(&mut sink),
                 ),
             )
         })
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
     };
 
     {
@@ -1118,7 +1137,7 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(req.session_id.clone(), history);
     }
-    Ok(events_to_dto(&events))
+    result.map(|_| ())
 }
 
 /// Signal cooperative cancel for an in-flight turn (#109).

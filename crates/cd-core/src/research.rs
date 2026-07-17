@@ -1,6 +1,8 @@
 //! Offline and host research entry points (real tool path, no demo shell).
 
-use crate::agent::{run_agent_turn, AgentOptions, ChatBackend, ScriptedBackend};
+use crate::agent::{
+    run_agent_turn, run_agent_turn_with_sink, AgentOptions, ChatBackend, ScriptedBackend,
+};
 use crate::audit::AuditLog;
 use crate::chat::{
     ChatCompletion, ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, ToolCallMsg,
@@ -28,83 +30,81 @@ pub struct EventDto {
     pub payload: serde_json::Value,
 }
 
+/// Convert one stream event to a host DTO.
+pub fn event_to_dto(e: &StreamEvent) -> EventDto {
+    let (kind, payload) = match e {
+        StreamEvent::TurnStarted { session_id, model } => (
+            "turn_started",
+            serde_json::json!({ "session_id": session_id, "model": model }),
+        ),
+        StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
+        StreamEvent::ThoughtDelta { text } => {
+            ("thought_delta", serde_json::json!({ "text": text }))
+        }
+        StreamEvent::Tool {
+            id,
+            name,
+            phase,
+            summary,
+            detail,
+            ok,
+        } => (
+            "tool",
+            serde_json::json!({
+                "id": id, "name": name, "phase": phase,
+                "summary": summary, "detail": detail, "ok": ok
+            }),
+        ),
+        StreamEvent::Citation {
+            source_id,
+            label,
+            locator,
+        } => (
+            "citation",
+            serde_json::json!({
+                "source_id": source_id, "label": label, "locator": locator
+            }),
+        ),
+        StreamEvent::SearchTrail { steps } => {
+            ("search_trail", serde_json::json!({ "steps": steps }))
+        }
+        StreamEvent::PermissionRequired {
+            request_id,
+            tool_name,
+            target,
+            reason,
+            preview,
+            risk,
+            arguments,
+        } => (
+            "permission_required",
+            serde_json::json!({
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "target": target,
+                "reason": reason,
+                "preview": preview,
+                "risk": risk,
+                "arguments": arguments,
+            }),
+        ),
+        StreamEvent::TurnCompleted { reason } => {
+            ("turn_completed", serde_json::json!({ "reason": reason }))
+        }
+        StreamEvent::Error { code, message } => (
+            "error",
+            serde_json::json!({ "code": code, "message": message }),
+        ),
+    };
+    EventDto {
+        kind: kind.into(),
+        payload,
+    }
+}
+
 /// Convert stream events to DTOs.
 pub fn events_to_dto(events: &[StreamEvent]) -> Vec<EventDto> {
-    events
-        .iter()
-        .map(|e| {
-            let (kind, payload) = match e {
-                StreamEvent::TurnStarted { session_id, model } => (
-                    "turn_started",
-                    serde_json::json!({ "session_id": session_id, "model": model }),
-                ),
-                StreamEvent::TextDelta { text } => {
-                    ("text_delta", serde_json::json!({ "text": text }))
-                }
-                StreamEvent::ThoughtDelta { text } => {
-                    ("thought_delta", serde_json::json!({ "text": text }))
-                }
-                StreamEvent::Tool {
-                    id,
-                    name,
-                    phase,
-                    summary,
-                    detail,
-                    ok,
-                } => (
-                    "tool",
-                    serde_json::json!({
-                        "id": id, "name": name, "phase": phase,
-                        "summary": summary, "detail": detail, "ok": ok
-                    }),
-                ),
-                StreamEvent::Citation {
-                    source_id,
-                    label,
-                    locator,
-                } => (
-                    "citation",
-                    serde_json::json!({
-                        "source_id": source_id, "label": label, "locator": locator
-                    }),
-                ),
-                StreamEvent::SearchTrail { steps } => {
-                    ("search_trail", serde_json::json!({ "steps": steps }))
-                }
-                StreamEvent::PermissionRequired {
-                    request_id,
-                    tool_name,
-                    target,
-                    reason,
-                    preview,
-                    risk,
-                    arguments,
-                } => (
-                    "permission_required",
-                    serde_json::json!({
-                        "request_id": request_id,
-                        "tool_name": tool_name,
-                        "target": target,
-                        "reason": reason,
-                        "preview": preview,
-                        "risk": risk,
-                        "arguments": arguments,
-                    }),
-                ),
-                StreamEvent::TurnCompleted { reason } => {
-                    ("turn_completed", serde_json::json!({ "reason": reason }))
-                }
-                StreamEvent::Error { code, message } => (
-                    "error",
-                    serde_json::json!({ "code": code, "message": message }),
-                ),
-            };
-            EventDto {
-                kind: kind.into(),
-                payload,
-            }
-        })
-        .collect()
+    events.iter().map(event_to_dto).collect()
 }
 
 /// Build a tool host for a workspace (in-memory index; no disk cache).
@@ -342,12 +342,13 @@ pub async fn research_turn(
         session_id,
         force_local,
         None,
+        None,
     )
     .await
 }
 
-/// Research turn with optional cooperative cancel flag.
-#[allow(clippy::too_many_arguments)] // host API; cancel is additive for #109
+/// Research turn with optional cancel flag and live event sink.
+#[allow(clippy::too_many_arguments)] // host API; cancel + sink additive for #109/#108
 pub async fn research_turn_with_cancel(
     host: &mut ToolHost,
     profile: &ProviderProfile,
@@ -357,9 +358,16 @@ pub async fn research_turn_with_cancel(
     session_id: &str,
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
-        return research_local(host, user_text, session_id);
+        let ev = research_local(host, user_text, session_id)?;
+        if let Some(sink) = live {
+            for e in &ev {
+                sink(e.clone());
+            }
+        }
+        return Ok(ev);
     }
 
     // Ollama: full agent loop with native tools (mistral etc. advertise tools).
@@ -375,10 +383,19 @@ pub async fn research_turn_with_cancel(
                     Some(profile.chat_model.clone()),
                 );
                 opts.cancel = cancel;
-                return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
+                return run_agent_turn_with_sink(
+                    &backend, host, user_text, history, &opts, None, live,
+                )
+                .await;
             }
         }
-        return research_local(host, user_text, session_id);
+        let ev = research_local(host, user_text, session_id)?;
+        if let Some(sink) = live {
+            for e in &ev {
+                sink(e.clone());
+            }
+        }
+        return Ok(ev);
     }
 
     if profile.kind == ProviderKind::OpenAiCompatible {
@@ -396,7 +413,8 @@ pub async fn research_turn_with_cancel(
             Some(profile.chat_model.clone()),
         );
         opts.cancel = cancel;
-        return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
+        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, None, live)
+            .await;
     }
 
     // Explicit opt-in only: load ~/.grok/auth.json session, pin host to api.x.ai.
@@ -449,10 +467,17 @@ pub async fn research_turn_with_cancel(
             Some(profile.chat_model.clone()),
         );
         opts.cancel = cancel;
-        return run_agent_turn(&backend, host, user_text, history, &opts, None).await;
+        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, None, live)
+            .await;
     }
 
-    research_local(host, user_text, session_id)
+    let ev = research_local(host, user_text, session_id)?;
+    if let Some(sink) = live {
+        for e in &ev {
+            sink(e.clone());
+        }
+    }
+    Ok(ev)
 }
 
 /// Scripted tool-using turn for golden fixtures (no network).
