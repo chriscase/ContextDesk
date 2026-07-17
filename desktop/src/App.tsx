@@ -244,7 +244,14 @@ export function App() {
     string,
     unknown
   > | null>(null);
-  const [pane, setPane] = useState<PaneId>("chat");
+  const [pane, setPane] = useState<PaneId>(() => {
+    const p = localStorage.getItem("cd-pane");
+    if (p === "memory" || p === "source" || p === "todos" || p === "chat") return p;
+    return "chat";
+  });
+  useEffect(() => {
+    localStorage.setItem("cd-pane", pane);
+  }, [pane]);
   const [hostPreflightReport, setHostPreflightReport] =
     useState<PreflightReport | null>(null);
   const [memoryDocs, setMemoryDocs] = useState<MemoryDoc[]>([]);

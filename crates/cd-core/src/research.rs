@@ -119,10 +119,42 @@ pub fn research_local(
     query: &str,
     session_id: &str,
 ) -> CoreResult<Vec<StreamEvent>> {
+    research_local_with_skills(host, query, session_id, &[])
+}
+
+/// Local research with optional skill directories for `/skill` slash invoke.
+pub fn research_local_with_skills(
+    host: &mut ToolHost,
+    query: &str,
+    session_id: &str,
+    skill_dirs: &[std::path::PathBuf],
+) -> CoreResult<Vec<StreamEvent>> {
     let mut events = vec![StreamEvent::TurnStarted {
         session_id: session_id.into(),
         model: Some("local-retrieval".into()),
     }];
+
+    let mut query = query.to_string();
+    let mut skill_note = String::new();
+    if let Some((sid, rest)) = crate::skills::parse_skill_slash(&query) {
+        let skills = crate::skills::discover_skills(skill_dirs).unwrap_or_default();
+        if let Some(sk) = crate::skills::find_skill(&skills, &sid) {
+            if sk.disabled {
+                skill_note = format!(
+                    "_Skill `{}` is disabled (review-gated). Enable it in Settings before use._\n\n",
+                    sk.id
+                );
+            } else {
+                skill_note = format!("{}\n\n", crate::skills::skill_context(sk));
+                events.push(StreamEvent::SearchTrail {
+                    steps: vec![format!("skill:{}", sk.id)],
+                });
+            }
+        } else {
+            skill_note = format!("_Skill `{sid}` not found in skill dirs._\n\n");
+        }
+        query = if rest.is_empty() { sid } else { rest };
+    }
 
     let result = host.execute(
         "search_kb",
@@ -131,7 +163,7 @@ pub fn research_local(
     )?;
     events.extend(result.events.clone());
     let ranked = crate::router::rank_sources(
-        query,
+        &query,
         &[
             crate::router::SourceKind::Memory,
             crate::router::SourceKind::Files,
@@ -152,12 +184,12 @@ pub fn research_local(
 
     let answer = if result.ok && !result.detail_raw.contains("No hits") {
         format!(
-            "### Research results\n\nQuery: **{}**\n\n{}\n\n_Sources cited from workspace search._\n",
+            "### Research results\n\n{skill_note}Query: **{}**\n\n{}\n\n_Sources cited from workspace search._\n",
             query, result.detail_raw
         )
     } else {
         format!(
-            "### Research results\n\nNo indexed hits for **{}**. Add workspace roots and reindex, or rephrase.\n",
+            "### Research results\n\n{skill_note}No indexed hits for **{}**. Add workspace roots and reindex, or rephrase.\n",
             query
         )
     };

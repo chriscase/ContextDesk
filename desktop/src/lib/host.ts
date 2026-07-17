@@ -210,6 +210,37 @@ export type ProviderDto = {
 };
 
 /** Persist active provider profile (refs only) + optional API key to OS keychain. */
+export type SkillDto = {
+  id: string;
+  name: string;
+  description: string;
+  disabled: boolean;
+  allows_write: boolean;
+  path: string;
+};
+
+export async function hostListSkills(): Promise<SkillDto[]> {
+  if (!isTauri()) return [];
+  return invoke<SkillDto[]>("list_skills_cmd");
+}
+
+export async function hostWriteSkill(args: {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  allowsWrite?: boolean;
+}): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("write_skill_cmd", {
+    id: args.id,
+    name: args.name,
+    description: args.description,
+    body: args.body,
+    allowsWrite: args.allowsWrite ?? false,
+  });
+}
+
 export async function hostSaveActiveProvider(args: {
   kind: string;
   baseUrl: string;

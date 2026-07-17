@@ -13,7 +13,7 @@ use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
 use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
 use cd_core::research::{
-    build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
+    build_host, events_to_dto, grant_and_execute, research_turn, EventDto,
 };
 use cd_core::keychain_store::{
     key_ref_confluence_pat, key_ref_for_profile, looks_like_raw_secret, KeychainSecretStore,
@@ -563,10 +563,95 @@ struct AgentTurnReq {
     force_local: bool,
 }
 
+fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
+    let config_dir = ensure_config_dir(&state.branding).ok();
+    let roots: Vec<_> = cfg
+        .workspace
+        .as_ref()
+        .map(|w| w.roots.clone())
+        .unwrap_or_default();
+    cd_core::skills::default_skill_dirs(config_dir.as_deref(), &roots)
+}
+
+#[derive(Debug, Serialize)]
+struct SkillDto {
+    id: String,
+    name: String,
+    description: String,
+    disabled: bool,
+    allows_write: bool,
+    path: String,
+}
+
+#[tauri::command]
+fn list_skills_cmd(state: State<'_, AppState>) -> Result<Vec<SkillDto>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let dirs = skill_dirs_for(&state, &cfg);
+    let skills = cd_core::skills::discover_skills(&dirs).map_err(|e| e.to_string())?;
+    Ok(skills
+        .into_iter()
+        .map(|s| SkillDto {
+            id: s.id,
+            name: s.name,
+            description: s.description,
+            disabled: s.disabled,
+            allows_write: s.allows_write,
+            path: s.path.display().to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn write_skill_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+    description: String,
+    body: String,
+    allows_write: bool,
+) -> Result<String, String> {
+    // SoftWrite-style: host only; skills with allows_write start disabled.
+    let cfg = state.config.lock().expect("config").clone();
+    let root = cfg
+        .workspace
+        .as_ref()
+        .and_then(|w| w.roots.first())
+        .ok_or("no workspace root")?;
+    let dir = cd_core::skills::workspace_skills_dir(root);
+    let skill = cd_core::skills::Skill {
+        id: id.clone(),
+        name,
+        description,
+        body,
+        path: PathBuf::new(),
+        disabled: allows_write,
+        allows_write,
+    };
+    let path = cd_core::skills::write_skill(&dir, &skill).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 #[tauri::command]
 async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec<EventDto>, String> {
     ensure_host(&state)?;
     let cfg = state.config.lock().expect("config").clone();
+    let skill_dirs = skill_dirs_for(&state, &cfg);
+    let mut user_text = req.text.clone();
+    // Inject skill playbook into the query prefix for agent context (cannot elevate grants).
+    if let Some((sid, rest)) = cd_core::skills::parse_skill_slash(&user_text) {
+        if let Ok(skills) = cd_core::skills::discover_skills(&skill_dirs) {
+            if let Some(sk) = cd_core::skills::find_skill(&skills, &sid) {
+                if !sk.disabled {
+                    let ctx = cd_core::skills::skill_context(sk);
+                    user_text = if rest.is_empty() {
+                        format!("{ctx}\n\nApply this skill to the workspace context.")
+                    } else {
+                        format!("{ctx}\n\nUser question: {rest}")
+                    };
+                }
+            }
+        }
+    }
     let profile = cfg
         .providers
         .active()
@@ -597,7 +682,7 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
                     host,
                     &profile,
                     api_key.clone(),
-                    &req.text,
+                    &user_text,
                     &mut history,
                     &req.session_id,
                     false,
@@ -605,11 +690,22 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
             });
             match res {
                 Ok(ev) => ev,
-                Err(_) => research_local(host, &req.text, &req.session_id)
-                    .map_err(|e| e.to_string())?,
+                Err(_) => cd_core::research::research_local_with_skills(
+                    host,
+                    &user_text,
+                    &req.session_id,
+                    &skill_dirs,
+                )
+                .map_err(|e| e.to_string())?,
             }
         } else {
-            research_local(host, &req.text, &req.session_id).map_err(|e| e.to_string())?
+            cd_core::research::research_local_with_skills(
+                host,
+                &user_text,
+                &req.session_id,
+                &skill_dirs,
+            )
+            .map_err(|e| e.to_string())?
         }
     } else {
         let mut host_guard = state.host.lock().expect("host");
@@ -619,7 +715,7 @@ async fn agent_turn(state: State<'_, AppState>, req: AgentTurnReq) -> Result<Vec
                 host,
                 &profile,
                 api_key,
-                &req.text,
+                &user_text,
                 &mut history,
                 &req.session_id,
                 false,
@@ -769,6 +865,8 @@ pub fn run() {
             validate_workspace_path,
             agent_turn,
             complete_permission_cmd,
+            list_skills_cmd,
+            write_skill_cmd,
             reindex,
             read_memory_file,
             read_workspace_file_cmd,

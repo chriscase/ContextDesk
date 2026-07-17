@@ -30,7 +30,7 @@ export function Composer({ onSubmit, disabled, busy, onStop }: Props) {
     <div className="composer" data-expanded={expanded ? "true" : "false"}>
       <div className="composer__toolbar">
         <span className="composer__hint" id={`${id}-hint`}>
-          Enter to send · Shift+Enter newline · markdown welcome
+          Enter to send · Shift+Enter newline · /skill id …
         </span>
         <div className="row">
           <button
