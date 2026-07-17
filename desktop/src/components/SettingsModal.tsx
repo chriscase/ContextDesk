@@ -277,6 +277,7 @@ export function SettingsModal({
           chatModel: draft.chatModel,
           label: draft.providerLabel ?? undefined,
           apiKey: apiKeyDraft.trim() || undefined,
+          localOnly: draft.localOnly ?? draft.providerKind === "ollama",
         });
         if (saved) {
           next = {
@@ -574,6 +575,20 @@ export function SettingsModal({
                     }
                     placeholder={
                       draft.providerKind === "ollama" ? "mistral" : "provider/model"
+                    }
+                  />
+                ) : null}
+
+                {draft.providerKind !== "none" ? (
+                  <ToggleField
+                    id={`${baseId}-local-only`}
+                    label="Local-only profile"
+                    hint="Refuse non-loopback base URLs (recommended for Ollama). Remote gateways need this off."
+                    checked={
+                      draft.localOnly ?? draft.providerKind === "ollama"
+                    }
+                    onChange={(localOnly) =>
+                      setDraft((d) => ({ ...d, localOnly }))
                     }
                   />
                 ) : null}

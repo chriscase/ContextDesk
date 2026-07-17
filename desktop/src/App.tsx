@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Composer } from "./components/Composer";
+import { MarkdownBody } from "./components/MarkdownBody";
 import {
   PermissionModal,
   type PermissionPrompt,
@@ -39,6 +40,7 @@ type Msg = {
   content: string;
   tools?: ToolCallView[];
   citations?: { id: string; label: string }[];
+  trail?: string[];
   streaming?: boolean;
 };
 
@@ -76,6 +78,7 @@ function loadSetup(): AppSetupState {
     chatModel: "mistral",
     baseUrl: "http://127.0.0.1:11434",
     hasApiKey: false,
+    localOnly: true,
     ollamaReachable: null,
     remoteReachable: null,
     confluence: {
@@ -96,6 +99,7 @@ function applyEventsToMessage(
   const citations: { id: string; label: string }[] = [
     ...(base.citations ?? []),
   ];
+  const trail: string[] = [...(base.trail ?? [])];
   let permission: PermissionPrompt | null = null;
 
   for (const ev of events) {
@@ -128,6 +132,16 @@ function applyEventsToMessage(
           label: String(p.label ?? p.source_id ?? "source"),
         });
         break;
+      case "search_trail": {
+        const steps = p.steps;
+        if (Array.isArray(steps)) {
+          for (const s of steps) {
+            const step = String(s);
+            if (step && !trail.includes(step)) trail.push(step);
+          }
+        }
+        break;
+      }
       case "permission_required":
         permission = {
           requestId: String(p.request_id ?? ""),
@@ -148,12 +162,23 @@ function applyEventsToMessage(
     }
   }
 
+  // When retrieval produced citations, ensure content can reference them as chips.
+  if (citations.length && content && !content.includes("#cite:")) {
+    const refs = citations
+      .map((c) => `[${c.label}](#cite:${c.id})`)
+      .join(" ");
+    if (!content.includes(citations[0].label)) {
+      content = `${content.trim()}\n\nSources: ${refs}`;
+    }
+  }
+
   return {
     msg: {
       ...base,
       content,
       tools: tools.length ? tools : undefined,
       citations: citations.length ? citations : undefined,
+      trail: trail.length ? trail : undefined,
       streaming: false,
     },
     permission,
@@ -585,6 +610,15 @@ export function App() {
                     <article key={m.id} className="msg" data-role={m.role}>
                       <div className="msg__role">{m.role}</div>
                       {m.tools ? <ToolCallList tools={m.tools} /> : null}
+                      {m.trail?.length ? (
+                        <div className="search-trail" aria-label="Search trail">
+                          {m.trail.map((s) => (
+                            <span key={s} className="search-trail__step">
+                              {s}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                       {m.citations?.length ? (
                         <div>
                           {m.citations.map((c) => (
@@ -613,19 +647,56 @@ export function App() {
                         </div>
                       ) : null}
                       <div className="msg__bubble">
-                        <div
-                          className="msg__content"
-                          data-streaming={m.streaming ? "true" : "false"}
-                        >
-                          {m.content}
-                        </div>
+                        {m.role === "assistant" ? (
+                          <div
+                            className="msg__content"
+                            data-streaming={m.streaming ? "true" : "false"}
+                            onClick={(e) => {
+                              const t = e.target as HTMLElement;
+                              const cite = t.getAttribute("data-cite");
+                              if (!cite) return;
+                              setSourcePath(cite);
+                              setPane("source");
+                              setSourceContent("Loading…");
+                              void hostReadFile(cite)
+                                .then((body) => setSourceContent(body))
+                                .catch((err) =>
+                                  setSourceContent(
+                                    `Could not read ${cite}:\n${
+                                      err instanceof Error ? err.message : String(err)
+                                    }`,
+                                  ),
+                                );
+                            }}
+                          >
+                            <MarkdownBody
+                              text={m.content}
+                              streaming={m.streaming}
+                            />
+                          </div>
+                        ) : (
+                          <div
+                            className="msg__content"
+                            data-streaming={m.streaming ? "true" : "false"}
+                          >
+                            {m.content}
+                          </div>
+                        )}
                       </div>
                     </article>
                   ))
                 )}
               </div>
               <div className="composer-dock">
-                <Composer onSubmit={onSubmit} disabled={busy} />
+                <Composer
+                  onSubmit={onSubmit}
+                  disabled={busy}
+                  busy={busy}
+                  onStop={() => {
+                    setBusy(false);
+                    setAgentError("Turn stopped (cooperative cancel).");
+                  }}
+                />
               </div>
             </>
           ) : null}

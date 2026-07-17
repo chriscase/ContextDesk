@@ -140,6 +140,9 @@ struct SaveProviderReq {
     label: Option<String>,
     /// Optional new API key; empty/null keeps existing keychain entry.
     api_key: Option<String>,
+    /// When true, refuse non-loopback remote bases (local-only profile).
+    #[serde(default)]
+    local_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,6 +212,18 @@ fn save_active_provider(
         api_key_ref = Some(r.clone());
     }
 
+    let local_only = req
+        .local_only
+        .unwrap_or_else(|| matches!(kind, ProviderKind::Ollama));
+    if local_only && !base_url.is_empty() {
+        let policy = SsrfPolicy::local_only();
+        if validate_provider_url(&base_url, &policy).is_err() {
+            return Err(
+                "local-only profile: base URL must be loopback (e.g. 127.0.0.1)".into(),
+            );
+        }
+    }
+
     let profile = ProviderProfile {
         id: id.clone(),
         label: label.clone(),
@@ -219,7 +234,7 @@ fn save_active_provider(
         embedding_model: None,
         embedding_base_url: None,
         capabilities: Default::default(),
-        local_only: matches!(kind, ProviderKind::Ollama),
+        local_only,
     };
 
     if let Some(slot) = cfg.providers.profiles.iter_mut().find(|p| p.id == id) {

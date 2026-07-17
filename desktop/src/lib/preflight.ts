@@ -32,6 +32,8 @@ export type AppSetupState = {
   chatModel: string;
   baseUrl: string;
   hasApiKey: boolean;
+  /** Refuse non-loopback bases (local-only profile). */
+  localOnly?: boolean;
   /** Simulated / later real probes */
   ollamaReachable: boolean | null;
   remoteReachable: boolean | null;

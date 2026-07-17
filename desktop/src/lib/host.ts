@@ -217,6 +217,7 @@ export async function hostSaveActiveProvider(args: {
   label?: string;
   /** Raw key once; never stored in React setup / localStorage after save. */
   apiKey?: string;
+  localOnly?: boolean;
 }): Promise<ProviderDto | null> {
   if (!isTauri()) return null;
   return invoke<ProviderDto>("save_active_provider", {
@@ -226,6 +227,7 @@ export async function hostSaveActiveProvider(args: {
       chat_model: args.chatModel,
       label: args.label ?? null,
       api_key: args.apiKey ?? null,
+      local_only: args.localOnly ?? null,
     },
   });
 }
