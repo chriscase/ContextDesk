@@ -34,16 +34,16 @@ Living document — expand as connectors and server land.
 
 | Control | Status |
 |---------|--------|
-| UI-originated write grants | Designed (permissions module) |
-| Filesystem allowlist roots | Partial (workspace) |
-| Secret filename denylist on read | Planned |
-| Keychain for API keys | Planned |
-| SSRF policy on bases | Planned |
-| Untrusted labeling of tool results | Planned |
-| Grok session opt-in + URL pin | Planned (Phase 2+) |
-| MCP host-side side-effect policy | Planned |
-| SQL single-SELECT allowlist | Planned |
-| Server multi-tenant isolation tests | Planned |
+| UI-originated write grants | Implemented (`complete_permission` + request ids) |
+| Filesystem allowlist roots | Implemented (`paths` + workspace) |
+| Secret filename denylist on read | Implemented (heuristic list) |
+| Keychain for API keys | Implemented (`secrets` + Tauri commands) |
+| SSRF policy on bases | Implemented (literal IPs + mapped IPv6; DNS rebinding residual) |
+| Untrusted labeling of tool results | Implemented (`injection`) |
+| Grok session opt-in + URL pin | Implemented (exact host `api.x.ai`) |
+| MCP host-side side-effect policy | Config types; runtime dispatch Phase 3+ |
+| SQL single-SELECT allowlist | Keyword denylist + tests; AST harden residual |
+| Server multi-tenant isolation | workspace_id on routes; API keys hashed |
 
 ## Explicit non-goals of early MVP
 
