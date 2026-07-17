@@ -737,7 +737,8 @@ export function App() {
         const prefersReduced =
           typeof window !== "undefined" &&
           window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        const delayMs = prefersReduced ? 0 : 18;
+        // Slightly longer than a frame so beam-in chunks are perceptible.
+        const delayMs = prefersReduced ? 0 : 28;
 
         for (const ev of textEvents) {
           const chunk = String(ev.payload?.text ?? "");

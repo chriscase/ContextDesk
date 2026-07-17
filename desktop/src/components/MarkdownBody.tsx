@@ -1,7 +1,10 @@
 /**
  * Lightweight streaming-safe markdown renderer (no external deps).
- * Handles incomplete fences while tokens stream; escapes HTML.
+ * While streaming, new text deltas materialize (beam-in); settled content
+ * is full markdown. Prefer-reduced-motion disables motion.
  */
+
+import { useRef } from "react";
 
 type Props = {
   text: string;
@@ -19,11 +22,9 @@ function escapeHtml(s: string): string {
 /** Inline: `code`, **bold**, *italic*, [label](url) */
 function renderInline(src: string): string {
   let s = escapeHtml(src);
-  // code spans first
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  // citation-style chips written as [^path] or bare [label](#cite:id)
   s = s.replace(
     /\[([^\]]+)\]\(#cite:([^)]+)\)/g,
     '<button type="button" class="citation-chip" data-cite="$2">$1</button>',
@@ -47,7 +48,6 @@ function parseBlocks(text: string): Block[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    // fenced code
     const fence = line.match(/^```(\w*)\s*$/);
     if (fence) {
       const lang = fence[1] ?? "";
@@ -66,7 +66,6 @@ function parseBlocks(text: string): Block[] {
       blocks.push({ kind: "pre", lang, text: body.join("\n"), open: !closed });
       continue;
     }
-    // heading
     const h = line.match(/^(#{1,3})\s+(.+)$/);
     if (h) {
       blocks.push({
@@ -77,7 +76,6 @@ function parseBlocks(text: string): Block[] {
       i += 1;
       continue;
     }
-    // list
     if (/^[-*]\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
@@ -87,12 +85,10 @@ function parseBlocks(text: string): Block[] {
       blocks.push({ kind: "ul", items });
       continue;
     }
-    // blank
     if (line.trim() === "") {
       i += 1;
       continue;
     }
-    // paragraph (merge consecutive)
     const para: string[] = [line];
     i += 1;
     while (
@@ -110,26 +106,66 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-export function MarkdownBody({ text, streaming }: Props) {
-  const blocks = parseBlocks(text);
+type BeamChunk = { id: number; text: string };
+
+/**
+ * Split growing text into stable + newly appended chunks so only fresh
+ * deltas get a one-shot beam-in animation (Gemini-style materialize).
+ */
+function useBeamChunks(text: string, streaming: boolean): BeamChunk[] {
+  const prev = useRef("");
+  const chunks = useRef<BeamChunk[]>([]);
+  const nextId = useRef(0);
+
+  if (!streaming) {
+    // Final frame: single settled chunk, no animation.
+    if (chunks.current.length !== 1 || chunks.current[0]?.text !== text) {
+      chunks.current = text ? [{ id: nextId.current++, text }] : [];
+    }
+    prev.current = text;
+    return chunks.current;
+  }
+
+  if (!text.startsWith(prev.current)) {
+    // Reset (new message / rewrite)
+    chunks.current = text ? [{ id: nextId.current++, text }] : [];
+  } else if (text.length > prev.current.length) {
+    const added = text.slice(prev.current.length);
+    // Merge tiny deltas into the last chunk if it's still "fresh" and small,
+    // so we animate readable phrases rather than single characters only.
+    const last = chunks.current[chunks.current.length - 1];
+    const lastIsTiny = last && last.text.length < 12;
+    if (lastIsTiny && chunks.current.length > 0) {
+      chunks.current = [
+        ...chunks.current.slice(0, -1),
+        { id: last.id, text: last.text + added },
+      ];
+    } else {
+      chunks.current = [...chunks.current, { id: nextId.current++, text: added }];
+    }
+  }
+  prev.current = text;
+  return chunks.current;
+}
+
+function BlocksView({ blocks, streaming }: { blocks: Block[]; streaming?: boolean }) {
   return (
-    <div
-      className="md-body"
-      data-streaming={streaming ? "true" : "false"}
-      data-materialize={streaming ? "true" : "false"}
-    >
+    <>
       {blocks.map((b, idx) => {
+        const isLast = idx === blocks.length - 1;
+        const enter = !streaming || !isLast;
         if (b.kind === "pre") {
           return (
             <pre
-              key={idx}
-              className="md-pre"
+              key={`pre-${idx}-${b.lang}`}
+              className={`md-pre${enter ? " md-block-enter" : ""}`}
               data-open={b.open ? "true" : "false"}
               data-lang={b.lang || undefined}
             >
               <code
                 dangerouslySetInnerHTML={{
-                  __html: escapeHtml(b.text) + (b.open && streaming ? "\n…" : ""),
+                  __html:
+                    escapeHtml(b.text) + (b.open && streaming ? "\n…" : ""),
                 }}
               />
             </pre>
@@ -137,7 +173,10 @@ export function MarkdownBody({ text, streaming }: Props) {
         }
         if (b.kind === "ul") {
           return (
-            <ul key={idx} className="md-ul">
+            <ul
+              key={`ul-${idx}`}
+              className={`md-ul${enter ? " md-block-enter" : ""}`}
+            >
               {b.items.map((it, j) => (
                 <li
                   key={j}
@@ -148,23 +187,57 @@ export function MarkdownBody({ text, streaming }: Props) {
           );
         }
         if (b.kind === "h") {
-          const Tag = (`h${b.level}` as "h1" | "h2" | "h3");
+          const Tag = `h${b.level}` as "h1" | "h2" | "h3";
           return (
             <Tag
-              key={idx}
-              className="md-h"
+              key={`h-${idx}`}
+              className={`md-h${enter ? " md-block-enter" : ""}`}
               dangerouslySetInnerHTML={{ __html: renderInline(b.text) }}
             />
           );
         }
         return (
           <p
-            key={idx}
-            className="md-p"
+            key={`p-${idx}`}
+            className={`md-p${enter ? " md-block-enter" : ""}`}
             dangerouslySetInnerHTML={{ __html: renderInline(b.text) }}
           />
         );
       })}
+    </>
+  );
+}
+
+export function MarkdownBody({ text, streaming }: Props) {
+  const chunks = useBeamChunks(text, Boolean(streaming));
+  const blocks = parseBlocks(text);
+
+  // While streaming: beam new deltas so the materialize is visible.
+  // Settled markdown for completed structure still used when not streaming.
+  if (streaming) {
+    return (
+      <div className="md-body md-body--streaming" data-streaming="true">
+        <p className="md-p md-p--stream">
+          {chunks.map((c, i) => {
+            const isLatest = i === chunks.length - 1;
+            return (
+              <span
+                key={c.id}
+                className={isLatest ? "md-beam-chunk" : "md-beam-settled"}
+              >
+                {c.text}
+              </span>
+            );
+          })}
+          <span className="md-stream-caret" aria-hidden />
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="md-body" data-streaming="false">
+      <BlocksView blocks={blocks} streaming={false} />
     </div>
   );
 }
