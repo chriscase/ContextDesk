@@ -161,6 +161,11 @@
   gap: 6px;
 }
 
+.compact-banner--expanded {
+  border-style: dashed;
+  background: transparent;
+}
+
 .compact-banner__main {
   display: flex;
   flex-direction: column;

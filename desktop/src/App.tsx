@@ -197,22 +197,33 @@ export function App() {
     id: string;
     title: string;
     messages: Msg[];
-    /**
-     * When set, UI folds older turns into a banner and only shows the last
-     * `compactKeepLast` messages. Full `messages` array is never deleted.
-     */
-    compactSummary: string | null;
-    /** How many recent messages stay visible while compacted. */
+    /** How many recent messages stay visible while auto-folded. */
     compactKeepLast: number;
+    /**
+     * When false (default), long threads auto-fold older turns in the UI.
+     * Full `messages` are never deleted — fold is view-only.
+     */
+    showFullHistory: boolean;
   };
 
   const newSession = (title = "Chat"): ChatSession => ({
     id: crypto.randomUUID(),
     title,
     messages: [],
-    compactSummary: null,
     compactKeepLast: 6,
+    showFullHistory: false,
   });
+
+  const foldPreview = (msgs: Msg[], keep: number): string => {
+    if (msgs.length <= keep) return "";
+    return msgs
+      .slice(0, -keep)
+      .map((m) => {
+        const snip = m.content.replace(/\s+/g, " ").trim().slice(0, 100);
+        return `• ${m.role}: ${snip}${m.content.length > 100 ? "…" : ""}`;
+      })
+      .join("\n");
+  };
 
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
@@ -238,41 +249,17 @@ export function App() {
   };
   const sessionId = activeSession?.id ?? "";
   const compactKeep = activeSession?.compactKeepLast ?? 6;
-  const isCompacted = Boolean(activeSession?.compactSummary);
-  const canCompact = messages.length > compactKeep;
-  const hiddenCount =
-    isCompacted && messages.length > compactKeep
-      ? messages.length - compactKeep
-      : 0;
-  /** Visible transcript — folds older turns when Compact is active. */
-  const visibleMessages =
-    isCompacted && hiddenCount > 0 ? messages.slice(-compactKeep) : messages;
+  const showFullHistory = activeSession?.showFullHistory ?? false;
+  /** Auto-fold when over keep and user has not expanded. Non-destructive. */
+  const isFolded = !showFullHistory && messages.length > compactKeep;
+  const hiddenCount = isFolded ? messages.length - compactKeep : 0;
+  const visibleMessages = isFolded ? messages.slice(-compactKeep) : messages;
+  const hiddenPreview = isFolded ? foldPreview(messages, compactKeep) : "";
 
-  const compactActiveSession = () => {
-    setSessions((all) =>
-      all.map((s) => {
-        if (s.id !== resolvedSessionId) return s;
-        const keep = s.compactKeepLast;
-        if (s.messages.length <= keep) {
-          return { ...s, compactSummary: null };
-        }
-        const older = s.messages.slice(0, -keep);
-        const lines = older.map((m) => {
-          const snip = m.content.replace(/\s+/g, " ").trim().slice(0, 100);
-          return `• ${m.role}: ${snip}${m.content.length > 100 ? "…" : ""}`;
-        });
-        return {
-          ...s,
-          compactSummary: lines.join("\n"),
-        };
-      }),
-    );
-  };
-
-  const expandActiveSession = () => {
+  const setShowFullHistory = (show: boolean) => {
     setSessions((all) =>
       all.map((s) =>
-        s.id === resolvedSessionId ? { ...s, compactSummary: null } : s,
+        s.id === resolvedSessionId ? { ...s, showFullHistory: show } : s,
       ),
     );
   };
@@ -800,52 +787,52 @@ export function App() {
                 >
                   +
                 </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  title={
-                    isCompacted
-                      ? "Show all messages in this chat"
-                      : canCompact
-                        ? `Hide older messages; keep the last ${compactKeep} visible (nothing is deleted)`
-                        : `Need more than ${compactKeep} messages to compact`
-                  }
-                  disabled={!isCompacted && !canCompact}
-                  onClick={() => {
-                    if (isCompacted) expandActiveSession();
-                    else compactActiveSession();
-                  }}
-                >
-                  {isCompacted ? "Show all" : "Compact"}
-                </button>
               </div>
               <div className="chat-scroll">
-                {isCompacted && hiddenCount > 0 ? (
+                {isFolded && hiddenCount > 0 ? (
                   <div className="compact-banner" role="status">
                     <div className="compact-banner__main">
                       <strong>
                         {hiddenCount} earlier message
-                        {hiddenCount === 1 ? "" : "s"} hidden
+                        {hiddenCount === 1 ? "" : "s"} folded
                       </strong>
                       <span className="compact-banner__meta">
-                        Showing last {compactKeep} · full history kept in session
+                        Auto-hiding older turns · showing last {compactKeep} ·
+                        nothing deleted
                       </span>
                     </div>
                     <div className="compact-banner__actions">
                       <button
                         type="button"
                         className="btn btn--ghost btn--sm"
-                        onClick={expandActiveSession}
+                        onClick={() => setShowFullHistory(true)}
                       >
                         Show all
                       </button>
                     </div>
                     <details className="compact-banner__details">
-                      <summary>Preview hidden turns</summary>
-                      <pre className="tool-row__detail">
-                        {activeSession?.compactSummary}
-                      </pre>
+                      <summary>Preview folded turns</summary>
+                      <pre className="tool-row__detail">{hiddenPreview}</pre>
                     </details>
+                  </div>
+                ) : null}
+                {showFullHistory && messages.length > compactKeep ? (
+                  <div className="compact-banner compact-banner--expanded" role="status">
+                    <div className="compact-banner__main">
+                      <strong>Full history shown</strong>
+                      <span className="compact-banner__meta">
+                        {messages.length} messages · fold to declutter (never deletes)
+                      </span>
+                    </div>
+                    <div className="compact-banner__actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() => setShowFullHistory(false)}
+                      >
+                        Fold older
+                      </button>
+                    </div>
                   </div>
                 ) : null}
                 {messages.length === 0 ? (
