@@ -60,7 +60,21 @@ No marketplace auto-start.
 
 ## Grok Build session (opt-in)
 
-After explicit UI opt-in, the host may load `~/.grok/auth.json` **in Rust only** via `grok_auth::load_grok_session_credentials`. Credentials attach only to host `api.x.ai` (exact match). Never logged. User is responsible for Grok ToS / account rules — not legal advice.
+After **explicit user opt-in**, the desktop host may load `~/.grok/auth.json` **in Rust only** (`cd_core::grok_auth`). Webview never receives tokens.
+
+| Concern | Behavior |
+|---------|----------|
+| File | `~/.grok/auth.json` (Grok CLI / Grok Build session store) |
+| Fields used | `key` (access), `refresh_token`, `expires_at`, `oidc_issuer`, `oidc_client_id`, `auth_mode`, `email` |
+| API host pin | Bearer may only be sent to exact host `api.x.ai` |
+| Refresh | If `expires_at` is past and `refresh_token` is present, host calls OIDC token endpoint on `auth.x.ai` with `grant_type=refresh_token` (`ensure_fresh_credentials`) |
+| Failure | Clear re-login message — run `grok login` again; ContextDesk does not store passwords |
+| Headers | `Authorization: Bearer …`, OIDC CLI headers (`X-XAI-Token-Auth`, `x-authenticateresponse`), client version header |
+| Logging | Never log raw tokens (`redacted_debug` only) |
+
+**User responsibility:** reusing a Grok Build / Grok CLI session is subject to xAI / Grok product Terms of Service and your account entitlements. ContextDesk does not give legal advice; opt-in means you accept that risk.
+
+See also `docs/THREAT_MODEL.md`.
 
 ## SSRF policy (provider bases)
 
