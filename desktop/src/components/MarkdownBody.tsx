@@ -2,6 +2,7 @@
  * Lightweight streaming-safe markdown renderer (no external deps).
  * While streaming, text accumulates into larger phrases before a beam-in.
  * Prefer-reduced-motion disables motion.
+ * GFM tables render as real HTML tables once header + separator are present.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -10,6 +11,22 @@ type Props = {
   text: string;
   streaming?: boolean;
 };
+
+type Align = "left" | "center" | "right";
+
+type Block =
+  | { kind: "p"; text: string }
+  | { kind: "pre"; lang: string; text: string; open: boolean }
+  | { kind: "ul"; items: string[] }
+  | { kind: "h"; level: 1 | 2 | 3; text: string }
+  | {
+      kind: "table";
+      headers: string[];
+      aligns: Align[];
+      rows: string[][];
+      /** True while still receiving more rows (streaming). */
+      open?: boolean;
+    };
 
 function escapeHtml(s: string): string {
   return s
@@ -37,17 +54,14 @@ function renderInline(src: string): string {
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  // Internal cite chips: label only (open via data-cite handler).
   s = s.replace(
     /\[([^\]]+)\]\(#cite:([^)]+)\)/g,
     '<button type="button" class="citation-chip" data-cite="$2"><span class="citation-chip__name">$1</span></button>',
   );
-  // Markdown links: keep anchor text, never dump the raw URL as visible text.
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_m, text, href) => {
     const label = String(text).trim() || shortHostFromUrl(String(href));
     return `<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${label}</a>`;
   });
-  // Bare URLs → short host + link (avoids Google News mega-URLs in the bubble).
   s = s.replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g, (_m, pre, href) => {
     const host = shortHostFromUrl(String(href));
     return `${pre}<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${host}</a>`;
@@ -55,11 +69,53 @@ function renderInline(src: string): string {
   return s;
 }
 
-type Block =
-  | { kind: "p"; text: string }
-  | { kind: "pre"; lang: string; text: string; open: boolean }
-  | { kind: "ul"; items: string[] }
-  | { kind: "h"; level: 1 | 2 | 3; text: string };
+/** GFM table row: has pipes and is not a fence. */
+function isTableRow(line: string): boolean {
+  const t = line.trim();
+  if (!t || t.startsWith("```")) return false;
+  // Must have at least one pipe and non-separator content somewhere
+  if (!t.includes("|")) return false;
+  return true;
+}
+
+/** Separator like | --- | :---: | ---: | */
+function isTableSep(line: string): boolean {
+  const t = line.trim();
+  if (!t.includes("|") || !t.includes("-")) return false;
+  // Strip outer pipes
+  let inner = t;
+  if (inner.startsWith("|")) inner = inner.slice(1);
+  if (inner.endsWith("|")) inner = inner.slice(0, -1);
+  const cells = inner.split("|").map((c) => c.trim());
+  if (cells.length === 0) return false;
+  return cells.every((c) => /^:?-{1,}:?$/.test(c));
+}
+
+function parseAlign(cell: string): Align {
+  const c = cell.trim();
+  const left = c.startsWith(":");
+  const right = c.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  return "left";
+}
+
+function parseTableRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|")) t = t.slice(0, -1);
+  return t.split("|").map((c) => c.trim());
+}
+
+function isTableStart(lines: string[], i: number): boolean {
+  if (i >= lines.length) return false;
+  if (!isTableRow(lines[i]) || isTableSep(lines[i])) return false;
+  // Need a separator on the next non-empty line (allow streaming gap)
+  let j = i + 1;
+  while (j < lines.length && lines[j].trim() === "") j += 1;
+  if (j >= lines.length) return false;
+  return isTableSep(lines[j]);
+}
 
 function parseBlocks(text: string): Block[] {
   const lines = text.split("\n");
@@ -67,6 +123,8 @@ function parseBlocks(text: string): Block[] {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+
+    // Fenced code
     const fence = line.match(/^```(\w*)\s*$/);
     if (fence) {
       const lang = fence[1] ?? "";
@@ -85,6 +143,49 @@ function parseBlocks(text: string): Block[] {
       blocks.push({ kind: "pre", lang, text: body.join("\n"), open: !closed });
       continue;
     }
+
+    // GFM table: header + separator + rows
+    if (isTableStart(lines, i)) {
+      const headers = parseTableRow(lines[i]);
+      i += 1;
+      while (i < lines.length && lines[i].trim() === "") i += 1;
+      const aligns = isTableSep(lines[i] ?? "")
+        ? parseTableRow(lines[i]).map(parseAlign)
+        : headers.map(() => "left" as Align);
+      if (isTableSep(lines[i] ?? "")) i += 1;
+
+      const rows: string[][] = [];
+      while (i < lines.length) {
+        const rowLine = lines[i];
+        if (rowLine.trim() === "") {
+          // Blank line ends table
+          break;
+        }
+        if (!isTableRow(rowLine) || isTableSep(rowLine)) break;
+        if (rowLine.startsWith("```") || /^#{1,3}\s+/.test(rowLine)) break;
+        if (/^[-*]\s+/.test(rowLine) && !rowLine.includes("|")) break;
+        const cells = parseTableRow(rowLine);
+        // Pad / trim to header width
+        const normalized = headers.map((_, ci) => cells[ci] ?? "");
+        rows.push(normalized);
+        i += 1;
+      }
+      // Pad aligns to header length
+      while (aligns.length < headers.length) aligns.push("left");
+      const open =
+        i >= lines.length &&
+        lines.length > 0 &&
+        isTableRow(lines[lines.length - 1] ?? "");
+      blocks.push({
+        kind: "table",
+        headers,
+        aligns: aligns.slice(0, headers.length),
+        rows,
+        open: open || undefined,
+      });
+      continue;
+    }
+
     const h = line.match(/^(#{1,3})\s+(.+)$/);
     if (h) {
       blocks.push({
@@ -95,6 +196,7 @@ function parseBlocks(text: string): Block[] {
       i += 1;
       continue;
     }
+
     if (/^[-*]\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
@@ -104,10 +206,13 @@ function parseBlocks(text: string): Block[] {
       blocks.push({ kind: "ul", items });
       continue;
     }
+
     if (line.trim() === "") {
       i += 1;
       continue;
     }
+
+    // Paragraph — stop before tables, fences, lists, headings
     const para: string[] = [line];
     i += 1;
     while (
@@ -115,8 +220,10 @@ function parseBlocks(text: string): Block[] {
       lines[i].trim() !== "" &&
       !lines[i].startsWith("```") &&
       !/^#{1,3}\s+/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i])
+      !/^[-*]\s+/.test(lines[i]) &&
+      !isTableStart(lines, i)
     ) {
+      // Lone table-looking line without a following separator: keep as prose
       para.push(lines[i]);
       i += 1;
     }
@@ -137,7 +244,6 @@ function shouldFlushBuffer(buf: string, force: boolean): boolean {
   if (force) return true;
   if (buf.length >= HARD_MAX_CHARS) return true;
   if (buf.length >= MIN_BEAM_CHARS) return true;
-  // Sentence / paragraph boundary once we have a readable phrase.
   if (buf.length >= MIN_BOUNDARY_CHARS) {
     if (/[.!?]["')\]]?\s*$/.test(buf)) return true;
     if (/\n\n/.test(buf)) return true;
@@ -235,6 +341,62 @@ function useBeamChunks(
   return { settled, buffer: streaming ? buffer : "" };
 }
 
+function TableView({
+  block,
+}: {
+  block: Extract<Block, { kind: "table" }>;
+}) {
+  const colCount = Math.max(
+    block.headers.length,
+    ...block.rows.map((r) => r.length),
+    1,
+  );
+  const headers = Array.from(
+    { length: colCount },
+    (_, i) => block.headers[i] ?? "",
+  );
+  const aligns = Array.from(
+    { length: colCount },
+    (_, i) => block.aligns[i] ?? "left",
+  );
+
+  return (
+    <div
+      className="md-table-wrap md-block-enter"
+      data-open={block.open ? "true" : "false"}
+    >
+      <table className="md-table">
+        <thead>
+          <tr>
+            {headers.map((h, i) => (
+              <th
+                key={i}
+                style={{ textAlign: aligns[i] }}
+                dangerouslySetInnerHTML={{ __html: renderInline(h) }}
+              />
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {block.rows.map((row, ri) => (
+            <tr key={ri}>
+              {headers.map((_, ci) => (
+                <td
+                  key={ci}
+                  style={{ textAlign: aligns[ci] }}
+                  dangerouslySetInnerHTML={{
+                    __html: renderInline(row[ci] ?? ""),
+                  }}
+                />
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function BlocksView({ blocks }: { blocks: Block[] }) {
   return (
     <>
@@ -252,6 +414,9 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
               />
             </pre>
           );
+        }
+        if (b.kind === "table") {
+          return <TableView key={`table-${idx}`} block={b} />;
         }
         if (b.kind === "ul") {
           return (
@@ -287,11 +452,20 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
   );
 }
 
+/** Prefer structured blocks when tables/code fences need real layout. */
+function needsStructuredRender(blocks: Block[]): boolean {
+  return blocks.some(
+    (b) => b.kind === "table" || b.kind === "pre" || b.kind === "ul" || b.kind === "h",
+  );
+}
+
 export function MarkdownBody({ text, streaming }: Props) {
   const { settled, buffer } = useBeamChunks(text, Boolean(streaming));
   const blocks = parseBlocks(text);
+  const structured = needsStructuredRender(blocks);
 
-  if (streaming) {
+  // Streaming prose: phrase beam-in. Tables / lists / headings / code: structured.
+  if (streaming && !structured) {
     return (
       <div className="md-body md-body--streaming" data-streaming="true">
         <p className="md-p md-p--stream">
@@ -312,8 +486,17 @@ export function MarkdownBody({ text, streaming }: Props) {
   }
 
   return (
-    <div className="md-body" data-streaming="false">
+    <div
+      className={
+        streaming ? "md-body md-body--streaming md-body--blocks" : "md-body"
+      }
+      data-streaming={streaming ? "true" : "false"}
+    >
       <BlocksView blocks={blocks} />
+      {streaming ? <span className="md-stream-caret" aria-hidden /> : null}
     </div>
   );
 }
+
+/** Exported for unit-style checks in the browser console / tests. */
+export const __mdTest = { parseBlocks, isTableSep, isTableRow, parseTableRow };
