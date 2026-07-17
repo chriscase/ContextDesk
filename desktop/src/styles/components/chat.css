@@ -51,16 +51,18 @@
 }
 
 /*
- * Gemini-style materialize: only *new* text deltas animate once.
- * (Animating the whole bubble on every token restart never looked like a transition.)
+ * Materialize larger phrases: flushed chunks beam in once;
+ * unflushed buffer stays soft until the phrase is ready.
  */
 .md-beam-chunk {
   display: inline;
-  animation: md-beam-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: md-beam-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.md-beam-settled {
+.md-beam-buffer {
   display: inline;
+  color: var(--text-muted);
+  opacity: 0.72;
 }
 
 .md-block-enter {
@@ -70,10 +72,10 @@
 @keyframes md-beam-in {
   from {
     opacity: 0;
-    filter: blur(5px);
+    filter: blur(6px);
   }
-  35% {
-    opacity: 0.75;
+  40% {
+    opacity: 0.85;
     filter: blur(1.5px);
   }
   to {
@@ -103,6 +105,123 @@
   }
 }
 
+/* Wait / thinking indicator while model has not produced text yet */
+.thinking-ind-wrap {
+  margin-top: var(--space-2);
+}
+
+.thinking-ind-wrap .thinking-ind {
+  margin: 0;
+  padding: 6px 10px;
+  max-width: none;
+}
+
+.thinking-ind-wrap .thinking-ind__orb {
+  width: 14px;
+  height: 14px;
+}
+
+.thinking-ind-wrap .thinking-ind__label {
+  font-size: var(--text-xs);
+}
+
+.thinking-ind {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 52rem;
+  margin: 0 0 var(--space-2);
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--bg-elevated) 80%, var(--accent-soft));
+}
+
+.thinking-ind__orb {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.thinking-ind__orb-core {
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-ind__orb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  animation: thinking-ring 1.2s ease-in-out infinite;
+}
+
+.thinking-ind__copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thinking-ind__label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.thinking-ind__model {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-ind__time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-soft));
+  background: var(--accent-soft);
+  flex-shrink: 0;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    transform: scale(0.85);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes thinking-ring {
+  0%,
+  100% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.15;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .md-beam-chunk,
   .md-block-enter {
@@ -111,6 +230,10 @@
   .md-stream-caret {
     animation: none;
     opacity: 0.7;
+  }
+  .thinking-ind__orb-core,
+  .thinking-ind__orb::before {
+    animation: none;
   }
 }
 

@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Composer } from "./components/Composer";
 import { MarkdownBody } from "./components/MarkdownBody";
+import { ThinkingIndicator } from "./components/ThinkingIndicator";
 import {
   PermissionModal,
   type PermissionPrompt,
@@ -561,6 +562,8 @@ export function App() {
   );
   const autoOpenedPreflight = useRef(false);
   const [busy, setBusy] = useState(false);
+  /** When the current turn started waiting for the model (for elapsed UI). */
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [permission, setPermission] = useState<PermissionPrompt | null>(null);
   const [pendingToolArgs, setPendingToolArgs] = useState<Record<
     string,
@@ -806,6 +809,7 @@ export function App() {
       }
       setAgentError(null);
       setBusy(true);
+      setTurnStartedAt(Date.now());
       stickToBottomRef.current = true;
       setUnreadBelow(0);
       const user: Msg = {
@@ -977,6 +981,7 @@ export function App() {
         });
       } finally {
         setBusy(false);
+        setTurnStartedAt(null);
       }
     },
     [
@@ -1626,32 +1631,58 @@ export function App() {
                       ) : null}
                       <div className="msg__bubble">
                         {m.role === "assistant" ? (
-                          <div
-                            className="msg__content"
-                            data-streaming={m.streaming ? "true" : "false"}
-                            onClick={(e) => {
-                              const t = e.target as HTMLElement;
-                              const cite = t.getAttribute("data-cite");
-                              if (!cite) return;
-                              setSourcePath(cite);
-                              setPane("source");
-                              setSourceContent("Loading…");
-                              void hostReadFile(cite)
-                                .then((body) => setSourceContent(body))
-                                .catch((err) =>
-                                  setSourceContent(
-                                    `Could not read ${cite}:\n${
-                                      err instanceof Error ? err.message : String(err)
-                                    }`,
-                                  ),
-                                );
-                            }}
-                          >
-                            <MarkdownBody
-                              text={m.content}
-                              streaming={m.streaming}
-                            />
-                          </div>
+                          <>
+                            {m.streaming &&
+                            !m.content.trim() &&
+                            turnStartedAt ? (
+                              <ThinkingIndicator
+                                startedAt={turnStartedAt}
+                                model={effectiveChatModel}
+                                hasTokens={false}
+                              />
+                            ) : null}
+                            {m.content ? (
+                              <div
+                                className="msg__content"
+                                data-streaming={m.streaming ? "true" : "false"}
+                                onClick={(e) => {
+                                  const t = e.target as HTMLElement;
+                                  const cite = t.getAttribute("data-cite");
+                                  if (!cite) return;
+                                  setSourcePath(cite);
+                                  setPane("source");
+                                  setSourceContent("Loading…");
+                                  void hostReadFile(cite)
+                                    .then((body) => setSourceContent(body))
+                                    .catch((err) =>
+                                      setSourceContent(
+                                        `Could not read ${cite}:\n${
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err)
+                                        }`,
+                                      ),
+                                    );
+                                }}
+                              >
+                                <MarkdownBody
+                                  text={m.content}
+                                  streaming={m.streaming}
+                                />
+                              </div>
+                            ) : null}
+                            {m.streaming &&
+                            m.content.trim() &&
+                            turnStartedAt ? (
+                              <div className="thinking-ind-wrap">
+                                <ThinkingIndicator
+                                  startedAt={turnStartedAt}
+                                  model={effectiveChatModel}
+                                  hasTokens
+                                />
+                              </div>
+                            ) : null}
+                          </>
                         ) : (
                           <div
                             className="msg__content"

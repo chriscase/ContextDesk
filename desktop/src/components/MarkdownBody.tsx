@@ -1,10 +1,10 @@
 /**
  * Lightweight streaming-safe markdown renderer (no external deps).
- * While streaming, new text deltas materialize (beam-in); settled content
- * is full markdown. Prefer-reduced-motion disables motion.
+ * While streaming, text accumulates into larger phrases before a beam-in.
+ * Prefer-reduced-motion disables motion.
  */
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Props = {
   text: string;
@@ -19,7 +19,6 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** Inline: `code`, **bold**, *italic*, [label](url) */
 function renderInline(src: string): string {
   let s = escapeHtml(src);
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -108,75 +107,135 @@ function parseBlocks(text: string): Block[] {
 
 type BeamChunk = { id: number; text: string };
 
-/**
- * Split growing text into stable + newly appended chunks so only fresh
- * deltas get a one-shot beam-in animation (Gemini-style materialize).
- */
-function useBeamChunks(text: string, streaming: boolean): BeamChunk[] {
-  const prev = useRef("");
-  const chunks = useRef<BeamChunk[]>([]);
-  const nextId = useRef(0);
+const MIN_BEAM_CHARS = 52;
+const MIN_BOUNDARY_CHARS = 28;
+const MAX_BUFFER_MS = 220;
+const HARD_MAX_CHARS = 120;
 
-  if (!streaming) {
-    // Final frame: single settled chunk, no animation.
-    if (chunks.current.length !== 1 || chunks.current[0]?.text !== text) {
-      chunks.current = text ? [{ id: nextId.current++, text }] : [];
-    }
-    prev.current = text;
-    return chunks.current;
+function shouldFlushBuffer(buf: string, force: boolean): boolean {
+  if (!buf) return false;
+  if (force) return true;
+  if (buf.length >= HARD_MAX_CHARS) return true;
+  if (buf.length >= MIN_BEAM_CHARS) return true;
+  // Sentence / paragraph boundary once we have a readable phrase.
+  if (buf.length >= MIN_BOUNDARY_CHARS) {
+    if (/[.!?]["')\]]?\s*$/.test(buf)) return true;
+    if (/\n\n/.test(buf)) return true;
+    if (/[:;]\s+$/.test(buf) && buf.length >= 40) return true;
   }
-
-  if (!text.startsWith(prev.current)) {
-    // Reset (new message / rewrite)
-    chunks.current = text ? [{ id: nextId.current++, text }] : [];
-  } else if (text.length > prev.current.length) {
-    const added = text.slice(prev.current.length);
-    // Merge tiny deltas into the last chunk if it's still "fresh" and small,
-    // so we animate readable phrases rather than single characters only.
-    const last = chunks.current[chunks.current.length - 1];
-    const lastIsTiny = last && last.text.length < 12;
-    if (lastIsTiny && chunks.current.length > 0) {
-      chunks.current = [
-        ...chunks.current.slice(0, -1),
-        { id: last.id, text: last.text + added },
-      ];
-    } else {
-      chunks.current = [...chunks.current, { id: nextId.current++, text: added }];
-    }
-  }
-  prev.current = text;
-  return chunks.current;
+  return false;
 }
 
-function BlocksView({ blocks, streaming }: { blocks: Block[]; streaming?: boolean }) {
+/**
+ * Accumulate streaming text into larger phrases, then beam them in once.
+ * Unflushed buffer is shown muted (no animation) until the phrase is ready.
+ */
+function useBeamChunks(
+  text: string,
+  streaming: boolean,
+): { settled: BeamChunk[]; buffer: string } {
+  const [settled, setSettled] = useState<BeamChunk[]>([]);
+  const [buffer, setBuffer] = useState("");
+  const settledRef = useRef<BeamChunk[]>([]);
+  const committedLen = useRef(0);
+  const bufferRef = useRef("");
+  const nextId = useRef(0);
+  const timerRef = useRef<number | null>(null);
+  const textRef = useRef(text);
+  textRef.current = text;
+
+  const clearTimer = () => {
+    if (timerRef.current != null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const flush = (force: boolean) => {
+    const buf = bufferRef.current;
+    if (!shouldFlushBuffer(buf, force)) return;
+    bufferRef.current = "";
+    clearTimer();
+    const chunk = { id: nextId.current++, text: buf };
+    settledRef.current = [...settledRef.current, chunk];
+    committedLen.current += buf.length;
+    setSettled(settledRef.current);
+    setBuffer("");
+  };
+
+  const scheduleFlush = () => {
+    clearTimer();
+    timerRef.current = window.setTimeout(() => {
+      flush(true);
+    }, MAX_BUFFER_MS);
+  };
+
+  useEffect(() => {
+    return () => clearTimer();
+  }, []);
+
+  useEffect(() => {
+    if (text.length < committedLen.current) {
+      clearTimer();
+      settledRef.current = [];
+      committedLen.current = 0;
+      bufferRef.current = "";
+      setSettled([]);
+      setBuffer("");
+    }
+
+    if (!streaming) {
+      clearTimer();
+      const rest = text.slice(committedLen.current);
+      if (rest) {
+        bufferRef.current = rest;
+        flush(true);
+      }
+      bufferRef.current = "";
+      setBuffer("");
+      return;
+    }
+
+    const fullPending = text.slice(committedLen.current);
+    bufferRef.current = fullPending;
+    setBuffer(fullPending);
+
+    if (shouldFlushBuffer(fullPending, false)) {
+      flush(false);
+      const again = textRef.current.slice(committedLen.current);
+      bufferRef.current = again;
+      setBuffer(again);
+      if (again) scheduleFlush();
+    } else if (fullPending) {
+      scheduleFlush();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, streaming]);
+
+  return { settled, buffer: streaming ? buffer : "" };
+}
+
+function BlocksView({ blocks }: { blocks: Block[] }) {
   return (
     <>
       {blocks.map((b, idx) => {
-        const isLast = idx === blocks.length - 1;
-        const enter = !streaming || !isLast;
         if (b.kind === "pre") {
           return (
             <pre
               key={`pre-${idx}-${b.lang}`}
-              className={`md-pre${enter ? " md-block-enter" : ""}`}
+              className="md-pre md-block-enter"
               data-open={b.open ? "true" : "false"}
               data-lang={b.lang || undefined}
             >
               <code
-                dangerouslySetInnerHTML={{
-                  __html:
-                    escapeHtml(b.text) + (b.open && streaming ? "\n…" : ""),
-                }}
+                dangerouslySetInnerHTML={{ __html: escapeHtml(b.text) }}
               />
             </pre>
           );
         }
         if (b.kind === "ul") {
           return (
-            <ul
-              key={`ul-${idx}`}
-              className={`md-ul${enter ? " md-block-enter" : ""}`}
-            >
+            <ul key={`ul-${idx}`} className="md-ul md-block-enter">
               {b.items.map((it, j) => (
                 <li
                   key={j}
@@ -191,7 +250,7 @@ function BlocksView({ blocks, streaming }: { blocks: Block[]; streaming?: boolea
           return (
             <Tag
               key={`h-${idx}`}
-              className={`md-h${enter ? " md-block-enter" : ""}`}
+              className="md-h md-block-enter"
               dangerouslySetInnerHTML={{ __html: renderInline(b.text) }}
             />
           );
@@ -199,7 +258,7 @@ function BlocksView({ blocks, streaming }: { blocks: Block[]; streaming?: boolea
         return (
           <p
             key={`p-${idx}`}
-            className={`md-p${enter ? " md-block-enter" : ""}`}
+            className="md-p md-block-enter"
             dangerouslySetInnerHTML={{ __html: renderInline(b.text) }}
           />
         );
@@ -209,26 +268,23 @@ function BlocksView({ blocks, streaming }: { blocks: Block[]; streaming?: boolea
 }
 
 export function MarkdownBody({ text, streaming }: Props) {
-  const chunks = useBeamChunks(text, Boolean(streaming));
+  const { settled, buffer } = useBeamChunks(text, Boolean(streaming));
   const blocks = parseBlocks(text);
 
-  // While streaming: beam new deltas so the materialize is visible.
-  // Settled markdown for completed structure still used when not streaming.
   if (streaming) {
     return (
       <div className="md-body md-body--streaming" data-streaming="true">
         <p className="md-p md-p--stream">
-          {chunks.map((c, i) => {
-            const isLatest = i === chunks.length - 1;
-            return (
-              <span
-                key={c.id}
-                className={isLatest ? "md-beam-chunk" : "md-beam-settled"}
-              >
-                {c.text}
-              </span>
-            );
-          })}
+          {settled.map((c) => (
+            <span key={c.id} className="md-beam-chunk">
+              {c.text}
+            </span>
+          ))}
+          {buffer ? (
+            <span className="md-beam-buffer" aria-hidden={false}>
+              {buffer}
+            </span>
+          ) : null}
           <span className="md-stream-caret" aria-hidden />
         </p>
       </div>
@@ -237,7 +293,7 @@ export function MarkdownBody({ text, streaming }: Props) {
 
   return (
     <div className="md-body" data-streaming="false">
-      <BlocksView blocks={blocks} streaming={false} />
+      <BlocksView blocks={blocks} />
     </div>
   );
 }
