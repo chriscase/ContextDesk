@@ -548,7 +548,7 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
             .args(["/C", "start", "", url])
             .spawn()
             .map_err(|e| format!("failed to open browser: {e}"))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -556,7 +556,7 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
             .arg(url)
             .spawn()
             .map_err(|e| format!("failed to open browser: {e}"))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
     {
