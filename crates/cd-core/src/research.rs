@@ -130,9 +130,17 @@ pub fn research_local(
         None,
     )?;
     events.extend(result.events.clone());
-    events.push(StreamEvent::SearchTrail {
-        steps: vec!["source:Files".into(), "tool:search_kb".into()],
-    });
+    let ranked = crate::router::rank_sources(
+        query,
+        &[
+            crate::router::SourceKind::Memory,
+            crate::router::SourceKind::Files,
+        ],
+        &crate::router::RouterBudget::default(),
+    );
+    let mut trail = crate::router::trail_for(&ranked);
+    trail.push("tool:search_kb".into());
+    events.push(StreamEvent::SearchTrail { steps: trail });
 
     if let Some(path) = &result.citation_path {
         events.push(StreamEvent::Citation {
