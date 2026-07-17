@@ -36,3 +36,10 @@ Hosts should treat the stream as the UI contract. Do not scrape private core typ
 
 - Full ACP parity with coding agents  
 - Binary file transfer in-band (use paths / side channels)  
+
+## Versioning policy
+
+- `cd_core::PROTOCOL_VERSION` is the frozen string for this major (`cd.v1`).
+- Additive optional fields on events are allowed without bumping.
+- Renaming/removing event `type` discriminants requires `cd.v2` and a migration note in this file.
+- Hosts should ignore unknown event types for forward compatibility.

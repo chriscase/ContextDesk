@@ -1,6 +1,6 @@
 [package]
 name = "cd-server"
-description = "ContextDesk headless server (team knowledge) — early stub"
+description = "ContextDesk headless server (team knowledge)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,14 @@ path = "src/main.rs"
 
 [dependencies]
 cd-core = { path = "../cd-core" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+tokio = { workspace = true, features = ["net", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { workspace = true }

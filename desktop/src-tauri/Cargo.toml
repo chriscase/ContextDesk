@@ -1,0 +1,31 @@
+[workspace]
+# Nested workspace so Tauri does not join the repo root Cargo workspace.
+
+[package]
+name = "contextdesk"
+version = "0.1.0"
+description = "ContextDesk desktop host"
+authors = ["ContextDesk contributors"]
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "contextdesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cd-core = { path = "../../crates/cd-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+panic = "abort"

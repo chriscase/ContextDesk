@@ -82,11 +82,12 @@ impl PermissionState {
         }
     }
 
-    /// True if this path was session-allowed.
+    /// True if this path was session-allowed (boundary-safe, not raw prefix).
     pub fn session_path_allowed(&self, path: &str) -> bool {
+        let path = path.trim();
         self.session_paths
             .iter()
-            .any(|p| path.starts_with(p) || p == path)
+            .any(|grant| path_under_grant(path, grant))
     }
 
     /// Whether a tool may run without a new UI prompt.
@@ -98,6 +99,19 @@ impl PermissionState {
             }
         }
     }
+}
+
+/// Exact match or child under grant with path separator boundary.
+pub fn path_under_grant(path: &str, grant: &str) -> bool {
+    let path = path.trim().trim_end_matches('/');
+    let grant = grant.trim().trim_end_matches('/');
+    if grant.is_empty() {
+        return false;
+    }
+    if path == grant {
+        return true;
+    }
+    path.starts_with(&format!("{grant}/"))
 }
 
 /// Validate a UI decision, including type-to-confirm when required.
@@ -149,7 +163,11 @@ mod tests {
     #[test]
     fn session_path_allows_soft_write() {
         let mut st = PermissionState::default();
-        st.allow_session_path("/proj/memory/");
+        st.allow_session_path("/proj/memory");
         assert!(st.may_execute_without_prompt(ToolSideEffect::SoftWrite, "/proj/memory/a.md"));
+        // Boundary: /proj/mem must not grant /proj/memory-evil
+        st.allow_session_path("/proj/mem");
+        assert!(!st.session_path_allowed("/proj/memory-evil/x"));
+        assert!(st.session_path_allowed("/proj/mem/x"));
     }
 }

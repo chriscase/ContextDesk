@@ -1,29 +1,35 @@
 //! ContextDesk core library.
 //!
 //! Hosts (desktop, server, embeds) depend on this crate for business logic.
-//! Keep secrets and OS integration at the host boundary; keep policy and
-//! pure logic here so agents can evolve the product safely.
-//!
-//! # Module map
-//! - [`branding`] — product identity from `branding.toml`
-//! - [`error`] — shared error types
-//! - [`tools`] — tool specs and side-effect classes
-//! - [`events`] — `cd.v1` stream event types
-//! - [`workspace`] — workspace identity (early stub)
-//! - [`probe`] — gateway URL normalization / model heuristics
-//! - [`permissions`] — UI-originated write grants
-//! - [`providers`] — provider profile model (keychain refs, not secrets)
-//! - [`preflight`] — environment health checks for Settings UI
+//! Keep secrets and OS integration at the host boundary where needed;
+//! pure policy and tools live here.
 
 #![deny(missing_docs)]
 
+pub mod agent;
+pub mod audit;
 pub mod branding;
+pub mod chat;
+pub mod config;
+pub mod connectors;
+pub mod discovery;
 pub mod error;
 pub mod events;
+pub mod grok_auth;
+pub mod home_source;
+pub mod index;
+pub mod injection;
+pub mod paths;
 pub mod permissions;
 pub mod preflight;
 pub mod probe;
 pub mod providers;
+pub mod router;
+pub mod secrets;
+pub mod sessions;
+pub mod skills;
+pub mod ssrf;
+pub mod tool_host;
 pub mod tools;
 pub mod workspace;
 
@@ -36,3 +42,6 @@ pub use tools::{ToolSideEffect, ToolSpec};
 
 /// Library version (cargo package version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Protocol version string.
+pub const PROTOCOL_VERSION: &str = "cd.v1";

@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities — no shell; dialog open for folders only.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}
