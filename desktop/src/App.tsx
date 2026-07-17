@@ -473,55 +473,6 @@ export function App() {
     }
   }, [messages, sessionId, markSessionRead]);
 
-  // Auto-scroll when content grows if user is following the bottom.
-  const lastContentSig = `${messages.length}:${messages[messages.length - 1]?.content.length ?? 0}:${messages[messages.length - 1]?.streaming ? "1" : "0"}`;
-  useEffect(() => {
-    if (pane !== "chat") return;
-    const el = chatScrollRef.current;
-    if (!el) return;
-    if (stickToBottomRef.current) {
-      const last = messages[messages.length - 1];
-      // Instant while streaming so beam-in stays in view; smooth when turn settles.
-      const behavior: ScrollBehavior = last?.streaming ? "auto" : "smooth";
-      el.scrollTo({ top: el.scrollHeight, behavior });
-      if (last) markSessionRead(sessionId, last.id);
-      setUnreadBelow(0);
-    } else {
-      const n = countUnread(
-        messages,
-        activeSession?.lastReadMessageId ?? null,
-      );
-      setUnreadBelow(n);
-    }
-  }, [
-    lastContentSig,
-    pane,
-    sessionId,
-    messages,
-    activeSession?.lastReadMessageId,
-    markSessionRead,
-    countUnread,
-  ]);
-
-  // Switching chats: restore unread badge; jump to bottom if fully read.
-  useEffect(() => {
-    if (pane !== "chat") return;
-    const lastRead = activeSession?.lastReadMessageId ?? null;
-    const n = countUnread(messages, lastRead);
-    setUnreadBelow(n);
-    if (n === 0) {
-      stickToBottomRef.current = true;
-      requestAnimationFrame(() => {
-        const el = chatScrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
-    } else {
-      stickToBottomRef.current = false;
-    }
-    // only when session id changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, pane]);
-
   const setShowFullHistory = (show: boolean) => {
     setSessions((all) =>
       all.map((s) =>
@@ -652,6 +603,55 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("cd-pane", pane);
   }, [pane]);
+
+  // Auto-scroll when content grows if user is following the bottom.
+  const lastContentSig = `${messages.length}:${messages[messages.length - 1]?.content.length ?? 0}:${messages[messages.length - 1]?.streaming ? "1" : "0"}`;
+  useEffect(() => {
+    if (pane !== "chat") return;
+    const el = chatScrollRef.current;
+    if (!el) return;
+    if (stickToBottomRef.current) {
+      const last = messages[messages.length - 1];
+      const behavior: ScrollBehavior = last?.streaming ? "auto" : "smooth";
+      el.scrollTo({ top: el.scrollHeight, behavior });
+      if (last) markSessionRead(sessionId, last.id);
+      setUnreadBelow(0);
+    } else {
+      const n = countUnread(
+        messages,
+        activeSession?.lastReadMessageId ?? null,
+      );
+      setUnreadBelow(n);
+    }
+  }, [
+    lastContentSig,
+    pane,
+    sessionId,
+    messages,
+    activeSession?.lastReadMessageId,
+    markSessionRead,
+    countUnread,
+  ]);
+
+  // Switching chats: restore unread badge; jump to bottom if fully read.
+  useEffect(() => {
+    if (pane !== "chat") return;
+    const lastRead = activeSession?.lastReadMessageId ?? null;
+    const n = countUnread(messages, lastRead);
+    setUnreadBelow(n);
+    if (n === 0) {
+      stickToBottomRef.current = true;
+      requestAnimationFrame(() => {
+        const el = chatScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    } else {
+      stickToBottomRef.current = false;
+    }
+    // only when session id / pane changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, pane]);
+
   const [hostPreflightReport, setHostPreflightReport] =
     useState<PreflightReport | null>(null);
   const [memoryDocs, setMemoryDocs] = useState<MemoryDoc[]>([]);
