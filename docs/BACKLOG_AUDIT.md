@@ -38,7 +38,7 @@ Last audit: 2026-07-17. Update when closing.
 | 17 | Ollama | DONE | tags + chat + health; embed optional |
 | 18 | Local discovery | DONE | discover_local + Settings candidates list |
 | 19 | Grok session | PARTIAL | Module + host pin; full wire incomplete |
-| 20 | AI settings UI | PARTIAL | Form + candidates + probe; live models residual |
+| 20 | AI settings UI | DONE | discover candidates + probe; no secrets full |
 | 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
 | 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
 | 23 | Permission modal UI | DONE | Blocking modal; preview; allow once/session; type-confirm |
@@ -46,11 +46,11 @@ Last audit: 2026-07-17. Update when closing.
 | 25 | MVP tools | DONE | search/read/save + allowlist + line caps |
 | 26 | Indexer | DONE | reindex; secret skip; size/depth caps |
 | 27 | Agent loop | DONE | profile + events + cancel + mock/scripted tests |
-| 28 | Citations UI | PARTIAL | chips + hostReadFile |
+| 28 | Citations UI | DONE | chips + trail + markdown #cite links |
 | 29 | Router budgets | PARTIAL | module |
-| 30 | Streaming markdown | PARTIAL | basic; not full md render |
-| 31 | Compact tools UI | PARTIAL | |
-| 32 | Composer | PARTIAL | expand works |
+| 30 | Streaming markdown | DONE | progressive text_delta + MarkdownBody + materialize |
+| 31 | Compact tools UI | DONE | status icons; collapse threshold 4 |
+| 32 | Composer | DONE | expand; Enter/Shift+Enter; stop SVG; list/code assist |
 | 33 | Compaction | PARTIAL | sessions module; UI thin |
 | 34 | Multi-session tabs | TODO/PARTIAL | single session mostly |
 | 35 | SVG icons | PARTIAL | icons.tsx |
@@ -58,9 +58,9 @@ Last audit: 2026-07-17. Update when closing.
 | 61 | SSRF | DONE | Unit tests + probe_url policy + DEV.md override |
 | 62 | Injection | DONE | wrap_untrusted + gate test; write skills disabled |
 | 63 | Path policy | DONE | symlink escape; .env deny; no root session grant |
-| 64 | Egress/local-only | PARTIAL | profile flag; UI badge weak |
+| 64 | Egress/local-only | PARTIAL | local-only toggle + host SSRF; badge residual |
 | 65 | Phase 1 DoD | TODO | not honestly closable yet |
-| 72 | AI form live probe | PARTIAL | |
+| 72 | AI form live probe | DONE | validation; test connection; keychain save; local-only |
 
 ## Phase 2+
 
