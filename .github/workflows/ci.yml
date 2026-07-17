@@ -22,6 +22,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  claims:
+    name: claim↔code guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check Shipped anchors in docs/CLAIMS.md
+        run: sh scripts/check_claims.sh
+
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -9,10 +9,13 @@
 ## Workspace commands
 
 ```sh
-# Format / lint (as tooling lands)
-cargo fmt
-cargo clippy -p cd-core -- -D warnings
-cargo test -p cd-core
+# Doc honesty gate (claim↔code; also runs in CI job `claims`)
+sh scripts/check_claims.sh
+
+# Full gate — see AGENTS.md "Build / test / lint"
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 
 # Desktop
 cd desktop
