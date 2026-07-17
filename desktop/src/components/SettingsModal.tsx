@@ -41,6 +41,7 @@ import {
   ToggleField,
   useDebouncedAsyncCheck,
 } from "./forms";
+import { HelpTip, HelpTitle } from "./HelpTip";
 import { PreflightPanel } from "./PreflightPanel";
 import type { ReactNode } from "react";
 import {
@@ -794,6 +795,30 @@ export function SettingsModal({
                     <SecretField
                       id={`${baseId}-key`}
                       label="API key"
+                      help={{
+                        label: "API key storage",
+                        title: "API key",
+                        body: (
+                          <>
+                            <p>
+                              Required for most OpenAI-compatible gateways.
+                              ContextDesk stores the key in the OS keychain —
+                              never in local config files or chat history.
+                            </p>
+                            <ol>
+                              <li>Paste the key from your provider dashboard.</li>
+                              <li>
+                                Click <strong>Save</strong> so it is written to
+                                the keychain.
+                              </li>
+                              <li>
+                                Leave blank later to keep the existing key;
+                                paste a new value only to replace.
+                              </li>
+                            </ol>
+                          </>
+                        ),
+                      }}
                       value={apiKeyDraft}
                       error={
                         !draft.hasApiKey && !apiKeyDraft.trim()
@@ -829,7 +854,31 @@ export function SettingsModal({
                     <TextField
                       id={`${baseId}-grok-url`}
                       label="API base (api.x.ai only)"
-                      hint="Session credentials are only allowed against api.x.ai. Tokens come from ~/.grok/auth.json after opt-in Save."
+                      hint="Session credentials only against api.x.ai after opt-in Save."
+                      help={{
+                        label: "Grok Build session",
+                        title: "Grok Build setup",
+                        body: (
+                          <>
+                            <p>
+                              Uses your local Grok Build session (
+                              <code>~/.grok/auth.json</code>) after you opt in
+                              with Save — not a pasted API key.
+                            </p>
+                            <ol>
+                              <li>Sign in with Grok Build / CLI on this machine.</li>
+                              <li>
+                                Choose <strong>Grok Build session</strong> and
+                                leave the base as <code>https://api.x.ai/v1</code>.
+                              </li>
+                              <li>
+                                Click <strong>Save</strong> so ContextDesk may
+                                use the session for chat.
+                              </li>
+                            </ol>
+                          </>
+                        ),
+                      }}
                       value={draft.baseUrl}
                       onChange={(e) =>
                         setDraft((d) => ({
@@ -919,27 +968,90 @@ export function SettingsModal({
             {section === "connectors" ? (
               <div>
                 <p className="section-lead">
-                  Optional data sources. Web research and publisher packs are
-                  opt-in. X search needs a paid API key (keychain only).
-                  Confluence is read-only (PAT in keychain).
+                  Optional data sources. Use the{" "}
+                  <span className="section-lead__help-hint" aria-hidden>
+                    ?
+                  </span>{" "}
+                  icons for setup steps where extra configuration is required.
                 </p>
                 <ToggleField
                   id={`${baseId}-web-research`}
                   label="Enable web research"
-                  hint="Exposes web_search and web_fetch. Combines Google News with curated publisher RSS. The model may pass packs (e.g. middle_east, security) to narrow fan-in. Public http(s) only; SSRF-gated."
+                  hint="Adds web_search / web_fetch. No API key. Public web only; SSRF-gated."
                   checked={draft.webResearchEnabled ?? false}
                   onChange={(webResearchEnabled) =>
                     setDraft((d) => ({ ...d, webResearchEnabled }))
                   }
+                  help={{
+                    label: "web research setup",
+                    title: "Web research",
+                    body: (
+                      <>
+                        <p>
+                          Turns on agent tools that search and fetch public web
+                          pages. No account or API key is required.
+                        </p>
+                        <ol>
+                          <li>
+                            Toggle <strong>Enable web research</strong> on.
+                          </li>
+                          <li>
+                            Optionally disable individual publisher feeds you do
+                            not want used (groups match{" "}
+                            <code>packs</code> the model can pass).
+                          </li>
+                          <li>
+                            Click <strong>Save</strong>. New chat turns can call{" "}
+                            <code>web_search</code> and <code>web_fetch</code>.
+                          </li>
+                        </ol>
+                        <p>
+                          Backends: Google News RSS, curated publisher RSS, then
+                          DuckDuckGo fallbacks. Private/loopback URLs are blocked.
+                        </p>
+                      </>
+                    ),
+                  }}
                 />
                 {draft.webResearchEnabled && newsSources.length > 0 ? (
                   <div className="news-sources">
-                    <p className="field__hint news-sources__lead">
-                      Publisher feeds (user allowlist). The agent can further
-                      narrow by pack id matching these groups. All on by
-                      default — turn off any you do not want queried. Cached
-                      ~8 minutes.
-                    </p>
+                    <div className="news-sources__lead-row">
+                      <p className="field__hint news-sources__lead">
+                        Publisher allowlist. Groups map to agent{" "}
+                        <code>packs</code>. Cached ~8 minutes.
+                      </p>
+                      <HelpTip
+                        label="publisher packs"
+                        title="Publisher feeds & packs"
+                      >
+                        <p>
+                          These feeds supply real article URLs alongside Google
+                          News. Everything is on by default.
+                        </p>
+                        <ul>
+                          <li>
+                            <strong>User toggles</strong> are the hard max —
+                            disabled sources never run.
+                          </li>
+                          <li>
+                            The model may pass{" "}
+                            <code>
+                              packs: [&quot;middle_east&quot;,
+                              &quot;security&quot;]
+                            </code>{" "}
+                            to narrow fan-in further.
+                          </li>
+                          <li>
+                            Pack ids:{" "}
+                            <code>public_intl</code>,{" "}
+                            <code>us_mainstream</code>,{" "}
+                            <code>middle_east</code>, <code>security</code>,{" "}
+                            <code>progressive</code>,{" "}
+                            <code>conservative</code>.
+                          </li>
+                        </ul>
+                      </HelpTip>
+                    </div>
                     <div className="news-sources__bulk">
                       <button
                         type="button"
@@ -1000,18 +1112,46 @@ export function SettingsModal({
                   </div>
                 ) : null}
                 <div className="settings-connector-block">
-                  <h3 className="settings-connector-block__title">X (Twitter)</h3>
-                  <p className="field__hint">
-                    Optional. Recent-search via the official X API. Free tier
-                    cannot search in practice — you need a paid/usable plan.
-                    Bearer token is stored in the OS keychain only (never in
-                    config.json). When enabled with a key, the agent gets{" "}
-                    <code>x_search</code>.
-                  </p>
+                  <HelpTitle
+                    title="X (Twitter)"
+                    helpLabel="X search setup"
+                    helpTitle="Set up X search"
+                  >
+                    <p>
+                      Optional connector for recent posts via the official X
+                      API. This is <strong>not free RSS</strong> — search needs
+                      a paid/usable X API plan. Free tier is effectively
+                      unusable for reading/search.
+                    </p>
+                    <ol>
+                      <li>
+                        Create an app at{" "}
+                        <strong>developer.x.com</strong> and subscribe to a plan
+                        that includes recent search.
+                      </li>
+                      <li>
+                        Copy a <strong>Bearer token</strong> (OAuth 2.0 app
+                        token).
+                      </li>
+                      <li>
+                        Toggle <strong>Enable X search</strong> on, paste the
+                        token below, then <strong>Save</strong>.
+                      </li>
+                      <li>
+                        Use <strong>Test X config</strong> to confirm a key is
+                        on file (does not call the live API).
+                      </li>
+                    </ol>
+                    <p>
+                      The token is stored only in the OS keychain — never in{" "}
+                      <code>config.json</code>. When both enable + key are set,
+                      the agent gets the <code>x_search</code> tool.
+                    </p>
+                  </HelpTitle>
                   <ToggleField
                     id={`${baseId}-x-enabled`}
                     label="Enable X search"
-                    hint="Registers x_search only when a bearer is also on file."
+                    hint="Tool appears only when a bearer is also saved."
                     checked={draft.x?.enabled ?? false}
                     onChange={(enabled) =>
                       setDraft((d) => ({
@@ -1026,7 +1166,25 @@ export function SettingsModal({
                   <SecretField
                     id={`${baseId}-x-key`}
                     label="X API bearer token"
-                    hint="OAuth 2.0 Bearer for api.x.com. Stored in keychain on Save."
+                    hint="Stored in keychain on Save."
+                    help={{
+                      label: "X API bearer",
+                      title: "Where the bearer goes",
+                      body: (
+                        <>
+                          <p>
+                            Paste the Bearer token from the X developer
+                            portal. ContextDesk sends it only as{" "}
+                            <code>Authorization: Bearer …</code> to{" "}
+                            <code>api.x.com</code>.
+                          </p>
+                          <p>
+                            Leave blank on later saves to keep the existing
+                            key. Masked dots mean a key is already stored.
+                          </p>
+                        </>
+                      ),
+                    }}
                     value={
                       xTokenDraft
                         ? xTokenDraft
@@ -1087,10 +1245,44 @@ export function SettingsModal({
                   ) : null}
                 </div>
 
+                <div className="settings-connector-block">
+                  <HelpTitle
+                    title="Confluence (read-only)"
+                    helpLabel="Confluence setup"
+                    helpTitle="Set up Confluence"
+                  >
+                    <p>
+                      Read-only access to a Confluence wiki. The agent can
+                      search and open pages; it cannot create or edit content.
+                    </p>
+                    <ol>
+                      <li>
+                        Note your wiki base URL (e.g.{" "}
+                        <code>https://wiki.example.com</code> — no{" "}
+                        <code>/wiki</code> or API path required).
+                      </li>
+                      <li>
+                        Create a personal access token (PAT) or API token in
+                        your Atlassian/Confluence account.
+                      </li>
+                      <li>
+                        Toggle enable on, enter base URL + PAT, optionally
+                        restrict to space keys (e.g. <code>ENG, DOCS</code>).
+                      </li>
+                      <li>
+                        <strong>Save</strong>, then Test configuration.
+                      </li>
+                    </ol>
+                    <p>
+                      The PAT is stored only in the OS keychain. Tools:{" "}
+                      <code>confluence_search</code>,{" "}
+                      <code>confluence_get_page</code>.
+                    </p>
+                  </HelpTitle>
                 <ToggleField
                   id={`${baseId}-cf-enabled`}
-                  label="Enable Confluence (read-only)"
-                  hint="PAT is stored in the OS keychain only."
+                  label="Enable Confluence"
+                  hint="PAT stays in the OS keychain only."
                   checked={draft.confluence?.enabled ?? false}
                   onChange={(enabled) =>
                     setDraft((d) => ({
@@ -1108,6 +1300,32 @@ export function SettingsModal({
                   id={`${baseId}-cf-url`}
                   label="Confluence base URL"
                   hint="e.g. https://wiki.example.com — no API path required"
+                  help={{
+                    label: "Confluence URL",
+                    title: "Base URL format",
+                    body: (
+                      <>
+                        <p>
+                          Use the site origin only. ContextDesk appends the
+                          REST paths it needs.
+                        </p>
+                        <ul>
+                          <li>
+                            Good: <code>https://wiki.company.com</code>
+                          </li>
+                          <li>
+                            Good:{" "}
+                            <code>https://yoursite.atlassian.net/wiki</code>{" "}
+                            if that is how your Cloud wiki is reached
+                          </li>
+                          <li>
+                            Avoid pasting full page or API URLs with query
+                            strings
+                          </li>
+                        </ul>
+                      </>
+                    ),
+                  }}
                   value={draft.confluence?.baseUrl ?? ""}
                   error={confluenceUrlError}
                   ok={
@@ -1133,7 +1351,25 @@ export function SettingsModal({
                 <SecretField
                   id={`${baseId}-cf-pat`}
                   label="Personal access token"
-                  hint="Atlassian/Confluence PAT or API token. Stored in keychain only."
+                  hint="Stored in keychain only."
+                  help={{
+                    label: "Confluence PAT",
+                    title: "Personal access token",
+                    body: (
+                      <>
+                        <p>
+                          Create a PAT or API token in your Atlassian/Confluence
+                          account settings with read access to the spaces you
+                          need.
+                        </p>
+                        <p>
+                          Paste once and Save. Leave blank later to keep the
+                          existing token; masked dots mean a token is already
+                          stored.
+                        </p>
+                      </>
+                    ),
+                  }}
                   value={
                     cfTokenDraft
                       ? cfTokenDraft
@@ -1219,6 +1455,7 @@ export function SettingsModal({
                     {cfStatus}
                   </p>
                 ) : null}
+                </div>
               </div>
             ) : null}
 

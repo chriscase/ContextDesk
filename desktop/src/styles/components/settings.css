@@ -54,6 +54,33 @@
   letter-spacing: -0.01em;
 }
 
+.section-lead__help-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1em;
+  height: 1.1em;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--text-faint);
+  vertical-align: middle;
+}
+
+.news-sources__lead-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+}
+
+.news-sources__lead-row .news-sources__lead {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+}
+
 /* Legacy modal overlay (unused; kept for any residual class refs). */
 .settings-overlay {
   position: fixed;

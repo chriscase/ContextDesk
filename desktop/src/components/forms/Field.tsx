@@ -5,6 +5,14 @@ import type {
   TextareaHTMLAttributes,
 } from "react";
 import { useEffect, useId, useState } from "react";
+import { HelpTip } from "../HelpTip";
+
+/** Optional setup help shown as a ? icon next to the label. */
+export type FieldHelp = {
+  label: string;
+  title: string;
+  body: ReactNode;
+};
 
 type BaseProps = {
   label: string;
@@ -13,6 +21,7 @@ type BaseProps = {
   ok?: string | null;
   pending?: string | null;
   id: string;
+  help?: FieldHelp;
 };
 
 function describedByIds(
@@ -38,14 +47,22 @@ export function Field({
   ok,
   pending,
   id,
+  help,
   children,
 }: BaseProps & { children: ReactNode }) {
   const invalid = Boolean(error);
   return (
     <div className="field" data-invalid={invalid ? "true" : "false"}>
-      <label className="field__label" htmlFor={id}>
-        {label}
-      </label>
+      <div className="field__label-row">
+        <label className="field__label" htmlFor={id}>
+          {label}
+        </label>
+        {help ? (
+          <HelpTip label={help.label} title={help.title}>
+            {help.body}
+          </HelpTip>
+        ) : null}
+      </div>
       {children}
       {hint && !error && !ok && !pending ? (
         <span className="field__hint" id={`${id}-hint`}>
@@ -78,10 +95,19 @@ export function TextField({
   ok,
   pending,
   id,
+  help,
   ...rest
 }: BaseProps & InputHTMLAttributes<HTMLInputElement>) {
   return (
-    <Field label={label} hint={hint} error={error} ok={ok} pending={pending} id={id}>
+    <Field
+      label={label}
+      hint={hint}
+      error={error}
+      ok={ok}
+      pending={pending}
+      id={id}
+      help={help}
+    >
       <input
         id={id}
         className="field__control"
@@ -100,11 +126,20 @@ export function SecretField({
   ok,
   pending,
   id,
+  help,
   ...rest
 }: BaseProps & InputHTMLAttributes<HTMLInputElement>) {
   const h = hint ?? "Stored in the OS keychain — never written to a plain config file.";
   return (
-    <Field label={label} hint={h} error={error} ok={ok} pending={pending} id={id}>
+    <Field
+      label={label}
+      hint={h}
+      error={error}
+      ok={ok}
+      pending={pending}
+      id={id}
+      help={help}
+    >
       <input
         id={id}
         className="field__control"
@@ -123,11 +158,12 @@ export function SelectField({
   hint,
   error,
   id,
+  help,
   children,
   ...rest
 }: BaseProps & SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <Field label={label} hint={hint} error={error} id={id}>
+    <Field label={label} hint={hint} error={error} id={id} help={help}>
       <select
         id={id}
         className="field__control"
@@ -146,10 +182,11 @@ export function TextAreaField({
   hint,
   error,
   id,
+  help,
   ...rest
 }: BaseProps & TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return (
-    <Field label={label} hint={hint} error={error} id={id}>
+    <Field label={label} hint={hint} error={error} id={id} help={help}>
       <textarea
         id={id}
         className="field__control"
@@ -169,6 +206,7 @@ export function ToggleField({
   checked,
   onChange,
   disabled,
+  help,
 }: {
   id: string;
   label: string;
@@ -176,19 +214,27 @@ export function ToggleField({
   checked: boolean;
   onChange: (next: boolean) => void;
   disabled?: boolean;
+  help?: FieldHelp;
 }) {
   return (
     <div className="field">
-      <label className="toggle" htmlFor={id}>
-        <input
-          id={id}
-          type="checkbox"
-          checked={checked}
-          disabled={disabled}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <span>{label}</span>
-      </label>
+      <div className="toggle-row">
+        <label className="toggle" htmlFor={id}>
+          <input
+            id={id}
+            type="checkbox"
+            checked={checked}
+            disabled={disabled}
+            onChange={(e) => onChange(e.target.checked)}
+          />
+          <span>{label}</span>
+        </label>
+        {help ? (
+          <HelpTip label={help.label} title={help.title}>
+            {help.body}
+          </HelpTip>
+        ) : null}
+      </div>
       {hint ? <span className="field__hint">{hint}</span> : null}
     </div>
   );

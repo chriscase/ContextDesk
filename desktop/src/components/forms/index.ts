@@ -9,3 +9,4 @@ export {
   useDebouncedAsyncCheck,
   useFieldId,
 } from "./Field";
+export type { FieldHelp } from "./Field";

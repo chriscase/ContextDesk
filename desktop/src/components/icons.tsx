@@ -107,6 +107,17 @@ export function IconClose({ className }: IconProps) {
   );
 }
 
+/** Circle question mark — setup help / popover trigger. */
+export function IconHelp({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
+    </Svg>
+  );
+}
+
 export function IconCheck({ className }: IconProps) {
   return (
     <Svg className={className}>
