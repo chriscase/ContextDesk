@@ -17,8 +17,11 @@ import {
   agentTurn,
   completePermission,
   hostCheckOllama,
+  hostListMemory,
   hostPreflight,
+  hostReadFile,
   hostSetWorkspace,
+  hostWriteMemory,
   type EventDto,
 } from "./lib/host";
 import {
@@ -186,13 +189,12 @@ export function App() {
         title: i.title,
         level: i.level,
         detail: i.detail,
-        fixAction: (i.fix_action as AppSetupState extends never
-          ? never
-          : "workspace" | "ai" | "general" | "appearance") ?? undefined,
+        fixAction:
+          (i.fix_action as "workspace" | "ai" | "general" | "appearance" | undefined) ??
+          undefined,
       })),
       hasBlocking: report.has_blocking,
     });
-    // also refresh ollama flag on setup for client merge
     if (setup.providerKind === "ollama") {
       const ok = await hostCheckOllama(setup.baseUrl);
       if (ok !== null) {
@@ -201,9 +203,33 @@ export function App() {
     }
   }, [setup.baseUrl, setup.providerKind]);
 
+  const refreshMemory = useCallback(async () => {
+    try {
+      const files = await hostListMemory();
+      setMemoryDocs(
+        files.map((f) => ({
+          path: f.path,
+          title: f.title,
+          body: f.body,
+        })),
+      );
+      if (files.length && !memoryPath) {
+        setMemoryPath(files[0].path);
+      }
+    } catch {
+      /* browser without host */
+    }
+  }, [memoryPath]);
+
   useEffect(() => {
     void refreshHostPreflight();
   }, [setup.workspaceRoots, setup.providerKind, setup.chatModel]);
+
+  useEffect(() => {
+    if (setup.workspaceRoots.length > 0) {
+      void refreshMemory();
+    }
+  }, [setup.workspaceRoots, refreshMemory]);
 
   useEffect(() => {
     if (preflight.hasBlocking && !localStorage.getItem("cd-setup-seen")) {
@@ -262,10 +288,23 @@ export function App() {
               setPendingToolArgs({});
             }
           }
-          // Open source pane on first citation
           const cite = msg.citations?.[0];
           if (cite) {
             setSourcePath(cite.id);
+            void hostReadFile(cite.id)
+              .then((body) => {
+                setSourceContent(body);
+                setPane("source");
+              })
+              .catch((err) => {
+                setSourceContent(
+                  `Could not read file:\n${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
+          }
+          // Refresh memory if save_memory tool ran
+          if (msg.tools?.some((t) => t.name === "save_memory" && t.ok)) {
+            void refreshMemory();
           }
           const next = [...m];
           next[idx] = msg;
@@ -289,7 +328,13 @@ export function App() {
         setBusy(false);
       }
     },
-    [preflight.hasBlocking, sessionId, setup.ollamaReachable, setup.providerKind],
+    [
+      preflight.hasBlocking,
+      sessionId,
+      setup.ollamaReachable,
+      setup.providerKind,
+      refreshMemory,
+    ],
   );
 
   const onPermissionRespond = async (
@@ -502,10 +547,17 @@ export function App() {
                               className="citation-chip"
                               onClick={() => {
                                 setSourcePath(c.id);
-                                setSourceContent(
-                                  `(open via host) ${c.label}\nPath: ${c.id}`,
-                                );
                                 setPane("source");
+                                setSourceContent("Loading…");
+                                void hostReadFile(c.id)
+                                  .then((body) => setSourceContent(body))
+                                  .catch((err) =>
+                                    setSourceContent(
+                                      `Could not read ${c.id}:\n${
+                                        err instanceof Error ? err.message : String(err)
+                                      }`,
+                                    ),
+                                  );
                               }}
                             >
                               {c.label}
@@ -537,13 +589,17 @@ export function App() {
               activePath={memoryPath}
               onSelect={setMemoryPath}
               onSave={(path, body) => {
-                setMemoryDocs((docs) => {
-                  const title =
-                    docs.find((d) => d.path === path)?.title ?? path;
-                  const next = docs.filter((d) => d.path !== path);
-                  next.push({ path, title, body });
-                  return next;
-                });
+                const title =
+                  memoryDocs.find((d) => d.path === path)?.title ?? "Note";
+                const base =
+                  path.split(/[/\\]/).pop()?.replace(/\.md$/i, "") ?? "note";
+                void hostWriteMemory(base, title, body)
+                  .then(() => refreshMemory())
+                  .catch((err) =>
+                    setAgentError(
+                      err instanceof Error ? err.message : String(err),
+                    ),
+                  );
               }}
             />
           ) : null}

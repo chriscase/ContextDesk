@@ -23,6 +23,7 @@ url = { workspace = true }
 futures-util = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

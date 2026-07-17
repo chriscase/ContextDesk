@@ -109,11 +109,35 @@ export async function hostSaveSecret(profileId: string, secret: string): Promise
   await invoke("set_provider_secret", { profileId, secret });
 }
 
-export async function hostReadFile(relative: string): Promise<string> {
+export async function hostReadFile(path: string): Promise<string> {
   if (!isTauri()) {
-    throw new Error("read requires Tauri host");
+    // cd-server fallback: not implemented for arbitrary files; fail honestly
+    throw new Error("File read requires Tauri host (npm run tauri:dev)");
   }
-  return invoke<string>("read_memory_file", { relative });
+  return invoke<string>("read_workspace_file_cmd", { path });
+}
+
+export type MemoryFileDto = {
+  path: string;
+  relative: string;
+  title: string;
+  body: string;
+};
+
+export async function hostListMemory(): Promise<MemoryFileDto[]> {
+  if (!isTauri()) return [];
+  return invoke<MemoryFileDto[]>("list_memory_notes");
+}
+
+export async function hostWriteMemory(
+  filename: string,
+  title: string,
+  body: string,
+): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Memory write requires Tauri host");
+  }
+  return invoke<string>("write_memory_note", { filename, title, body });
 }
 
 export function setupToWorkspaceRoots(setup: AppSetupState): string[] {

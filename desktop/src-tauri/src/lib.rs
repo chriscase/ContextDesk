@@ -10,6 +10,7 @@ use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
 use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
+use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_file, MemoryFile};
 use cd_core::research::{
     build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
 };
@@ -357,12 +358,55 @@ fn reindex(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn read_memory_file(state: State<'_, AppState>, relative: String) -> Result<String, String> {
+fn read_workspace_file_cmd(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
-    let path = cd_core::paths::resolve_allowed_path(&ws, &relative, false)
+    read_workspace_file(&ws, &path).map_err(|e| e.to_string())
+}
+
+/// Alias used by UI for citation / source preview.
+#[tauri::command]
+fn read_memory_file(state: State<'_, AppState>, relative: String) -> Result<String, String> {
+    read_workspace_file_cmd(state, relative)
+}
+
+#[tauri::command]
+fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+    list_memory_files(&ws).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn write_memory_note(
+    state: State<'_, AppState>,
+    filename: String,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+    let path = write_memory_file(&ws, &filename, &title, &body).map_err(|e| e.to_string())?;
+    // refresh index if host exists
+    if let Ok(mut g) = state.host.lock() {
+        if let Some(h) = g.as_mut() {
+            let _ = h.reindex();
+        }
+    }
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn sql_ro_query(
+    state: State<'_, AppState>,
+    db_path: String,
+    sql: String,
+) -> Result<cd_core::sql_ro::SqlRoResult, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+    let path = cd_core::paths::resolve_allowed_path(&ws, &db_path, false)
         .map_err(|e| e.to_string())?;
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    cd_core::sql_ro::execute_sqlite_ro(&path, &sql).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -406,6 +450,10 @@ pub fn run() {
             complete_permission_cmd,
             reindex,
             read_memory_file,
+            read_workspace_file_cmd,
+            list_memory_notes,
+            write_memory_note,
+            sql_ro_query,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");

@@ -22,6 +22,7 @@ pub mod http_preset;
 pub mod index;
 pub mod injection;
 pub mod mcp_client;
+pub mod memory_fs;
 pub mod paths;
 pub mod permissions;
 pub mod preflight;
