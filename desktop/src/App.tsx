@@ -994,7 +994,7 @@ export function App() {
     setSessions((all) => {
       const next = all.filter((s) => s.id !== id);
       if (next.length === 0) {
-        const s = newSession("Chat 1");
+        const s = newSession("Chat 1", defaultChatModel);
         setActiveSessionId(s.id);
         return [s];
       }
