@@ -13,6 +13,7 @@
 //! - [`probe`] — gateway URL normalization / model heuristics
 //! - [`permissions`] — UI-originated write grants
 //! - [`providers`] — provider profile model (keychain refs, not secrets)
+//! - [`preflight`] — environment health checks for Settings UI
 
 #![deny(missing_docs)]
 
@@ -20,6 +21,7 @@ pub mod branding;
 pub mod error;
 pub mod events;
 pub mod permissions;
+pub mod preflight;
 pub mod probe;
 pub mod providers;
 pub mod tools;

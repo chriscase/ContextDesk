@@ -12,8 +12,9 @@ ContextDesk is a **developer knowledge workbench**: multi-source retrieval, tool
 2. **No company-specific branding in source** — generic provider kinds (`openai_compatible`, `ollama`, `xai_grok_build`, `anthropic`).
 3. **Rename-friendly** — product display strings from `branding.toml` / branding module; crate names stay `cd-*`.
 4. **Writes need explicit human confirmation** — HardWrite never silent; SoftWrite via Accept/Discard where durable.
-5. **Modular CSS** — no scattered inline style soup; themes via CSS variables in `desktop/ui/src/styles/`.
+5. **Modular CSS** — no scattered inline style soup; themes via CSS variables in `desktop/src/styles/`.
 6. **Decoupled core** — hosts call `cd-core`; do not put business logic only in Tauri commands or React.
+7. **Settings-first** — happy path is Settings + Preflight UI with validated forms and live checks, **not** hand-edited config files. Power-user export/import is optional only.
 
 ## Language practices
 

@@ -24,12 +24,17 @@ Point at allowlisted folders + memory → ask how a subsystem works → get stre
 
 | Principle | Detail |
 |-----------|--------|
+| **Settings-first** | Normal use never requires hand-editing config files |
+| **Preflight** | Local/remote dependency health is visible and re-checkable |
+| **Live forms** | Validate as you type; probe/debounce expensive checks |
 | Citation-first | Answers without sources are incomplete |
 | Search trail | Show where the assistant looked |
 | Compact density | Tool cards and history stay scannable |
 | Permission theater is a feature | Obvious confirm UI for writes |
 | Calm chrome | Multi-pane without IDE clutter |
 | Themeable | CSS variables; dark default |
+
+Config files and env vars may exist for power users and servers; they are **not** the happy path.
 
 ## Personas
 

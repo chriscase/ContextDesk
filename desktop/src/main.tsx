@@ -9,6 +9,8 @@ import "./styles/layout.css";
 import "./styles/components/composer.css";
 import "./styles/components/tools.css";
 import "./styles/components/chat.css";
+import "./styles/components/forms.css";
+import "./styles/components/settings.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

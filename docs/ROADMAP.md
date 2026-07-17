@@ -4,7 +4,8 @@ GitHub issues and epics are the source of truth. High-level phases:
 
 ## Phase 0 — Foundation
 
-Monorepo, `cd-core` skeleton, branding, AGENTS docs, CI, desktop shell shell.
+Monorepo, `cd-core` skeleton, branding, AGENTS docs, CI, desktop shell,
+**Settings + Preflight UI** (no config-file happy path), form validation primitives.
 
 ## Phase 1 — MVP research loop
 
