@@ -601,34 +601,31 @@ fn list_skills_cmd(state: State<'_, AppState>) -> Result<Vec<SkillDto>, String> 
         .collect())
 }
 
+/// Propose authoring a skill via the SoftWrite tool host path (PermissionRequired).
+/// Does **not** write until the UI completes the grant and re-executes.
 #[tauri::command]
-fn write_skill_cmd(
+fn propose_save_skill_cmd(
     state: State<'_, AppState>,
     id: String,
     name: String,
     description: String,
     body: String,
     allows_write: bool,
-) -> Result<String, String> {
-    // SoftWrite-style: host only; skills with allows_write start disabled.
-    let cfg = state.config.lock().expect("config").clone();
-    let root = cfg
-        .workspace
-        .as_ref()
-        .and_then(|w| w.roots.first())
-        .ok_or("no workspace root")?;
-    let dir = cd_core::skills::workspace_skills_dir(root);
-    let skill = cd_core::skills::Skill {
-        id: id.clone(),
-        name,
-        description,
-        body,
-        path: PathBuf::new(),
-        disabled: allows_write,
-        allows_write,
-    };
-    let path = cd_core::skills::write_skill(&dir, &skill).map_err(|e| e.to_string())?;
-    Ok(path.display().to_string())
+) -> Result<Vec<EventDto>, String> {
+    ensure_host(&state)?;
+    let mut host_guard = state.host.lock().expect("host");
+    let host = host_guard.as_mut().ok_or("host missing")?;
+    let args = serde_json::json!({
+        "id": id,
+        "name": name,
+        "description": description,
+        "body_markdown": body,
+        "allows_write": allows_write,
+    });
+    let result = host
+        .execute(cd_core::tools::names::SAVE_SKILL, &args, None)
+        .map_err(|e| e.to_string())?;
+    Ok(events_to_dto(&result.events))
 }
 
 #[tauri::command]
@@ -866,7 +863,7 @@ pub fn run() {
             agent_turn,
             complete_permission_cmd,
             list_skills_cmd,
-            write_skill_cmd,
+            propose_save_skill_cmd,
             reindex,
             read_memory_file,
             read_workspace_file_cmd,

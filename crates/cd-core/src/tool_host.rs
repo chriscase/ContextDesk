@@ -9,6 +9,7 @@ use crate::paths::resolve_allowed_path;
 use crate::permissions::{
     validate_decision, PermissionDecision, PermissionRequest, PermissionState,
 };
+use crate::skills::{self, Skill};
 use crate::tools::{may_auto_execute, mvp_tool_specs, names, ToolSideEffect, ToolSpec};
 use crate::workspace::Workspace;
 use serde_json::{json, Value};
@@ -211,6 +212,7 @@ impl ToolHost {
             names::SEARCH_KB => self.tool_search(arguments)?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
             names::SAVE_MEMORY => self.tool_save_memory(arguments)?,
+            names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             _ => {
                 return Err(CoreError::Message(format!("unknown tool `{name}`")));
             }
@@ -370,6 +372,69 @@ impl ToolHost {
         ))
     }
 
+    /// SoftWrite skill author — only called after grant (see execute gate).
+    fn tool_save_skill(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id)
+            .trim();
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let body = args
+            .get("body_markdown")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if id.is_empty() || body.is_empty() {
+            return Err(CoreError::Message(
+                "save_skill requires id and body_markdown".into(),
+            ));
+        }
+        let allows_write = args
+            .get("allows_write")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let root = self
+            .workspace
+            .roots
+            .first()
+            .ok_or_else(|| CoreError::Policy("no workspace roots".into()))?;
+        let dir = skills::workspace_skills_dir(root);
+        let skill = Skill {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            body: body.to_string(),
+            path: PathBuf::new(),
+            // Write-claiming skills stay disabled until explicit enable.
+            disabled: allows_write,
+            allows_write,
+        };
+        let path = skills::write_skill(&dir, &skill)?;
+        // Confirm under allowlist
+        let _ = resolve_allowed_path(&self.workspace, &path, false)?;
+        // Catalog must see the new skill immediately
+        let catalog = skills::discover_skills(std::slice::from_ref(&dir))?;
+        let in_catalog = catalog.iter().any(|s| s.id == id);
+        if !in_catalog {
+            return Err(CoreError::Message(
+                "skill written but not visible in catalog".into(),
+            ));
+        }
+        let preview = skill_draft_preview(args);
+        Ok((
+            true,
+            format!("skill saved {}", path.display()),
+            preview,
+            Some(path.display().to_string()),
+        ))
+    }
+
     fn audit_log(
         &self,
         tool: &str,
@@ -397,6 +462,7 @@ fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
     match side {
         ToolSideEffect::Read => "local",
         ToolSideEffect::SoftWrite if name == names::SAVE_MEMORY => "local",
+        ToolSideEffect::SoftWrite if name == names::SAVE_SKILL => "local",
         ToolSideEffect::SoftWrite => "local",
         ToolSideEffect::HardWrite => "destructive",
     }
@@ -423,6 +489,30 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             let safe = if safe.is_empty() { "note" } else { safe };
             memory_dir.join(format!("{safe}.md")).display().to_string()
         }
+        names::SAVE_SKILL => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
+            let safe: String = id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            // Absolute-ish target under first root so grant matching is stable.
+            let root = memory_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            root.join(".contextdesk")
+                .join("skills")
+                .join(format!("{safe}.md"))
+                .display()
+                .to_string()
+        }
         names::SEARCH_KB => args
             .get("query")
             .and_then(|v| v.as_str())
@@ -432,7 +522,36 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
     }
 }
 
+/// Human-readable draft shown in the permission modal for SoftWrite tools.
+fn skill_draft_preview(args: &Value) -> String {
+    let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let body = args
+        .get("body_markdown")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let allows = args
+        .get("allows_write")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    format!(
+        "--- skill draft preview ---\nid: {id}\nname: {name}\ndescription: {description}\nallows_write: {allows}\n---\n\n{body}\n"
+    )
+}
+
 fn preview_args(args: &Value) -> String {
+    // Prefer readable skill draft when this looks like save_skill.
+    if args.get("body_markdown").is_some() && args.get("id").is_some() {
+        let draft = skill_draft_preview(args);
+        if draft.len() > 2000 {
+            return format!("{}…", &draft[..2000]);
+        }
+        return draft;
+    }
     let s = args.to_string();
     if s.len() > 500 {
         format!("{}…", &s[..500])
@@ -530,6 +649,62 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, StreamEvent::PermissionRequired { .. })));
+    }
+
+    #[test]
+    fn save_skill_soft_write_requires_grant_and_previews_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let args = json!({
+            "id": "auth-trace",
+            "name": "Auth Trace",
+            "description": "Trace auth",
+            "body_markdown": "1. Search auth\n2. Cite files",
+            "allows_write": false
+        });
+        // Without grant → PermissionRequired with draft preview
+        let r = host.execute(names::SAVE_SKILL, &args, None).unwrap();
+        assert!(!r.ok);
+        let preview = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired {
+                    preview, tool_name, ..
+                } => {
+                    assert_eq!(tool_name, names::SAVE_SKILL);
+                    Some(preview.clone())
+                }
+                _ => None,
+            })
+            .expect("permission required");
+        assert!(
+            preview.contains("skill draft preview") && preview.contains("auth-trace"),
+            "preview={preview}"
+        );
+        // File must not exist yet
+        let skill_path = dir.path().join(".contextdesk/skills/auth-trace.md");
+        assert!(!skill_path.exists());
+
+        // Grant AllowOnce and execute
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host.execute(names::SAVE_SKILL, &args, Some(&rid)).unwrap();
+        assert!(r2.ok, "summary={}", r2.summary);
+        assert!(skill_path.is_file(), "skill file missing");
+        // Immediately in catalog
+        let catalog = skills::discover_skills(&[skills::workspace_skills_dir(dir.path())]).unwrap();
+        assert!(catalog.iter().any(|s| s.id == "auth-trace"));
     }
 
     #[test]

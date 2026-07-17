@@ -224,15 +224,18 @@ export async function hostListSkills(): Promise<SkillDto[]> {
   return invoke<SkillDto[]>("list_skills_cmd");
 }
 
-export async function hostWriteSkill(args: {
+/** SoftWrite path: returns permission_required events until grant + re-execute. */
+export async function hostProposeSaveSkill(args: {
   id: string;
   name: string;
   description: string;
   body: string;
   allowsWrite?: boolean;
-}): Promise<string | null> {
-  if (!isTauri()) return null;
-  return invoke<string>("write_skill_cmd", {
+}): Promise<EventDto[]> {
+  if (!isTauri()) {
+    throw new Error("Skill authoring requires Tauri host");
+  }
+  return invoke<EventDto[]>("propose_save_skill_cmd", {
     id: args.id,
     name: args.name,
     description: args.description,

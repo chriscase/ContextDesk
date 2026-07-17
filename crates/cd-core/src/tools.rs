@@ -36,6 +36,8 @@ pub mod names {
     pub const READ_FILE_SLICE: &str = "read_file_slice";
     /// Append or create a project memory markdown note (SoftWrite).
     pub const SAVE_MEMORY: &str = "save_memory";
+    /// Propose authoring a skill markdown playbook (SoftWrite + Accept).
+    pub const SAVE_SKILL: &str = "save_skill";
 }
 
 /// MVP tool specifications (schemas only; execution is host/agent work).
@@ -84,6 +86,23 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "required": ["title", "body_markdown"]
             }),
         },
+        ToolSpec {
+            name: names::SAVE_SKILL.into(),
+            description: "Propose authoring a skill playbook under workspace .contextdesk/skills (SoftWrite; requires user Accept). Skills cannot raise write permissions."
+                .into(),
+            side_effect: ToolSideEffect::SoftWrite,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Stable skill id (slug)" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "body_markdown": { "type": "string", "description": "Skill playbook body" },
+                    "allows_write": { "type": "boolean", "description": "If true, skill is saved disabled until user enables" }
+                },
+                "required": ["id", "name", "description", "body_markdown"]
+            }),
+        },
     ]
 }
 
@@ -101,8 +120,11 @@ mod tests {
         let specs = mvp_tool_specs();
         assert!(specs.iter().any(|t| t.name == names::SEARCH_KB));
         assert!(specs.iter().any(|t| t.name == names::SAVE_MEMORY));
+        assert!(specs.iter().any(|t| t.name == names::SAVE_SKILL));
         let save = specs.iter().find(|t| t.name == names::SAVE_MEMORY).unwrap();
         assert_eq!(save.side_effect, ToolSideEffect::SoftWrite);
+        let skill = specs.iter().find(|t| t.name == names::SAVE_SKILL).unwrap();
+        assert_eq!(skill.side_effect, ToolSideEffect::SoftWrite);
         assert!(!may_auto_execute(ToolSideEffect::HardWrite));
         assert!(may_auto_execute(ToolSideEffect::Read));
     }

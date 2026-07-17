@@ -38,7 +38,12 @@ export function PermissionModal({ prompt, onRespond }: Props) {
             <pre className="tool-row__detail">{prompt.target}</pre>
             <p className="section-lead">Why: {prompt.reason}</p>
             <p className="section-lead">Risk: {prompt.risk}</p>
-            <pre className="tool-row__detail">{prompt.preview}</pre>
+            {prompt.toolName === "save_skill" ? (
+              <p className="field__label">Skill draft preview (Accept writes this file)</p>
+            ) : (
+              <p className="field__label">Preview</p>
+            )}
+            <pre className="tool-row__detail tool-row__detail--tall">{prompt.preview}</pre>
             {needsType ? (
               <div className="field">
                 <label className="field__label" htmlFor="type-confirm">
