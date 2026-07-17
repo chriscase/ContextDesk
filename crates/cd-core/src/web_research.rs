@@ -9,9 +9,13 @@
 //! DDG HTML is unofficial and best-effort — parse failures return empty results.
 
 use crate::error::{CoreError, CoreResult};
-use crate::ssrf::{validate_provider_url, SsrfPolicy};
+use crate::ssrf::{
+    build_pinned_client, resolve_and_validate, validate_provider_url, DnsResolver, SsrfPolicy,
+    SystemResolver,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::time::Duration;
 use url::Url;
 
 /// Max raw HTTP body bytes retained for extraction.
@@ -63,6 +67,7 @@ pub struct WebFetchResult {
 ///
 /// Stricter than provider probes: rejects credentials in URL, non-http(s),
 /// and loopback/private/metadata under [`web_ssrf_policy`].
+/// Does **not** resolve DNS — use [`validate_web_url_resolved`] for hop/SSRF pin.
 pub fn validate_web_url(raw: &str) -> CoreResult<Url> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -76,6 +81,17 @@ pub fn validate_web_url(raw: &str) -> CoreResult<Url> {
         ));
     }
     // Fragment-only noise is fine; block data/javascript already via scheme.
+    Ok(url)
+}
+
+/// Syntactic web SSRF check **plus** DNS resolve of every address (#141).
+///
+/// Hostnames that resolve to private/metadata/link-local are refused even when
+/// the hostname string looks public.
+pub fn validate_web_url_resolved(raw: &str, resolver: &impl DnsResolver) -> CoreResult<Url> {
+    let url = validate_web_url(raw)?;
+    let _ips = resolve_and_validate(&url, &web_ssrf_policy(), resolver)
+        .map_err(|e| CoreError::Policy(format!("web URL DNS/SSRF rejected: {e}")))?;
     Ok(url)
 }
 
@@ -206,19 +222,23 @@ pub fn urlencoding_encode(s: &str) -> String {
     out
 }
 
-fn build_client() -> CoreResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        // Manual redirects so each hop is SSRF-checked.
-        .redirect(reqwest::redirect::Policy::none())
-        // Browser-like UA: many news sites 401/403 custom bot agents.
-        .user_agent(concat!(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) ",
-            "Gecko/20100101 Firefox/128.0 ContextDesk/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|e| CoreError::Message(format!("http client: {e}")))
+/// Build a redirect-disabled client pinned to vetted IPs for `url` (#141).
+fn build_client_for(url: &Url, resolver: &impl DnsResolver) -> CoreResult<reqwest::Client> {
+    let client = build_pinned_client(
+        url,
+        &web_ssrf_policy(),
+        resolver,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+    )?;
+    Ok(client)
+}
+
+fn browser_ua() -> &'static str {
+    concat!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) ",
+        "Gecko/20100101 Firefox/128.0 ContextDesk/",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// True when HTTP status is a typical bot-block / paywall / soft failure
@@ -250,13 +270,25 @@ pub fn soft_fetch_advice(status: u16, url: &str) -> String {
 ///
 /// Non-2xx responses return [`Ok`] with `status` set and advisory text — they are
 /// **not** hard errors, so the agent can try another URL.
+///
+/// Each hop is DNS-resolved and pinned (#141); private/metadata IPs refuse the hop.
 pub async fn web_fetch(url: &str) -> CoreResult<WebFetchResult> {
-    let mut current = validate_web_url(url)?;
-    let client = build_client()?;
+    web_fetch_with_resolver(url, &SystemResolver).await
+}
+
+/// Like [`web_fetch`] with an injectable DNS resolver (offline tests).
+pub async fn web_fetch_with_resolver(
+    url: &str,
+    resolver: &impl DnsResolver,
+) -> CoreResult<WebFetchResult> {
+    let mut current = validate_web_url_resolved(url, resolver)?;
 
     for hop in 0..=MAX_REDIRECTS {
+        // New pinned client each hop so the socket cannot rebind after DNS change.
+        let client = build_client_for(&current, resolver)?;
         let resp = client
             .get(current.as_str())
+            .header("User-Agent", browser_ua())
             .header(
                 "Accept",
                 "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
@@ -289,7 +321,7 @@ pub async fn web_fetch(url: &str) -> CoreResult<WebFetchResult> {
                     status: status.as_u16(),
                 });
             };
-            match resolve_redirect(&current, loc) {
+            match resolve_redirect(&current, loc, resolver) {
                 Ok(next) => {
                     current = next;
                     continue;
@@ -371,11 +403,16 @@ pub async fn web_fetch(url: &str) -> CoreResult<WebFetchResult> {
     })
 }
 
-fn resolve_redirect(base: &Url, location: &str) -> CoreResult<Url> {
+/// Resolve a redirect Location: syntactic web SSRF + DNS private-IP re-vet (#141).
+pub fn resolve_redirect(
+    base: &Url,
+    location: &str,
+    resolver: &impl DnsResolver,
+) -> CoreResult<Url> {
     let joined = base
         .join(location)
         .map_err(|e| CoreError::Message(format!("bad redirect: {e}")))?;
-    validate_web_url(joined.as_str())
+    validate_web_url_resolved(joined.as_str(), resolver)
 }
 
 /// Sanitize search query (length + control chars).
@@ -627,10 +664,11 @@ pub async fn web_search_google_news(query: &str, limit: usize) -> CoreResult<Vec
         "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
         urlencoding_encode(&q)
     );
-    let _ = validate_web_url(&url)?;
-    let client = build_client()?;
+    let url = validate_web_url_resolved(&url, &SystemResolver)?;
+    let client = build_client_for(&url, &SystemResolver)?;
     let resp = client
-        .get(&url)
+        .get(url.as_str())
+        .header("User-Agent", browser_ua())
         .header(
             "Accept",
             "application/rss+xml, application/xml, text/xml, */*",
@@ -750,10 +788,11 @@ pub async fn web_search_ddg_instant(query: &str, limit: usize) -> CoreResult<Vec
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         urlencoding_encode(&q)
     );
-    let _ = validate_web_url(&url)?;
-    let client = build_client()?;
+    let url = validate_web_url_resolved(&url, &SystemResolver)?;
+    let client = build_client_for(&url, &SystemResolver)?;
     let resp = client
-        .get(&url)
+        .get(url.as_str())
+        .header("User-Agent", browser_ua())
         .header("Accept", "application/json")
         .send()
         .await
@@ -858,11 +897,12 @@ pub async fn web_search_ddg_html(query: &str, limit: usize) -> CoreResult<Vec<We
         "https://html.duckduckgo.com/html/?q={}",
         urlencoding_encode(&q)
     );
-    let _ = validate_web_url(&search_url)?;
+    let search_url = validate_web_url_resolved(&search_url, &SystemResolver)?;
 
-    let client = build_client()?;
+    let client = build_client_for(&search_url, &SystemResolver)?;
     let resp = client
-        .get(&search_url)
+        .get(search_url.as_str())
+        .header("User-Agent", browser_ua())
         .header("Accept", "text/html")
         .send()
         .await
@@ -1291,6 +1331,41 @@ mod tests {
     fn ssrf_allows_public_https() {
         let u = validate_web_url("https://example.com/path?q=1").unwrap();
         assert_eq!(u.host_str(), Some("example.com"));
+    }
+
+    /// #141: hostname that DNS-resolves to private/metadata is refused offline.
+    #[test]
+    fn resolve_rejects_hostname_to_private_or_metadata() {
+        use crate::ssrf::MapResolver;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let resolver = MapResolver::from_pairs([
+            (
+                "legit.example".to_string(),
+                vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            ),
+            (
+                "evil.example".to_string(),
+                vec![IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))],
+            ),
+            (
+                "rfc1918.example".to_string(),
+                vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9))],
+            ),
+        ]);
+        assert!(validate_web_url_resolved("https://legit.example/x", &resolver).is_ok());
+        assert!(validate_web_url_resolved("https://evil.example/latest", &resolver).is_err());
+        assert!(validate_web_url_resolved("https://rfc1918.example/", &resolver).is_err());
+
+        let base = Url::parse("https://legit.example/a").unwrap();
+        // Redirect hop to DNS-private host must fail (#141).
+        let hop = resolve_redirect(&base, "https://evil.example/meta", &resolver);
+        assert!(hop.is_err(), "expected DNS private hop refuse, got {hop:?}");
+        let hop2 = resolve_redirect(&base, "https://rfc1918.example/x", &resolver);
+        assert!(hop2.is_err());
+        // Relative redirect to same public host ok.
+        let hop3 = resolve_redirect(&base, "/next", &resolver);
+        assert!(hop3.is_ok());
     }
 
     #[test]
