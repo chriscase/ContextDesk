@@ -9,7 +9,7 @@ Last audit: 2026-07-17 (after reopen). Update when closing.
 | # | Title | Status | Notes |
 |---|--------|--------|-------|
 | 1 | Epic Foundation | PARTIAL | Docs/CI/core exist; epic open until children honest |
-| 11 | CI fmt/clippy/test | PARTIAL | Workflow exists; verify green on latest main |
+| 11 | CI fmt/clippy/test | DONE | Closed honestly; CI green a444fdb |
 | 12 | Tauri shell + theming | PARTIAL | Tauri host + CSS themes; not full packaging |
 | 13 | RENAME.md | DONE | `docs/RENAME.md` |
 | 57 | Threat model | DONE | `docs/THREAT_MODEL.md` living doc |
