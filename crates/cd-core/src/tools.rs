@@ -140,7 +140,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::WEB_SEARCH.into(),
-            description: "Search the public web for current events / public knowledge (read-only). Use when local KB and Confluence are insufficient. Returns title, URL, snippet. Follow with web_fetch for full page text. Requires Web research enabled in Settings."
+            description: "Search the public web for current events / public knowledge (read-only). Returns title, URL, snippet — snippets alone are often enough for a news brief. Prefer open sources. Follow with web_fetch only when you need more body text. Requires Web research enabled in Settings."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
@@ -154,7 +154,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::WEB_FETCH.into(),
-            description: "Fetch a public http(s) URL and return truncated readable text (read-only). SSRF-blocked for private/loopback/metadata. Prefer after web_search. Requires Web research enabled in Settings."
+            description: "Fetch a public http(s) URL and return truncated readable text (read-only). Many news sites return HTTP 401/403 (paywall/bot block) — that is a soft failure: try another URL or use web_search snippets, do not stop. SSRF-blocked for private/loopback/metadata. Prefer BBC, AP, Wikipedia, gov domains over paywalled wires when possible."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({

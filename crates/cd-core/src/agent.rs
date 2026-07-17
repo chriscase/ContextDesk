@@ -200,14 +200,47 @@ pub async fn run_agent_turn(
             // PermissionRequired → complete_permission. auto_grant only used for
             // tests that pre-approve via host API before re-issue.
             let _ = auto_grant;
-            let result = host.execute(&tc.function.name, &args, None)?;
+            // Tool execution errors must not kill the whole turn (e.g. HTTP 401
+            // on a news site). Feed the failure back as tool content so the
+            // model can try another URL or answer from search snippets.
+            let result = match host.execute(&tc.function.name, &args, None) {
+                Ok(r) => r,
+                Err(e) => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let detail = format!(
+                        "Tool `{}` failed: {e}\n\
+                         Continue if possible (try another tool/URL). Do not claim the host crashed.",
+                        tc.function.name
+                    );
+                    let wrapped = wrap_untrusted(&format!("tool:{}", tc.function.name), &detail);
+                    events.push(StreamEvent::Tool {
+                        id: id.clone(),
+                        name: tc.function.name.clone(),
+                        phase: crate::events::ToolPhase::Finished,
+                        summary: format!("{} failed", tc.function.name),
+                        detail: Some(detail.clone()),
+                        ok: Some(false),
+                    });
+                    crate::tool_host::ToolResult {
+                        name: tc.function.name.clone(),
+                        ok: false,
+                        summary: format!("{} failed", tc.function.name),
+                        detail_for_model: wrapped,
+                        detail_raw: detail,
+                        citation_path: None,
+                        events: vec![],
+                    }
+                }
+            };
             events.extend(result.events);
             if let Some(path) = &result.citation_path {
-                events.push(StreamEvent::Citation {
-                    source_id: path.clone(),
-                    label: path.clone(),
-                    locator: None,
-                });
+                if result.ok {
+                    events.push(StreamEvent::Citation {
+                        source_id: path.clone(),
+                        label: path.clone(),
+                        locator: None,
+                    });
+                }
             }
             history.push(ChatMessage {
                 role: Role::Tool,

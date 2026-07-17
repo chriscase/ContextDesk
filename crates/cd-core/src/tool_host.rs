@@ -598,20 +598,40 @@ impl ToolHost {
         if url.is_empty() {
             return Err(CoreError::Message("web_fetch requires url".into()));
         }
-        // SSRF validation before any network I/O.
+        // SSRF validation before any network I/O (hard fail — policy).
         let _ = web_research::validate_web_url(url)?;
         self.throttle_web()?;
-        let fetched = block_on_http(web_research::web_fetch(url))?;
-        let raw = web_research::format_fetch_result(&fetched);
-        let summary = if fetched.title.is_empty() {
-            format!("fetched {}", fetched.url)
-        } else {
-            format!(
-                "fetched “{}”",
-                fetched.title.chars().take(60).collect::<String>()
-            )
+        // Network / HTTP failures are soft: return tool result so the agent can retry.
+        let fetched = match block_on_http(web_research::web_fetch(url)) {
+            Ok(f) => f,
+            Err(e) => {
+                let raw = format!(
+                    "web_fetch network error for {url}: {e}\n\
+                     Try another URL from web_search or answer from search snippets. Do not abort."
+                );
+                return Ok((
+                    false,
+                    format!("web_fetch failed for {url}"),
+                    raw,
+                    Some(url.to_string()),
+                ));
+            }
         };
-        Ok((true, summary, raw, Some(fetched.url)))
+        let raw = web_research::format_fetch_result(&fetched);
+        let ok = fetched.ok();
+        let summary = if ok {
+            if fetched.title.is_empty() {
+                format!("fetched {}", fetched.url)
+            } else {
+                format!(
+                    "fetched “{}”",
+                    fetched.title.chars().take(60).collect::<String>()
+                )
+            }
+        } else {
+            format!("web_fetch HTTP {} for {}", fetched.status, fetched.url)
+        };
+        Ok((ok, summary, raw, Some(fetched.url)))
     }
 
     /// SoftWrite skill author — only called after grant (see execute gate).

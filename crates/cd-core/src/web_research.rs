@@ -205,16 +205,45 @@ fn build_client() -> CoreResult<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         // Manual redirects so each hop is SSRF-checked.
         .redirect(reqwest::redirect::Policy::none())
+        // Browser-like UA: many news sites 401/403 custom bot agents.
         .user_agent(concat!(
-            "ContextDesk/",
-            env!("CARGO_PKG_VERSION"),
-            " (web research; user-enabled)"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) ",
+            "Gecko/20100101 Firefox/128.0 ContextDesk/",
+            env!("CARGO_PKG_VERSION")
         ))
         .build()
         .map_err(|e| CoreError::Message(format!("http client: {e}")))
 }
 
+/// True when HTTP status is a typical bot-block / paywall / soft failure
+/// (should not abort the agent turn).
+pub fn is_soft_http_failure(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404 | 410 | 418 | 429 | 451 | 500..=599)
+        || !(200..300).contains(&status)
+}
+
+/// Human guidance when a page cannot be read.
+pub fn soft_fetch_advice(status: u16, url: &str) -> String {
+    let kind = match status {
+        401 | 403 => "blocked (login wall, paywall, or bot protection)",
+        404 | 410 => "not found",
+        429 => "rate-limited",
+        451 => "unavailable for legal reasons",
+        500..=599 => "server error",
+        _ => "non-success response",
+    };
+    format!(
+        "web_fetch could not read this page: HTTP {status} ({kind}) for {url}.\n\
+         This is common for major news sites (Reuters, NYT, WSJ, etc.).\n\
+         Recovery: (1) use snippets from web_search, (2) try a different URL from search results, \
+         (3) prefer open sources (AP, BBC, Wikipedia, gov sites). Do not abort the user answer."
+    )
+}
+
 /// Fetch a URL, follow limited redirects, return text extract.
+///
+/// Non-2xx responses return [`Ok`] with `status` set and advisory text — they are
+/// **not** hard errors, so the agent can try another URL.
 pub async fn web_fetch(url: &str) -> CoreResult<WebFetchResult> {
     let mut current = validate_web_url(url)?;
     let client = build_client()?;
@@ -224,59 +253,116 @@ pub async fn web_fetch(url: &str) -> CoreResult<WebFetchResult> {
             .get(current.as_str())
             .header(
                 "Accept",
-                "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+                "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
             )
+            .header("Accept-Language", "en-US,en;q=0.9")
             .send()
             .await
-            .map_err(|e| CoreError::Message(format!("web_fetch: {e}")))?;
+            .map_err(|e| CoreError::Message(format!("web_fetch network: {e}")))?;
 
         let status = resp.status();
         if status.is_redirection() {
             if hop == MAX_REDIRECTS {
-                return Err(CoreError::Policy(format!(
-                    "too many redirects (max {MAX_REDIRECTS})"
-                )));
+                return Ok(WebFetchResult {
+                    url: current.to_string(),
+                    title: String::new(),
+                    text: soft_fetch_advice(310, current.as_str()) + "\n(too many redirects)",
+                    status: 310,
+                });
             }
             let loc = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| CoreError::Message("redirect without Location".into()))?;
-            current = resolve_redirect(&current, loc)?;
-            continue;
-        }
-
-        if !status.is_success() {
-            return Err(CoreError::Message(format!(
-                "web_fetch HTTP {} for {}",
-                status.as_u16(),
-                current
-            )));
-        }
-
-        // Reject oversized Content-Length when advertised (before download).
-        if let Some(cl) = resp.content_length() {
-            if cl > MAX_BODY_BYTES as u64 * 4 {
-                return Err(CoreError::Policy(format!(
-                    "response Content-Length {cl} exceeds safety cap"
-                )));
+                .and_then(|v| v.to_str().ok());
+            let Some(loc) = loc else {
+                return Ok(WebFetchResult {
+                    url: current.to_string(),
+                    title: String::new(),
+                    text: soft_fetch_advice(status.as_u16(), current.as_str())
+                        + "\n(redirect without Location)",
+                    status: status.as_u16(),
+                });
+            };
+            match resolve_redirect(&current, loc) {
+                Ok(next) => {
+                    current = next;
+                    continue;
+                }
+                Err(e) => {
+                    return Ok(WebFetchResult {
+                        url: current.to_string(),
+                        title: String::new(),
+                        text: format!(
+                            "{}\n(redirect blocked by SSRF policy: {e})",
+                            soft_fetch_advice(status.as_u16(), current.as_str())
+                        ),
+                        status: status.as_u16(),
+                    });
+                }
             }
         }
 
-        let bytes = read_body_capped(resp).await?;
-        // Lossy UTF-8 for binary-ish pages
+        let code = status.as_u16();
+
+        // Cap body even on error pages (sometimes include a short message).
+        if let Some(cl) = resp.content_length() {
+            if cl > MAX_BODY_BYTES as u64 * 4 && status.is_success() {
+                return Ok(WebFetchResult {
+                    url: current.to_string(),
+                    title: String::new(),
+                    text: format!("response too large (Content-Length {cl}); refused download"),
+                    status: 413,
+                });
+            }
+        }
+
+        let bytes = match read_body_capped(resp).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(WebFetchResult {
+                    url: current.to_string(),
+                    title: String::new(),
+                    text: format!(
+                        "{}\n(body read error: {e})",
+                        soft_fetch_advice(code, current.as_str())
+                    ),
+                    status: if status.is_success() { 502 } else { code },
+                });
+            }
+        };
+
         let html = String::from_utf8_lossy(&bytes);
+        if !status.is_success() {
+            let excerpt = html_to_text(&html);
+            let mut text = soft_fetch_advice(code, current.as_str());
+            if !excerpt.is_empty() {
+                text.push_str("\n---\nPartial page text:\n");
+                text.push_str(&excerpt.chars().take(1500).collect::<String>());
+            }
+            return Ok(WebFetchResult {
+                url: current.to_string(),
+                title: extract_title(&html),
+                text,
+                status: code,
+            });
+        }
+
         let title = extract_title(&html);
         let text = html_to_text(&html);
         return Ok(WebFetchResult {
             url: current.to_string(),
             title,
             text,
-            status: status.as_u16(),
+            status: code,
         });
     }
 
-    Err(CoreError::Policy("redirect loop".into()))
+    Ok(WebFetchResult {
+        url: url.to_string(),
+        title: String::new(),
+        text: soft_fetch_advice(310, url) + "\n(redirect loop)",
+        status: 310,
+    })
 }
 
 fn resolve_redirect(base: &Url, location: &str) -> CoreResult<Url> {
@@ -596,9 +682,19 @@ pub fn format_fetch_result(r: &WebFetchResult) -> String {
     if !r.title.is_empty() {
         out.push_str(&format!("Title: {}\n", r.title));
     }
+    if !r.ok() {
+        out.push_str("RESULT: failed (soft) — try another URL or use search snippets.\n");
+    }
     out.push_str("---\n");
     out.push_str(&r.text);
     out
+}
+
+impl WebFetchResult {
+    /// Successful 2xx fetch with usable body.
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status) && !self.text.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -694,5 +790,26 @@ mod tests {
         let s = format_search_hits(&[], "quantum");
         assert!(s.contains("No web search"));
         assert!(s.contains("quantum"));
+    }
+
+    #[test]
+    fn soft_http_failure_guidance() {
+        assert!(is_soft_http_failure(401));
+        assert!(is_soft_http_failure(403));
+        assert!(is_soft_http_failure(429));
+        let a = soft_fetch_advice(401, "https://www.reuters.com/world/iran/");
+        assert!(a.contains("401"));
+        assert!(a.contains("web_search") || a.contains("snippets"));
+        assert!(a.contains("Do not abort"));
+        let r = WebFetchResult {
+            url: "https://www.reuters.com/world/iran/".into(),
+            title: String::new(),
+            text: a,
+            status: 401,
+        };
+        assert!(!r.ok());
+        let fmt = format_fetch_result(&r);
+        assert!(fmt.contains("failed (soft)"));
+        assert!(fmt.contains("401"));
     }
 }
