@@ -1404,17 +1404,18 @@ export function App() {
                     <div className="empty-state__title">{branding.name}</div>
                     <p className="empty-state__body">{branding.tagline}</p>
                     <p className="empty-state__body">
-                      Configure workspace + AI in Settings. Asks run through the
-                      real agent/tool host (Tauri or cd-server), not a demo
-                      shell.
+                      Ask about your workspace, code, or notes. Choose a model
+                      in the composer if you want to switch.
                     </p>
-                    <button
-                      type="button"
-                      className="btn btn--primary"
-                      onClick={() => openSettings("preflight")}
-                    >
-                      Open Preflight
-                    </button>
+                    {preflight.hasBlocking ? (
+                      <button
+                        type="button"
+                        className="btn btn--primary"
+                        onClick={() => openSettings("preflight")}
+                      >
+                        Fix setup issues
+                      </button>
+                    ) : null}
                   </div>
                 ) : (
                   visibleMessages.map((m) => (
