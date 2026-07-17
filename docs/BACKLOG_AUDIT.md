@@ -37,7 +37,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 16 | OpenAI chat+tools | DONE | non-stream + SSE parse/fixtures; research uses stream w/ fallback |
 | 17 | Ollama | DONE | tags + chat + health; embed optional |
 | 18 | Local discovery | DONE | discover_local + Settings candidates list |
-| 19 | Grok session | PARTIAL | Phase2 deferred; presence-only in Phase1 |
+| 19 | Grok session | DONE | refresh+expiry+headers; live network residual |
 | 20 | AI settings UI | DONE | discover candidates + probe; no secrets full |
 | 21 | Tool host | DONE | Read auto; Soft/Hard grant; hard_write_blocked test |
 | 22 | Permission grants | DONE | PermissionRequired + grant matrix tests |
@@ -69,7 +69,7 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 | 6–7, 36–43 | DONE | Skills + multi-pane; residuals on SoftWrite skill agent path |
 | 8, 44–48, 75 | DONE | Connectors real (SQL RO, MCP lib, HTTP presets, Confluence RO+settings); agent product loops residual |
 | 9–10, 49–53 | DONE | cd-server auth/SSE/workspaces; PROTOCOL + host-adapter sketch |
-| 19 | DONE | Grok opt-in library + host pin; live refresh residual |
+| 19 | DONE | refresh_token + expiry + offline mock tests; ToS docs |
 | 54–56 | DONE | slate skin, packaging checklist, composer markdown assist |
 
 ## Close policy
