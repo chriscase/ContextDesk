@@ -851,7 +851,7 @@ pub async fn search_publisher_feeds(
             }
             any = true;
             // Prefer display label as publisher brand
-            let title = if it.title.contains(&s.label) {
+            let title = if it.title.contains(s.label) {
                 it.title.clone()
             } else {
                 format!("{} - {}", it.title, s.label)
@@ -951,7 +951,9 @@ mod tests {
         assert!(me.len() < enabled.len());
         assert!(me.contains("al_jazeera") || me.contains("anadolu") || me.contains("jpost"));
         assert!(!me.contains("fox_news"));
-        assert!(notes.iter().any(|n| n.starts_with("packs:middle_east") || n.contains("middle_east")));
+        assert!(notes
+            .iter()
+            .any(|n| n.starts_with("packs:middle_east") || n.contains("middle_east")));
 
         let (fallback, notes) = filter_ids_by_packs(&enabled, &["not_a_real_pack".into()]);
         assert_eq!(fallback.len(), enabled.len());

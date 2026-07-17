@@ -341,7 +341,7 @@ pub fn title_from_prompt(prompt: &str, max_chars: usize) -> String {
     } else {
         collapsed.as_str()
     };
-    let max = max_chars.max(8).min(48);
+    let max = max_chars.clamp(8, 48);
     let mut out: String = base.chars().take(max).collect();
     if base.chars().count() > max {
         // Prefer break on last space inside window.
@@ -398,7 +398,7 @@ pub fn sanitize_generated_title(raw: &str, max_chars: usize) -> String {
     if t.is_empty() || is_placeholder_title(&t) {
         return String::new();
     }
-    let max = max_chars.max(8).min(64);
+    let max = max_chars.clamp(8, 64);
     if t.chars().count() > max {
         let mut out: String = t.chars().take(max).collect();
         if let Some(sp) = out.rfind(' ') {

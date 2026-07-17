@@ -525,7 +525,7 @@ pub async fn web_search(
     notes.extend(pack_notes);
 
     let gnews_cap = (limit.max(4) * 2 / 3).max(4).min(limit);
-    let per = ((gnews_cap + variants.len() - 1) / variants.len()).clamp(3, gnews_cap);
+    let per = gnews_cap.div_ceil(variants.len()).clamp(3, gnews_cap);
 
     for (i, v) in variants.iter().enumerate() {
         if hits.len() >= gnews_cap {
@@ -785,14 +785,15 @@ pub fn parse_ddg_instant_json(text: &str, limit: usize) -> Vec<WebSearchHit> {
         .and_then(|x| x.as_str())
         .unwrap_or("Overview")
         .trim();
-    if !abstract_text.is_empty() && !abstract_url.is_empty() {
-        if validate_web_url(abstract_url).is_ok() {
-            hits.push(WebSearchHit {
-                title: heading.chars().take(200).collect(),
-                url: abstract_url.to_string(),
-                snippet: abstract_text.chars().take(400).collect(),
-            });
-        }
+    if !abstract_text.is_empty()
+        && !abstract_url.is_empty()
+        && validate_web_url(abstract_url).is_ok()
+    {
+        hits.push(WebSearchHit {
+            title: heading.chars().take(200).collect(),
+            url: abstract_url.to_string(),
+            snippet: abstract_text.chars().take(400).collect(),
+        });
     }
     if let Some(arr) = v.get("RelatedTopics").and_then(|a| a.as_array()) {
         for item in arr {
@@ -1058,7 +1059,7 @@ fn parse_ddg_uddg_fallback(html: &str, limit: usize) -> Vec<WebSearchHit> {
         };
         let after = &rest[i + 5..];
         let end = after
-            .find(|c: char| c == '&' || c == '"' || c == '\'' || c == ' ' || c == '>')
+            .find(['&', '"', '\'', ' ', '>'])
             .unwrap_or(after.len().min(2000));
         let encoded = &after[..end];
         let decoded = percent_decode(encoded);

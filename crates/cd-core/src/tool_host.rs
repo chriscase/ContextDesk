@@ -40,6 +40,16 @@ pub struct ToolResult {
     pub events: Vec<StreamEvent>,
 }
 
+/// (soft_ok, summary, raw_detail, citations: [(url, label, title?)]).
+type ToolRunResult = (bool, String, String, Vec<(String, String, Option<String>)>);
+/// Single-citation variant of [`ToolRunResult`].
+type ToolRunResultOne = (
+    bool,
+    String,
+    String,
+    Option<(String, String, Option<String>)>,
+);
+
 /// Host context for tools.
 pub struct ToolHost {
     /// Workspace allowlist.
@@ -615,10 +625,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, citations as (url, label, title)).
-    fn tool_web_search(
-        &mut self,
-        args: &Value,
-    ) -> CoreResult<(bool, String, String, Vec<(String, String, Option<String>)>)> {
+    fn tool_web_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -678,10 +685,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, citations).
-    fn tool_x_search(
-        &mut self,
-        args: &Value,
-    ) -> CoreResult<(bool, String, String, Vec<(String, String, Option<String>)>)> {
+    fn tool_x_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
         if !self.x_enabled {
             return Err(CoreError::Policy(
                 "X search is disabled. Enable it in Settings → Connectors and add an API key."
@@ -719,12 +723,7 @@ impl ToolHost {
                     "x_search network/error for `{q}`: {e}\n\
                      Soft fail — try web_search or report the gap. Do not invent posts."
                 );
-                return Ok((
-                    false,
-                    format!("x_search failed for `{q}`"),
-                    raw,
-                    vec![],
-                ));
+                return Ok((false, format!("x_search failed for `{q}`"), raw, vec![]));
             }
         };
         let raw = crate::x_search::format_x_hits(&hits, &q, &notes);
@@ -751,15 +750,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, optional (url, label, title)).
-    fn tool_web_fetch(
-        &mut self,
-        args: &Value,
-    ) -> CoreResult<(
-        bool,
-        String,
-        String,
-        Option<(String, String, Option<String>)>,
-    )> {
+    fn tool_web_fetch(&mut self, args: &Value) -> CoreResult<ToolRunResultOne> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),

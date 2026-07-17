@@ -57,10 +57,14 @@ struct XMeta {
 pub fn sanitize_x_query(raw: &str) -> CoreResult<String> {
     let q = raw.trim();
     if q.is_empty() {
-        return Err(CoreError::Message("x_search requires a non-empty query".into()));
+        return Err(CoreError::Message(
+            "x_search requires a non-empty query".into(),
+        ));
     }
     if q.len() > 512 {
-        return Err(CoreError::Message("x_search query too long (max 512 chars)".into()));
+        return Err(CoreError::Message(
+            "x_search query too long (max 512 chars)".into(),
+        ));
     }
     Ok(q.to_string())
 }
@@ -74,10 +78,7 @@ pub async fn search_recent(
     let q = sanitize_x_query(query)?;
     let bearer = bearer.trim();
     if bearer.is_empty() {
-        return Ok((
-            vec![],
-            vec!["x:no_bearer".into()],
-        ));
+        return Ok((vec![], vec!["x:no_bearer".into()]));
     }
     let limit = limit.clamp(10, 100); // API min 10 for recent search max_results
     let max_results = limit.min(100);
@@ -141,9 +142,8 @@ pub async fn search_recent(
         return Ok((vec![], notes));
     }
 
-    let parsed: XApiResponse = serde_json::from_str(&body).map_err(|e| {
-        CoreError::Message(format!("x_search parse: {e}"))
-    })?;
+    let parsed: XApiResponse = serde_json::from_str(&body)
+        .map_err(|e| CoreError::Message(format!("x_search parse: {e}")))?;
 
     if let Some(errs) = &parsed.errors {
         for e in errs.iter().take(3) {

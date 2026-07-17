@@ -8,8 +8,8 @@ Last audit: 2026-07-17 (Phase 0–5 pass). Update when closing.
 
 | # | Title | Status | Notes |
 |---|--------|--------|-------|
-| 1 | Epic Foundation | DONE | CI green; branding; AGENTS/docs; Phase 0 children closed |
-| 11 | CI fmt/clippy/test | DONE | Closed honestly; CI green a444fdb |
+| 1 | Epic Foundation | DONE | branding; AGENTS/docs; Phase 0 children closed (CI status: see #158/#97) |
+| 11 | CI fmt/clippy/test | PARTIAL | Historical a444fdb claim stale; re-green under remediation #158 (fmt+clippy) then #97 |
 | 12 | Tauri shell + theming | DONE | tokens/themes; theme toggle; branding host; no inline style soup |
 | 13 | RENAME.md | DONE | `docs/RENAME.md` |
 | 57 | Threat model | DONE | `docs/THREAT_MODEL.md` living doc |

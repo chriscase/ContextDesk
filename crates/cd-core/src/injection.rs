@@ -85,7 +85,7 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
              Cite by short name; never paste long raw URLs. Do not refuse web research when tools returned data.\n",
         );
     }
-    if tool_names.iter().any(|n| *n == "x_search") {
+    if tool_names.contains(&"x_search") {
         s.push_str(
             "X search is ENABLED (x_search): use for breaking/social/primary posts when the question needs recent X content. \
              Not free — if the tool returns auth/rate-limit notes, say so and fall back to web_search. \
