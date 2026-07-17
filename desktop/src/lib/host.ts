@@ -343,6 +343,7 @@ export type ChatSessionDto = {
   pinned: boolean;
   title_locked: boolean;
   chat_model?: string | null;
+  last_read_message_id?: string | null;
 };
 
 export type ModelOptionDto = {

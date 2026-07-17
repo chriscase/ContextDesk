@@ -79,6 +79,9 @@ pub struct Session {
     /// Chat model id for this session (None → app default / active profile).
     #[serde(default)]
     pub chat_model: Option<String>,
+    /// Last message id the user has scrolled into view / marked read.
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
 }
 
 fn default_keep_last() -> usize {
@@ -122,6 +125,7 @@ impl Session {
             pinned: false,
             title_locked: false,
             chat_model: None,
+            last_read_message_id: None,
         }
     }
 
