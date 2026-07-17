@@ -193,14 +193,51 @@ export function App() {
     version: "0.1.0",
     protocol: "cd.v1",
   });
+  type ChatSession = {
+    id: string;
+    title: string;
+    messages: Msg[];
+    /** Compacted older turns (full messages retained in messages). */
+    compactSummary: string | null;
+    compactKeepLast: number;
+  };
+
+  const newSession = (title = "Chat"): ChatSession => ({
+    id: crypto.randomUUID(),
+    title,
+    messages: [],
+    compactSummary: null,
+    compactKeepLast: 12,
+  });
+
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    return [newSession("Chat 1")];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const resolvedSessionId = activeSessionId ?? sessions[0]?.id ?? "";
+  const activeSession =
+    sessions.find((s) => s.id === resolvedSessionId) ?? sessions[0];
+  const messages = activeSession?.messages ?? [];
+  const setMessages = (
+    updater: Msg[] | ((prev: Msg[]) => Msg[]),
+  ) => {
+    const sid = resolvedSessionId;
+    setSessions((all) =>
+      all.map((s) => {
+        if (s.id !== sid) return s;
+        const next =
+          typeof updater === "function" ? updater(s.messages) : updater;
+        return { ...s, messages: next };
+      }),
+    );
+  };
+  const sessionId = activeSession?.id ?? "";
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("preflight");
   const [dismissedBanner, setDismissedBanner] = useState(false);
-  const [sessionId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [permission, setPermission] = useState<PermissionPrompt | null>(null);
   const [pendingToolArgs, setPendingToolArgs] = useState<Record<
@@ -482,6 +519,14 @@ export function App() {
       ? `${setup.workspaceRoots.length} root${setup.workspaceRoots.length === 1 ? "" : "s"}`
       : "No workspace";
 
+  const localOnly =
+    setup.localOnly ?? setup.providerKind === "ollama";
+  const egressLabel = localOnly
+    ? "Local-only"
+    : setup.providerKind === "openai_compatible"
+      ? "Remote AI"
+      : "Local";
+
   const onSaveSetup = async (next: AppSetupState) => {
     setSetup(next);
     try {
@@ -510,6 +555,19 @@ export function App() {
             title="Workspace scope"
           >
             {scopeLabel}
+          </button>
+          <button
+            type="button"
+            className="chip"
+            data-tone={localOnly ? "ok" : "warn"}
+            onClick={() => openSettings("ai")}
+            title={
+              localOnly
+                ? "Local-only profile — remote bases refused"
+                : "Remote provider may send prompts off-machine"
+            }
+          >
+            {egressLabel}
           </button>
         </div>
         <div className="titlebar__actions">
@@ -624,7 +682,76 @@ export function App() {
 
           {pane === "chat" ? (
             <>
+              <div className="session-tabs" role="tablist" aria-label="Chat sessions">
+                {sessions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    role="tab"
+                    className="session-tab"
+                    data-active={s.id === resolvedSessionId ? "true" : "false"}
+                    onClick={() => setActiveSessionId(s.id)}
+                  >
+                    {s.title}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  title="New chat session"
+                  onClick={() => {
+                    const s = newSession(`Chat ${sessions.length + 1}`);
+                    setSessions((all) => [...all, s]);
+                    setActiveSessionId(s.id);
+                  }}
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  title="Compact older turns (full history kept)"
+                  disabled={messages.length < 4}
+                  onClick={() => {
+                    setSessions((all) =>
+                      all.map((s) => {
+                        if (s.id !== resolvedSessionId) return s;
+                        const keep = s.compactKeepLast;
+                        if (s.messages.length <= keep) {
+                          return { ...s, compactSummary: null };
+                        }
+                        const older = s.messages.slice(0, -keep);
+                        const lines = older.map((m) => {
+                          const snip = m.content.slice(0, 120);
+                          return `- ${m.role}: ${snip}`;
+                        });
+                        return {
+                          ...s,
+                          compactSummary: lines.join("\n"),
+                        };
+                      }),
+                    );
+                  }}
+                >
+                  Compact
+                </button>
+              </div>
               <div className="chat-scroll">
+                {activeSession?.compactSummary ? (
+                  <details className="compact-banner">
+                    <summary>
+                      Earlier conversation compacted (expand full retained
+                      history)
+                    </summary>
+                    <pre className="tool-row__detail">
+                      {activeSession.compactSummary}
+                    </pre>
+                    <p className="field__hint">
+                      Full messages remain in the session; only the model
+                      context summary is compact.
+                    </p>
+                  </details>
+                ) : null}
                 {messages.length === 0 ? (
                   <div className="empty-state">
                     <div className="empty-state__title">{branding.name}</div>

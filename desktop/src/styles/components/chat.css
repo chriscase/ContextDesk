@@ -115,6 +115,46 @@
   background: var(--bg-elevated);
 }
 
+.session-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.session-tab {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+}
+
+.session-tab[data-active="true"] {
+  color: var(--text);
+  background: var(--bg-panel);
+  border-color: var(--border);
+  font-weight: 500;
+}
+
+.session-tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.compact-banner {
+  max-width: 52rem;
+  margin: 0 auto var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
 .empty-state {
   max-width: 36rem;
   margin: 12vh auto 0;

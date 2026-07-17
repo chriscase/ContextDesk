@@ -10,6 +10,7 @@ It is a **research & synthesis** product—not a code-editing agent. Pair it wit
 | **License** | [Apache-2.0](LICENSE) |
 | **Status** | Early development — see [Issues](https://github.com/chriscase/ContextDesk/issues) |
 | **Identity** | Rename-friendly — see [`branding.toml`](branding.toml) |
+| **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md) |
 
 ---
 

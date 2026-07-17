@@ -11,6 +11,8 @@ Monorepo, `cd-core` skeleton, branding, AGENTS docs, CI, desktop shell,
 
 Provider profiles + probe (SSRF-hardened), **Ollama + OpenAI-compatible only**, keychain secrets, local file KB + memory, tool host (read + memory soft-write), agent loop, citations, desktop chat UI (stream, compact tools, composer), permissions, path/secret denylist, injection labeling.
 
+**Definition of done:** [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) — cited answers on fixtures, HardWrite blocked without grant, offline CI, Ollama or OpenAI-compatible path only.
+
 **Not in Phase 1:** Grok Build session reuse, multi-tenant server, MCP marketplace.
 
 ## Phase 2 — Discovery & skills
