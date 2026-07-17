@@ -29,6 +29,7 @@ import {
   hostRenameChatSession,
   hostSaveChatSession,
   hostSetWorkspace,
+  hostSuggestChatTitle,
   hostWriteMemory,
   type BrandingDto,
   type ChatSessionDto,
@@ -242,7 +243,8 @@ export function App() {
     return false;
   };
 
-  const titleFromPrompt = (prompt: string, max = 56) => {
+  /** Immediate short heuristic (never dump the full prompt into the tab). */
+  const titleFromPrompt = (prompt: string, max = 40) => {
     const line =
       prompt
         .split("\n")
@@ -250,9 +252,47 @@ export function App() {
         .find((l) => l.length > 0) ?? "";
     const collapsed = line.replace(/\s+/g, " ").trim();
     if (!collapsed) return "";
-    if (collapsed.length <= max) return collapsed;
-    return `${collapsed.slice(0, max).trimEnd()}…`;
+    const clause = collapsed.search(/[.?!;,](\s|$)/);
+    const base =
+      clause >= 12 && clause <= Math.max(max, 28)
+        ? collapsed.slice(0, clause).replace(/[.?!;,]+$/, "").trim()
+        : collapsed;
+    if (base.length <= max) return base;
+    const slice = base.slice(0, max);
+    const sp = slice.lastIndexOf(" ");
+    const cut = sp >= 8 ? slice.slice(0, sp) : slice;
+    return `${cut.trimEnd()}…`;
   };
+
+  /** Upgrade tab title with model when available; never overrides rename lock. */
+  const upgradeTitleWithLlm = useCallback(
+    async (sessionId: string, prompt: string) => {
+      try {
+        const suggested = await hostSuggestChatTitle(prompt);
+        if (!suggested?.trim()) return;
+        setSessions((all) =>
+          all.map((s) => {
+            if (s.id !== sessionId || s.titleLocked) return s;
+            const updated = {
+              ...s,
+              title: suggested.trim(),
+              updatedAt: nowIso(),
+            };
+            // Persist if we already have messages (after first turn / mid-flight).
+            if (updated.messages.length > 0) {
+              void hostSaveChatSession(sessionToDto(updated)).catch(() => {
+                /* ignore */
+              });
+            }
+            return updated;
+          }),
+        );
+      } catch {
+        /* keep heuristic title */
+      }
+    },
+    [],
+  );
 
   const msgFromStored = (m: ChatSessionDto["messages"][number]): Msg | null => {
     if (m.role !== "user" && m.role !== "assistant") return null;
@@ -590,7 +630,11 @@ export function App() {
         content: "",
         streaming: true,
       };
-      // Auto-title from first prompt when still a placeholder.
+      // Short heuristic title immediately; LLM upgrades shortly after (if unlocked).
+      const wasFirstUser =
+        (sessions.find((s) => s.id === resolvedSessionId)?.messages.filter(
+          (m) => m.role === "user",
+        ).length ?? 0) === 0;
       setSessions((all) =>
         all.map((s) => {
           if (s.id !== resolvedSessionId) return s;
@@ -608,6 +652,9 @@ export function App() {
         }),
       );
       setPane("chat");
+      if (wasFirstUser) {
+        void upgradeTitleWithLlm(sessionId, text);
+      }
 
       try {
         // Prefer local retrieval when Ollama unknown / offline; host upgrades if model up.
@@ -734,10 +781,12 @@ export function App() {
       preflight.hasBlocking,
       sessionId,
       resolvedSessionId,
+      sessions,
       setup.ollamaReachable,
       setup.providerKind,
       refreshMemory,
       persistSession,
+      upgradeTitleWithLlm,
     ],
   );
 

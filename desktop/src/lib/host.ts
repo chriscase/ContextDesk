@@ -377,6 +377,18 @@ export async function hostDeleteChatSession(id: string): Promise<void> {
   await invoke("delete_chat_session", { id });
 }
 
+/** Brief title via active model (heuristic fallback if model down). */
+export async function hostSuggestChatTitle(prompt: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string>("suggest_chat_title", { prompt });
+}
+
+/** LLM-retitle a saved session (no-op if user renamed / title_locked). */
+export async function hostRetitleChatSession(id: string): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("retitle_chat_session", { id });
+}
+
 export type MemoryFileDto = {
   path: string;
   relative: string;

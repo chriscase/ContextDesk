@@ -1,7 +1,6 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 use cd_core::branding::Branding;
-use cd_core::chat::ChatMessage;
 use cd_core::config::{
     config_path, ensure_config_dir, load_config, save_config, AppConfig, ConfluenceSettings,
     WorkspaceConfig, CONFLUENCE_PAT_REF,
@@ -20,7 +19,11 @@ use cd_core::keychain_store::{
     SecretStore,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
-use cd_core::sessions::{Session, SessionMeta, SessionStore};
+use cd_core::chat::{ChatMessage, Role as ChatRole};
+use cd_core::sessions::{
+    sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
+    SessionStore,
+};
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use serde::{Deserialize, Serialize};
@@ -860,6 +863,138 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
     Ok(())
 }
 
+/// One-shot LLM title (falls back to short heuristic if model unavailable).
+async fn llm_title_for_prompt(state: &AppState, prompt: &str) -> String {
+    let fallback = title_from_prompt(prompt, 40);
+    if prompt.trim().is_empty() {
+        return fallback;
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .active()
+        .cloned()
+        .unwrap_or_else(ProviderProfile::ollama_local);
+    let api_key = profile
+        .api_key_ref
+        .as_ref()
+        .and_then(|r| state.secrets.get(r).ok().flatten());
+
+    let messages = vec![
+        ChatMessage {
+            role: ChatRole::System,
+            content: "You only output a short chat title. No explanation.".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            content: session_title_llm_prompt(prompt),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ];
+
+    let raw = match profile.kind {
+        ProviderKind::Ollama => {
+            let Ok(client) =
+                cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
+            else {
+                return fallback;
+            };
+            match client.complete(&messages).await {
+                Ok(c) => c.content,
+                Err(_) => return fallback,
+            }
+        }
+        ProviderKind::OpenAiCompatible => {
+            let policy = if profile.local_only {
+                SsrfPolicy::local_only()
+            } else {
+                SsrfPolicy::default()
+            };
+            let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+            ) else {
+                return fallback;
+            };
+            match client.complete(&messages, None).await {
+                Ok(c) => c.content,
+                Err(_) => return fallback,
+            }
+        }
+        ProviderKind::XaiGrokBuild => {
+            let base = if profile.base_url.trim().is_empty() {
+                "https://api.x.ai/v1"
+            } else {
+                profile.base_url.trim()
+            };
+            if cd_core::grok_auth::assert_grok_base_allowed(base).is_err() {
+                return fallback;
+            }
+            let Ok(creds) = cd_core::grok_auth::load_grok_session_credentials() else {
+                return fallback;
+            };
+            let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                base,
+                None,
+                &profile.chat_model,
+                &SsrfPolicy::default(),
+            ) else {
+                return fallback;
+            };
+            let client = client.with_extra_headers(creds.request_headers());
+            match client.complete(&messages, None).await {
+                Ok(c) => c.content,
+                Err(_) => return fallback,
+            }
+        }
+        ProviderKind::Anthropic => return fallback,
+    };
+
+    let cleaned = sanitize_generated_title(&raw, 48);
+    if cleaned.is_empty() {
+        fallback
+    } else {
+        cleaned
+    }
+}
+
+/// Suggest a brief chat title for a user prompt (LLM when possible).
+#[tauri::command]
+async fn suggest_chat_title(state: State<'_, AppState>, prompt: String) -> Result<String, String> {
+    Ok(llm_title_for_prompt(&state, &prompt).await)
+}
+
+/// Generate LLM title for session (if not rename-locked) and persist.
+#[tauri::command]
+async fn retitle_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Session, String> {
+    let store = session_store(&state)?;
+    let mut session = store.load(&id).map_err(|e| e.to_string())?;
+    if session.title_locked {
+        return Ok(session);
+    }
+    let prompt = session
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    if prompt.trim().is_empty() {
+        return Ok(session);
+    }
+    let title = llm_title_for_prompt(&state, &prompt).await;
+    session.apply_suggested_title(&title);
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
 #[derive(Debug, Deserialize)]
 struct GrantReq {
     request_id: String,
@@ -999,6 +1134,8 @@ pub fn run() {
             save_chat_session,
             rename_chat_session,
             delete_chat_session,
+            suggest_chat_title,
+            retitle_chat_session,
             agent_turn,
             complete_permission_cmd,
             list_skills_cmd,

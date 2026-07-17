@@ -147,16 +147,34 @@ impl Session {
             .collect()
     }
 
-    /// Apply auto-title from first user prompt when allowed.
+    /// Apply **heuristic** auto-title from first user prompt when allowed.
+    ///
+    /// Does not lock the title — LLM can upgrade later while `title_locked` is false.
     pub fn maybe_auto_title_from_first_user(&mut self) {
-        if self.title_locked || !is_placeholder_title(&self.title) {
+        if self.title_locked {
+            return;
+        }
+        // Only replace placeholders or prior heuristic-length auto titles when empty-ish.
+        if !is_placeholder_title(&self.title) {
             return;
         }
         if let Some(first) = self.messages.iter().find(|m| m.role == "user") {
-            let t = title_from_prompt(&first.content, 56);
+            let t = title_from_prompt(&first.content, 40);
             if !t.is_empty() {
                 self.title = t;
             }
+        }
+    }
+
+    /// Apply an LLM (or other) suggested title when the user has not renamed.
+    pub fn apply_suggested_title(&mut self, suggested: &str) {
+        if self.title_locked {
+            return;
+        }
+        let t = sanitize_generated_title(suggested, 48);
+        if !t.is_empty() {
+            self.title = t;
+            self.touch();
         }
     }
 
@@ -229,7 +247,10 @@ pub fn is_placeholder_title(title: &str) -> bool {
     false
 }
 
-/// Derive a short session title from the first user prompt.
+/// Derive a **short** session title from the first user prompt (no LLM).
+///
+/// Prefer first sentence / clause; hard-cap length so the sidebar never shows
+/// the entire prompt.
 pub fn title_from_prompt(prompt: &str, max_chars: usize) -> String {
     let one_line = prompt
         .lines()
@@ -241,13 +262,83 @@ pub fn title_from_prompt(prompt: &str, max_chars: usize) -> String {
     if collapsed.is_empty() {
         return String::new();
     }
-    let max = max_chars.max(8);
-    let mut out: String = collapsed.chars().take(max).collect();
-    if collapsed.chars().count() > max {
+    // Cut at sentence / clause boundary when short enough.
+    let cut_at = collapsed
+        .find(['.', '?', '!'])
+        .map(|i| i + 1)
+        .or_else(|| collapsed.find([';', ',']))
+        .filter(|&i| i >= 12 && i <= max_chars.max(24));
+    let base = if let Some(i) = cut_at {
+        collapsed[..i].trim_end_matches(['.', '?', '!', ';', ',']).trim()
+    } else {
+        collapsed.as_str()
+    };
+    let max = max_chars.max(8).min(48);
+    let mut out: String = base.chars().take(max).collect();
+    if base.chars().count() > max {
+        // Prefer break on last space inside window.
+        if let Some(sp) = out.rfind(' ') {
+            if sp >= 8 {
+                out.truncate(sp);
+            }
+        }
         out = out.trim_end().to_string();
         out.push('…');
     }
     out
+}
+
+/// Prompt for a one-shot chat title completion (no tools).
+pub fn session_title_llm_prompt(user_message: &str) -> String {
+    let snippet: String = user_message.chars().take(800).collect();
+    format!(
+        "Create a concise chat title for this message.\n\
+         Rules: 3–7 words, Title Case preferred, no quotes, no trailing punctuation, \
+         no prefix like \"Title:\", English unless the message is clearly another language.\n\
+         Message:\n{snippet}\n\
+         Title:"
+    )
+}
+
+/// Clean model output into a safe sidebar title.
+pub fn sanitize_generated_title(raw: &str, max_chars: usize) -> String {
+    let mut t = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+    for prefix in [
+        "Title:",
+        "title:",
+        "Chat title:",
+        "Here's a title:",
+        "Here is a title:",
+    ] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest.trim().to_string();
+        }
+    }
+    t = t
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*')
+        .trim()
+        .trim_end_matches(['.', '!', '?'])
+        .trim()
+        .to_string();
+    // Collapse whitespace.
+    t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() || is_placeholder_title(&t) {
+        return String::new();
+    }
+    let max = max_chars.max(8).min(64);
+    if t.chars().count() > max {
+        let mut out: String = t.chars().take(max).collect();
+        if let Some(sp) = out.rfind(' ') {
+            if sp >= 8 {
+                out.truncate(sp);
+            }
+        }
+        t = out.trim_end().to_string();
+        if !t.ends_with('…') {
+            t.push('…');
+        }
+    }
+    t
 }
 
 /// Session store on disk (`*.json` per session).
@@ -407,13 +498,29 @@ mod tests {
     #[test]
     fn auto_title_from_prompt() {
         assert_eq!(
-            title_from_prompt("  Hello world\nsecond line  ", 56),
+            title_from_prompt("  Hello world\nsecond line  ", 40),
             "Hello world"
         );
         let long = "a".repeat(100);
         let t = title_from_prompt(&long, 20);
         assert!(t.ends_with('…'));
         assert!(t.chars().count() <= 21);
+        // Does not dump an entire long first sentence when a clause break exists.
+        let t2 = title_from_prompt(
+            "How do I configure Ollama for local models, and what ports should I open for the API?",
+            40,
+        );
+        assert!(t2.len() < 80);
+        assert!(!t2.contains("ports should I open"));
+    }
+
+    #[test]
+    fn sanitize_llm_title() {
+        assert_eq!(
+            sanitize_generated_title("Title: \"Ollama Local Setup\"", 48),
+            "Ollama Local Setup"
+        );
+        assert!(sanitize_generated_title("Chat 1", 48).is_empty());
     }
 
     #[test]
