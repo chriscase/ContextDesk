@@ -11,7 +11,11 @@ Thumbs.db
 id_rsa*
 auth.json
 **/credentials*
-**/*secret*
+# Ignore secret *files*, not Rust modules named keychain_store / etc.
+**/*.secret
+**/*secrets.json
+**/*secret.json
+.env.secret
 
 # Node
 node_modules/

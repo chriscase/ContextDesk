@@ -15,7 +15,7 @@ use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_fi
 use cd_core::research::{
     build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
 };
-use cd_core::secrets::{
+use cd_core::keychain_store::{
     key_ref_confluence_pat, key_ref_for_profile, KeychainSecretStore, SecretStore,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
