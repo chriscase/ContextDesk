@@ -111,17 +111,11 @@ pub fn ensure_config_dir(branding: &Branding) -> CoreResult<PathBuf> {
     Ok(dir)
 }
 
-/// Load config or default.
-pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
-    if !path.exists() {
-        return Ok(AppConfig::default());
-    }
-    let raw = fs::read_to_string(path)?;
-    let cfg: AppConfig = serde_json::from_str(&raw)?;
-    // Belt: ensure no accidental secret fields
+fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
+    use crate::keychain_store::looks_like_raw_secret;
     for p in &cfg.providers.profiles {
         if let Some(r) = &p.api_key_ref {
-            if r.starts_with("sk-") || r.len() > 200 {
+            if looks_like_raw_secret(r) {
                 return Err(CoreError::Config(
                     "refusing config that embeds raw secrets in api_key_ref".into(),
                 ));
@@ -129,17 +123,29 @@ pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
         }
     }
     if let Some(r) = &cfg.confluence.pat_ref {
-        if r.len() > 120 || r.contains("ATATT") || r.starts_with("sk-") {
+        if looks_like_raw_secret(r) || r.contains("ATATT") {
             return Err(CoreError::Config(
                 "refusing config that embeds raw Confluence secrets in pat_ref".into(),
             ));
         }
     }
+    Ok(())
+}
+
+/// Load config or default.
+pub fn load_config(path: &Path) -> CoreResult<AppConfig> {
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+    let raw = fs::read_to_string(path)?;
+    let cfg: AppConfig = serde_json::from_str(&raw)?;
+    refuse_raw_secret_refs(&cfg)?;
     Ok(cfg)
 }
 
 /// Atomic-ish write of config.
 pub fn save_config(path: &Path, cfg: &AppConfig) -> CoreResult<()> {
+    refuse_raw_secret_refs(cfg)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -190,5 +196,18 @@ mod tests {
             pat_ref: None,
         };
         assert!(!c.is_configured());
+    }
+
+    #[test]
+    fn refuses_raw_secret_in_api_key_ref() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = AppConfig::default();
+        cfg.providers = ProviderConfig::with_local_ollama();
+        cfg.providers.profiles[0].api_key_ref = Some("sk-proj-totally-a-secret".into());
+        assert!(save_config(&path, &cfg).is_err());
+        // Path-shaped refs are OK
+        cfg.providers.profiles[0].api_key_ref = Some("provider/openai-compatible/api_key".into());
+        assert!(save_config(&path, &cfg).is_ok());
     }
 }

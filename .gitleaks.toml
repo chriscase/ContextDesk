@@ -1,0 +1,13 @@
+# Gitleaks config for ContextDesk.
+# Prefer redacting fixtures over allowlists. See docs/DEV.md § Secret scanning.
+
+title = "ContextDesk"
+
+[extend]
+# Use default gitleaks rules; this file documents local policy + optional path allowlists.
+useDefault = true
+
+# Example allowlist shape (keep empty unless a documented false positive needs it):
+# [[allowlists]]
+# description = "why this path is safe"
+# paths = ['''docs/examples/fake-token\.txt''']

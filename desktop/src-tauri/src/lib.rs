@@ -16,7 +16,8 @@ use cd_core::research::{
     build_host, events_to_dto, grant_and_execute, research_local, research_turn, EventDto,
 };
 use cd_core::keychain_store::{
-    key_ref_confluence_pat, key_ref_for_profile, KeychainSecretStore, SecretStore,
+    key_ref_confluence_pat, key_ref_for_profile, looks_like_raw_secret, KeychainSecretStore,
+    SecretStore,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
@@ -88,7 +89,7 @@ fn get_config(state: State<'_, AppState>) -> AppConfig {
 fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), String> {
     for p in &cfg.providers.profiles {
         if let Some(r) = &p.api_key_ref {
-            if r.starts_with("sk-") || r.starts_with("xai-") {
+            if looks_like_raw_secret(r) {
                 return Err("refusing raw secret in api_key_ref".into());
             }
         }
@@ -107,14 +108,144 @@ fn set_provider_secret(
     profile_id: String,
     secret: String,
 ) -> Result<(), String> {
+    let secret = secret.trim();
+    if secret.is_empty() || secret.chars().all(|c| c == '•') {
+        return Err("empty secret".into());
+    }
+    // Never log secret; only store.
     let r = key_ref_for_profile(&profile_id);
-    state.secrets.set(&r, &secret).map_err(|e| e.to_string())
+    state.secrets.set(&r, secret).map_err(|e| e.to_string())?;
+    // Ensure profile records the ref only (not the secret).
+    let mut cfg = state.config.lock().expect("config lock");
+    if let Some(p) = cfg.providers.profiles.iter_mut().find(|p| p.id == profile_id) {
+        p.api_key_ref = Some(r);
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
 fn provider_has_secret(state: State<'_, AppState>, profile_id: String) -> Result<bool, String> {
     let r = key_ref_for_profile(&profile_id);
     state.secrets.has(&r).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveProviderReq {
+    /// `ollama` | `openai_compatible`
+    kind: String,
+    base_url: String,
+    chat_model: String,
+    label: Option<String>,
+    /// Optional new API key; empty/null keeps existing keychain entry.
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProviderDto {
+    id: String,
+    kind: String,
+    base_url: String,
+    chat_model: String,
+    label: String,
+    /// Keychain ref id only — never the secret.
+    api_key_ref: Option<String>,
+    has_key: bool,
+}
+
+/// Persist active provider profile (refs only) and optionally store API key in keychain.
+#[tauri::command]
+fn save_active_provider(
+    state: State<'_, AppState>,
+    req: SaveProviderReq,
+) -> Result<ProviderDto, String> {
+    let kind = match req.kind.as_str() {
+        "ollama" => ProviderKind::Ollama,
+        "openai_compatible" => ProviderKind::OpenAiCompatible,
+        "anthropic" => ProviderKind::Anthropic,
+        other => return Err(format!("unsupported provider kind: {other}")),
+    };
+    let id = match kind {
+        ProviderKind::Ollama => "ollama-local".to_string(),
+        ProviderKind::OpenAiCompatible => "openai-compatible".to_string(),
+        ProviderKind::Anthropic => "anthropic".to_string(),
+        ProviderKind::XaiGrokBuild => "xai-grok-build".to_string(),
+    };
+    let label = req.label.unwrap_or_else(|| match kind {
+        ProviderKind::Ollama => "Ollama (local)".into(),
+        ProviderKind::OpenAiCompatible => "OpenAI-compatible gateway".into(),
+        ProviderKind::Anthropic => "Anthropic".into(),
+        ProviderKind::XaiGrokBuild => "Grok Build session".into(),
+    });
+    let base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    let chat_model = req.chat_model.trim().to_string();
+    if chat_model.is_empty() {
+        return Err("chat model is required".into());
+    }
+
+    let mut api_key_ref: Option<String> = None;
+    if let Some(key) = req.api_key.as_ref() {
+        let key = key.trim();
+        if !key.is_empty() && !key.chars().all(|c| c == '•') {
+            if looks_like_raw_secret(key) || key.len() >= 8 {
+                let r = key_ref_for_profile(&id);
+                state.secrets.set(&r, key).map_err(|e| e.to_string())?;
+                api_key_ref = Some(r);
+            }
+        }
+    }
+
+    let mut cfg = state.config.lock().expect("config lock");
+    // Keep existing ref if no new key provided.
+    if api_key_ref.is_none() {
+        if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
+            api_key_ref = existing.api_key_ref.clone();
+        }
+    }
+    // If still none but key exists under standard ref, record the ref.
+    let r = key_ref_for_profile(&id);
+    if api_key_ref.is_none() && state.secrets.has(&r).unwrap_or(false) {
+        api_key_ref = Some(r.clone());
+    }
+
+    let profile = ProviderProfile {
+        id: id.clone(),
+        label: label.clone(),
+        kind,
+        base_url: base_url.clone(),
+        api_key_ref: api_key_ref.clone(),
+        chat_model: chat_model.clone(),
+        embedding_model: None,
+        embedding_base_url: None,
+        capabilities: Default::default(),
+        local_only: matches!(kind, ProviderKind::Ollama),
+    };
+
+    if let Some(slot) = cfg.providers.profiles.iter_mut().find(|p| p.id == id) {
+        *slot = profile.clone();
+    } else {
+        cfg.providers.profiles.push(profile.clone());
+    }
+    cfg.providers.active_id = Some(id.clone());
+
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+
+    let has_key = api_key_ref
+        .as_ref()
+        .map(|r| state.secrets.has(r).unwrap_or(false))
+        .unwrap_or(false);
+
+    Ok(ProviderDto {
+        id,
+        kind: req.kind,
+        base_url,
+        chat_model,
+        label,
+        api_key_ref,
+        has_key,
+    })
 }
 
 #[tauri::command]
@@ -564,6 +695,7 @@ pub fn run() {
             save_app_config,
             set_provider_secret,
             provider_has_secret,
+            save_active_provider,
             list_local_candidates,
             probe_url,
             check_ollama,

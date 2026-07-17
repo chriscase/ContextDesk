@@ -59,6 +59,30 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// OS keychain service name from product slug (`{slug}-secrets`).
+/// Documented for agents and packaging; must stay rename-friendly via branding slug.
+pub fn keychain_service_name(slug: &str) -> String {
+    format!("{slug}-secrets")
+}
+
+/// True if a string looks like a raw API key rather than a keychain ref id.
+/// Used to refuse writing secrets into `api_key_ref` fields on disk / IPC.
+pub fn looks_like_raw_secret(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    // Keychain refs use path-like ids: `provider/{id}/api_key`
+    if v.contains('/') && !v.starts_with("sk-") && !v.starts_with("xai-") {
+        return false;
+    }
+    v.starts_with("sk-")
+        || v.starts_with("xai-")
+        || v.starts_with("ghp_")
+        || v.starts_with("gho_")
+        || (v.len() >= 32 && !v.contains('/') && !v.contains('.'))
+}
+
 /// OS keychain-backed store. Service name derived from product slug.
 pub struct KeychainSecretStore {
     service: String,
@@ -67,7 +91,7 @@ pub struct KeychainSecretStore {
 impl KeychainSecretStore {
     /// Use default ContextDesk service name.
     pub fn new() -> Self {
-        Self::with_service(format!("{DEFAULT_SLUG}-secrets"))
+        Self::with_service(keychain_service_name(DEFAULT_SLUG))
     }
 
     /// Custom service name (tests / branding).
@@ -75,6 +99,11 @@ impl KeychainSecretStore {
         Self {
             service: service.into(),
         }
+    }
+
+    /// Service name used for OS keychain entries.
+    pub fn service_name(&self) -> &str {
+        &self.service
     }
 }
 
@@ -141,5 +170,24 @@ mod tests {
     #[test]
     fn key_ref_stable() {
         assert_eq!(key_ref_for_profile("work"), "provider/work/api_key");
+    }
+
+    #[test]
+    fn service_name_from_slug() {
+        assert_eq!(keychain_service_name("contextdesk"), "contextdesk-secrets");
+        assert_eq!(keychain_service_name("acme-desk"), "acme-desk-secrets");
+        assert_eq!(
+            KeychainSecretStore::new().service_name(),
+            "contextdesk-secrets"
+        );
+    }
+
+    #[test]
+    fn raw_secret_heuristic() {
+        assert!(looks_like_raw_secret("sk-proj-abc123def456"));
+        assert!(looks_like_raw_secret("xai-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(!looks_like_raw_secret("provider/work/api_key"));
+        assert!(!looks_like_raw_secret(&key_ref_confluence_pat()));
+        assert!(!looks_like_raw_secret(""));
     }
 }

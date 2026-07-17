@@ -2,7 +2,7 @@
 
 Legend: **DONE** = AC met + tests | **PARTIAL** = real code, AC incomplete | **TODO** = missing or stub
 
-Last audit: 2026-07-17 (after reopen). Update when closing.
+Last audit: 2026-07-17. Update when closing.
 
 ## Phase 0 — Foundation
 
@@ -14,9 +14,9 @@ Last audit: 2026-07-17 (after reopen). Update when closing.
 | 13 | RENAME.md | DONE | `docs/RENAME.md` |
 | 57 | Threat model | DONE | `docs/THREAT_MODEL.md` living doc |
 | 59 | Workspace roots UX | PARTIAL | Settings form; native picker incomplete |
-| 60 | Keychain secrets | PARTIAL | Keychain store + Tauri cmds; more IPC scrubbing |
-| 66 | gitleaks CI | PARTIAL | Job in workflow; needs green run confirmation |
-| 67 | Tauri capability lockdown | PARTIAL | capabilities/default.json; CSP set |
+| 60 | Keychain secrets | DONE | Keychain store + save_active_provider; refs only; DEV.md service names |
+| 66 | gitleaks CI | DONE | Workflow + FP process in DEV.md; .gitleaks.toml |
+| 67 | Tauri capability lockdown | DONE | default.json minimal; AGENTS checklist; no secret-return IPC |
 | 68 | Epic Settings/preflight | PARTIAL | Shell exists |
 | 69 | Settings shell | PARTIAL | Sections incl. Connectors |
 | 70 | Preflight screen | PARTIAL | UI + cd-core + host probe |

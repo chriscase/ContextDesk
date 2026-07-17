@@ -68,3 +68,21 @@ Treat UI work as requiring an expert visual/UX pass—not a default form dump.
 - SQL: read-only roles, timeouts, row limits
 - MCP: opt-in, allowlisted, first-use approve
 - Grok Build session reuse: explicit user opt-in; credentials stay in Rust
+- Secrets: OS keychain only (`{slug}-secrets` service); webview never receives raw keys (see `docs/DEV.md`)
+- CI: gitleaks on every PR — false-positive process in `docs/DEV.md` (do not disable the job)
+
+## Tauri capability review checklist
+
+Capabilities live in `desktop/src-tauri/capabilities/`. Default window ACL is intentionally minimal.
+
+Before expanding permissions or shipping desktop changes, verify:
+
+1. **No shell** — no `shell:allow-*` / `shell:default` unless a future issue explicitly scopes a fixed binary (never arbitrary commands).
+2. **No broad FS** — no `fs:allow-read-recursive` / write-all. Workspace FS goes through Rust host + allowlisted roots, not webview plugins.
+3. **Dialog scope** — `dialog:allow-open` is OK for folder picker; do not add save/write dialogs that bypass host policy without review.
+4. **No secrets over IPC** — commands return DTOs/bools only (`provider_has_secret`, config with `api_key_ref`). Never add `get_provider_secret` to the webview.
+5. **CSP** — `tauri.conf.json` → `app.security.csp` stays restrictive; remote connect only to localhost for Ollama/dev, not `*`.
+6. **Capabilities JSON** — every new permission has a one-line comment in the capability file *why* it is required.
+7. **Plugins** — new Tauri plugins require an issue + threat-model note; default is refuse.
+
+Current baseline (`capabilities/default.json`): `core:default` + `dialog:allow-open` only.

@@ -109,6 +109,50 @@ export async function hostSaveSecret(profileId: string, secret: string): Promise
   await invoke("set_provider_secret", { profileId, secret });
 }
 
+export async function hostProviderHasSecret(profileId: string): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("provider_has_secret", { profileId });
+}
+
+export type ProviderDto = {
+  id: string;
+  kind: string;
+  base_url: string;
+  chat_model: string;
+  label: string;
+  api_key_ref: string | null;
+  has_key: boolean;
+};
+
+/** Persist active provider profile (refs only) + optional API key to OS keychain. */
+export async function hostSaveActiveProvider(args: {
+  kind: string;
+  baseUrl: string;
+  chatModel: string;
+  label?: string;
+  /** Raw key once; never stored in React setup / localStorage after save. */
+  apiKey?: string;
+}): Promise<ProviderDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ProviderDto>("save_active_provider", {
+    req: {
+      kind: args.kind,
+      base_url: args.baseUrl,
+      chat_model: args.chatModel,
+      label: args.label ?? null,
+      api_key: args.apiKey ?? null,
+    },
+  });
+}
+
+/** Stable profile ids used by the host for keychain refs. */
+export function profileIdForKind(kind: string): string {
+  if (kind === "ollama") return "ollama-local";
+  if (kind === "openai_compatible") return "openai-compatible";
+  if (kind === "anthropic") return "anthropic";
+  return kind;
+}
+
 export async function hostReadFile(path: string): Promise<string> {
   if (!isTauri()) {
     // cd-server fallback: not implemented for arbitrary files; fail honestly

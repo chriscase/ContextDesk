@@ -4,8 +4,11 @@ import {
   hostConfluenceHasToken,
   hostGetConfluence,
   hostPreflight,
+  hostProviderHasSecret,
+  hostSaveActiveProvider,
   hostSaveConfluence,
   hostTestConfluence,
+  profileIdForKind,
 } from "../lib/host";
 import {
   runClientPreflight,
@@ -64,6 +67,8 @@ export function SettingsModal({
   const [probeTick, setProbeTick] = useState(0);
   const [cfStatus, setCfStatus] = useState<string | null>(null);
   const [cfTokenDraft, setCfTokenDraft] = useState("");
+  /** Transient API key typed in UI — never written to localStorage / setup state. */
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
   const baseId = useId();
 
   useEffect(() => {
@@ -72,6 +77,7 @@ export function SettingsModal({
       setSection(initialSection);
       setCfTokenDraft("");
       setCfStatus(null);
+      setApiKeyDraft("");
       void (async () => {
         const cf = await hostGetConfluence();
         const has = await hostConfluenceHasToken();
@@ -85,6 +91,13 @@ export function SettingsModal({
               hasToken: has ?? Boolean(cf.pat_ref),
             },
           }));
+        }
+        if (setup.providerKind !== "none") {
+          const pid = profileIdForKind(setup.providerKind);
+          const keyOk = await hostProviderHasSecret(pid);
+          if (keyOk !== null) {
+            setDraft((d) => ({ ...d, hasApiKey: keyOk }));
+          }
         }
       })();
     }
@@ -195,6 +208,35 @@ export function SettingsModal({
   };
 
   const save = async () => {
+    let next: AppSetupState = { ...draft };
+
+    // Persist AI provider + optional API key (keychain only; never in setup JSON).
+    if (draft.providerKind !== "none") {
+      try {
+        const saved = await hostSaveActiveProvider({
+          kind: draft.providerKind,
+          baseUrl: draft.baseUrl,
+          chatModel: draft.chatModel,
+          label: draft.providerLabel ?? undefined,
+          apiKey: apiKeyDraft.trim() || undefined,
+        });
+        if (saved) {
+          next = {
+            ...next,
+            hasApiKey: saved.has_key,
+            baseUrl: saved.base_url,
+            chatModel: saved.chat_model,
+            providerLabel: saved.label,
+          };
+        }
+      } catch {
+        // browser mode: local flags only
+        if (apiKeyDraft.trim()) {
+          next = { ...next, hasApiKey: true };
+        }
+      }
+    }
+
     // Persist Confluence to host config + keychain when possible
     try {
       const saved = await hostSaveConfluence({
@@ -204,16 +246,22 @@ export function SettingsModal({
         pat: cfTokenDraft.trim() || undefined,
       });
       const has = await hostConfluenceHasToken();
-      draft.confluence = {
-        enabled: saved.enabled,
-        baseUrl: saved.base_url,
-        spaces: saved.spaces.join(", "),
-        hasToken: has ?? Boolean(saved.pat_ref),
+      next = {
+        ...next,
+        confluence: {
+          enabled: saved.enabled,
+          baseUrl: saved.base_url,
+          spaces: saved.spaces.join(", "),
+          hasToken: has ?? Boolean(saved.pat_ref),
+        },
       };
     } catch {
       // browser mode: keep in local setup only
     }
-    onSaveSetup({ ...draft });
+
+    setApiKeyDraft("");
+    setCfTokenDraft("");
+    onSaveSetup(next);
     onClose();
   };
 
@@ -366,21 +414,32 @@ export function SettingsModal({
                     <SecretField
                       id={`${baseId}-key`}
                       label="API key"
-                      value={draft.hasApiKey ? "••••••••••••" : ""}
+                      value={apiKeyDraft}
                       error={
-                        !draft.hasApiKey ? "Required for remote gateways." : null
+                        !draft.hasApiKey && !apiKeyDraft.trim()
+                          ? "Required for remote gateways."
+                          : null
                       }
-                      ok={draft.hasApiKey ? "Key saved securely (masked)" : null}
+                      ok={
+                        draft.hasApiKey && !apiKeyDraft
+                          ? "Key in OS keychain (enter a new value to replace)"
+                          : apiKeyDraft.trim()
+                            ? "Will store in OS keychain on Save"
+                            : null
+                      }
                       onChange={(e) => {
-                        const v = e.target.value;
-                        if (v.includes("•")) return;
+                        setApiKeyDraft(e.target.value);
                         setDraft((d) => ({
                           ...d,
-                          hasApiKey: v.trim().length > 0,
                           remoteReachable: null,
                         }));
                       }}
-                      placeholder="Paste key"
+                      placeholder={
+                        draft.hasApiKey
+                          ? "•••••••• (stored securely)"
+                          : "Paste key — stored in keychain on Save"
+                      }
+                      autoComplete="off"
                     />
                   </>
                 ) : null}
