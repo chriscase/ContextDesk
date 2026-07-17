@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:port": "node scripts/dev-port.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "node scripts/tauri-dev.mjs",
+    "tauri:dev:raw": "tauri dev",
     "tauri:build": "tauri build"
   },
   "dependencies": {

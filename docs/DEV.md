@@ -17,8 +17,39 @@ cargo test -p cd-core
 # Desktop
 cd desktop
 npm install
-npm run tauri dev
+npm run tauri:dev    # preferred — free-port aware
 ```
+
+## Dev ports (multi-Tauri machines)
+
+Almost every `create-tauri-app` template uses **Vite on 1420**. If you run several Tauri apps, that port is almost always busy (`strictPort: true` then fails).
+
+**ContextDesk strategy:**
+
+| Step | Behavior |
+|------|----------|
+| 1 | Prefer explicit `CD_DEV_PORT` (or `PORT`) if set |
+| 2 | Else start at **1450** (ContextDesk base — not 1420) |
+| 3 | Scan **1450…1490** for a free TCP port |
+| 4 | Start Vite with that port and pass the same URL to Tauri via `--config` merge |
+
+```sh
+cd desktop
+
+# Auto-pick free port (usual)
+npm run tauri:dev
+
+# Pin a port
+CD_DEV_PORT=1462 npm run tauri:dev
+
+# Just print what would be chosen
+npm run dev:port
+npm run dev:port -- --json
+```
+
+**Conventions for other apps on this machine:** give each product a unique **base** port (e.g. ContextDesk 1450, other apps 1460 / 1470 / …) so first-launch collisions are rare; keep a small free-port scan as a backstop.
+
+Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri always use `npm run tauri:dev` so the shell and Vite stay on the same port.
 
 ## Config locations (defaults)
 
