@@ -75,3 +75,12 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 | Webview CSP | Updater HTTP is Rust-side; webview does not need expanded `connect-src` for GitHub |
 
 Compromise of GitHub releases without the private key cannot force a signed update. Compromise of the private key requires rotating the pubkey in a new install path.
+
+## Module process isolation residual (#135)
+
+Enforced for MCP/module children:
+- `env_clear` + PATH + **granted** secret env only
+- optional `cwd` set to the module directory
+- wall-clock JSON-RPC timeout (default 30s) + response size caps
+
+**Not** claimed (OS sandbox follow-up): seccomp/bubblewrap/sandbox-exec/Job Objects network or filesystem syscall isolation. Documented residual, not a false claim of full isolation.
