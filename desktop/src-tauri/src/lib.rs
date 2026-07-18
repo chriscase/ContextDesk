@@ -264,9 +264,7 @@ fn save_active_provider(
     };
     let desc = cd_core::providers::descriptor_for(kind);
     let id = desc.profile_id_slug.to_string();
-    let label = req
-        .label
-        .unwrap_or_else(|| desc.default_label.to_string());
+    let label = req.label.unwrap_or_else(|| desc.default_label.to_string());
     let mut base_url = req.base_url.trim().trim_end_matches('/').to_string();
     if base_url.is_empty() {
         if let Some(def) = desc.default_base_url {
@@ -439,18 +437,24 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             ollama_ok = Some(ollama_reachable(&p.base_url).await);
         } else if p.kind == ProviderKind::XaiGrokBuild {
             key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
+            // #126: real probe (session + models list), not structural URL only.
+            let outcome = cd_core::discovery::probe_provider(p, None).await;
+            provider_ok = Some(outcome.is_reachable());
         } else if desc.needs_api_key {
             let ref_id = p
                 .api_key_ref
                 .clone()
                 .unwrap_or_else(|| key_ref_for_profile(&p.id));
-            key_present = Some(state.secrets.has(&ref_id).unwrap_or(false));
-            let policy = if p.local_only {
-                SsrfPolicy::local_only()
+            let has = state.secrets.has(&ref_id).unwrap_or(false);
+            key_present = Some(has);
+            // #126: live HTTP probe (models list); never structural-only "responded".
+            let api_key = if has {
+                state.secrets.get(&ref_id).ok().flatten()
             } else {
-                SsrfPolicy::default()
+                None
             };
-            provider_ok = Some(validate_provider_url(&p.base_url, &policy).is_ok());
+            let outcome = cd_core::discovery::probe_provider(p, api_key).await;
+            provider_ok = Some(outcome.is_reachable());
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();

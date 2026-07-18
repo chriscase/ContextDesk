@@ -232,30 +232,34 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
 
             // #121: Anthropic is wired; key check above covers credentials.
 
-            if matches!(
+            // Remote kinds (OpenAI-compatible, Anthropic, …) — only report "responded"
+            // when the host supplied a real probe result (`provider_reachable`), never
+            // for a structural URL-shape check alone (#126).
+            let remote_probe_kinds = matches!(
                 p.kind,
                 ProviderKind::OpenAiCompatible | ProviderKind::Anthropic
-            ) {
+            );
+            if remote_probe_kinds {
                 match input.provider_reachable {
                     Some(true) => items.push(PreflightItem {
                         id: "provider.remote".into(),
                         title: "Provider endpoint".into(),
                         level: PreflightLevel::Pass,
-                        detail: "Endpoint responded successfully.".into(),
+                        detail: "Live probe succeeded (models/health HTTP ok).".into(),
                         fix_action: Some("ai".into()),
                     }),
                     Some(false) => items.push(PreflightItem {
                         id: "provider.remote".into(),
                         title: "Provider endpoint".into(),
                         level: PreflightLevel::Fail,
-                        detail: "Could not reach provider (check URL, key, network).".into(),
+                        detail: "Live probe failed — check URL, key, and network.".into(),
                         fix_action: Some("ai".into()),
                     }),
                     None => items.push(PreflightItem {
                         id: "provider.remote".into(),
                         title: "Provider endpoint".into(),
                         level: PreflightLevel::Warn,
-                        detail: "Connection not tested yet. Use Test connection in Settings."
+                        detail: "Not live-tested yet — use Test connection in Settings (URL shape alone is not a probe)."
                             .into(),
                         fix_action: Some("ai".into()),
                     }),
