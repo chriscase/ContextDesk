@@ -29,6 +29,7 @@ pub mod injection;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;
 pub mod mcp_client;
+pub mod memory;
 pub mod memory_fs;
 pub mod module_registry;
 pub mod modules;
