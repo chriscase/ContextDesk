@@ -191,6 +191,78 @@ fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), Str
     Ok(())
 }
 
+/// Connector row for Settings (#127). No secrets.
+#[derive(Clone, serde::Serialize)]
+struct ConnectorDto {
+    id: String,
+    kind: String,
+    enabled: bool,
+    label: String,
+}
+
+#[tauri::command]
+fn list_connectors(state: State<'_, AppState>) -> Vec<ConnectorDto> {
+    let cfg = state.config.lock().expect("config lock").clone();
+    cfg.connectors
+        .iter()
+        .map(|c| ConnectorDto {
+            id: c.id.clone(),
+            kind: c.kind.clone(),
+            enabled: c.enabled,
+            label: c.label(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn list_connector_kinds() -> Vec<String> {
+    cd_core::connectors::CONNECTOR_KINDS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Replace workspace connector list (settings JSON only; no secrets over IPC).
+#[tauri::command]
+fn save_connectors(
+    state: State<'_, AppState>,
+    connectors: Vec<cd_core::connectors::ConnectorConfig>,
+) -> Result<Vec<ConnectorDto>, String> {
+    for c in &connectors {
+        if c.id.trim().is_empty() || c.kind.trim().is_empty() {
+            return Err("connector id and kind are required".into());
+        }
+        // Refuse accidental secret fields in settings JSON.
+        if let Some(obj) = c.settings.as_object() {
+            for key in ["api_key", "password", "token", "pat", "secret", "bearer"] {
+                if let Some(v) = obj.get(key) {
+                    if v.as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                        return Err(format!(
+                            "refusing secret field `{key}` in connector settings — use keychain"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    cfg.connectors = connectors;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg.clone();
+    let _ = ensure_host(&state);
+    Ok(cfg
+        .connectors
+        .iter()
+        .map(|c| ConnectorDto {
+            id: c.id.clone(),
+            kind: c.kind.clone(),
+            enabled: c.enabled,
+            label: c.label(),
+        })
+        .collect())
+}
+
 #[tauri::command]
 fn set_provider_secret(
     state: State<'_, AppState>,
@@ -1868,6 +1940,9 @@ pub fn run() {
             get_branding,
             get_config,
             save_app_config,
+            list_connectors,
+            list_connector_kinds,
+            save_connectors,
             set_provider_secret,
             provider_has_secret,
             save_active_provider,
