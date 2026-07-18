@@ -1,0 +1,84 @@
+import type { ComponentProps } from "react";
+import { ChatArchivePane } from "../panes/ChatArchivePane";
+import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
+import { SourcePreviewPane } from "../panes/SourcePreviewPane";
+import { TodoPane } from "../panes/TodoPane";
+import { ChatPane, type ChatPaneProps } from "./ChatPane";
+import { PaneTabs } from "./PaneTabs";
+import type { PaneId } from "../../lib/session";
+
+type ArchiveProps = ComponentProps<typeof ChatArchivePane>;
+
+type Props = {
+  pane: PaneId;
+  onPaneChange: (p: PaneId) => void;
+  archive: ArchiveProps | null;
+  chat: ChatPaneProps | null;
+  memory: {
+    docs: MemoryDoc[];
+    activePath: string | null;
+    onSelect: (p: string) => void;
+    onCreateHint: () => void;
+    onSave: (path: string, body: string) => void;
+  } | null;
+  source: { path: string | null; content: string } | null;
+  todosKey: string | null;
+};
+
+/** Workspace pane host (#146). */
+export function Workspace({
+  pane,
+  onPaneChange,
+  archive,
+  chat,
+  memory,
+  source,
+  todosKey,
+}: Props) {
+  return (
+    <div className="workspace">
+      <PaneTabs pane={pane} onChange={onPaneChange} />
+      {pane === "archive" && archive ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-archive"
+          aria-labelledby="pane-tab-archive"
+          className="pane-panel"
+        >
+          <ChatArchivePane {...archive} />
+        </div>
+      ) : null}
+      {pane === "chat" && chat ? <ChatPane {...chat} /> : null}
+      {pane === "memory" && memory ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-memory"
+          aria-labelledby="pane-tab-memory"
+          className="pane-panel"
+        >
+          <MemoryPane {...memory} />
+        </div>
+      ) : null}
+      {pane === "source" && source ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-source"
+          aria-labelledby="pane-tab-source"
+          className="pane-panel"
+        >
+          <SourcePreviewPane path={source.path} content={source.content} />
+        </div>
+      ) : null}
+      {pane === "todos" && todosKey ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-todos"
+          aria-labelledby="pane-tab-todos"
+          className="pane-panel"
+        >
+          <TodoPane storageKey={todosKey} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
