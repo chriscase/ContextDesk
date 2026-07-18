@@ -1842,7 +1842,7 @@ fn sql_ro_query(
 pub fn run() {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let branding = Branding::default();
+    let branding = Branding::embedded();
     let _ = ensure_config_dir(&branding);
     let path = config_path(&branding).expect("config path");
     let mut config = load_config(&path).unwrap_or_default();

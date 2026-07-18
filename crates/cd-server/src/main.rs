@@ -272,7 +272,7 @@ async fn main() {
         .init();
 
     let args = Args::parse();
-    let branding = cd_core::Branding::default();
+    let branding = cd_core::Branding::embedded();
 
     if args.print_branding {
         println!(

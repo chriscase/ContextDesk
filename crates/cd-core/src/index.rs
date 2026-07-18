@@ -788,7 +788,8 @@ fn walk(dir: &Path, depth: usize, f: &mut dyn FnMut(&Path) -> CoreResult<bool>) 
     for ent in entries.flatten() {
         let path = ent.path();
         let name = ent.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && name != ".contextdesk" && path.is_dir() {
+        let ws_dot = crate::branding::Branding::embedded().workspace_dir_name;
+        if name.starts_with('.') && name != ws_dot && path.is_dir() {
             continue;
         }
         if name == "node_modules" || name == "target" || name == "dist" || name == ".git" {

@@ -103,6 +103,21 @@ impl Default for Branding {
 }
 
 impl Branding {
+    /// Product identity baked from the committed repo-root `branding.toml` (#179).
+    ///
+    /// Edit `branding.toml` + rebuild to rename. On parse error, logs a warning
+    /// and returns [`Branding::default`] (never panics).
+    pub fn embedded() -> Self {
+        const RAW: &str = include_str!("../../../branding.toml");
+        match Self::parse_toml(RAW) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "branding.toml embed parse failed; using defaults");
+                Self::default()
+            }
+        }
+    }
+
     /// Load branding from a TOML file path.
     pub fn load_from_path(path: impl AsRef<Path>) -> CoreResult<Self> {
         let raw = std::fs::read_to_string(path.as_ref())?;
@@ -157,5 +172,32 @@ mod tests {
         let b = Branding::parse_toml(raw).expect("branding.toml");
         assert_eq!(b.name, "ContextDesk");
         assert!(b.available_themes.contains(&"light".to_string()));
+    }
+
+    #[test]
+    fn embedded_matches_repo_toml() {
+        let b = Branding::embedded();
+        assert_eq!(b.name, "ContextDesk");
+        assert_eq!(b.workspace_dir_name, ".contextdesk");
+        assert_eq!(b.config_dir_name, ".contextdesk");
+    }
+
+    /// #179: non-default workspace_dir_name drives memory/skills path helpers.
+    #[test]
+    fn custom_workspace_dir_name_in_paths() {
+        let b = Branding {
+            workspace_dir_name: ".acme".into(),
+            ..Branding::default()
+        };
+        let root = std::path::Path::new("/tmp/ws");
+        let mem = crate::memory_fs::memory_dir_named(
+            &crate::workspace::Workspace::new("t", vec![root.to_path_buf()]),
+            &b.workspace_dir_name,
+        )
+        .unwrap();
+        let skills = crate::skills::workspace_skills_dir_named(root, &b.workspace_dir_name);
+        assert_eq!(mem, std::path::PathBuf::from("/tmp/ws/.acme/memory"));
+        assert_eq!(skills, std::path::PathBuf::from("/tmp/ws/.acme/skills"));
+        assert!(!mem.to_string_lossy().contains(".contextdesk"));
     }
 }
