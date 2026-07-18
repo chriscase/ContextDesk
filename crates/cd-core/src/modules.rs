@@ -633,4 +633,41 @@ secret_refs = ["provider/demo/api_key"]
         remove_module_dir(mods.path(), "demo-mod").unwrap();
         assert!(!mods.path().join("demo-mod").exists());
     }
+
+    /// #138: reference module under `examples/modules/echo-notes` parses as `cd.module.v1`.
+    ///
+    /// Entrypoint is rewritten to a platform-absolute path so Windows CI accepts the
+    /// absolute-path policy; the shipped `module.toml` remains the author-facing sample.
+    #[test]
+    fn example_echo_notes_module_toml_parses() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/modules/echo-notes/module.toml");
+        assert!(
+            path.is_file(),
+            "missing reference module at {}",
+            path.display()
+        );
+        let raw = fs::read_to_string(&path).expect("read example module.toml");
+        assert!(raw.contains("cd.module.v1"), "schema must be cd.module.v1");
+        // Normalize entrypoint for platform absolute-path policy.
+        let abs = abs_cmd_toml();
+        let mut normalized = String::new();
+        for line in raw.lines() {
+            if line.trim_start().starts_with("command") {
+                normalized.push_str(&format!("command = \"{abs}\"\n"));
+            } else {
+                normalized.push_str(line);
+                normalized.push('\n');
+            }
+        }
+        let m = parse_module_toml(&normalized).expect("example module.toml must parse");
+        assert_eq!(m.schema, MODULE_SCHEMA_V1);
+        assert_eq!(m.id, "echo-notes");
+        assert_eq!(m.version, "0.1.0");
+        let names: Vec<_> = m.provided_tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"note_read"), "{names:?}");
+        assert!(names.contains(&"note_append"), "{names:?}");
+        // Authors must not self-grant.
+        assert!(ModuleGrantStore::try_self_grant_from_manifest(&m).is_err());
+    }
 }
