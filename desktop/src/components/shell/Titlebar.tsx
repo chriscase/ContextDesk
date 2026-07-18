@@ -15,21 +15,24 @@ type Props = {
   onToggleTheme: () => void;
 };
 
-/** Start OS window drag from a titlebar drag region (Magic Trackpad–friendly). */
-async function startWindowDrag(e: ReactMouseEvent): Promise<void> {
+/**
+ * Start OS window drag from a titlebar drag region (Magic Trackpad–friendly).
+ * Needs capability `core:window:allow-start-dragging` + remote localhost in
+ * capabilities/default.json for `tauri dev` (devUrl is remote from ACL's view).
+ * Failures are always swallowed; CSS `-webkit-app-region: drag` is fallback.
+ */
+function startWindowDrag(e: ReactMouseEvent): void {
   if (e.button !== 0) return;
   const t = e.target;
   if (!(t instanceof Element)) return;
-  // Interactive controls keep no-drag; never start a drag from them.
   if (t.closest("button, a, input, select, textarea, [data-no-drag]")) return;
-  // Only when the event hit a designated drag surface.
   if (!t.closest("[data-tauri-drag-region]")) return;
-  try {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().startDragging();
-  } catch {
-    // Browser / missing capability — CSS -webkit-app-region still applies in Tauri.
-  }
+  e.preventDefault();
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => getCurrentWindow().startDragging())
+    .catch(() => {
+      /* ACL / browser — CSS app-region still applies */
+    });
 }
 
 /** App chrome titlebar (#146 / #153). */
@@ -49,9 +52,7 @@ export function Titlebar({
     <header
       className="titlebar"
       data-tauri-drag-region
-      onMouseDown={(e) => {
-        void startWindowDrag(e);
-      }}
+      onMouseDown={startWindowDrag}
     >
       <div className="titlebar__brand" data-tauri-drag-region>
         <IconSpark title={productName} />
@@ -82,11 +83,7 @@ export function Titlebar({
         </button>
       </div>
       {/* Dedicated empty drag surface — chips/actions otherwise leave almost none. */}
-      <div
-        className="titlebar__drag"
-        data-tauri-drag-region
-        aria-hidden
-      />
+      <div className="titlebar__drag" data-tauri-drag-region aria-hidden />
       <div className="titlebar__actions" data-no-drag>
         <span
           className="titlebar__kbd-hint titlebar__no-drag"
