@@ -59,7 +59,11 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 
 ## Versioning policy
 
-- `cd_core::PROTOCOL_VERSION` is the frozen string for this major (`cd.v1`).
+- `cd_core::PROTOCOL_VERSION` is the string for this major (`cd.v1`).
+- The **event `kind` discriminants** in the table above are **guarded** by
+  `research::tests::protocol_md_event_kinds_match_dto` (offline unit test).
+  Only those discriminants are treated as stable for this major; do not call
+  sketch/`session.*` names “frozen.”
 - Additive optional fields on events are allowed without bumping.
 - Renaming/removing event `kind` discriminants requires `cd.v2` and a migration note in this file.
 - Hosts should ignore unknown event kinds for forward compatibility.

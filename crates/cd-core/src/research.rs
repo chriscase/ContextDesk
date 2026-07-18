@@ -1245,6 +1245,74 @@ mod tests {
             .any(|e| matches!(e, StreamEvent::TurnCompleted { .. })));
     }
 
+    /// #169: EventDto.kind set must match docs/PROTOCOL.md discriminants (drift guard).
+    #[test]
+    fn protocol_md_event_kinds_match_dto() {
+        use crate::events::ToolPhase;
+        // Documented in docs/PROTOCOL.md — keep in sync.
+        const DOCUMENTED: &[&str] = &[
+            "turn_started",
+            "text_delta",
+            "thought_delta",
+            "tool",
+            "citation",
+            "search_trail",
+            "permission_required",
+            "turn_completed",
+            "error",
+        ];
+        let samples = [
+            StreamEvent::TurnStarted {
+                session_id: "s".into(),
+                model: None,
+            },
+            StreamEvent::TextDelta { text: "t".into() },
+            StreamEvent::ThoughtDelta { text: "th".into() },
+            StreamEvent::Tool {
+                id: "i".into(),
+                name: "n".into(),
+                phase: ToolPhase::Started,
+                summary: "s".into(),
+                detail: None,
+                ok: None,
+            },
+            StreamEvent::Citation {
+                source_id: "c".into(),
+                label: "l".into(),
+                locator: None,
+            },
+            StreamEvent::SearchTrail {
+                steps: vec!["x".into()],
+            },
+            StreamEvent::PermissionRequired {
+                request_id: "r".into(),
+                tool_name: "t".into(),
+                target: "p".into(),
+                reason: "why".into(),
+                preview: "pv".into(),
+                risk: "local".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "stop".into(),
+            },
+            StreamEvent::Error {
+                code: "e".into(),
+                message: "m".into(),
+            },
+        ];
+        let mut kinds: Vec<String> = samples.iter().map(|e| event_to_dto(e).kind).collect();
+        kinds.sort();
+        let mut expected: Vec<String> = DOCUMENTED.iter().map(|s| (*s).to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            kinds, expected,
+            "DTO kinds drifted from docs/PROTOCOL.md — update both"
+        );
+        // Exhaustive: every StreamEvent variant appears (count match).
+        assert_eq!(kinds.len(), DOCUMENTED.len());
+    }
+
     #[tokio::test]
     async fn scripted_tool_turn_runs_search() {
         let dir = tempdir().unwrap();
