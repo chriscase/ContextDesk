@@ -25,7 +25,9 @@
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg-panel);
-  /* Window drag on empty titlebar (#153); buttons use .titlebar__no-drag. */
+  /* Window drag on empty titlebar (#153); buttons use .titlebar__no-drag.
+     CSS drag alone is flaky on external Magic Trackpad — Titlebar also calls
+     startDragging() on primary-button mousedown on drag regions. */
   -webkit-app-region: drag;
   app-region: drag;
   user-select: none;
@@ -39,7 +41,8 @@ html[data-platform="macos"] .titlebar {
 .titlebar__no-drag,
 .titlebar button,
 .titlebar a,
-.titlebar input {
+.titlebar input,
+.titlebar [data-no-drag] {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
@@ -52,6 +55,18 @@ html[data-platform="macos"] .titlebar {
   font-size: var(--text-sm);
   letter-spacing: -0.02em;
   min-width: 0;
+  flex-shrink: 1;
+}
+
+/* Empty flex space always available for window drag (chips/buttons eat brand width). */
+.titlebar__drag {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 24px;
+  min-height: 100%;
+  -webkit-app-region: drag;
+  app-region: drag;
+  cursor: default;
 }
 
 .titlebar__meta {
@@ -64,6 +79,8 @@ html[data-platform="macos"] .titlebar {
   align-items: center;
   gap: var(--space-1);
   flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .icon-btn {
@@ -143,7 +160,10 @@ html[data-platform="macos"] .titlebar {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--sidebar-w, 200px) 1fr;
+  grid-template-columns: var(--sidebar-w, 200px) minmax(0, 1fr);
+  /* Both columns must be able to shrink so nested overflow:auto can scroll
+     (default grid min-size is content, which clips instead of scrolling). */
+  grid-template-rows: minmax(0, 1fr);
   height: 100%;
 }
 
@@ -303,13 +323,26 @@ html[data-platform="macos"] .titlebar {
 }
 
 /* Flex column so session tabs / chrome stay compact; chat body takes remaining space.
-   (Grid `auto 1fr auto` previously assigned 1fr to session-tabs when chat was open.) */
+   (Grid `auto 1fr auto` previously assigned 1fr to session-tabs when chat was open.)
+   height/overflow pin the grid cell so chat-scroll gets a real scrollport (trackpads). */
 .workspace {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
   background: var(--bg-app);
+}
+
+/* Chat / archive / memory / etc. — must fill workspace and pass height to overflow children. */
+.pane-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .chat-scroll-wrap {
@@ -318,11 +351,15 @@ html[data-platform="macos"] .titlebar {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .chat-scroll {
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding: var(--space-4) var(--space-4) var(--space-3);
   min-height: 0;
 }
