@@ -32,3 +32,4 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 sha2 = "0.10"
+wiremock = "0.6"
