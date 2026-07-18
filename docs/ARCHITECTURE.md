@@ -15,10 +15,17 @@
 └───────────────────────────┬──────────────────────────────┘
                             │ Connector trait / MCP
 ┌───────────────────────────▼──────────────────────────────┐
-│ Connectors                                               │
+│ Connectors / external modules                            │
 │  files · memory · sqlite · postgres(RO) · mcp · http…    │
+│  Module substrate: MCP stdio subprocess — see            │
+│  docs/adr/0001-external-module-substrate.md (#133 / #94) │
 └──────────────────────────────────────────────────────────┘
 ```
+
+### External modules (normative)
+
+Third-party tools use the **MCP subprocess** substrate (not WASM, not native dylibs).  
+Security model, non-goals, and migration path: **[ADR 0001](adr/0001-external-module-substrate.md)**.
 
 ## Key modules (target)
 
