@@ -1,15 +1,20 @@
 /**
  * Settings → Modules (#136). Local install only (NON_GOALS #7).
  * Enable triggers #135 capability approval when grants are missing.
+ * Browse-only registry (#139) — metadata only; Install hands off to local #136 path.
  */
 import { useCallback, useEffect, useState } from "react";
 import {
   hostApproveModuleEnable,
+  hostBrowseModuleRegistry,
+  hostGetModuleRegistrySettings,
   hostInstallModule,
   hostListModules,
   hostRemoveModule,
   hostSetModuleEnabled,
+  hostSetModuleRegistrySettings,
   type ModuleDto,
+  type ModuleRegistryEntryDto,
 } from "../../lib/host";
 
 export type ModulesSectionProps = {
@@ -28,11 +33,18 @@ export function ModulesSection({ baseId }: ModulesSectionProps) {
     typeConfirm: string | null;
   } | null>(null);
   const [typed, setTyped] = useState("");
+  const [regEnabled, setRegEnabled] = useState(false);
+  const [regUrl, setRegUrl] = useState("");
+  const [regFile, setRegFile] = useState("");
+  const [regEntries, setRegEntries] = useState<ModuleRegistryEntryDto[]>([]);
 
   const refresh = useCallback(async () => {
     try {
       const list = await hostListModules();
       setModules(list);
+      const rs = await hostGetModuleRegistrySettings();
+      setRegEnabled(rs.enabled);
+      setRegUrl(rs.url);
     } catch (e) {
       setNote(e instanceof Error ? e.message : "Could not list modules");
     }
@@ -133,12 +145,73 @@ export function ModulesSection({ baseId }: ModulesSectionProps) {
     }
   };
 
+  const onSaveRegistry = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await hostSetModuleRegistrySettings(regEnabled, regUrl);
+      setRegEnabled(r.enabled);
+      setRegUrl(r.url);
+      setNote(
+        r.enabled && r.url
+          ? "Registry opt-in saved (browse is metadata-only; never auto-installs)."
+          : "Registry browse disabled.",
+      );
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "Registry settings failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onBrowseRegistry = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      // Metadata only — does not install or run module code (NON_GOALS #7).
+      const entries = await hostBrowseModuleRegistry(
+        regFile.trim() || undefined,
+      );
+      setRegEntries(entries);
+      setNote(`Found ${entries.length} registry entr${entries.length === 1 ? "y" : "ies"} (metadata only).`);
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : "Browse failed");
+      setRegEntries([]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onInstallFromRegistry = async (e: ModuleRegistryEntryDto) => {
+    if (!e.local_path) {
+      setNote(
+        `“${e.id}” has no local_path — download/build the module, then use Install (local) with its directory.`,
+      );
+      return;
+    }
+    setPathDraft(e.local_path);
+    setBusy(true);
+    setNote(null);
+    try {
+      // Explicit hand-off to #136 local install — never silent.
+      const m = await hostInstallModule(e.local_path);
+      setNote(`Installed ${m.id} v${m.version} from registry hand-off (local path).`);
+      await refresh();
+    } catch (err) {
+      setNote(err instanceof Error ? err.message : "Install failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div>
       <p className="section-lead">
         External modules use the MCP subprocess substrate (ADR 0001). Install is{" "}
-        <strong>local path only</strong> — no marketplace auto-install. Enabling
-        a module requests capability approval before tools attach.
+        <strong>local path only</strong> — no marketplace auto-install
+        (NON_GOALS #7). Enabling a module requests capability approval before
+        tools attach. An optional browse-only index may list metadata; it never
+        auto-installs.
       </p>
 
       <h3 className="settings-connector-block__title">Install (local)</h3>
@@ -260,6 +333,101 @@ export function ModulesSection({ baseId }: ModulesSectionProps) {
           ))}
         </ul>
       )}
+
+      <h3 className="settings-connector-block__title">
+        Browse-only registry (optional)
+      </h3>
+      <p className="field__hint">
+        Metadata index only — never auto-installs (NON_GOALS #7). URL empty by
+        default; no product-hardcoded company index. Opt-in fetch is SSRF-gated.
+        Prefer a local JSON file for offline browse.
+      </p>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={regEnabled}
+          disabled={busy}
+          onChange={(e) => setRegEnabled(e.target.checked)}
+        />
+        <span>Enable remote registry URL</span>
+      </label>
+      <label className="field">
+        <span className="field__label">Registry URL (http/https)</span>
+        <input
+          id={`${baseId}-reg-url`}
+          className="field__control"
+          value={regUrl}
+          onChange={(e) => setRegUrl(e.target.value)}
+          placeholder="(empty — no default)"
+          disabled={busy}
+          autoComplete="off"
+        />
+      </label>
+      <label className="field">
+        <span className="field__label">Or local index JSON path</span>
+        <input
+          id={`${baseId}-reg-file`}
+          className="field__control"
+          value={regFile}
+          onChange={(e) => setRegFile(e.target.value)}
+          placeholder="/path/to/registry-fixture.json"
+          disabled={busy}
+          autoComplete="off"
+        />
+      </label>
+      <div className="workspace-root-actions">
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={busy}
+          onClick={() => void onSaveRegistry()}
+        >
+          Save registry settings
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={busy}
+          onClick={() => void onBrowseRegistry()}
+        >
+          Browse
+        </button>
+      </div>
+      {regEntries.length > 0 ? (
+        <ul className="preflight-list" aria-label="Registry entries">
+          {regEntries.map((e) => (
+            <li key={`${e.id}@${e.version}`} className="preflight-row">
+              <div>
+                <div className="preflight-row__title">
+                  {e.name}{" "}
+                  <span className="field__hint">
+                    ({e.id} v{e.version})
+                  </span>
+                </div>
+                <div className="preflight-row__detail">
+                  {e.description || "—"}
+                </div>
+                <div className="workspace-root-actions">
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    disabled={busy || !e.can_install_local}
+                    title={
+                      e.can_install_local
+                        ? "Install via local path (#136)"
+                        : "No local_path — use Install (local) after download"
+                    }
+                    onClick={() => void onInstallFromRegistry(e)}
+                  >
+                    Install
+                  </button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       {note ? <p className="field__hint">{note}</p> : null}
     </div>
   );

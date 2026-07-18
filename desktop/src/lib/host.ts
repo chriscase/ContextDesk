@@ -894,6 +894,51 @@ export async function hostRemoveModule(id: string): Promise<boolean> {
   return invoke<boolean>("remove_module", { id });
 }
 
+/** Browse-only registry settings (#139). Default: disabled + empty URL. */
+export type ModuleRegistrySettingsDto = {
+  enabled: boolean;
+  url: string;
+};
+
+export type ModuleRegistryEntryDto = {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  homepage: string | null;
+  local_path: string | null;
+  can_install_local: boolean;
+};
+
+export async function hostGetModuleRegistrySettings(): Promise<ModuleRegistrySettingsDto> {
+  if (!isTauri()) return { enabled: false, url: "" };
+  return invoke<ModuleRegistrySettingsDto>("get_module_registry_settings");
+}
+
+export async function hostSetModuleRegistrySettings(
+  enabled: boolean,
+  url: string,
+): Promise<ModuleRegistrySettingsDto> {
+  if (!isTauri()) throw new Error("Registry settings require Tauri host");
+  return invoke<ModuleRegistrySettingsDto>("set_module_registry_settings", {
+    enabled,
+    url,
+  });
+}
+
+/**
+ * Browse registry metadata only — never auto-installs (NON_GOALS #7).
+ * Pass `filePath` for offline local JSON; otherwise uses configured URL when enabled.
+ */
+export async function hostBrowseModuleRegistry(
+  filePath?: string,
+): Promise<ModuleRegistryEntryDto[]> {
+  if (!isTauri()) return [];
+  return invoke<ModuleRegistryEntryDto[]>("browse_module_registry", {
+    filePath: filePath ?? null,
+  });
+}
+
 export async function hostUpdateModule(
   id: string,
   path: string,

@@ -114,6 +114,15 @@ pub struct AppConfig {
     /// Enabled external module ids (#136). Install is local-only (NON_GOALS #7).
     #[serde(default)]
     pub enabled_modules: Vec<String>,
+    /// Opt-in module registry browse (#139). Default **false** — no fetch until enabled.
+    ///
+    /// Browse is metadata-only (NON_GOALS #7); never auto-installs.
+    #[serde(default)]
+    pub module_registry_enabled: bool,
+    /// Registry index URL (http/https). **Empty by default** — no hardcoded company URL
+    /// (AGENTS.md #2). Fetch is SSRF-gated when non-empty and enabled.
+    #[serde(default)]
+    pub module_registry_url: String,
 }
 
 fn default_index_max_files() -> usize {

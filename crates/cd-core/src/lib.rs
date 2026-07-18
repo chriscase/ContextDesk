@@ -30,6 +30,7 @@ pub mod injection;
 pub mod keychain_store;
 pub mod mcp_client;
 pub mod memory_fs;
+pub mod module_registry;
 pub mod modules;
 pub mod paths;
 pub mod permissions;
