@@ -198,20 +198,61 @@ struct ConnectorDto {
     kind: String,
     enabled: bool,
     label: String,
+    /// Kind-specific non-secret settings (command/args for MCP, etc.).
+    settings: serde_json::Value,
+    /// Tools discovered after host attach (MCP `mcp__server__tool` names).
+    #[serde(default)]
+    discovered_tools: Vec<String>,
+}
+
+fn connector_dtos(state: &AppState, cfg: &AppConfig) -> Vec<ConnectorDto> {
+    let tool_names: Vec<String> = state
+        .host
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.as_ref().map(|h| {
+                h.specs_for_model()
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    cfg.connectors
+        .iter()
+        .map(|c| {
+            let discovered_tools = if c.kind == "mcp" {
+                let server = c
+                    .settings
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(c.id.as_str());
+                let prefix = format!("mcp__{server}__");
+                tool_names
+                    .iter()
+                    .filter(|n| n.starts_with(&prefix))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            ConnectorDto {
+                id: c.id.clone(),
+                kind: c.kind.clone(),
+                enabled: c.enabled,
+                label: c.label(),
+                settings: c.settings.clone(),
+                discovered_tools,
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]
 fn list_connectors(state: State<'_, AppState>) -> Vec<ConnectorDto> {
     let cfg = state.config.lock().expect("config lock").clone();
-    cfg.connectors
-        .iter()
-        .map(|c| ConnectorDto {
-            id: c.id.clone(),
-            kind: c.kind.clone(),
-            enabled: c.enabled,
-            label: c.label(),
-        })
-        .collect()
+    connector_dtos(&state, &cfg)
 }
 
 #[tauri::command]
@@ -251,16 +292,7 @@ fn save_connectors(
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config lock") = cfg.clone();
     let _ = ensure_host(&state);
-    Ok(cfg
-        .connectors
-        .iter()
-        .map(|c| ConnectorDto {
-            id: c.id.clone(),
-            kind: c.kind.clone(),
-            enabled: c.enabled,
-            label: c.label(),
-        })
-        .collect())
+    Ok(connector_dtos(&state, &cfg))
 }
 
 #[tauri::command]

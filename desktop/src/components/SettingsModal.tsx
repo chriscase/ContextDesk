@@ -548,7 +548,7 @@ export function SettingsModal({
           id: c.id,
           kind: c.kind,
           enabled: c.enabled,
-          settings: {},
+          settings: c.settings ?? {},
         })),
       );
       setConnectors(saved);
@@ -1192,6 +1192,15 @@ export function SettingsModal({
                       onClick={() => {
                         const kind = newConnectorKind.trim() || "sqlite";
                         const id = `${kind}-${Date.now().toString(36)}`;
+                        const settings =
+                          kind === "mcp"
+                            ? {
+                                name: id,
+                                command: "",
+                                args: [] as string[],
+                                read_tools: [] as string[],
+                              }
+                            : {};
                         setConnectors((list) => [
                           ...list,
                           {
@@ -1199,6 +1208,7 @@ export function SettingsModal({
                             kind,
                             enabled: true,
                             label: kind,
+                            settings,
                           },
                         ]);
                       }}
@@ -1206,6 +1216,89 @@ export function SettingsModal({
                       Add
                     </button>
                   </div>
+                  {connectors
+                    .filter((c) => c.kind === "mcp")
+                    .map((c) => {
+                      const settings = (c.settings ?? {}) as {
+                        name?: string;
+                        command?: string;
+                        args?: string[];
+                      };
+                      return (
+                        <div key={`mcp-cfg-${c.id}`} className="settings-connector-block">
+                          <p className="field__label">MCP: {c.id}</p>
+                          <TextField
+                            id={`${baseId}-mcp-cmd-${c.id}`}
+                            label="Absolute command"
+                            hint="e.g. /usr/local/bin/my-mcp-server — must be absolute (no shell)."
+                            value={settings.command ?? ""}
+                            onChange={(e) => {
+                              const command = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: {
+                                          ...(x.settings ?? {}),
+                                          name:
+                                            (x.settings as { name?: string })?.name ??
+                                            x.id,
+                                          command,
+                                          args:
+                                            (x.settings as { args?: string[] })?.args ??
+                                            [],
+                                        },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="/absolute/path/to/mcp-server"
+                          />
+                          <TextField
+                            id={`${baseId}-mcp-args-${c.id}`}
+                            label="Args (space-separated)"
+                            value={(settings.args ?? []).join(" ")}
+                            onChange={(e) => {
+                              const args = e.target.value
+                                .trim()
+                                .split(/\s+/)
+                                .filter(Boolean);
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: {
+                                          ...(x.settings ?? {}),
+                                          name:
+                                            (x.settings as { name?: string })?.name ??
+                                            x.id,
+                                          command:
+                                            (x.settings as { command?: string })
+                                              ?.command ?? "",
+                                          args,
+                                        },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="--flag value"
+                          />
+                          {c.discovered_tools && c.discovered_tools.length > 0 ? (
+                            <p className="field__hint" role="status">
+                              Discovered tools: {c.discovered_tools.join(", ")}
+                            </p>
+                          ) : c.enabled && (settings.command ?? "").trim() ? (
+                            <p className="field__hint">
+                              No tools discovered yet — Save to spawn and list tools.
+                            </p>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   {connectorsNote ? (
                     <p className="field__hint" role="status">
                       {connectorsNote}
