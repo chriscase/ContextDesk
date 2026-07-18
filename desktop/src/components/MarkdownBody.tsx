@@ -5,7 +5,7 @@
  * GFM tables render as real HTML tables once header + separator are present.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Props = {
   text: string;
@@ -461,7 +461,12 @@ function needsStructuredRender(blocks: Block[]): boolean {
 
 export function MarkdownBody({ text, streaming }: Props) {
   const { settled, buffer } = useBeamChunks(text, Boolean(streaming));
-  const blocks = parseBlocks(text);
+  // Settled rows must not re-parse when a neighbor streams (#148).
+  const blocks = useMemo(
+    () => parseBlocks(text),
+    // `streaming` included so open fences/tables re-evaluate on settle.
+    [text, streaming],
+  );
   const structured = needsStructuredRender(blocks);
 
   // Streaming prose: phrase beam-in. Tables / lists / headings / code: structured.
