@@ -7,8 +7,11 @@ import {
   hostGetRouterBudget,
   hostGetWebResearchEnabled,
   hostGetX,
+  hostListConnectors,
+  hostListConnectorKinds,
   hostListLocalCandidates,
   hostListWebResearchSources,
+  hostSaveConnectors,
   hostSetRouterBudget,
   hostPreflight,
   hostProbeUrl,
@@ -25,6 +28,7 @@ import {
   hostXHasToken,
   normalizeProviderKind,
   profileIdForKind,
+  type ConnectorDto,
   type DefaultWorkspaceDto,
   type LocalCandidateDto,
   type NewsSourceDto,
@@ -118,6 +122,11 @@ export function SettingsModal({
     max_results_per_source: 8,
     deadline_ms: 60_000,
   });
+  /** Workspace connector registry (#127). */
+  const [connectors, setConnectors] = useState<ConnectorDto[]>([]);
+  const [connectorKinds, setConnectorKinds] = useState<string[]>([]);
+  const [newConnectorKind, setNewConnectorKind] = useState("sqlite");
+  const [connectorsNote, setConnectorsNote] = useState<string | null>(null);
   const baseId = useId();
 
   useEffect(() => {
@@ -139,6 +148,15 @@ export function SettingsModal({
         const budget = await hostGetRouterBudget();
         if (budget) setRouterBudget(budget);
         if (sources.length) setNewsSources(sources);
+        const [clist, ckinds] = await Promise.all([
+          hostListConnectors(),
+          hostListConnectorKinds(),
+        ]);
+        setConnectors(clist);
+        if (ckinds.length) {
+          setConnectorKinds(ckinds);
+          setNewConnectorKind(ckinds[0] ?? "sqlite");
+        }
         setDraft((d) => ({
           ...d,
           confluence: cf
@@ -521,6 +539,24 @@ export function SettingsModal({
       setRouterBudget(savedBudget);
     } catch {
       /* browser mode */
+    }
+
+    // Persist connector registry (#127) — rebuilds host via ensure_host.
+    try {
+      const saved = await hostSaveConnectors(
+        connectors.map((c) => ({
+          id: c.id,
+          kind: c.kind,
+          enabled: c.enabled,
+          settings: {},
+        })),
+      );
+      setConnectors(saved);
+      setConnectorsNote(null);
+    } catch (e) {
+      setConnectorsNote(
+        e instanceof Error ? e.message : "Could not save connectors",
+      );
     }
 
     setApiKeyDraft("");
@@ -1065,6 +1101,122 @@ export function SettingsModal({
                   </span>{" "}
                   icons for setup steps where extra configuration is required.
                 </p>
+
+                <div className="settings-connector-block">
+                  <HelpTitle
+                    title="Connector registry"
+                    helpLabel="Connector registry"
+                    helpTitle="Workspace connectors"
+                  >
+                    <p>
+                      Generic connectors (files, memory, SQLite, Postgres, MCP,
+                      HTTP, Confluence). Kind-specific credentials use the OS
+                      keychain on Save — never pasted into config JSON.
+                    </p>
+                    <p>
+                      MCP / SQL / HTTP execution arms land in follow-up issues;
+                      you can still enable entries so they persist.
+                    </p>
+                  </HelpTitle>
+                  <ul className="session-list">
+                    {connectors.length === 0 ? (
+                      <li className="field__hint">No connectors yet — add one below.</li>
+                    ) : (
+                      connectors.map((c) => (
+                        <li key={c.id}>
+                          <div className="session-list__item row--between">
+                            <span>
+                              <strong>{c.label || c.kind}</strong>
+                              <span className="field__hint">
+                                {" "}
+                                · {c.kind} · {c.id}
+                              </span>
+                            </span>
+                            <div className="field-row">
+                              <ToggleField
+                                id={`${baseId}-conn-${c.id}`}
+                                label="Enabled"
+                                checked={c.enabled}
+                                onChange={(enabled) =>
+                                  setConnectors((list) =>
+                                    list.map((x) =>
+                                      x.id === c.id ? { ...x, enabled } : x,
+                                    ),
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                className="btn btn--ghost btn--sm"
+                                onClick={() =>
+                                  setConnectors((list) =>
+                                    list.filter((x) => x.id !== c.id),
+                                  )
+                                }
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        </li>
+                      ))
+                    )}
+                  </ul>
+                  <div className="field-row">
+                    <SelectField
+                      id={`${baseId}-new-conn-kind`}
+                      label="Add connector kind"
+                      value={newConnectorKind}
+                      onChange={(e) => setNewConnectorKind(e.target.value)}
+                    >
+                      {(connectorKinds.length
+                        ? connectorKinds
+                        : [
+                            "files",
+                            "memory",
+                            "sqlite",
+                            "postgres",
+                            "mcp",
+                            "http",
+                            "confluence",
+                          ]
+                      ).map((k) => (
+                        <option key={k} value={k}>
+                          {k}
+                        </option>
+                      ))}
+                    </SelectField>
+                    <button
+                      type="button"
+                      className="btn btn--primary btn--sm"
+                      onClick={() => {
+                        const kind = newConnectorKind.trim() || "sqlite";
+                        const id = `${kind}-${Date.now().toString(36)}`;
+                        setConnectors((list) => [
+                          ...list,
+                          {
+                            id,
+                            kind,
+                            enabled: true,
+                            label: kind,
+                          },
+                        ]);
+                      }}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {connectorsNote ? (
+                    <p className="field__hint" role="status">
+                      {connectorsNote}
+                    </p>
+                  ) : (
+                    <p className="field__hint">
+                      Changes apply on <strong>Save</strong> (rebuilds tool host).
+                    </p>
+                  )}
+                </div>
+
                 <ToggleField
                   id={`${baseId}-web-research`}
                   label="Enable web research"

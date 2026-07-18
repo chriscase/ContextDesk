@@ -193,6 +193,49 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Workspace connector registry entry (#127). No secrets. */
+export type ConnectorDto = {
+  id: string;
+  kind: string;
+  enabled: boolean;
+  label: string;
+};
+
+export async function hostListConnectors(): Promise<ConnectorDto[]> {
+  if (!isTauri()) return [];
+  return invoke<ConnectorDto[]>("list_connectors");
+}
+
+export async function hostListConnectorKinds(): Promise<string[]> {
+  if (!isTauri()) {
+    return [
+      "files",
+      "memory",
+      "sqlite",
+      "postgres",
+      "mcp",
+      "http",
+      "confluence",
+    ];
+  }
+  return invoke<string[]>("list_connector_kinds");
+}
+
+/** Persist connector list (id/kind/enabled/settings only). Rebuilds host. */
+export async function hostSaveConnectors(
+  connectors: { id: string; kind: string; enabled: boolean; settings?: unknown }[],
+): Promise<ConnectorDto[]> {
+  if (!isTauri()) return connectors.map((c) => ({ ...c, label: c.kind, settings: undefined }));
+  return invoke<ConnectorDto[]>("save_connectors", {
+    connectors: connectors.map((c) => ({
+      id: c.id,
+      kind: c.kind,
+      enabled: c.enabled,
+      settings: c.settings ?? {},
+    })),
+  });
+}
+
 /** Instant exists + readable directory check (Tauri host). */
 export async function hostValidateWorkspacePath(
   path: string,
