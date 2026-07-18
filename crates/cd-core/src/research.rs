@@ -13,7 +13,7 @@ use crate::error::CoreResult;
 use crate::events::StreamEvent;
 use crate::index::KeywordIndex;
 use crate::permissions::PermissionDecision;
-use crate::providers::{ProviderKind, ProviderProfile};
+use crate::providers::{ProviderCapabilities, ProviderKind, ProviderProfile};
 use crate::ssrf::SsrfPolicy;
 use crate::tool_host::ToolHost;
 use crate::tools::ToolSpec;
@@ -379,6 +379,174 @@ impl ChatBackend for AnthropicBackend {
     }
 }
 
+/// Honor profile capability flags: strip tools when disabled; skip stream when
+/// `stream` is false (#125). Does not swallow rejections — non-stream path is explicit.
+pub struct CapabilityAwareBackend {
+    inner: Box<dyn ChatBackend>,
+    caps: ProviderCapabilities,
+}
+
+impl CapabilityAwareBackend {
+    /// Wrap a constructed backend with profile capabilities.
+    pub fn new(inner: Box<dyn ChatBackend>, caps: ProviderCapabilities) -> Self {
+        Self { inner, caps }
+    }
+}
+
+#[async_trait]
+impl ChatBackend for CapabilityAwareBackend {
+    async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> CoreResult<ChatCompletion> {
+        let tools = if self.caps.tools { tools } else { &[] };
+        self.inner.complete(messages, tools).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+        on_text: &mut (dyn FnMut(String) + Send),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> CoreResult<ChatCompletion> {
+        let tools = if self.caps.tools { tools } else { &[] };
+        if !self.caps.stream {
+            // Explicit non-stream path — no attempt-then-catch mask.
+            let c = self.inner.complete(messages, tools).await?;
+            if !c.content.is_empty() && c.tool_calls.is_empty() {
+                on_text(c.content.clone());
+            }
+            return Ok(c);
+        }
+        match self
+            .inner
+            .complete_streaming(messages, tools, on_text, cancel)
+            .await
+        {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                // Surface stream rejection rather than silent success-with-empty.
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("stream")
+                    || msg.contains("sse")
+                    || msg.contains("not support")
+                    || msg.contains("unsupported")
+                {
+                    return Err(CoreError::Message(format!(
+                        "Streaming rejected by provider (capabilities.stream=true but request failed): {e}"
+                    )));
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Build a [`ChatBackend`] for `profile` (#122).
+///
+/// Owns SSRF policy selection, Anthropic/OpenAI client construction, and Grok
+/// session credential loading. Callers (hosts / `research_turn`) must not
+/// re-implement per-kind client wiring.
+///
+/// Adding a generic kind = edit [`ProviderKind`] + [`crate::providers::descriptor_for`]
+/// + this function, nothing else.
+pub async fn backend_for(
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+) -> CoreResult<Box<dyn ChatBackend>> {
+    let policy = if profile.local_only {
+        SsrfPolicy::local_only()
+    } else {
+        SsrfPolicy::default()
+    };
+
+    match profile.kind {
+        ProviderKind::Ollama => {
+            let client = OllamaClient::new(&profile.base_url, &profile.chat_model)?;
+            Ok(Box::new(OllamaBackend(client)))
+        }
+        ProviderKind::OpenAiCompatible => {
+            let client = OpenAiCompatibleClient::new(
+                &profile.base_url,
+                api_key,
+                &profile.chat_model,
+                &policy,
+            )?;
+            Ok(Box::new(OpenAiBackend(client)))
+        }
+        ProviderKind::Anthropic => {
+            let client =
+                AnthropicClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
+            Ok(Box::new(AnthropicBackend(client)))
+        }
+        ProviderKind::XaiGrokBuild => {
+            let desc = crate::providers::descriptor_for(ProviderKind::XaiGrokBuild);
+            let base = if profile.base_url.trim().is_empty() {
+                desc.default_base_url.unwrap_or("https://api.x.ai/v1")
+            } else {
+                profile.base_url.trim()
+            };
+            crate::grok_auth::assert_grok_base_allowed(base)?;
+            let creds = crate::grok_auth::load_grok_session_credentials()?;
+            // #141: pin OIDC refresh host (auth.x.ai) — no auto-redirects.
+            let refresh_url = creds.oidc_issuer.as_deref().unwrap_or("https://auth.x.ai");
+            let http = match crate::ssrf::build_pinned_client_for_url(
+                if refresh_url.starts_with("http") {
+                    refresh_url
+                } else {
+                    "https://auth.x.ai"
+                },
+                &SsrfPolicy::default(),
+                &crate::ssrf::SystemResolver,
+                std::time::Duration::from_secs(60),
+            ) {
+                Ok((_u, c)) => c,
+                Err(_) => reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(60))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| CoreError::Message(format!("http client: {e}")))?,
+            };
+            let creds = crate::grok_auth::ensure_fresh_credentials(creds, |token_url, body| {
+                let http = http.clone();
+                async move {
+                    let resp = http
+                        .post(token_url)
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(|e| CoreError::Message(format!("refresh request: {e}")))?;
+                    let status = resp.status();
+                    let text = resp
+                        .text()
+                        .await
+                        .map_err(|e| CoreError::Message(format!("refresh body: {e}")))?;
+                    if !status.is_success() {
+                        return Err(CoreError::Message(format!(
+                            "refresh HTTP {status}: {}",
+                            text.chars().take(120).collect::<String>()
+                        )));
+                    }
+                    serde_json::from_str(&text)
+                        .map_err(|e| CoreError::Message(format!("refresh json: {e}")))
+                }
+            })
+            .await?;
+            let headers = creds.request_headers();
+            let client = OpenAiCompatibleClient::new(
+                base,
+                None,
+                &profile.chat_model,
+                &SsrfPolicy::default(),
+            )?
+            .with_extra_headers(headers);
+            Ok(Box::new(OpenAiBackend(client)))
+        }
+    }
+}
+
 /// Run a full research turn: prefer live model; fall back to local retrieval.
 pub async fn research_turn(
     host: &mut ToolHost,
@@ -414,7 +582,7 @@ pub async fn research_turn_with_cancel(
     session_id: &str,
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
         let ev = research_local(host, user_text, session_id)?;
@@ -426,21 +594,11 @@ pub async fn research_turn_with_cancel(
         return Ok(ev);
     }
 
-    // Ollama: full agent loop with native tools (mistral etc. advertise tools).
+    // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
     // #123: never silently fall back to keyword-only when a chat model is selected.
     if profile.kind == ProviderKind::Ollama {
         match OllamaClient::new(&profile.base_url, &profile.chat_model) {
-            Ok(client) if client.health().await => {
-                let backend = OllamaBackend(client);
-                let mut opts = AgentOptions::from_budget(
-                    host.router_budget(),
-                    session_id,
-                    Some(profile.chat_model.clone()),
-                );
-                opts.cancel = cancel;
-                return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live)
-                    .await;
-            }
+            Ok(client) if client.health().await => { /* reachable; build via factory below */ }
             _ => {
                 let msg = format!(
                     "Ollama isn't reachable at {} — start Ollama or choose another provider in Settings.",
@@ -457,123 +615,55 @@ pub async fn research_turn_with_cancel(
         }
     }
 
-    if profile.kind == ProviderKind::OpenAiCompatible {
-        let policy = if profile.local_only {
-            SsrfPolicy::local_only()
-        } else {
-            SsrfPolicy::default()
-        };
-        let client =
-            OpenAiCompatibleClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
-        let backend = OpenAiBackend(client);
-        let mut opts = AgentOptions::from_budget(
-            host.router_budget(),
-            session_id,
-            Some(profile.chat_model.clone()),
-        );
-        opts.cancel = cancel;
-        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
-    }
-
-    // Native Anthropic Messages API (#121) — no longer falls through as unwired.
-    if profile.kind == ProviderKind::Anthropic {
-        let policy = if profile.local_only {
-            SsrfPolicy::local_only()
-        } else {
-            SsrfPolicy::default()
-        };
-        let client =
-            AnthropicClient::new(&profile.base_url, api_key, &profile.chat_model, &policy)?;
-        let backend = AnthropicBackend(client);
-        let mut opts = AgentOptions::from_budget(
-            host.router_budget(),
-            session_id,
-            Some(profile.chat_model.clone()),
-        );
-        opts.cancel = cancel;
-        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
-    }
-
-    // Explicit opt-in only: load ~/.grok/auth.json session, pin host to api.x.ai.
-    if profile.kind == ProviderKind::XaiGrokBuild {
-        let base = if profile.base_url.trim().is_empty() {
-            "https://api.x.ai/v1"
-        } else {
-            profile.base_url.trim()
-        };
-        crate::grok_auth::assert_grok_base_allowed(base)?;
-        let creds = crate::grok_auth::load_grok_session_credentials()?;
-        // #141: pin OIDC refresh host (auth.x.ai) — no auto-redirects.
-        let refresh_url = creds.oidc_issuer.as_deref().unwrap_or("https://auth.x.ai");
-        // Prefer pin to known Grok auth host; fall back to unpinned none-redirect if load fails.
-        let http = match crate::ssrf::build_pinned_client_for_url(
-            if refresh_url.starts_with("http") {
-                refresh_url
+    // #122: single factory for all wired kinds (no per-kind if-chain for client construction).
+    let backend = match backend_for(profile, api_key).await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.to_lowercase().contains("not wired") {
+                "provider_not_wired"
             } else {
-                "https://auth.x.ai"
-            },
-            &crate::ssrf::SsrfPolicy::default(),
-            &crate::ssrf::SystemResolver,
-            std::time::Duration::from_secs(60),
-        ) {
-            Ok((_u, c)) => c,
-            Err(_) => reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| CoreError::Message(format!("http client: {e}")))?,
-        };
-        let creds = crate::grok_auth::ensure_fresh_credentials(creds, |token_url, body| {
-            let http = http.clone();
-            async move {
-                let resp = http
-                    .post(token_url)
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| CoreError::Message(format!("refresh request: {e}")))?;
-                let status = resp.status();
-                let text = resp
-                    .text()
-                    .await
-                    .map_err(|e| CoreError::Message(format!("refresh body: {e}")))?;
-                if !status.is_success() {
-                    return Err(CoreError::Message(format!(
-                        "refresh HTTP {status}: {}",
-                        text.chars().take(120).collect::<String>()
-                    )));
-                }
-                serde_json::from_str(&text)
-                    .map_err(|e| CoreError::Message(format!("refresh json: {e}")))
-            }
-        })
-        .await?;
-        let headers = creds.request_headers();
-        let client =
-            OpenAiCompatibleClient::new(base, None, &profile.chat_model, &SsrfPolicy::default())?
-                .with_extra_headers(headers);
-        let backend = OpenAiBackend(client);
-        let mut opts = AgentOptions::from_budget(
-            host.router_budget(),
-            session_id,
-            Some(profile.chat_model.clone()),
-        );
-        opts.cancel = cancel;
-        return run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await;
-    }
+                "provider_error"
+            };
+            return Ok(emit_provider_error(
+                code,
+                msg,
+                session_id,
+                Some(profile.chat_model.clone()),
+                live,
+            ));
+        }
+    };
 
-    // Unwired provider kinds (e.g. Anthropic until #121): honest error, not keyword shell.
-    let kind_label = format!("{:?}", profile.kind);
-    let msg = format!(
-        "Provider `{kind_label}` is not wired for chat yet — pick Ollama, an OpenAI-compatible gateway, or Grok Build in Settings."
-    );
-    Ok(emit_provider_error(
-        "provider_not_wired",
-        msg,
+    // #125: honor capability matrix with explicit degrade notices.
+    let caps = profile.capabilities;
+    let tools_notice = if !caps.tools {
+        Some(StreamEvent::SearchTrail {
+            steps: vec![format!(
+                "tools disabled for profile “{}” (capabilities.tools=false)",
+                profile.label
+            )],
+        })
+    } else {
+        None
+    };
+    if let (Some(notice), Some(sink)) = (&tools_notice, live.as_mut()) {
+        sink(notice.clone());
+    }
+    let backend = CapabilityAwareBackend::new(backend, caps);
+
+    let mut opts = AgentOptions::from_budget(
+        host.router_budget(),
         session_id,
         Some(profile.chat_model.clone()),
-        live,
-    ))
+    );
+    opts.cancel = cancel;
+    let mut events =
+        run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
+    if let Some(notice) = tools_notice {
+        events.insert(0, notice);
+    }
+    Ok(events)
 }
 
 /// Emit a provider failure as stream events (no keyword-only TextDelta shell) (#123).
@@ -918,7 +1008,7 @@ mod tests {
     }
 
     /// #123: Anthropic without API key must fail honestly (not keyword shell).
-    /// (Wired path is #121; missing key is still not a silent degrade.)
+    /// (#122: factory `backend_for` errors surface as provider_error events, not TextDelta.)
     #[tokio::test]
     async fn anthropic_missing_key_errors_without_keyword_shell() {
         let dir = tempdir().unwrap();
@@ -930,7 +1020,7 @@ mod tests {
         profile.label = "Anthropic".into();
         profile.base_url = "https://api.anthropic.com".into();
         let mut history = vec![];
-        let result = research_turn_with_cancel(
+        let events = research_turn_with_cancel(
             &mut host,
             &profile,
             None,
@@ -941,14 +1031,143 @@ mod tests {
             None,
             None,
         )
-        .await;
-        // Missing key → CoreError (not Ok(keyword shell)).
-        assert!(result.is_err(), "expected key error, got {result:?}");
-        let err = result.unwrap_err().to_string();
+        .await
+        .expect("provider errors are stream events, not panics");
+        let err_msgs: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!err_msgs.is_empty(), "expected Error event, got {events:?}");
+        let joined = err_msgs.join(" ");
         assert!(
-            err.to_lowercase().contains("key") || err.to_lowercase().contains("anthropic"),
-            "err={err}"
+            joined.to_lowercase().contains("key") || joined.to_lowercase().contains("anthropic"),
+            "err={joined}"
         );
+        // Must not emit a keyword-only TextDelta that looks like a successful answer.
+        let has_billing_shell = events.iter().any(|e| match e {
+            StreamEvent::TextDelta { text } => text.to_lowercase().contains("billing secret"),
+            _ => false,
+        });
+        assert!(!has_billing_shell, "keyword shell leaked: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn backend_for_builds_ollama_and_rejects_anthropic_without_key() {
+        let ollama = ProviderProfile::ollama_local();
+        assert!(backend_for(&ollama, None).await.is_ok());
+
+        let mut anthropic = ProviderProfile::ollama_local();
+        anthropic.kind = ProviderKind::Anthropic;
+        anthropic.base_url = "https://api.anthropic.com".into();
+        anthropic.chat_model = "claude-test".into();
+        let err = backend_for(&anthropic, None)
+            .await
+            .err()
+            .expect("missing key must Err");
+        let s = err.to_string().to_lowercase();
+        assert!(s.contains("key") || s.contains("anthropic"), "err={s}");
+
+        // SSRF: private metadata host refused for OpenAI-compatible.
+        let mut bad = ProviderProfile::ollama_local();
+        bad.kind = ProviderKind::OpenAiCompatible;
+        bad.base_url = "http://169.254.169.254/".into();
+        bad.local_only = false;
+        assert!(backend_for(&bad, Some("sk-test-key-12345".into()))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn capability_matrix_honors_tools_and_stream_flags() {
+        use std::sync::Arc;
+        struct SharedProbe {
+            tools_lens: std::sync::Mutex<Vec<usize>>,
+            used_stream: std::sync::Mutex<bool>,
+        }
+        #[async_trait]
+        impl ChatBackend for Arc<SharedProbe> {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                self.tools_lens.lock().unwrap().push(tools.len());
+                Ok(ChatCompletion {
+                    content: "ok".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+            async fn complete_streaming(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+                on_text: &mut (dyn FnMut(String) + Send),
+                _cancel: Option<&std::sync::atomic::AtomicBool>,
+            ) -> CoreResult<ChatCompletion> {
+                *self.used_stream.lock().unwrap() = true;
+                let c = self.complete(messages, tools).await?;
+                if !c.content.is_empty() {
+                    on_text(c.content.clone());
+                }
+                Ok(c)
+            }
+        }
+
+        let tools = [ToolSpec {
+            name: "search_kb".into(),
+            description: "x".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            side_effect: crate::tools::ToolSideEffect::Read,
+        }];
+
+        // tools=false, stream=false → empty tools + complete (not stream path on inner).
+        let probe = Arc::new(SharedProbe {
+            tools_lens: std::sync::Mutex::new(vec![]),
+            used_stream: std::sync::Mutex::new(false),
+        });
+        let backend = CapabilityAwareBackend::new(
+            Box::new(probe.clone()),
+            ProviderCapabilities {
+                tools: false,
+                stream: false,
+                embeddings: false,
+            },
+        );
+        let mut _d = vec![];
+        backend
+            .complete_streaming(&[], &tools, &mut |t| _d.push(t), None)
+            .await
+            .unwrap();
+        assert_eq!(*probe.tools_lens.lock().unwrap(), vec![0]);
+        assert!(
+            !*probe.used_stream.lock().unwrap(),
+            "stream=false must not call complete_streaming on inner"
+        );
+
+        // tools=true, stream=true → tools passed + stream path.
+        let probe2 = Arc::new(SharedProbe {
+            tools_lens: std::sync::Mutex::new(vec![]),
+            used_stream: std::sync::Mutex::new(false),
+        });
+        let backend2 = CapabilityAwareBackend::new(
+            Box::new(probe2.clone()),
+            ProviderCapabilities {
+                tools: true,
+                stream: true,
+                embeddings: false,
+            },
+        );
+        let mut _d2 = vec![];
+        backend2
+            .complete_streaming(&[], &tools, &mut |t| _d2.push(t), None)
+            .await
+            .unwrap();
+        assert_eq!(*probe2.tools_lens.lock().unwrap(), vec![1]);
+        assert!(*probe2.used_stream.lock().unwrap());
     }
 
     #[tokio::test]

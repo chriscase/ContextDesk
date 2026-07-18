@@ -262,24 +262,14 @@ fn save_active_provider(
         "xai_grok_build" => ProviderKind::XaiGrokBuild,
         other => return Err(format!("unsupported provider kind: {other}")),
     };
-    let id = match kind {
-        ProviderKind::Ollama => "ollama-local".to_string(),
-        ProviderKind::OpenAiCompatible => "openai-compatible".to_string(),
-        ProviderKind::Anthropic => "anthropic".to_string(),
-        ProviderKind::XaiGrokBuild => "xai-grok-build".to_string(),
-    };
-    let label = req.label.unwrap_or_else(|| match kind {
-        ProviderKind::Ollama => "Ollama (local)".into(),
-        ProviderKind::OpenAiCompatible => "OpenAI-compatible gateway".into(),
-        ProviderKind::Anthropic => "Anthropic".into(),
-        ProviderKind::XaiGrokBuild => "Grok Build session".into(),
-    });
+    let desc = cd_core::providers::descriptor_for(kind);
+    let id = desc.profile_id_slug.to_string();
+    let label = req.label.unwrap_or_else(|| desc.default_label.to_string());
     let mut base_url = req.base_url.trim().trim_end_matches('/').to_string();
-    if base_url.is_empty() && matches!(kind, ProviderKind::XaiGrokBuild) {
-        base_url = "https://api.x.ai/v1".into();
-    }
-    if base_url.is_empty() && matches!(kind, ProviderKind::Anthropic) {
-        base_url = "https://api.anthropic.com".into();
+    if base_url.is_empty() {
+        if let Some(def) = desc.default_base_url {
+            base_url = def.to_string();
+        }
     }
     let chat_model = req.chat_model.trim().to_string();
     if chat_model.is_empty() {
@@ -295,6 +285,7 @@ fn save_active_provider(
     }
 
     let mut api_key_ref: Option<String> = None;
+    // Grok uses session file, not keychain paste; other needs_api_key kinds accept keychain.
     if !matches!(kind, ProviderKind::XaiGrokBuild) {
         if let Some(key) = req.api_key.as_ref() {
             let key = key.trim();
@@ -325,11 +316,7 @@ fn save_active_provider(
         api_key_ref = Some(r.clone());
     }
 
-    let local_only = req.local_only.unwrap_or(match kind {
-        ProviderKind::Ollama => true,
-        ProviderKind::XaiGrokBuild => false,
-        _ => false,
-    });
+    let local_only = req.local_only.unwrap_or(desc.is_local);
     if local_only && !base_url.is_empty() {
         let policy = SsrfPolicy::local_only();
         if validate_provider_url(&base_url, &policy).is_err() {
@@ -337,6 +324,8 @@ fn save_active_provider(
         }
     }
 
+    // #125: seed per-kind defaults from descriptor (never all-false Default).
+    let capabilities = desc.default_capabilities;
     let profile = ProviderProfile {
         id: id.clone(),
         label: label.clone(),
@@ -344,9 +333,14 @@ fn save_active_provider(
         base_url: base_url.clone(),
         api_key_ref: api_key_ref.clone(),
         chat_model: chat_model.clone(),
-        embedding_model: None,
+        embedding_model: if capabilities.embeddings {
+            // Ollama local default embed id when kind supports embeddings.
+            Some("nomic-embed-text".into())
+        } else {
+            None
+        },
         embedding_base_url: None,
-        capabilities: Default::default(),
+        capabilities,
         local_only,
     };
 
@@ -438,26 +432,29 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     let mut provider_ok = None;
     let mut key_present = None;
     if let Some(p) = &active {
-        match p.kind {
-            ProviderKind::Ollama => {
-                ollama_ok = Some(ollama_reachable(&p.base_url).await);
-            }
-            ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => {
-                let ref_id = p
-                    .api_key_ref
-                    .clone()
-                    .unwrap_or_else(|| key_ref_for_profile(&p.id));
-                key_present = Some(state.secrets.has(&ref_id).unwrap_or(false));
-                let policy = if p.local_only {
-                    SsrfPolicy::local_only()
-                } else {
-                    SsrfPolicy::default()
-                };
-                provider_ok = Some(validate_provider_url(&p.base_url, &policy).is_ok());
-            }
-            ProviderKind::XaiGrokBuild => {
-                key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
-            }
+        let desc = cd_core::providers::descriptor_for(p.kind);
+        if p.kind == ProviderKind::Ollama {
+            ollama_ok = Some(ollama_reachable(&p.base_url).await);
+        } else if p.kind == ProviderKind::XaiGrokBuild {
+            key_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
+            // #126: real probe (session + models list), not structural URL only.
+            let outcome = cd_core::discovery::probe_provider(p, None).await;
+            provider_ok = Some(outcome.is_reachable());
+        } else if desc.needs_api_key {
+            let ref_id = p
+                .api_key_ref
+                .clone()
+                .unwrap_or_else(|| key_ref_for_profile(&p.id));
+            let has = state.secrets.has(&ref_id).unwrap_or(false);
+            key_present = Some(has);
+            // #126: live HTTP probe (models list); never structural-only "responded".
+            let api_key = if has {
+                state.secrets.get(&ref_id).ok().flatten()
+            } else {
+                None
+            };
+            let outcome = cd_core::discovery::probe_provider(p, api_key).await;
+            provider_ok = Some(outcome.is_reachable());
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
@@ -1326,24 +1323,17 @@ fn parse_selection_key(key: &str) -> (Option<String>, String) {
 }
 
 fn provider_group_label(p: &ProviderProfile) -> String {
-    match p.kind {
-        ProviderKind::Ollama => {
-            if p.label.trim().is_empty() {
-                "Ollama".into()
-            } else {
-                p.label.clone()
-            }
-        }
-        ProviderKind::OpenAiCompatible => {
-            if p.label.trim().is_empty() {
-                "OpenAI-compatible".into()
-            } else {
-                p.label.clone()
-            }
-        }
-        ProviderKind::XaiGrokBuild => "Grok / xAI".into(),
-        ProviderKind::Anthropic => "Anthropic".into(),
+    let desc = cd_core::providers::descriptor_for(p.kind);
+    // Prefer a non-empty custom profile label for local/gateway groups.
+    if !p.label.trim().is_empty()
+        && matches!(
+            p.kind,
+            ProviderKind::Ollama | ProviderKind::OpenAiCompatible
+        )
+    {
+        return p.label.clone();
     }
+    desc.group_label.to_string()
 }
 
 fn looks_like_chat_model_id(id: &str) -> bool {
