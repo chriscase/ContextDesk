@@ -377,11 +377,33 @@ export type SkillDto = {
   disabled: boolean;
   allows_write: boolean;
   path: string;
+  /** Sibling module.toml present (#137). */
+  has_module: boolean;
+  module_id: string | null;
+};
+
+export type SetSkillEnabledResult = {
+  id: string;
+  enabled: boolean;
+  needs_module_approval: boolean;
+  module_id: string | null;
+  preview: string | null;
+  reason: string | null;
+  type_confirm_phrase: string | null;
 };
 
 export async function hostListSkills(): Promise<SkillDto[]> {
   if (!isTauri()) return [];
   return invoke<SkillDto[]>("list_skills_cmd");
+}
+
+/** Persist enable/disable; may return module capability approval for tool-shipping skills (#137). */
+export async function hostSetSkillEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<SetSkillEnabledResult> {
+  if (!isTauri()) throw new Error("Skill enable requires Tauri host");
+  return invoke<SetSkillEnabledResult>("set_skill_enabled_cmd", { id, enabled });
 }
 
 /** SoftWrite path: returns permission_required events until grant + re-execute. */

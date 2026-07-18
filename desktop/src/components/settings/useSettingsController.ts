@@ -53,6 +53,7 @@ export type SettingsSection =
   | "ai"
   | "connectors"
   | "modules"
+  | "skills"
   | "appearance"
   | "general";
 

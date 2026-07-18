@@ -47,6 +47,15 @@ Third-party modules are MCP servers the host launches (absolute path, no shell s
 4. **#136:** Settings lifecycle UI — install path pick / enable / disable / remove / first-use approval (no marketplace auto-fetch).
 5. **#137–#139:** Skills that ship tools, authoring guide, optional browse-only registry (documentation + discovery only).
 
+### Skill enable path (#137 / closes #38 dead-end)
+
+Write-claiming skills used to force `disabled = allows_write` on every parse and never persisted enable state — Settings had no Skills section and no Tauri toggle. That is **closed**:
+
+- `enabled` is written into SKILL.md frontmatter by `write_skill` / `set_skill_enabled_on_disk`.
+- `parse_skill_file` honors explicit `enabled`/`disabled`; re-discovery does not silently re-disable a user-enabled skill.
+- Settings → **Skills** + `set_skill_enabled_cmd` are the UI-originated enable path (AGENTS #4).
+- A skill directory MAY ship sibling `module.toml` (`cd.module.v1`); enabling the skill installs/provisions through #136 and first-use capability approval #135. Skills still cannot self-grant or elevate HardWrite.
+
 Dead-code era is over for MCP attach on the connector path; remaining work is packaging, mediation UX, and docs — not a substrate rewrite.
 
 ## Alternatives rejected

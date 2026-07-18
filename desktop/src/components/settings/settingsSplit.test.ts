@@ -17,6 +17,7 @@ const SECTION_FILES = [
   "AiSection.tsx",
   "ConnectorsSection.tsx",
   "ModulesSection.tsx",
+  "SkillsSection.tsx",
   "AppearanceSection.tsx",
   "GeneralSection.tsx",
 ] as const;
