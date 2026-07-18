@@ -1,8 +1,17 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security vulnerability
+  - name: Report a security vulnerability
     url: https://github.com/chriscase/ContextDesk/blob/main/SECURITY.md
-    about: Report security issues privately — see SECURITY.md (do not open a public issue).
+    about: |
+      Security issues (credential theft, RCE, unauthorized data access, SSRF, path
+      traversal, write-gate bypass) must be reported privately — not via a public issue.
+      See SECURITY.md for the reporting channel and expected response window.
   - name: Documentation & product notes
     url: https://github.com/chriscase/ContextDesk/tree/main/docs
-    about: Product docs, roadmap, and development notes.
+    about: Product docs, roadmap, development notes, and community checklist.
+  - name: Ask a question
+    url: https://github.com/chriscase/ContextDesk/discussions
+    about: |
+      Usage questions and ideas that are not bugs or scoped feature requests.
+      If Discussions are not yet enabled (see docs/COMMUNITY.md), open a short
+      public issue titled "[question] …" until the operator enables Discussions.
