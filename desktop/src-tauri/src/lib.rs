@@ -200,8 +200,7 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         let modules_dir = cd_core::modules::default_modules_dir(&config_dir);
         let grants_path = config_dir.join("module_grants.json");
         let grants = cd_core::modules::ModuleGrantStore::load(&grants_path).unwrap_or_default();
-        let discovered =
-            cd_core::modules::discover_modules(&[modules_dir]).unwrap_or_default();
+        let discovered = cd_core::modules::discover_modules(&[modules_dir]).unwrap_or_default();
         for id in &cfg.enabled_modules {
             if let Some(m) = discovered.iter().find(|x| &x.id == id) {
                 let secrets = &state.secrets;
@@ -1383,14 +1382,12 @@ fn approve_module_enable(
         "allow_session_path" => cd_core::permissions::PermissionDecision::AllowSessionPath,
         _ => return Err("invalid decision".into()),
     };
-    cd_core::permissions::validate_decision(&req, dec, typed.as_deref())
-        .map_err(|e| e)?;
+    cd_core::permissions::validate_decision(&req, dec, typed.as_deref()).map_err(|e| e)?;
     if matches!(dec, cd_core::permissions::PermissionDecision::Deny) {
         return Ok(false);
     }
     let gpath = grants_path(&state)?;
-    let mut grants =
-        cd_core::modules::ModuleGrantStore::load(&gpath).map_err(|e| e.to_string())?;
+    let mut grants = cd_core::modules::ModuleGrantStore::load(&gpath).map_err(|e| e.to_string())?;
     grants
         .grant_from_ui(&m.id, m.requested_capabilities.clone(), dec)
         .map_err(|e| e.to_string())?;
@@ -1428,7 +1425,11 @@ fn remove_module(state: State<'_, AppState>, id: String) -> Result<bool, String>
 
 /// Re-install from a local path (same id); local only (NON_GOALS #7).
 #[tauri::command]
-fn update_module(state: State<'_, AppState>, id: String, path: String) -> Result<ModuleDto, String> {
+fn update_module(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+) -> Result<ModuleDto, String> {
     let id = id.trim().to_string();
     let src = std::path::PathBuf::from(path.trim());
     let dir = modules_dir(&state)?;
