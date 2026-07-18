@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "identifier": "cc.chriscase.contextdesk",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node scripts/gen-tauri-conf.mjs && npm run dev",
     "devUrl": "http://localhost:1450",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "node scripts/gen-tauri-conf.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,6 +25,8 @@
   "bundle": {
     "active": false,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ]
   }
 }
