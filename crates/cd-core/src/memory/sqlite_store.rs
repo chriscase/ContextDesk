@@ -102,12 +102,26 @@ impl SqliteMemoryStore {
         supersedes: Option<Uuid>,
         rev: i64,
     ) -> CoreResult<MemoryRecord> {
+        // Redact secrets before persist (and content_hash is over redacted text)
+        let redaction = crate::redact::redact_candidate(&draft.content);
+        if redaction.blocked {
+            return Err(CoreError::Policy(
+                redaction
+                    .block_reason
+                    .unwrap_or_else(|| "credential-dominant memory blocked".into()),
+            ));
+        }
+        let content = if redaction.redacted {
+            redaction.text
+        } else {
+            draft.content.clone()
+        };
         let title = if draft.title.trim().is_empty() {
-            title_from_content(&draft.content, "untitled")
+            title_from_content(&content, "untitled")
         } else {
             draft.title.clone()
         };
-        let content_hash = content_hash_for(&draft.content);
+        let content_hash = content_hash_for(&content);
         // url / due_at from structured (Rust-written, not GENERATED columns)
         let url = draft.url.clone().or_else(|| {
             draft
@@ -145,7 +159,7 @@ impl SqliteMemoryStore {
                 id.to_string(),
                 draft.kind.as_str(),
                 title,
-                draft.content,
+                content,
                 structured,
                 valid_from,
                 valid_to,
@@ -168,7 +182,7 @@ impl SqliteMemoryStore {
         .map_err(sqlite_err)?;
 
         replace_tags(conn, &id, &draft.tags)?;
-        fts_upsert(conn, &id, &draft.content, &title)?;
+        fts_upsert(conn, &id, &content, &title)?;
 
         load_record(conn, &id)?.ok_or_else(|| CoreError::Message("insert vanished".into()))
     }
@@ -861,6 +875,37 @@ mod tests {
         let rec = store.put(MemoryWriteOp::Insert(d), 1).unwrap();
         assert_eq!(rec.url.as_deref(), Some("https://example.com/x"));
         assert_eq!(rec.due_at, Some(99));
+    }
+
+    #[test]
+    fn credential_dominant_blocked_on_insert() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let err = store
+            .put(
+                MemoryWriteOp::Insert(draft("sk-proj-abcdefghijklmnopqrstuvwxyz012345")),
+                1,
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("credential") || msg.contains("policy") || msg.contains("refuse"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn prose_token_redacted_before_persist() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let rec = store
+            .put(
+                MemoryWriteOp::Insert(draft(
+                    "remember the bot uses sk-abcdefghijklmnop for staging only",
+                )),
+                1,
+            )
+            .unwrap();
+        assert!(!rec.content.contains("abcdefghijklmnop"));
+        assert!(rec.content.contains("sk-***"));
     }
 
     #[test]

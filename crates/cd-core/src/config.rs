@@ -129,6 +129,9 @@ pub struct AppConfig {
     /// (AGENTS.md #2). Fetch is SSRF-gated when non-empty and enabled.
     #[serde(default)]
     pub module_registry_url: String,
+    /// Durable memory + ambient recall settings (MEMORY.md §10 defaults).
+    #[serde(default)]
+    pub memory: crate::memory::MemoryConfig,
 }
 
 fn default_index_max_files() -> usize {

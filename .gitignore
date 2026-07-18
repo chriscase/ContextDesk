@@ -29,6 +29,12 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Workspace durable memory DBs (in-repo location; personal is OS app-data)
+**/.contextdesk/memory/
+**/.contextdesk/memory/**
+**/.contextdesk/memory/*.sqlite
+**/.contextdesk/memory/*.sqlite-*
+
 # Tauri / desktop
 desktop/src-tauri/target/
 desktop/dist/
