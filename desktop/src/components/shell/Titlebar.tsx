@@ -27,13 +27,13 @@ export function Titlebar({
   onToggleTheme,
 }: Props) {
   return (
-    <header className="titlebar">
-      <div className="titlebar__brand">
+    <header className="titlebar" data-tauri-drag-region>
+      <div className="titlebar__brand" data-tauri-drag-region>
         <IconSpark title={productName} />
-        <span>{productName}</span>
+        <span data-tauri-drag-region>{productName}</span>
         <button
           type="button"
-          className="chip"
+          className="chip titlebar__no-drag"
           data-tone={hasWorkspace ? "ok" : "warn"}
           onClick={onOpenWorkspace}
           title="Workspace scope"
@@ -42,7 +42,7 @@ export function Titlebar({
         </button>
         <button
           type="button"
-          className="chip"
+          className="chip titlebar__no-drag"
           data-tone={localOnly ? "ok" : "warn"}
           onClick={onOpenAi}
           title={
@@ -57,7 +57,7 @@ export function Titlebar({
       <div className="titlebar__actions">
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn titlebar__no-drag"
           title="Settings & preflight"
           onClick={onOpenSettings}
         >
@@ -65,7 +65,7 @@ export function Titlebar({
         </button>
         <button
           type="button"
-          className="icon-btn"
+          className="icon-btn titlebar__no-drag"
           title={theme === "dark" ? "Light mode" : "Dark mode"}
           onClick={onToggleTheme}
         >
