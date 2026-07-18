@@ -1,0 +1,88 @@
+name: Bug report
+description: Something is broken or incorrect in ContextDesk
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. **Do not paste API keys, tokens, passwords, or private URLs** in this form — redact logs.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that start from a clean launch when possible.
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other / unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider kind (generic)
+      description: Active model provider if relevant (no employer-specific names).
+      options:
+        - none / not applicable
+        - ollama
+        - openai_compatible
+        - anthropic
+        - xai_grok_build
+        - unknown
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: App version, git SHA, or "main @ date".
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (redacted)
+      description: |
+        Paste relevant console/log lines. Redact secrets. Do not paste API keys.
+      render: shell
+    validations:
+      required: false

@@ -2,8 +2,10 @@
 
 Thanks for helping build ContextDesk.
 
+Please follow our [Code of Conduct](CODE_OF_CONDUCT.md). For security reports, use [SECURITY.md](SECURITY.md) — do not open a public issue. Repo-settings residual checklist: [docs/COMMUNITY.md](docs/COMMUNITY.md).
+
 1. Read [AGENTS.md](AGENTS.md), [docs/PRODUCT.md](docs/PRODUCT.md), and [docs/NON_GOALS.md](docs/NON_GOALS.md).
-2. Pick an issue; prefer items labeled `good first issue` or small `P1` tasks.
+2. Pick an issue; prefer items labeled `good first issue` or small `P1` tasks. Use the issue forms under **New issue**.
 3. Keep PRs focused; link `Fixes #N`.
 4. No secrets in commits (see [SECURITY.md](SECURITY.md)).
 5. **Before pushing**, run the same gate CI runs (from repo root):

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/chriscase/ContextDesk/blob/main/SECURITY.md
+    about: Report security issues privately — see SECURITY.md (do not open a public issue).
+  - name: Documentation & product notes
+    url: https://github.com/chriscase/ContextDesk/tree/main/docs
+    about: Product docs, roadmap, and development notes.
