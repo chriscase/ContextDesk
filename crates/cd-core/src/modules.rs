@@ -179,6 +179,15 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Absolute sample path in TOML-escaped form (Windows backslashes doubled).
+    fn abs_cmd_toml() -> &'static str {
+        if cfg!(windows) {
+            r"C:\\Windows\\System32\\cmd.exe"
+        } else {
+            "/usr/bin/true"
+        }
+    }
+
     fn valid_toml(cmd: &str) -> String {
         format!(
             r#"
@@ -210,12 +219,7 @@ secret_refs = ["provider/demo/api_key"]
 
     #[test]
     fn parse_valid_manifest() {
-        let abs = if cfg!(windows) {
-            r"C:\Windows\System32\cmd.exe"
-        } else {
-            "/usr/bin/true"
-        };
-        let m = parse_module_toml(&valid_toml(abs)).unwrap();
+        let m = parse_module_toml(&valid_toml(abs_cmd_toml())).unwrap();
         assert_eq!(m.schema, MODULE_SCHEMA_V1);
         assert_eq!(m.id, "demo-mod");
         assert_eq!(m.version, "1.2.3");
