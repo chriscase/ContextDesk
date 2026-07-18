@@ -56,6 +56,9 @@ jobs:
       - name: test workspace
         # cd-core + cd-server (incl. tenant isolation) (#160); offline, no real keychain (#178).
         run: cargo test --workspace
+      - name: embed_host example build (#170)
+        # Keeps crates/cd-core/examples/embed_host from rotting.
+        run: cargo build -p cd-core --examples
       - name: server smoke
         run: cargo run -p cd-server -- --print-branding
 

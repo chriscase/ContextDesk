@@ -109,6 +109,25 @@ pub fn events_to_dto(events: &[StreamEvent]) -> Vec<EventDto> {
 }
 
 /// Build a tool host for a workspace (in-memory index; no disk cache).
+///
+/// # Embed host example
+///
+/// See the runnable example: `cargo run -p cd-core --example embed_host -- <dir> "<query>"`
+/// (`crates/cd-core/examples/embed_host.rs`, docs/examples/host-adapter.md).
+///
+/// ```no_run
+/// use cd_core::research::{build_host, events_to_dto, research_local};
+/// use cd_core::workspace::Workspace;
+/// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// let ws = Workspace::new("embed", vec!["/tmp/notes".into()]);
+/// let mut host = build_host(ws, None)?;
+/// let events = research_local(&mut host, "payments", "s1").await?;
+/// for dto in events_to_dto(&events) {
+///     println!("{} {}", dto.kind, dto.payload);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub fn build_host(workspace: Workspace, audit_path: Option<PathBuf>) -> CoreResult<ToolHost> {
     build_host_with_index_cache(workspace, audit_path, None)
 }
