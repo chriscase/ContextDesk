@@ -134,14 +134,22 @@ fn pool_recall(
 }
 
 /// Try to embed synchronously when the backend is the offline mock; otherwise degrade.
+///
+/// **Always redacts before embed** (MEMORY.md §5) so a secret never reaches the
+/// embedding provider even if content slipped past persist.
 fn try_query_embed(backend: &dyn EmbedBackend, text: &str) -> Option<Vec<f32>> {
-    // Downcast via type_id is awkward without Any on the trait.
+    let redacted = crate::redact::redact_candidate(text);
+    if redacted.blocked {
+        tracing::warn!("memory embed blocked: credential-dominant content");
+        return None;
+    }
+    let safe = redacted.text;
     // Use a blocking single-thread runtime for hermetic backends that complete instantly.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .ok()?;
-    let texts = vec![text.to_string()];
+    let texts = vec![safe];
     // Bound latency: the mock is instant; real network backends should be called
     // by the host with a timeout — here we only attempt a short block.
     match rt.block_on(async {
@@ -150,6 +158,18 @@ fn try_query_embed(backend: &dyn EmbedBackend, text: &str) -> Option<Vec<f32>> {
         Ok(Ok(mut v)) if !v.is_empty() => v.pop(),
         _ => None,
     }
+}
+
+/// Redact text before embedding (public for tests / host pre-embed).
+pub fn redact_for_embed(text: &str) -> crate::error::CoreResult<String> {
+    let r = crate::redact::redact_candidate(text);
+    if r.blocked {
+        return Err(crate::error::CoreError::Policy(
+            r.block_reason
+                .unwrap_or_else(|| "credential-dominant; refuse embed".into()),
+        ));
+    }
+    Ok(r.text)
 }
 
 /// Convenience: rank with the offline mock embed backend (tests / no-network).
@@ -280,6 +300,51 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let _ = hits;
+    }
+
+    #[test]
+    fn redact_before_embed_strips_secrets_and_blocks_credentials() {
+        // Prose with key → redacted text embeddable
+        let safe =
+            redact_for_embed("remember the bot uses sk-abcdefghijklmnop for staging only").unwrap();
+        assert!(safe.contains("sk-***"));
+        assert!(!safe.contains("abcdefghijklmnop"));
+
+        // Credential-dominant blocked
+        let err = redact_for_embed("sk-proj-abcdefghijklmnopqrstuvwxyz012345").unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("credential")
+                || format!("{err}").to_lowercase().contains("policy")
+                || format!("{err}").to_lowercase().contains("refuse"),
+            "{err}"
+        );
+
+        // JWT class
+        let jwt = [
+            "eyJ",
+            "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            ".",
+            "eyJ",
+            "zdWIiOiIxMjM0NTY3ODkwIn0",
+            ".",
+            "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        ]
+        .concat();
+        let safe = redact_for_embed(&format!("auth {jwt} ok")).unwrap();
+        assert!(safe.contains("[REDACTED_JWT]") || !safe.contains("eyJhbGci"));
+    }
+
+    #[test]
+    fn try_query_embed_never_sees_raw_secret() {
+        // MockHashEmbedBackend is deterministic from text; redacted vs raw differ.
+        let mock = MockHashEmbedBackend::new(32);
+        let raw = "seed sk-abcdefghijklmnop end";
+        let v_raw = try_query_embed(&mock, raw).expect("should embed redacted");
+        let redacted = crate::redact::scrub_secrets(raw);
+        let v_red = try_query_embed(&mock, &redacted).expect("redacted embed");
+        // Both paths redact first, so vectors match
+        assert_eq!(v_raw, v_red);
+        assert!(!redacted.contains("abcdefghijklmnop"));
     }
 
     #[test]

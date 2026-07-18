@@ -191,6 +191,17 @@ pub fn build_host_with_connectors(
         host.set_router_budget(b);
     }
     host.attach_connectors(connectors);
+    // Product seam: attach durable memory (default ON per MEMORY.md §10).
+    // Desktop rebuild_host re-attaches with AppConfig.memory; this path covers
+    // server/local research and tests that use build_host*.
+    let branding = crate::branding::Branding::embedded();
+    if let Err(e) = crate::memory::attach_durable_memory_to_host(
+        &mut host,
+        &branding,
+        &crate::memory::MemoryConfig::default(),
+    ) {
+        tracing::warn!(error = %e, "durable memory attach failed; tools fall back to memory_fs");
+    }
     Ok(host)
 }
 
@@ -726,6 +737,8 @@ pub async fn research_turn_with_cancel(
         Some(profile.chat_model.clone()),
     );
     opts.cancel = cancel;
+    // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
+    opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     let mut events =
         run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
     if let Some(notice) = tools_notice {

@@ -98,6 +98,8 @@ pub struct ToolHost {
     durable_memory: Option<std::sync::Arc<dyn crate::memory::MemoryStore>>,
     /// When true, register durable memory tool specs (recall/supersede/retract).
     durable_memory_enabled: bool,
+    /// Ambient recall injection each turn (MEMORY.md §10.1; host-wired from config).
+    ambient_recall_enabled: bool,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Dynamic tools from connector registry (#127).
@@ -153,6 +155,7 @@ impl ToolHost {
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
             durable_memory_enabled: false,
+            ambient_recall_enabled: true,
             router_budget: crate::router::RouterBudget::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
@@ -542,9 +545,29 @@ impl ToolHost {
         self.durable_memory_enabled = enabled;
     }
 
+    /// Whether durable memory tools are enabled (may still lack a store).
+    pub fn durable_memory_enabled(&self) -> bool {
+        self.durable_memory_enabled
+    }
+
+    /// Toggle ambient memory injection (Settings / MemoryConfig).
+    pub fn set_ambient_recall_enabled(&mut self, enabled: bool) {
+        self.ambient_recall_enabled = enabled;
+    }
+
+    /// Whether ambient recall is enabled on this host.
+    pub fn ambient_recall_enabled(&self) -> bool {
+        self.ambient_recall_enabled
+    }
+
     /// Borrow the durable memory store when configured (ambient recall / tools).
     pub fn durable_memory_store(&self) -> Option<std::sync::Arc<dyn crate::memory::MemoryStore>> {
         self.durable_memory.clone()
+    }
+
+    /// True when durable Phase-1 tools are registered (store attached + enabled).
+    pub fn durable_memory_active(&self) -> bool {
+        self.durable_memory_enabled && self.durable_memory.is_some()
     }
 
     /// Opt-in hybrid `search_kb` path (#119). Off by default (keyword-only).
@@ -2243,6 +2266,150 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::Tool { ok: Some(true), .. })));
         assert!(dir.path().join(".contextdesk/memory/arch.md").exists());
+    }
+
+    /// Product path: durable store → save (Accept) → recall → supersede → retract.
+    /// Proves Phase-1 tools reachable through ToolHost::execute (host-wiring skeptic fix).
+    #[tokio::test]
+    async fn durable_memory_brain_e2e_via_tool_host() {
+        use crate::memory::{MemoryStore, TwoScopeMemory};
+        use crate::permissions::PermissionDecision;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".contextdesk")).unwrap();
+        let ws = crate::workspace::Workspace {
+            id: "e2e-ws".into(),
+            name: "e2e".into(),
+            roots: vec![root],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let audit_path = dir.path().join("audit.jsonl");
+        let mut host = ToolHost::new(ws, idx, Some(crate::audit::AuditLog::new(&audit_path)));
+        let store = std::sync::Arc::new(TwoScopeMemory::open_in_memory("e2e-ws").unwrap());
+        host.set_durable_memory(store.clone(), true);
+        host.set_ambient_recall_enabled(true);
+        assert!(host.durable_memory_active());
+        let names: Vec<_> = host.specs().into_iter().map(|s| s.name).collect();
+        assert!(names.iter().any(|n| n == "recall_memory"), "{names:?}");
+        assert!(names.iter().any(|n| n == "retract_memory"));
+
+        let args = serde_json::json!({
+            "kind": "fact",
+            "content": "launch date is June 2026 unique-e2e-alpha",
+            "title": "Launch"
+        });
+        let r = host.execute("save_memory", &args, None).await.unwrap();
+        assert!(!r.ok, "must require permission");
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired {
+                    request_id, target, ..
+                } => {
+                    assert!(target.starts_with("mem://"), "target={target}");
+                    Some(request_id.clone())
+                }
+                _ => None,
+            })
+            .expect("PermissionRequired");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host
+            .execute("save_memory", &args, Some(&rid))
+            .await
+            .unwrap();
+        assert!(r2.ok, "{}", r2.summary);
+
+        let audit_text = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(
+            audit_text.contains("mem://"),
+            "audit must encode mem:// target: {audit_text}"
+        );
+
+        let rec = host
+            .execute(
+                "recall_memory",
+                &serde_json::json!({"query": "unique-e2e-alpha"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rec.ok, "{}", rec.summary);
+        assert!(
+            rec.detail_raw.contains("unique-e2e-alpha") || rec.detail_raw.contains("Launch"),
+            "{}",
+            rec.detail_raw
+        );
+
+        let saved: serde_json::Value = serde_json::from_str(&r2.detail_raw).unwrap();
+        let id = saved["id"].as_str().unwrap().to_string();
+
+        let sargs = serde_json::json!({
+            "old_id": id,
+            "content": "launch date is July 2026 unique-e2e-beta",
+            "kind": "fact"
+        });
+        let r = host
+            .execute("supersede_memory", &sargs, None)
+            .await
+            .unwrap();
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("supersede permission");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host
+            .execute("supersede_memory", &sargs, Some(&rid))
+            .await
+            .unwrap();
+        assert!(r2.ok, "{}", r2.summary);
+        let neu: serde_json::Value = serde_json::from_str(&r2.detail_raw).unwrap();
+        let new_id = neu["id"].as_str().unwrap().to_string();
+
+        // #270: broad mem:// session grant must NOT auto-satisfy retract
+        host.permissions.allow_session_path("mem:");
+        let rargs = serde_json::json!({ "id": new_id });
+        let r = host.execute("retract_memory", &rargs, None).await.unwrap();
+        assert!(!r.ok, "retract must not session-auto");
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired {
+                    request_id, target, ..
+                } => {
+                    assert!(target.contains("retract"), "target={target}");
+                    Some(request_id.clone())
+                }
+                _ => None,
+            })
+            .expect("retract permission");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host
+            .execute("retract_memory", &rargs, Some(&rid))
+            .await
+            .unwrap();
+        assert!(r2.ok, "{}", r2.summary);
+
+        let hits = store
+            .recall(
+                &crate::memory::RecallQuery::new("unique-e2e"),
+                None,
+                crate::embed::HybridWeights::default(),
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+        assert!(hits
+            .iter()
+            .all(|h| h.record.status != crate::memory::Status::Retracted));
     }
 
     #[tokio::test]
