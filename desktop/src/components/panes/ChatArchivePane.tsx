@@ -104,7 +104,11 @@ export function ChatArchivePane({
         </div>
       </div>
 
-      <div className="archive-scope" role="tablist" aria-label="Archive scope">
+      <div
+        className="archive-scope"
+        role="tablist"
+        aria-label="Archive scope"
+      >
         {(
           [
             ["active", "Chats"],
@@ -114,9 +118,13 @@ export function ChatArchivePane({
         ).map(([id, label]) => (
           <button
             key={id}
+            id={`archive-scope-tab-${id}`}
             type="button"
             role="tab"
             className="archive-scope__tab"
+            aria-selected={scope === id}
+            aria-controls="archive-scope-panel"
+            tabIndex={scope === id ? 0 : -1}
             data-active={scope === id ? "true" : "false"}
             onClick={() => setScope(id)}
           >
@@ -124,6 +132,11 @@ export function ChatArchivePane({
           </button>
         ))}
       </div>
+      <div
+        id="archive-scope-panel"
+        role="tabpanel"
+        aria-labelledby={`archive-scope-tab-${scope}`}
+      >
 
       <div className="archive-search">
         <input
@@ -304,6 +317,7 @@ export function ChatArchivePane({
           })}
         </ul>
       )}
+      </div>
     </div>
   );
 }

@@ -9,6 +9,8 @@ import {
 import { Composer } from "./components/Composer";
 import { MarkdownBody } from "./components/MarkdownBody";
 import { ThinkingIndicator } from "./components/ThinkingIndicator";
+import { StreamLiveRegion } from "./components/StreamLiveRegion";
+import { nextRovingIndex } from "./lib/a11y";
 import {
   PermissionModal,
   type PermissionPrompt,
@@ -1565,7 +1567,28 @@ export function App() {
           </button>
         </aside>
         <div className="workspace">
-          <div className="pane-tabs" role="tablist">
+          <div
+            className="pane-tabs"
+            role="tablist"
+            aria-label="Main panes"
+            onKeyDown={(e) => {
+              const order: PaneId[] = [
+                "chat",
+                "archive",
+                "memory",
+                "source",
+                "todos",
+              ];
+              const idx = order.indexOf(pane);
+              const next = nextRovingIndex(idx < 0 ? 0 : idx, order.length, e.key);
+              if (next == null) return;
+              e.preventDefault();
+              setPane(order[next]);
+              window.requestAnimationFrame(() => {
+                document.getElementById(`pane-tab-${order[next]}`)?.focus();
+              });
+            }}
+          >
             {(
               [
                 ["chat", "Chat"],
@@ -1577,8 +1600,12 @@ export function App() {
             ).map(([id, label]) => (
               <button
                 key={id}
+                id={`pane-tab-${id}`}
                 type="button"
                 role="tab"
+                aria-selected={pane === id}
+                aria-controls={`pane-panel-${id}`}
+                tabIndex={pane === id ? 0 : -1}
                 data-active={pane === id ? "true" : "false"}
                 onClick={() => setPane(id)}
               >
@@ -1588,28 +1615,58 @@ export function App() {
           </div>
 
           {pane === "archive" ? (
-            <ChatArchivePane
-              refreshKey={archiveRefreshKey}
-              activeSessionId={resolvedSessionId}
-              onOpenSession={(id) => void openSessionById(id)}
-              onSessionsChanged={() => {
-                setArchiveRefreshKey((n) => n + 1);
-                void syncSessionsFromHost();
-              }}
-            />
+            <div
+              role="tabpanel"
+              id="pane-panel-archive"
+              aria-labelledby="pane-tab-archive"
+              className="pane-panel"
+            >
+              <ChatArchivePane
+                refreshKey={archiveRefreshKey}
+                activeSessionId={resolvedSessionId}
+                onOpenSession={(id) => void openSessionById(id)}
+                onSessionsChanged={() => {
+                  setArchiveRefreshKey((n) => n + 1);
+                  void syncSessionsFromHost();
+                }}
+              />
+            </div>
           ) : null}
 
           {pane === "chat" ? (
-            <>
+            <div
+              role="tabpanel"
+              id="pane-panel-chat"
+              aria-labelledby="pane-tab-chat"
+              className="pane-panel"
+            >
               <div
                 className="session-tabs"
                 role="tablist"
                 aria-label="Open chats"
+                onKeyDown={(e) => {
+                  const ids = openChatSessions.map((s) => s.id);
+                  if (ids.length === 0) return;
+                  const idx = Math.max(
+                    0,
+                    ids.indexOf(resolvedSessionId ?? ""),
+                  );
+                  const next = nextRovingIndex(idx, ids.length, e.key);
+                  if (next == null) return;
+                  e.preventDefault();
+                  setActiveSessionId(ids[next]);
+                  window.requestAnimationFrame(() => {
+                    document
+                      .getElementById(`session-tab-${ids[next]}`)
+                      ?.focus();
+                  });
+                }}
               >
                 <div className="session-tabs__list">
                   {openChatSessions.map((s) => (
                     <button
                       key={s.id}
+                      id={`session-tab-${s.id}`}
                       type="button"
                       role="tab"
                       className="session-tab"
@@ -1617,6 +1674,8 @@ export function App() {
                         s.id === resolvedSessionId ? "true" : "false"
                       }
                       aria-selected={s.id === resolvedSessionId}
+                      aria-controls="session-panel-chat"
+                      tabIndex={s.id === resolvedSessionId ? 0 : -1}
                       title={`${s.title} — right-click for options`}
                       onClick={() => setActiveSessionId(s.id)}
                       onContextMenu={(e) => openChatCtxMenu(e, s.id)}
@@ -1649,7 +1708,12 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <div className="chat-scroll-wrap">
+              <div
+                id="session-panel-chat"
+                role="tabpanel"
+                aria-label="Chat transcript"
+                className="chat-scroll-wrap"
+              >
               <div
                 className="chat-scroll"
                 ref={chatScrollRef}
@@ -1819,6 +1883,12 @@ export function App() {
                                   text={m.content}
                                   streaming={m.streaming}
                                 />
+                                {(m.streaming || m.content) && (
+                                  <StreamLiveRegion
+                                    text={m.content}
+                                    streaming={Boolean(m.streaming)}
+                                  />
+                                )}
                               </div>
                             ) : null}
                             {m.streaming &&
@@ -1904,36 +1974,57 @@ export function App() {
                   }}
                 />
               </div>
-            </>
+            </div>
           ) : null}
 
           {pane === "memory" ? (
-            <MemoryPane
-              docs={memoryDocs}
-              activePath={memoryPath}
-              onSelect={setMemoryPath}
-              onSave={(path, body) => {
-                const title =
-                  memoryDocs.find((d) => d.path === path)?.title ?? "Note";
-                const base =
-                  path.split(/[/\\]/).pop()?.replace(/\.md$/i, "") ?? "note";
-                void hostWriteMemory(base, title, body)
-                  .then(() => refreshMemory())
-                  .catch((err) =>
-                    setAgentError(
-                      err instanceof Error ? err.message : String(err),
-                    ),
-                  );
-              }}
-            />
+            <div
+              role="tabpanel"
+              id="pane-panel-memory"
+              aria-labelledby="pane-tab-memory"
+              className="pane-panel"
+            >
+              <MemoryPane
+                docs={memoryDocs}
+                activePath={memoryPath}
+                onSelect={setMemoryPath}
+                onSave={(path, body) => {
+                  const title =
+                    memoryDocs.find((d) => d.path === path)?.title ?? "Note";
+                  const base =
+                    path.split(/[/\\]/).pop()?.replace(/\.md$/i, "") ?? "note";
+                  void hostWriteMemory(base, title, body)
+                    .then(() => refreshMemory())
+                    .catch((err) =>
+                      setAgentError(
+                        err instanceof Error ? err.message : String(err),
+                      ),
+                    );
+                }}
+              />
+            </div>
           ) : null}
 
           {pane === "source" ? (
-            <SourcePreviewPane path={sourcePath} content={sourceContent} />
+            <div
+              role="tabpanel"
+              id="pane-panel-source"
+              aria-labelledby="pane-tab-source"
+              className="pane-panel"
+            >
+              <SourcePreviewPane path={sourcePath} content={sourceContent} />
+            </div>
           ) : null}
 
           {pane === "todos" ? (
-            <TodoPane storageKey={`cd-todos-${sessionId}`} />
+            <div
+              role="tabpanel"
+              id="pane-panel-todos"
+              aria-labelledby="pane-tab-todos"
+              className="pane-panel"
+            >
+              <TodoPane storageKey={`cd-todos-${sessionId}`} />
+            </div>
           ) : null}
         </div>
       </div>
