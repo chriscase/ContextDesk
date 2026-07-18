@@ -12,16 +12,20 @@ use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
 use cd_core::providers::ProviderProfile;
-use cd_core::research::{build_host, events_to_dto, research_local, research_turn};
+use cd_core::research::{
+    build_host, event_to_dto, events_to_dto, research_local, research_turn,
+    research_turn_with_cancel,
+};
 use cd_core::workspace::Workspace;
 use clap::Parser;
-use futures_util::stream::{self, Stream};
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -315,6 +319,23 @@ async fn research(
 struct StreamQuery {
     workspace_id: String,
     query: String,
+    #[serde(default)]
+    force_local: bool,
+    session_id: Option<String>,
+}
+
+/// Sets cancel flag when the SSE stream is dropped (client disconnect) (#166).
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn stream_event_to_sse(e: StreamEvent) -> Event {
+    let dto = event_to_dto(&e);
+    let data = serde_json::to_string(&dto).unwrap_or_else(|_| "{}".into());
+    Event::default().event(dto.kind).data(data)
 }
 
 async fn research_sse(
@@ -331,16 +352,85 @@ async fn research_sse(
         let data = map.get(&q.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         data.workspace.clone()
     };
-    let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // SSE still buffers full turn for now (#166 owns true incremental stream).
-    // Honor force_local=false path when provider configured (#165).
-    let (events, _degraded, _model) =
-        run_research_turn(&mut host, state.provider.as_ref(), &q.query, "sse", false).await?;
-    let dtos = events_to_dto(&events);
-    let stream = stream::iter(dtos.into_iter().map(|dto| {
-        let data = serde_json::to_string(&dto).unwrap_or_else(|_| "{}".into());
-        Ok(Event::default().event(dto.kind).data(data))
-    }));
+    let provider = state.provider.clone();
+    let force_local = q.force_local;
+    let query = q.query.clone();
+    let session_id = q.session_id.unwrap_or_else(|| "sse".into());
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_task = cancel.clone();
+
+    tokio::spawn(async move {
+        let Ok(mut host) = build_host(ws, None) else {
+            let _ = tx.send(StreamEvent::Error {
+                code: "host_build".into(),
+                message: "failed to build tool host".into(),
+            });
+            return;
+        };
+
+        let push = |e: StreamEvent| {
+            let _ = tx.send(e);
+        };
+
+        if force_local || provider.is_none() {
+            // Local path: emit events as they exist after local research (sink-ordered).
+            // research_local has no live sink yet; forward each event through the channel.
+            match research_local(&mut host, &query, &session_id).await {
+                Ok(events) => {
+                    for e in events {
+                        if cancel_task.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        push(e);
+                        // Let the SSE poll interleave (distinct wire times for offline tests).
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Err(err) => {
+                    push(StreamEvent::Error {
+                        code: "research_local".into(),
+                        message: err.to_string(),
+                    });
+                }
+            }
+            return;
+        }
+
+        let p = provider.as_ref().expect("provider checked");
+        let mut history: Vec<ChatMessage> = Vec::new();
+        let mut sink = |e: StreamEvent| {
+            let _ = tx.send(e);
+        };
+        let _ = research_turn_with_cancel(
+            &mut host,
+            &p.profile,
+            p.api_key.clone(),
+            &query,
+            &mut history,
+            &session_id,
+            false,
+            Some(cancel_task.clone()),
+            Some(&mut sink),
+        )
+        .await;
+    });
+
+    // Stream owned cancel: client disconnect drops stream → cancel in-flight turn.
+    let stream = futures_util::stream::unfold(
+        (rx, Some(CancelOnDrop(cancel))),
+        |(mut rx, guard)| async move {
+            match rx.recv().await {
+                Some(e) => Some((Ok(stream_event_to_sse(e)), (rx, guard))),
+                None => {
+                    drop(guard);
+                    None
+                }
+            }
+        },
+    );
+
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -760,6 +850,38 @@ mod tests {
             api_key: None,
         };
         assert!(p.profile.kind == cd_core::providers::ProviderKind::Ollama);
+    }
+
+    #[tokio::test]
+    async fn research_sse_orders_turn_started_before_completed() {
+        use http_body_util::BodyExt;
+
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a/x.md"), "payments gateway\n").unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[("k", "ws-a")]);
+        let app = build_app(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/research/stream?workspace_id=ws-a&query=payments&force_local=true&session_id=t-sse")
+            .header("authorization", "Bearer k")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        // SSE frames: event: turn_started ... event: turn_completed
+        let started = text.find("event: turn_started");
+        let completed = text.find("event: turn_completed");
+        assert!(
+            started.is_some() && completed.is_some(),
+            "missing events in SSE body:\n{text}"
+        );
+        assert!(
+            started.unwrap() < completed.unwrap(),
+            "turn_started must precede turn_completed:\n{text}"
+        );
     }
 
     #[tokio::test]
