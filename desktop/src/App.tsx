@@ -144,7 +144,12 @@ function openExternalUrl(url: string) {
 
 function formatMsgMetaFooter(meta: MessageMetaDto): string {
   const parts: string[] = [];
-  if (meta.model) parts.push(meta.model);
+  const model = meta.host_confirmed
+    ? meta.model
+    : meta.requested_model || meta.model;
+  if (model) {
+    parts.push(meta.host_confirmed ? model : `requested: ${model}`);
+  }
   if (meta.provider_label) parts.push(meta.provider_label);
   else if (meta.provider_kind) parts.push(meta.provider_kind);
   if (meta.base_url) {
@@ -190,6 +195,8 @@ function snapshotMessageMeta(args: {
   );
   return {
     model: model || undefined,
+    requested_model: model || undefined,
+    host_confirmed: false,
     provider_label: match?.provider_label || setup.providerLabel || undefined,
     provider_id:
       sessionProvider || match?.provider_id || parsed.providerId || undefined,
@@ -809,7 +816,13 @@ export function App() {
     setSettingsOpen(true);
   }, [preflight.hasBlocking, dismissedBanner, settingsOpen]);
 
+  const chatScrollSaveRef = useRef(0);
+
   const openSettings = (section: SettingsSection = "preflight") => {
+    // Preserve transcript scroll across Settings overlay (#155).
+    if (chatScrollRef.current) {
+      chatScrollSaveRef.current = chatScrollRef.current.scrollTop;
+    }
     setSettingsSection(section);
     setSettingsOpen(true);
   };
@@ -824,6 +837,15 @@ export function App() {
     if (preflight.hasBlocking) {
       dismissSetupPrompt();
     }
+    // Restore scroll after overlay unmount reflow (#155).
+    const top = chatScrollSaveRef.current;
+    window.requestAnimationFrame(() => {
+      const el = chatScrollRef.current;
+      if (!el) return;
+      el.scrollTop = top;
+      stickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= 80;
+    });
   }, [preflight.hasBlocking, dismissSetupPrompt]);
 
   const onSubmit = useCallback(
@@ -941,19 +963,29 @@ export function App() {
                 { ...base, streaming: !done },
                 [ev],
               );
+              // Host-fact model from turn_started wins; keep requested snapshot (#155).
               const merged: Msg = {
                 ...msg,
                 streaming: !done,
-                meta: metaAtSend,
+                meta: {
+                  ...metaAtSend,
+                  ...msg.meta,
+                  requested_model:
+                    metaAtSend.requested_model || metaAtSend.model,
+                  host_confirmed: Boolean(msg.meta?.host_confirmed),
+                  model: msg.meta?.host_confirmed
+                    ? msg.meta.model
+                    : metaAtSend.model,
+                },
               };
               if (done) {
                 const cite = merged.citations?.[0];
                 if (cite) {
+                  // Preload source content but stay on Chat — user opens Source on click (#155).
                   setSourcePath(cite.id);
                   void hostReadFile(cite.id)
                     .then((body) => {
                       setSourceContent(body);
-                      setPane("source");
                     })
                     .catch((err) => {
                       setSourceContent(

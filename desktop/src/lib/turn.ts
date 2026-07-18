@@ -60,10 +60,25 @@ export function applyEventsToMessage(
   ];
   const trail: string[] = [...(base.trail ?? [])];
   let permission: PermissionPrompt | null = null;
+  let meta: MessageMetaDto | undefined = base.meta
+    ? { ...base.meta }
+    : undefined;
 
   for (const ev of events) {
     const p = ev.payload;
     switch (ev.kind) {
+      case "turn_started": {
+        // Host-fact model from StreamEvent::TurnStarted (#155 / #90).
+        const hostModel = p.model != null ? String(p.model).trim() : "";
+        if (hostModel) {
+          meta = {
+            ...(meta ?? {}),
+            model: hostModel,
+            host_confirmed: true,
+          };
+        }
+        break;
+      }
       case "text_delta":
         content += String(p.text ?? "");
         break;
@@ -140,7 +155,7 @@ export function applyEventsToMessage(
       citations: citations.length ? citations : undefined,
       trail: trail.length ? trail : undefined,
       streaming: false,
-      meta: base.meta,
+      meta,
     },
     permission,
   };

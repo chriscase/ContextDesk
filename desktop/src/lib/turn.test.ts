@@ -58,6 +58,26 @@ describe("applyEventsToMessage", () => {
     expect(live.citations?.map((c) => c.id)).toEqual(batch.citations?.map((c) => c.id));
   });
 
+  it("turn_started sets host_confirmed model provenance (#155)", () => {
+    const { msg } = applyEventsToMessage(
+      base({
+        meta: {
+          model: "requested-model",
+          requested_model: "requested-model",
+          host_confirmed: false,
+        },
+      }),
+      [
+        {
+          kind: "turn_started",
+          payload: { session_id: "s1", model: "llama3.2:latest" },
+        },
+      ],
+    );
+    expect(msg.meta?.model).toBe("llama3.2:latest");
+    expect(msg.meta?.host_confirmed).toBe(true);
+  });
+
   it("permission_required surfaces on a single mid-turn event", () => {
     const { permission } = applyEventsToMessage(base({ content: "partial" }), [
       {
