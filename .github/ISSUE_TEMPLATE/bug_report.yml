@@ -1,51 +1,56 @@
 name: Bug report
-description: Something is broken or incorrect in ContextDesk
+description: Report something that is broken or behaves incorrectly in ContextDesk.
 title: "[bug] "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. **Do not paste API keys, tokens, passwords, or private URLs** in this form — redact logs.
+        Thanks for taking the time to file a bug report.
 
+        **Do not paste API keys, tokens, session credentials, private URLs with embedded
+        credentials, or any other secret into this form.** Secrets belong in the OS keychain
+        or environment variables, never in the repo or in issue text (see
+        [AGENTS.md](https://github.com/chriscase/ContextDesk/blob/main/AGENTS.md)
+        non-negotiable #1 and
+        [SECURITY.md](https://github.com/chriscase/ContextDesk/blob/main/SECURITY.md)).
+        Redact or replace any credential with a placeholder before pasting logs or config.
   - type: textarea
     id: summary
     attributes:
       label: Summary
-      description: One or two sentences describing the problem.
+      description: A short description of what is wrong.
     validations:
       required: true
-
   - type: textarea
     id: repro
     attributes:
-      label: Steps to reproduce
-      description: Numbered steps that start from a clean launch when possible.
+      label: Reproduction steps
+      description: Minimal steps to reproduce the behavior. Numbered list works best.
       placeholder: |
-        1. …
-        2. …
-        3. …
+        1. Open the desktop app with provider X configured
+        2. Run a chat session that calls the Y tool
+        3. Observe...
     validations:
       required: true
-
   - type: textarea
     id: expected
     attributes:
       label: Expected behavior
+      description: What you expected to happen.
     validations:
       required: true
-
   - type: textarea
     id: actual
     attributes:
       label: Actual behavior
+      description: What happened instead, including any error text.
     validations:
       required: true
-
   - type: dropdown
     id: os
     attributes:
-      label: OS
+      label: Operating system
       options:
         - macOS
         - Linux
@@ -53,14 +58,13 @@ body:
         - Other / unknown
     validations:
       required: true
-
   - type: dropdown
     id: provider
     attributes:
-      label: Provider kind (generic)
-      description: Active model provider if relevant (no employer-specific names).
+      label: Provider kind
+      description: Which generic provider kind were you using? (No employer-specific names.)
       options:
-        - none / not applicable
+        - not applicable
         - ollama
         - openai_compatible
         - anthropic
@@ -68,7 +72,6 @@ body:
         - unknown
     validations:
       required: true
-
   - type: input
     id: version
     attributes:
@@ -76,13 +79,20 @@ body:
       description: App version, git SHA, or "main @ date".
     validations:
       required: false
-
   - type: textarea
     id: logs
     attributes:
       label: Logs (redacted)
       description: |
-        Paste relevant console/log lines. Redact secrets. Do not paste API keys.
+        Relevant log output. Redact all secrets first. Wrap in a code block.
+        Remember: **no API keys, tokens, or private URLs** — this form is public.
       render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else relevant — workarounds tried, related issues.
     validations:
       required: false
