@@ -812,6 +812,74 @@ export async function hostSetHybridRetrieval(enabled: boolean): Promise<boolean>
   return invoke<boolean>("set_hybrid_retrieval", { enabled });
 }
 
+/** External module DTO (#136). No secrets. */
+export type ModuleDto = {
+  id: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  granted: boolean;
+  path: string;
+  entrypoint: string;
+  requested_filesystem_roots: string[];
+  requested_network_hosts: string[];
+  requested_secret_refs: string[];
+  hard_write_tools: string[];
+  provided_tools: string[];
+};
+
+export type SetModuleEnabledResult = {
+  enabled: boolean;
+  needs_approval: boolean;
+  module_id: string;
+  risk: string;
+  type_confirm_phrase: string | null;
+  preview: string;
+  reason: string;
+  request_id: string;
+};
+
+export async function hostListModules(): Promise<ModuleDto[]> {
+  if (!isTauri()) return [];
+  return invoke<ModuleDto[]>("list_modules");
+}
+
+/** Local path install only (NON_GOALS #7). */
+export async function hostInstallModule(path: string): Promise<ModuleDto> {
+  if (!isTauri()) throw new Error("Module install requires Tauri host");
+  return invoke<ModuleDto>("install_module", { path });
+}
+
+export async function hostSetModuleEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<SetModuleEnabledResult> {
+  if (!isTauri()) throw new Error("Module enable requires Tauri host");
+  return invoke<SetModuleEnabledResult>("set_module_enabled", { id, enabled });
+}
+
+export async function hostApproveModuleEnable(
+  id: string,
+  decision: string,
+  typed?: string,
+): Promise<boolean> {
+  if (!isTauri()) throw new Error("Module approve requires Tauri host");
+  return invoke<boolean>("approve_module_enable", { id, decision, typed });
+}
+
+export async function hostRemoveModule(id: string): Promise<boolean> {
+  if (!isTauri()) throw new Error("Module remove requires Tauri host");
+  return invoke<boolean>("remove_module", { id });
+}
+
+export async function hostUpdateModule(
+  id: string,
+  path: string,
+): Promise<ModuleDto> {
+  if (!isTauri()) throw new Error("Module update requires Tauri host");
+  return invoke<ModuleDto>("update_module", { id, path });
+}
+
 export type NewsSourceDto = {
   id: string;
   label: string;

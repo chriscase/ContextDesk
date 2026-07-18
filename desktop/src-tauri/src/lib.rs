@@ -194,6 +194,24 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         }
     }
     host.attach_connectors_with_all_secrets(&cfg.connectors, &pg_passwords, &http_bearers);
+
+    // #136: enabled external modules (local install only; capability grants from #135).
+    if let Ok(config_dir) = ensure_config_dir(&state.branding) {
+        let modules_dir = cd_core::modules::default_modules_dir(&config_dir);
+        let grants_path = config_dir.join("module_grants.json");
+        let grants = cd_core::modules::ModuleGrantStore::load(&grants_path).unwrap_or_default();
+        let discovered =
+            cd_core::modules::discover_modules(&[modules_dir]).unwrap_or_default();
+        for id in &cfg.enabled_modules {
+            if let Some(m) = discovered.iter().find(|x| &x.id == id) {
+                let secrets = &state.secrets;
+                let resolve = |r: &str| secrets.get(r).ok().flatten();
+                if let Err(e) = host.attach_module(m, &grants, &resolve) {
+                    tracing::warn!(module_id = %id, error = %e, "enabled module attach failed");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1171,6 +1189,280 @@ fn list_skills_cmd(state: State<'_, AppState>) -> Result<Vec<SkillDto>, String> 
         .collect())
 }
 
+/// Module row for Settings (#136). No secrets.
+#[derive(Clone, serde::Serialize)]
+struct ModuleDto {
+    id: String,
+    name: String,
+    version: String,
+    enabled: bool,
+    granted: bool,
+    path: String,
+    entrypoint: String,
+    requested_filesystem_roots: Vec<String>,
+    requested_network_hosts: Vec<String>,
+    requested_secret_refs: Vec<String>,
+    hard_write_tools: Vec<String>,
+    provided_tools: Vec<String>,
+}
+
+fn modules_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let config_dir = ensure_config_dir(&state.branding).map_err(|e| e.to_string())?;
+    Ok(cd_core::modules::default_modules_dir(&config_dir))
+}
+
+fn grants_path(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let config_dir = ensure_config_dir(&state.branding).map_err(|e| e.to_string())?;
+    Ok(config_dir.join("module_grants.json"))
+}
+
+#[tauri::command]
+fn list_modules(state: State<'_, AppState>) -> Result<Vec<ModuleDto>, String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let dir = modules_dir(&state)?;
+    let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
+        .map_err(|e| e.to_string())?;
+    let found = cd_core::modules::discover_modules(&[dir]).map_err(|e| e.to_string())?;
+    Ok(found
+        .into_iter()
+        .map(|m| ModuleDto {
+            enabled: cfg.enabled_modules.iter().any(|x| x == &m.id),
+            granted: grants.is_granted(&m.id),
+            path: m.path.display().to_string(),
+            entrypoint: m.entrypoint.command.display().to_string(),
+            requested_filesystem_roots: m
+                .requested_capabilities
+                .filesystem_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            requested_network_hosts: m.requested_capabilities.network_hosts,
+            requested_secret_refs: m.requested_capabilities.secret_refs,
+            hard_write_tools: m.hard_write_tools,
+            provided_tools: m.provided_tools.iter().map(|t| t.name.clone()).collect(),
+            id: m.id,
+            name: m.name,
+            version: m.version,
+        })
+        .collect())
+}
+
+/// Install from a **local** directory only (NON_GOALS #7 — no network install).
+#[tauri::command]
+fn install_module(state: State<'_, AppState>, path: String) -> Result<ModuleDto, String> {
+    let src = std::path::PathBuf::from(path.trim());
+    let dir = modules_dir(&state)?;
+    let m = cd_core::modules::install_module_from_dir(&src, &dir).map_err(|e| e.to_string())?;
+    let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
+        .map_err(|e| e.to_string())?;
+    Ok(ModuleDto {
+        enabled: false,
+        granted: grants.is_granted(&m.id),
+        path: m.path.display().to_string(),
+        entrypoint: m.entrypoint.command.display().to_string(),
+        requested_filesystem_roots: m
+            .requested_capabilities
+            .filesystem_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        requested_network_hosts: m.requested_capabilities.network_hosts,
+        requested_secret_refs: m.requested_capabilities.secret_refs,
+        hard_write_tools: m.hard_write_tools,
+        provided_tools: m.provided_tools.iter().map(|t| t.name.clone()).collect(),
+        id: m.id,
+        name: m.name,
+        version: m.version,
+    })
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SetModuleEnabledResult {
+    enabled: bool,
+    /// When true, UI must show permission modal before tools attach.
+    needs_approval: bool,
+    module_id: String,
+    risk: String,
+    type_confirm_phrase: Option<String>,
+    preview: String,
+    reason: String,
+    request_id: String,
+}
+
+#[tauri::command]
+fn set_module_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<SetModuleEnabledResult, String> {
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("module id required".into());
+    }
+    let dir = modules_dir(&state)?;
+    let found = cd_core::modules::discover_modules(&[dir]).map_err(|e| e.to_string())?;
+    let m = found
+        .into_iter()
+        .find(|x| x.id == id)
+        .ok_or_else(|| format!("module `{id}` not installed"))?;
+
+    if enabled {
+        let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
+            .map_err(|e| e.to_string())?;
+        if !cd_core::modules::module_tools_allowed(&m, &grants) {
+            let req = cd_core::modules::permission_request_for_module_enable(&m);
+            return Ok(SetModuleEnabledResult {
+                enabled: false,
+                needs_approval: true,
+                module_id: m.id,
+                risk: req.risk,
+                type_confirm_phrase: req.type_confirm_phrase,
+                preview: req.preview,
+                reason: req.reason,
+                request_id: req.request_id,
+            });
+        }
+        let mut cfg = state.config.lock().expect("config");
+        if !cfg.enabled_modules.iter().any(|x| x == &id) {
+            cfg.enabled_modules.push(id.clone());
+        }
+        let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+        save_config(&path, &cfg).map_err(|e| e.to_string())?;
+        drop(cfg);
+        let _ = ensure_host(&state);
+        return Ok(SetModuleEnabledResult {
+            enabled: true,
+            needs_approval: false,
+            module_id: id,
+            risk: "local".into(),
+            type_confirm_phrase: None,
+            preview: String::new(),
+            reason: String::new(),
+            request_id: String::new(),
+        });
+    }
+
+    // Disable
+    let mut cfg = state.config.lock().expect("config");
+    cfg.enabled_modules.retain(|x| x != &id);
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(SetModuleEnabledResult {
+        enabled: false,
+        needs_approval: false,
+        module_id: id,
+        risk: "local".into(),
+        type_confirm_phrase: None,
+        preview: String::new(),
+        reason: String::new(),
+        request_id: String::new(),
+    })
+}
+
+/// Complete first-use module capability approval (#135/#136) then enable.
+#[tauri::command]
+fn approve_module_enable(
+    state: State<'_, AppState>,
+    id: String,
+    decision: String,
+    typed: Option<String>,
+) -> Result<bool, String> {
+    let id = id.trim().to_string();
+    let dir = modules_dir(&state)?;
+    let found = cd_core::modules::discover_modules(&[dir]).map_err(|e| e.to_string())?;
+    let m = found
+        .into_iter()
+        .find(|x| x.id == id)
+        .ok_or_else(|| format!("module `{id}` not installed"))?;
+    let req = cd_core::modules::permission_request_for_module_enable(&m);
+    let dec = match decision.as_str() {
+        "deny" => cd_core::permissions::PermissionDecision::Deny,
+        "allow_once" => cd_core::permissions::PermissionDecision::AllowOnce,
+        "allow_session_path" => cd_core::permissions::PermissionDecision::AllowSessionPath,
+        _ => return Err("invalid decision".into()),
+    };
+    cd_core::permissions::validate_decision(&req, dec, typed.as_deref())
+        .map_err(|e| e)?;
+    if matches!(dec, cd_core::permissions::PermissionDecision::Deny) {
+        return Ok(false);
+    }
+    let gpath = grants_path(&state)?;
+    let mut grants =
+        cd_core::modules::ModuleGrantStore::load(&gpath).map_err(|e| e.to_string())?;
+    grants
+        .grant_from_ui(&m.id, m.requested_capabilities.clone(), dec)
+        .map_err(|e| e.to_string())?;
+    grants.save(&gpath).map_err(|e| e.to_string())?;
+
+    let mut cfg = state.config.lock().expect("config");
+    if !cfg.enabled_modules.iter().any(|x| x == &id) {
+        cfg.enabled_modules.push(id);
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(true)
+}
+
+#[tauri::command]
+fn remove_module(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    let id = id.trim().to_string();
+    let mut cfg = state.config.lock().expect("config");
+    cfg.enabled_modules.retain(|x| x != &id);
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let dir = modules_dir(&state)?;
+    cd_core::modules::remove_module_dir(&dir, &id).map_err(|e| e.to_string())?;
+    let gpath = grants_path(&state)?;
+    if let Ok(mut grants) = cd_core::modules::ModuleGrantStore::load(&gpath) {
+        grants.revoke(&id);
+        let _ = grants.save(&gpath);
+    }
+    let _ = ensure_host(&state);
+    Ok(true)
+}
+
+/// Re-install from a local path (same id); local only (NON_GOALS #7).
+#[tauri::command]
+fn update_module(state: State<'_, AppState>, id: String, path: String) -> Result<ModuleDto, String> {
+    let id = id.trim().to_string();
+    let src = std::path::PathBuf::from(path.trim());
+    let dir = modules_dir(&state)?;
+    let m = cd_core::modules::update_module_from_dir(&src, &dir).map_err(|e| e.to_string())?;
+    if m.id != id {
+        return Err(format!(
+            "source module id `{}` does not match update target `{id}`",
+            m.id
+        ));
+    }
+    let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
+        .map_err(|e| e.to_string())?;
+    let cfg = state.config.lock().expect("config");
+    Ok(ModuleDto {
+        enabled: cfg.enabled_modules.iter().any(|x| x == &m.id),
+        granted: grants.is_granted(&m.id),
+        path: m.path.display().to_string(),
+        entrypoint: m.entrypoint.command.display().to_string(),
+        requested_filesystem_roots: m
+            .requested_capabilities
+            .filesystem_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        requested_network_hosts: m.requested_capabilities.network_hosts,
+        requested_secret_refs: m.requested_capabilities.secret_refs,
+        hard_write_tools: m.hard_write_tools,
+        provided_tools: m.provided_tools.iter().map(|t| t.name.clone()).collect(),
+        id: m.id,
+        name: m.name,
+        version: m.version,
+    })
+}
+
 /// Propose authoring a skill via the SoftWrite tool host path (PermissionRequired).
 /// Does **not** write until the UI completes the grant and re-executes.
 #[tauri::command]
@@ -2113,6 +2405,12 @@ pub fn run() {
             complete_permission_cmd,
             list_skills_cmd,
             propose_save_skill_cmd,
+            list_modules,
+            install_module,
+            set_module_enabled,
+            approve_module_enable,
+            remove_module,
+            update_module,
             reindex,
             read_memory_file,
             read_workspace_file_cmd,

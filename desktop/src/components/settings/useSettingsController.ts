@@ -52,6 +52,7 @@ export type SettingsSection =
   | "workspace"
   | "ai"
   | "connectors"
+  | "modules"
   | "appearance"
   | "general";
 
