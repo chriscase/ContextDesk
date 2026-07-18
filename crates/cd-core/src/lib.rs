@@ -38,6 +38,7 @@ pub mod permissions;
 pub mod preflight;
 pub mod probe;
 pub mod providers;
+pub mod redact;
 pub mod research;
 pub mod router;
 /// Back-compat alias path used in docs.

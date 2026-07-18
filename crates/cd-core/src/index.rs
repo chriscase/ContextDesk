@@ -952,6 +952,16 @@ fn walk(dir: &Path, depth: usize, f: &mut dyn FnMut(&Path) -> CoreResult<bool>) 
         if name == "node_modules" || name == "target" || name == "dist" || name == ".git" {
             continue;
         }
+        // Durable memory SQLite + migrated notes live under <slug>/memory — do not
+        // double-surface as KB after Phase-1 migration (#273 / MEMORY.md §11).
+        if name == "memory"
+            && dir
+                .file_name()
+                .map(|n| n.to_string_lossy() == ws_dot.as_str())
+                .unwrap_or(false)
+        {
+            continue;
+        }
         if path.is_dir() {
             if path
                 .symlink_metadata()

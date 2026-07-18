@@ -283,3 +283,21 @@ Local scan (optional):
 ```sh
 gitleaks detect --source . --verbose
 ```
+
+## Durable memory (Phase 0/1)
+
+See [`docs/design/MEMORY.md`](design/MEMORY.md) for the full contract.
+
+| Scope | Default location | Notes |
+|-------|------------------|--------|
+| **Personal** | OS app-data / config dir: `~/<config_dir>/memory/personal.sqlite` | Never git-committable; barred from `changes_since` / sync |
+| **Workspace** | In-repo: `<workspace_root>/<slug>/memory/memory.sqlite` | Gitignored by default (`ensure_workspace_memory_gitignored` + root `.gitignore`) |
+
+Config knobs on `AppConfig.memory` (`MemoryConfig`):
+
+- `durable_memory_enabled` (default **true**) — gates tool registration
+- `workspace_location`: `in_repo` (default) or `app_data`
+- `ambient_recall_enabled` (default **true**), `ambient_max_chars` (~1500), `ambient_max_memories` (≤5), `ambient_min_score` (~0.35)
+
+Timestamps are unix **seconds**; ids are UUIDv7. Secrets are redacted via `cd_core::redact` before persist and before embed.
+

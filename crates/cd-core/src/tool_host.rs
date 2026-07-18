@@ -94,6 +94,10 @@ pub struct ToolHost {
     embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
     /// Hybrid weight knobs (documented in `embed` module).
     hybrid_weights: crate::embed::HybridWeights,
+    /// Durable memory store (Phase 1); when set, memory tools write here.
+    durable_memory: Option<std::sync::Arc<dyn crate::memory::MemoryStore>>,
+    /// When true, register durable memory tool specs (recall/supersede/retract).
+    durable_memory_enabled: bool,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Dynamic tools from connector registry (#127).
@@ -147,6 +151,8 @@ impl ToolHost {
             hybrid_retrieval: false,
             embed_backend: None,
             hybrid_weights: crate::embed::HybridWeights::default(),
+            durable_memory: None,
+            durable_memory_enabled: false,
             router_budget: crate::router::RouterBudget::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
@@ -521,7 +527,26 @@ impl ToolHost {
         self.x_bearer = bearer.filter(|b| !b.trim().is_empty());
     }
 
-    /// Enable or disable open-web research tools (Settings toggle).
+    /// Attach a durable memory store and enable memory tool specs.
+    pub fn set_durable_memory(
+        &mut self,
+        store: std::sync::Arc<dyn crate::memory::MemoryStore>,
+        enabled: bool,
+    ) {
+        self.durable_memory = Some(store);
+        self.durable_memory_enabled = enabled;
+    }
+
+    /// Enable/disable durable memory tools without replacing the store.
+    pub fn set_durable_memory_enabled(&mut self, enabled: bool) {
+        self.durable_memory_enabled = enabled;
+    }
+
+    /// Borrow the durable memory store when configured (ambient recall / tools).
+    pub fn durable_memory_store(&self) -> Option<std::sync::Arc<dyn crate::memory::MemoryStore>> {
+        self.durable_memory.clone()
+    }
+
     /// Opt-in hybrid `search_kb` path (#119). Off by default (keyword-only).
     pub fn set_hybrid_retrieval(&mut self, enabled: bool) {
         self.hybrid_retrieval = enabled;
@@ -582,6 +607,15 @@ impl ToolHost {
         }
         if !self.x_search_available() {
             specs.retain(|t| t.name != names::X_SEARCH);
+        }
+        if self.durable_memory_enabled && self.durable_memory.is_some() {
+            // Replace legacy save_memory schema with durable memory suite.
+            specs.retain(|t| t.name != names::SAVE_MEMORY);
+            for t in crate::memory::memory_tool_specs() {
+                if !specs.iter().any(|s| s.name == t.name) {
+                    specs.push(t);
+                }
+            }
         }
         for t in self.dynamic_tools.values() {
             if !specs.iter().any(|s| s.name == t.spec.name) {
@@ -796,6 +830,9 @@ impl ToolHost {
             names::SEARCH_KB => self.tool_search(arguments).await?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
             names::SAVE_MEMORY => self.tool_save_memory(arguments)?,
+            names::RECALL_MEMORY => self.tool_recall_memory(arguments)?,
+            names::SUPERSEDE_MEMORY => self.tool_supersede_memory(arguments)?,
+            names::RETRACT_MEMORY => self.tool_retract_memory(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
@@ -972,6 +1009,37 @@ impl ToolHost {
     }
 
     fn tool_save_memory(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        // Durable store path when enabled (MEMORY.md Phase 1).
+        if self.durable_memory_enabled {
+            if let Some(store) = &self.durable_memory {
+                let op = crate::memory::write_op_from_save_args(args)?;
+                let now = crate::embed::now_unix_secs();
+                let rec = store.put(op, now)?;
+                let target = crate::memory::tools::audit_target_for_record(&rec);
+                if let Some(log) = &self.audit {
+                    let _ = log.log(
+                        names::SAVE_MEMORY,
+                        ToolSideEffect::SoftWrite,
+                        &target,
+                        crate::audit::outcomes::ALLOWED,
+                        "memory saved",
+                        rec.content.len() as u64,
+                    );
+                }
+                let summary = format!("saved memory {} ({})", rec.id, rec.kind.as_str());
+                let raw = serde_json::json!({
+                    "id": rec.id.to_string(),
+                    "kind": rec.kind.as_str(),
+                    "title": rec.title,
+                    "scope": rec.scope.as_str(),
+                    "rev": rec.rev,
+                    "source_id": format!("memory:{}", rec.id),
+                })
+                .to_string();
+                return Ok((true, summary, raw, Some(format!("memory:{}", rec.id))));
+            }
+        }
+        // Legacy memory_fs markdown path (pre-store / migration bridge).
         let title = args
             .get("title")
             .and_then(|v| v.as_str())
@@ -979,12 +1047,13 @@ impl ToolHost {
             .trim();
         let body = args
             .get("body_markdown")
+            .or_else(|| args.get("content"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
         if body.is_empty() {
             return Err(CoreError::Message(
-                "save_memory requires body_markdown".into(),
+                "save_memory requires body_markdown or content".into(),
             ));
         }
         fs::create_dir_all(&self.memory_dir)?;
@@ -1008,6 +1077,109 @@ impl ToolHost {
             format!("saved {}", path.display()),
             content,
             Some(path.display().to_string()),
+        ))
+    }
+
+    fn tool_recall_memory(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let store = self
+            .durable_memory
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if query.is_empty() {
+            return Err(CoreError::Message("recall_memory requires query".into()));
+        }
+        let mut q = crate::memory::RecallQuery::new(query);
+        if let Some(k) = args.get("k").and_then(|v| v.as_u64()) {
+            q.k = k as usize;
+        }
+        if let Some(b) = args.get("include_superseded").and_then(|v| v.as_bool()) {
+            q.include_superseded = b;
+        }
+        if let Some(kinds) = args.get("kinds").and_then(|v| v.as_array()) {
+            q.kinds = Some(
+                kinds
+                    .iter()
+                    .filter_map(|x| x.as_str().map(crate::memory::Kind::parse))
+                    .collect(),
+            );
+        }
+        let now = crate::embed::now_unix_secs();
+        let hits = store.recall(&q, None, self.hybrid_weights, now)?;
+        let raw = crate::memory::format_recall_hits(&hits);
+        let summary = format!("recalled {} memories", hits.len());
+        Ok((
+            true,
+            summary,
+            raw,
+            hits.first().map(|h| h.source_id.clone()),
+        ))
+    }
+
+    fn tool_supersede_memory(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let store = self
+            .durable_memory
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+        let op = crate::memory::write_op_from_supersede_args(args)?;
+        let now = crate::embed::now_unix_secs();
+        let rec = store.put(op, now)?;
+        let target = crate::memory::tools::audit_target_for_record(&rec);
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                names::SUPERSEDE_MEMORY,
+                ToolSideEffect::SoftWrite,
+                &target,
+                crate::audit::outcomes::ALLOWED,
+                "memory superseded",
+                rec.content.len() as u64,
+            );
+        }
+        Ok((
+            true,
+            format!("superseded → {}", rec.id),
+            serde_json::json!({"id": rec.id.to_string(), "supersedes": rec.supersedes}).to_string(),
+            Some(format!("memory:{}", rec.id)),
+        ))
+    }
+
+    fn tool_retract_memory(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let store = self
+            .durable_memory
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+        let op = crate::memory::write_op_from_retract_args(args)?;
+        let now = crate::embed::now_unix_secs();
+        let rec = store.put(op, now)?;
+        let target = crate::memory::tools::audit_target_for_record(&rec);
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                names::RETRACT_MEMORY,
+                ToolSideEffect::SoftWrite,
+                &target,
+                crate::audit::outcomes::ALLOWED,
+                "memory retracted",
+                0,
+            );
+        }
+        Ok((
+            true,
+            format!("retracted {}", rec.id),
+            serde_json::json!({"id": rec.id.to_string(), "status": "retracted"}).to_string(),
+            Some(format!("memory:{}", rec.id)),
         ))
     }
 
@@ -1397,6 +1569,12 @@ impl ToolHost {
         if let Some(t) = self.dynamic_tools.get(name) {
             return t.side_effect();
         }
+        if let Some(t) = crate::memory::memory_tool_specs()
+            .into_iter()
+            .find(|t| t.name == name)
+        {
+            return t.side_effect;
+        }
         mvp_tool_specs()
             .into_iter()
             .find(|t| t.name == name)
@@ -1562,6 +1740,15 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             .unwrap_or("")
             .into(),
         names::SAVE_MEMORY => {
+            // Prefer durable mem:// target when args look like store writes.
+            if args.get("content").is_some()
+                || args.get("kind").is_some()
+                || args.get("id").is_some()
+            {
+                if let Ok(op) = crate::memory::write_op_from_save_args(args) {
+                    return crate::memory::permission_target_for_write(&op);
+                }
+            }
             let hint = args
                 .get("filename_hint")
                 .or_else(|| args.get("title"))
@@ -1575,6 +1762,25 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             let safe = if safe.is_empty() { "note" } else { safe };
             memory_dir.join(format!("{safe}.md")).display().to_string()
         }
+        names::SUPERSEDE_MEMORY => {
+            if let Ok(op) = crate::memory::write_op_from_supersede_args(args) {
+                crate::memory::permission_target_for_write(&op)
+            } else {
+                "mem://supersede/unknown".into()
+            }
+        }
+        names::RETRACT_MEMORY => {
+            if let Ok(op) = crate::memory::write_op_from_retract_args(args) {
+                crate::memory::permission_target_for_write(&op)
+            } else {
+                "mem://retract/unknown".into()
+            }
+        }
+        names::RECALL_MEMORY => args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("recall")
+            .into(),
         names::SAVE_SKILL => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
             let safe: String = id
