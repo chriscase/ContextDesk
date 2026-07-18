@@ -67,3 +67,15 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 - Additive optional fields on events are allowed without bumping.
 - Renaming/removing event `kind` discriminants requires `cd.v2` and a migration note in this file.
 - Hosts should ignore unknown event kinds for forward compatibility.
+
+## Server HTTP surface (`cd-server`, remediation #165–#168)
+
+| Method | Path | Role |
+|--------|------|------|
+| `POST` | `/v1/research` | Research turn; JSON `{ events, degraded, model }` |
+| `GET` | `/v1/research/stream` | SSE of the same event kinds (incremental; cancel on disconnect) |
+| `POST` | `/v1/session/prompt` | Session turn or `invoke_tool`; may emit `permission_required` |
+| `POST` | `/v1/permission/respond` | Client grant/deny → `grant_and_execute` (never auto-approved) |
+
+Session hosts are retained **in-process** for the lifetime of the `cd-server` process (keyed by `session_id`). No TTL yet; restart clears pending grants. Writes never execute without a matching client `permission/respond` allow.
+

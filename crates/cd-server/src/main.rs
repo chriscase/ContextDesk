@@ -11,11 +11,13 @@ use cd_core::config::{config_path, load_config};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
+use cd_core::permissions::PermissionDecision;
 use cd_core::providers::ProviderProfile;
 use cd_core::research::{
-    build_host, event_to_dto, events_to_dto, research_local, research_turn,
+    build_host, event_to_dto, events_to_dto, grant_and_execute, research_local, research_turn,
     research_turn_with_cancel,
 };
+use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
 use clap::Parser;
 use futures_util::stream::Stream;
@@ -68,6 +70,16 @@ struct AppState {
     key_workspaces: Arc<HashMap<[u8; 32], Vec<String>>>,
     /// Active provider from config/keychain; `None` → always local-retrieval / degraded.
     provider: Option<ServerProvider>,
+    /// Per-session ToolHost for permission pending state (#168).
+    /// Eviction: process lifetime only for now (document in PROTOCOL); no TTL yet.
+    /// `tokio::sync::Mutex` so we can await tool execute while holding the session.
+    sessions: Arc<tokio::sync::Mutex<HashMap<String, SessionHost>>>,
+}
+
+/// Session-scoped host retained between prompt and permission.respond (#168).
+struct SessionHost {
+    host: ToolHost,
+    workspace_id: String,
 }
 
 /// Load generic provider profile + keychain secret for server research (#165).
@@ -434,6 +446,164 @@ async fn research_sse(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+#[derive(Deserialize)]
+struct SessionPromptBody {
+    workspace_id: String,
+    session_id: String,
+    /// User query for a research turn (optional when `invoke_tool` is set).
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    force_local: bool,
+    /// Offline / explicit tool path: execute one tool under permission mediation.
+    /// Used to surface `permission_required` without a live model (#168 tests).
+    invoke_tool: Option<InvokeToolBody>,
+}
+
+#[derive(Deserialize)]
+struct InvokeToolBody {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct PermissionRespondBody {
+    workspace_id: String,
+    session_id: String,
+    request_id: String,
+    /// allow_once | deny | allow_session_path
+    decision: String,
+    typed: Option<String>,
+    #[serde(default)]
+    tool_name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+fn parse_decision(s: &str) -> Result<PermissionDecision, StatusCode> {
+    match s {
+        "deny" => Ok(PermissionDecision::Deny),
+        "allow_once" => Ok(PermissionDecision::AllowOnce),
+        "allow_session_path" => Ok(PermissionDecision::AllowSessionPath),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Ensure a per-session ToolHost exists for this workspace (#168).
+async fn ensure_session_host(
+    state: &AppState,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<(), StatusCode> {
+    let mut sessions = state.sessions.lock().await;
+    if let Some(s) = sessions.get(session_id) {
+        if s.workspace_id != workspace_id {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(());
+    }
+    let ws = {
+        let map = state
+            .workspaces
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let data = map.get(workspace_id).ok_or(StatusCode::NOT_FOUND)?;
+        data.workspace.clone()
+    };
+    let host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sessions.insert(
+        session_id.to_string(),
+        SessionHost {
+            host,
+            workspace_id: workspace_id.to_string(),
+        },
+    );
+    Ok(())
+}
+
+async fn session_prompt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SessionPromptBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    if body.session_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    ensure_session_host(&state, &body.workspace_id, &body.session_id).await?;
+
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(&body.session_id)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let events = if let Some(tool) = &body.invoke_tool {
+        // Permission-mediated tool invoke (no auto-approve). Writes stay pending.
+        let r = session
+            .host
+            .execute(&tool.name, &tool.arguments, None)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        r.events
+    } else {
+        let q = if body.query.trim().is_empty() {
+            "search workspace"
+        } else {
+            body.query.as_str()
+        };
+        let (ev, _, _) = run_research_turn(
+            &mut session.host,
+            state.provider.as_ref(),
+            q,
+            &body.session_id,
+            body.force_local || state.provider.is_none(),
+        )
+        .await?;
+        ev
+    };
+
+    Ok(Json(serde_json::json!({
+        "session_id": body.session_id,
+        "events": events_to_dto(&events),
+    })))
+}
+
+async fn permission_respond(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PermissionRespondBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    let decision = parse_decision(body.decision.trim())?;
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(&body.session_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if session.workspace_id != body.workspace_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Client-originated grant only — model never auto-approves (#168 / AGENTS #4).
+    let events = grant_and_execute(
+        &mut session.host,
+        &body.request_id,
+        decision,
+        body.typed.as_deref(),
+        &body.tool_name,
+        &body.arguments,
+        None,
+    )
+    .await
+    .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    Ok(Json(serde_json::json!({
+        "session_id": body.session_id,
+        "request_id": body.request_id,
+        "events": events_to_dto(&events),
+    })))
+}
+
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -442,6 +612,8 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/memory/list", post(list_memory))
         .route("/v1/research", post(research))
         .route("/v1/research/stream", get(research_sse))
+        .route("/v1/session/prompt", post(session_prompt))
+        .route("/v1/permission/respond", post(permission_respond))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state)
 }
@@ -522,6 +694,7 @@ async fn main() {
         workspaces: Arc::new(Mutex::new(workspaces)),
         key_workspaces: Arc::new(key_workspaces),
         provider,
+        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     };
 
     let app = build_app(state);
@@ -752,6 +925,7 @@ mod tests {
             workspaces: Arc::new(Mutex::new(workspaces)),
             key_workspaces: Arc::new(key_workspaces),
             provider,
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -850,6 +1024,139 @@ mod tests {
             api_key: None,
         };
         assert!(p.profile.kind == cd_core::providers::ProviderKind::Ollama);
+    }
+
+    #[tokio::test]
+    async fn permission_round_trip_allow_writes_skill() {
+        use http_body_util::BodyExt;
+
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a/x.md"), "payments\n").unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[("k", "ws-a")]);
+        let app = build_app(state);
+
+        let prompt = Request::builder()
+            .method("POST")
+            .uri("/v1/session/prompt")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{
+                  "workspace_id":"ws-a",
+                  "session_id":"s1",
+                  "invoke_tool":{
+                    "name":"save_skill",
+                    "arguments":{
+                      "id":"auth-trace",
+                      "name":"Auth Trace",
+                      "description":"Trace auth",
+                      "body_markdown":"1. Search\n2. Cite",
+                      "allows_write":false
+                    }
+                  }
+                }"#,
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(prompt).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = v["events"].as_array().unwrap();
+        let rid = events
+            .iter()
+            .find(|e| e["kind"] == "permission_required")
+            .and_then(|e| e["payload"]["request_id"].as_str())
+            .expect("permission_required")
+            .to_string();
+        let skill_path = dir.path().join("a/.contextdesk/skills/auth-trace.md");
+        assert!(!skill_path.exists(), "must not write before allow");
+
+        let respond = Request::builder()
+            .method("POST")
+            .uri("/v1/permission/respond")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","session_id":"s1","request_id":"{rid}","decision":"allow_once","tool_name":"save_skill","arguments":{{}}}}"#
+            )))
+            .unwrap();
+        let res = app.oneshot(respond).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            skill_path.is_file(),
+            "skill file should exist after allow: {skill_path:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_round_trip_deny_writes_nothing() {
+        use http_body_util::BodyExt;
+
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a/x.md"), "payments\n").unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[("k", "ws-a")]);
+        let app = build_app(state);
+
+        let prompt = Request::builder()
+            .method("POST")
+            .uri("/v1/session/prompt")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{
+                  "workspace_id":"ws-a",
+                  "session_id":"s2",
+                  "invoke_tool":{
+                    "name":"save_skill",
+                    "arguments":{
+                      "id":"deny-me",
+                      "name":"Deny Me",
+                      "description":"x",
+                      "body_markdown":"body",
+                      "allows_write":false
+                    }
+                  }
+                }"#,
+            ))
+            .unwrap();
+        let res = app.clone().oneshot(prompt).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rid = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "permission_required")
+            .and_then(|e| e["payload"]["request_id"].as_str())
+            .unwrap()
+            .to_string();
+
+        let respond = Request::builder()
+            .method("POST")
+            .uri("/v1/permission/respond")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","session_id":"s2","request_id":"{rid}","decision":"deny"}}"#
+            )))
+            .unwrap();
+        let res = app.oneshot(respond).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "error"),
+            "{v}"
+        );
+        let skill_path = dir.path().join("a/.contextdesk/skills/deny-me.md");
+        assert!(!skill_path.exists(), "deny must not write");
     }
 
     #[tokio::test]
