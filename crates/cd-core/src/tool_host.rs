@@ -62,6 +62,8 @@ pub struct ToolHost {
     pub audit: Option<AuditLog>,
     /// Memory directory under workspace.
     pub memory_dir: PathBuf,
+    /// Workspace data dir name (e.g. `.contextdesk`) from branding (#179).
+    workspace_dir_name: String,
     /// Pending permission requests keyed by request_id (UI-originated grants only).
     pending: std::collections::HashMap<String, PermissionRequest>,
     /// Single-use grants after UI AllowOnce (request_id → tool name + target).
@@ -97,17 +99,20 @@ pub struct ToolHost {
 impl ToolHost {
     /// Create host.
     pub fn new(workspace: Workspace, index: KeywordIndex, audit: Option<AuditLog>) -> Self {
+        let branding = crate::branding::Branding::embedded();
+        let ws_dir = branding.workspace_dir_name.clone();
         let memory_dir = workspace
             .roots
             .first()
-            .map(|r| r.join(".contextdesk").join("memory"))
-            .unwrap_or_else(|| PathBuf::from(".contextdesk/memory"));
+            .map(|r| r.join(&ws_dir).join("memory"))
+            .unwrap_or_else(|| PathBuf::from(format!("{ws_dir}/memory")));
         Self {
             workspace,
             index: Arc::new(index),
             permissions: PermissionState::default(),
             audit,
             memory_dir,
+            workspace_dir_name: ws_dir,
             pending: std::collections::HashMap::new(),
             approved_once: std::collections::HashMap::new(),
             confluence: None,
@@ -194,6 +199,11 @@ impl ToolHost {
     /// Enabled connector configs currently attached.
     pub fn connector_configs(&self) -> &[crate::connectors::ConnectorConfig] {
         &self.connector_configs
+    }
+
+    /// Workspace data directory name (from branding, e.g. `.contextdesk`).
+    pub fn workspace_dir_name(&self) -> &str {
+        &self.workspace_dir_name
     }
 
     /// Set full router budget (rounds, deadline, per-source caps).
@@ -1117,7 +1127,8 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
                 .and_then(|p| p.parent())
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| PathBuf::from("."));
-            root.join(".contextdesk")
+            let ws_dir = crate::branding::Branding::embedded().workspace_dir_name;
+            root.join(ws_dir)
                 .join("skills")
                 .join(format!("{safe}.md"))
                 .display()

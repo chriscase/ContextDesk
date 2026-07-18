@@ -20,13 +20,23 @@ pub struct MemoryFile {
     pub body: String,
 }
 
-/// Resolve `.contextdesk/memory` under the first workspace root.
+/// Resolve `{workspace_dir_name}/memory` under the first workspace root.
+///
+/// `workspace_dir_name` comes from [`crate::branding::Branding`] (e.g. `.contextdesk`).
 pub fn memory_dir(workspace: &Workspace) -> CoreResult<PathBuf> {
+    memory_dir_named(
+        workspace,
+        &crate::branding::Branding::embedded().workspace_dir_name,
+    )
+}
+
+/// Like [`memory_dir`] with an explicit workspace data dir name (#179).
+pub fn memory_dir_named(workspace: &Workspace, workspace_dir_name: &str) -> CoreResult<PathBuf> {
     let root = workspace
         .roots
         .first()
         .ok_or_else(|| CoreError::Policy("no workspace roots".into()))?;
-    let dir = root.join(".contextdesk").join("memory");
+    let dir = root.join(workspace_dir_name).join("memory");
     Ok(dir)
 }
 

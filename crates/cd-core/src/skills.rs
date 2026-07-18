@@ -176,7 +176,15 @@ pub fn set_skill_disabled(skill: &mut Skill, disabled: bool) {
 
 /// Default workspace skills directory under first root.
 pub fn workspace_skills_dir(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".contextdesk").join("skills")
+    workspace_skills_dir_named(
+        workspace_root,
+        &crate::branding::Branding::embedded().workspace_dir_name,
+    )
+}
+
+/// Skills dir with explicit branding workspace dir name (#179).
+pub fn workspace_skills_dir_named(workspace_root: &Path, workspace_dir_name: &str) -> PathBuf {
+    workspace_root.join(workspace_dir_name).join("skills")
 }
 
 /// Write a new skill file (caller must have SoftWrite grant).

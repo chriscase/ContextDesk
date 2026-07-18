@@ -98,7 +98,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::SAVE_SKILL.into(),
-            description: "Propose authoring a skill playbook under workspace .contextdesk/skills (SoftWrite; requires user Accept). Skills cannot raise write permissions."
+            description: "Propose authoring a skill playbook under the workspace data dir skills/ folder (SoftWrite; requires user Accept). Skills cannot raise write permissions."
                 .into(),
             side_effect: ToolSideEffect::SoftWrite,
             parameters: serde_json::json!({

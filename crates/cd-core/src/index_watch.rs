@@ -50,8 +50,9 @@ pub fn path_ignored_for_index(path: &Path) -> bool {
             if name == "node_modules" || name == "target" || name == "dist" || name == ".git" {
                 return true;
             }
-            // Dot-dirs except `.contextdesk` (matches `index::walk`).
-            if name.starts_with('.') && name != ".contextdesk" {
+            // Dot-dirs except branding workspace dir (matches `index::walk`).
+            let ws_dot = crate::branding::Branding::embedded().workspace_dir_name;
+            if name.starts_with('.') && name != ws_dot {
                 return true;
             }
         }
