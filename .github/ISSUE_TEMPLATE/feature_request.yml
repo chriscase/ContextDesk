@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose an improvement that fits the product non-goals
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [docs/NON_GOALS.md](https://github.com/chriscase/ContextDesk/blob/main/docs/NON_GOALS.md) before requesting coding-agent / unrestricted shell features.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Concrete behavior, not just "make X better".
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - desktop-ui
+        - retrieval / index
+        - providers
+        - connectors / tools
+        - security
+        - server / embed
+        - docs / community
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
