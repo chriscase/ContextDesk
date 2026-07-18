@@ -1168,6 +1168,27 @@ struct SkillDto {
     disabled: bool,
     allows_write: bool,
     path: String,
+    /// True when a sibling `module.toml` is present (#137).
+    has_module: bool,
+    module_id: Option<String>,
+}
+
+fn skill_to_dto(s: cd_core::skills::Skill) -> SkillDto {
+    let module_id = cd_core::skills::skill_module_toml_path(&s).and_then(|p| {
+        cd_core::modules::parse_module_file(&p)
+            .ok()
+            .map(|m| m.id)
+    });
+    SkillDto {
+        has_module: module_id.is_some(),
+        module_id,
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        disabled: s.disabled,
+        allows_write: s.allows_write,
+        path: s.path.display().to_string(),
+    }
 }
 
 #[tauri::command]
@@ -1175,17 +1196,102 @@ fn list_skills_cmd(state: State<'_, AppState>) -> Result<Vec<SkillDto>, String> 
     let cfg = state.config.lock().expect("config").clone();
     let dirs = skill_dirs_for(&state, &cfg);
     let skills = cd_core::skills::discover_skills(&dirs).map_err(|e| e.to_string())?;
-    Ok(skills
-        .into_iter()
-        .map(|s| SkillDto {
-            id: s.id,
-            name: s.name,
-            description: s.description,
-            disabled: s.disabled,
-            allows_write: s.allows_write,
-            path: s.path.display().to_string(),
-        })
-        .collect())
+    Ok(skills.into_iter().map(skill_to_dto).collect())
+}
+
+/// Result of enabling/disabling a skill (#137). May also request module capability approval.
+#[derive(Debug, Serialize)]
+struct SetSkillEnabledResult {
+    id: String,
+    enabled: bool,
+    /// When enabling a skill that ships `module.toml`, module may need #135 approval.
+    needs_module_approval: bool,
+    module_id: Option<String>,
+    preview: Option<String>,
+    reason: Option<String>,
+    type_confirm_phrase: Option<String>,
+}
+
+/// Persist skill enabled flag; when enabling a skill that ships `module.toml`,
+/// install into the modules dir and request first-use capability approval (#135/#136/#137).
+#[tauri::command]
+fn set_skill_enabled_cmd(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<SetSkillEnabledResult, String> {
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err("skill id required".into());
+    }
+    let cfg = state.config.lock().expect("config").clone();
+    let dirs = skill_dirs_for(&state, &cfg);
+    let skill = cd_core::skills::set_skill_enabled(&dirs, &id, enabled).map_err(|e| e.to_string())?;
+
+    if !enabled {
+        // Disabling the skill does not force-remove the module install; user manages Modules.
+        return Ok(SetSkillEnabledResult {
+            id: skill.id,
+            enabled: false,
+            needs_module_approval: false,
+            module_id: None,
+            preview: None,
+            reason: None,
+            type_confirm_phrase: None,
+        });
+    }
+
+    // Optional tool-shipping: provision sibling module.toml through #136 path.
+    let Some(src_dir) = cd_core::skills::skill_module_src_dir(&skill) else {
+        return Ok(SetSkillEnabledResult {
+            id: skill.id,
+            enabled: true,
+            needs_module_approval: false,
+            module_id: None,
+            preview: None,
+            reason: None,
+            type_confirm_phrase: None,
+        });
+    };
+
+    let mdir = modules_dir(&state)?;
+    let m = cd_core::modules::install_module_from_dir(&src_dir, &mdir).map_err(|e| e.to_string())?;
+    let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
+        .map_err(|e| e.to_string())?;
+
+    if !cd_core::modules::module_tools_allowed(&m, &grants) {
+        let req = cd_core::modules::permission_request_for_module_enable(&m);
+        return Ok(SetSkillEnabledResult {
+            id: skill.id,
+            enabled: true,
+            needs_module_approval: true,
+            module_id: Some(m.id),
+            preview: Some(req.preview.clone()),
+            reason: Some(req.reason.clone()),
+            type_confirm_phrase: req.type_confirm_phrase.clone(),
+        });
+    }
+
+    // Already granted or no caps required — enable module tools.
+    {
+        let mut cfg = state.config.lock().expect("config");
+        if !cfg.enabled_modules.iter().any(|x| x == &m.id) {
+            cfg.enabled_modules.push(m.id.clone());
+        }
+        let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+        save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    }
+    let _ = ensure_host(&state);
+
+    Ok(SetSkillEnabledResult {
+        id: skill.id,
+        enabled: true,
+        needs_module_approval: false,
+        module_id: Some(m.id),
+        preview: None,
+        reason: None,
+        type_confirm_phrase: None,
+    })
 }
 
 /// Module row for Settings (#136). No secrets.
@@ -2405,6 +2511,7 @@ pub fn run() {
             agent_turn,
             complete_permission_cmd,
             list_skills_cmd,
+            set_skill_enabled_cmd,
             propose_save_skill_cmd,
             list_modules,
             install_module,

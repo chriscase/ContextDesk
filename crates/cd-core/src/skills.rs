@@ -1,4 +1,11 @@
 //! Markdown skills discovery and parse.
+//!
+//! Write-claiming skills are review-gated (`enabled: false` by default). User
+//! enable is persisted in SKILL.md frontmatter so re-discovery does not
+//! silently re-disable (#137 / #38 follow-through). A skill directory MAY
+//! ship a sibling `module.toml` (`cd.module.v1`); enabling the skill can
+//! provision that module through the host lifecycle (#136) with capability
+//! grants (#135). Skills never elevate host permissions.
 
 use crate::error::CoreResult;
 use crate::injection::wrap_skill;
@@ -19,7 +26,7 @@ pub struct Skill {
     pub body: String,
     /// Path on disk.
     pub path: PathBuf,
-    /// Whether disabled by user.
+    /// Whether disabled by user (or review-gated default).
     #[serde(default)]
     pub disabled: bool,
     /// Skill claims write intent (still gated by host).
@@ -28,6 +35,11 @@ pub struct Skill {
 }
 
 /// Parse frontmatter from SKILL.md.
+///
+/// Enabled state is independent of `allows_write`:
+/// - explicit `enabled: true|false` wins
+/// - else explicit `disabled: true|false`
+/// - else default: write-claiming skills start disabled (review-gated)
 pub fn parse_skill_file(path: &Path) -> CoreResult<Option<Skill>> {
     let text = fs::read_to_string(path)?;
     let (meta, body) = split_frontmatter(&text);
@@ -43,8 +55,7 @@ pub fn parse_skill_file(path: &Path) -> CoreResult<Option<Skill>> {
         .get("allows_write")
         .map(|v| v == "true" || v == "yes")
         .unwrap_or(false);
-    // Agent-authored / write-claiming skills are review-gated: disabled until user enables.
-    let disabled = allows_write;
+    let disabled = resolve_disabled(&meta, allows_write);
     Ok(Some(Skill {
         id,
         name,
@@ -54,6 +65,18 @@ pub fn parse_skill_file(path: &Path) -> CoreResult<Option<Skill>> {
         disabled,
         allows_write,
     }))
+}
+
+/// Resolve disabled from explicit frontmatter, else review-gate write skills.
+fn resolve_disabled(meta: &std::collections::HashMap<String, String>, allows_write: bool) -> bool {
+    if let Some(v) = meta.get("enabled") {
+        return !(v == "true" || v == "yes");
+    }
+    if let Some(v) = meta.get("disabled") {
+        return v == "true" || v == "yes";
+    }
+    // No explicit flag: write-claiming skills are review-gated until user enables.
+    allows_write
 }
 
 #[allow(clippy::string_slice)] // safe: frontmatter fences are ASCII "---"
@@ -169,7 +192,7 @@ pub fn default_skill_dirs(config_dir: Option<&Path>, workspace_roots: &[PathBuf]
     dirs
 }
 
-/// Toggle disabled flag (user enable for review-gated write skills).
+/// Toggle disabled flag in memory (prefer [`set_skill_enabled_on_disk`] for persistence).
 pub fn set_skill_disabled(skill: &mut Skill, disabled: bool) {
     skill.disabled = disabled;
 }
@@ -187,16 +210,79 @@ pub fn workspace_skills_dir_named(workspace_root: &Path, workspace_dir_name: &st
     workspace_root.join(workspace_dir_name).join("skills")
 }
 
+/// Format skill file content with persistent `enabled` field (#137).
+pub fn format_skill_file(skill: &Skill) -> String {
+    let enabled = !skill.disabled;
+    format!(
+        "---\nid: {}\nname: {}\ndescription: {}\nallows_write: {}\nenabled: {}\n---\n\n{}\n",
+        skill.id, skill.name, skill.description, skill.allows_write, enabled, skill.body
+    )
+}
+
 /// Write a new skill file (caller must have SoftWrite grant).
+///
+/// Always persists `enabled` so re-discovery honors user choice (#137).
 pub fn write_skill(dir: &Path, skill: &Skill) -> CoreResult<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = dir.join(format!("{}.md", skill.id));
-    let content = format!(
-        "---\nid: {}\nname: {}\ndescription: {}\nallows_write: {}\n---\n\n{}\n",
-        skill.id, skill.name, skill.description, skill.allows_write, skill.body
-    );
-    fs::write(&path, content)?;
+    fs::write(&path, format_skill_file(skill))?;
     Ok(path)
+}
+
+/// Persist enabled/disabled to the skill file on disk and return the updated skill.
+///
+/// Re-discovery after this call must not silently re-disable a user-enabled skill.
+pub fn set_skill_enabled_on_disk(skill: &Skill, enabled: bool) -> CoreResult<Skill> {
+    let mut next = skill.clone();
+    next.disabled = !enabled;
+    let path = if skill.path.as_os_str().is_empty() {
+        return Err(crate::error::CoreError::Message(
+            "skill has no path on disk".into(),
+        ));
+    } else {
+        skill.path.clone()
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, format_skill_file(&next))?;
+    next.path = path;
+    Ok(next)
+}
+
+/// Find skill by id across dirs, set enabled, persist frontmatter.
+pub fn set_skill_enabled(dirs: &[PathBuf], id: &str, enabled: bool) -> CoreResult<Skill> {
+    let skills = discover_skills(dirs)?;
+    let skill = find_skill(&skills, id)
+        .ok_or_else(|| crate::error::CoreError::Message(format!("skill `{id}` not found")))?;
+    set_skill_enabled_on_disk(skill, enabled)
+}
+
+/// Path to a sibling `module.toml` if this skill lives in a directory that ships tools (#137).
+///
+/// - `…/my-skill/SKILL.md` → `…/my-skill/module.toml`
+/// - flat `…/skills/foo.md` has no sibling module dir (returns None unless co-located)
+pub fn skill_module_toml_path(skill: &Skill) -> Option<PathBuf> {
+    let parent = skill.path.parent()?;
+    let name = skill.path.file_name()?.to_str()?;
+    // Directory form: parent/SKILL.md
+    if name.eq_ignore_ascii_case("SKILL.md") {
+        let mt = parent.join("module.toml");
+        if mt.is_file() {
+            return Some(mt);
+        }
+    }
+    // Flat form: only if parent has module.toml and single-skill layout (unusual)
+    let mt = parent.join("module.toml");
+    if mt.is_file() && name.eq_ignore_ascii_case("SKILL.md") {
+        return Some(mt);
+    }
+    None
+}
+
+/// Directory containing a skill-bundled module (parent of `module.toml`), if any.
+pub fn skill_module_src_dir(skill: &Skill) -> Option<PathBuf> {
+    skill_module_toml_path(skill).and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -217,6 +303,7 @@ mod tests {
         let found = discover_skills(&[skills]).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "auth-trace");
+        assert!(!found[0].disabled, "read-only skills default enabled");
         assert!(catalog_summaries(&found).contains("auth-trace"));
     }
 
@@ -233,10 +320,53 @@ mod tests {
             allows_write: true,
         };
         let path = write_skill(dir.path(), &s).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("enabled: false"),
+            "write_skill must persist enabled flag: {text}"
+        );
         let parsed = parse_skill_file(&path).unwrap().unwrap();
         assert!(parsed.allows_write);
         assert!(parsed.disabled, "write skills start disabled");
         assert!(!catalog_summaries(&[parsed]).contains("draft"));
+    }
+
+    #[test]
+    fn enable_round_trip_write_skill_visible_in_catalog() {
+        // AC #137: create with allows_write (starts disabled) → enable → visible in catalog.
+        let dir = tempdir().unwrap();
+        let s = Skill {
+            id: "writer".into(),
+            name: "Writer".into(),
+            description: "Writes notes".into(),
+            body: "SoftWrite a note".into(),
+            path: PathBuf::new(),
+            disabled: true,
+            allows_write: true,
+        };
+        let path = write_skill(dir.path(), &s).unwrap();
+        let parsed = parse_skill_file(&path).unwrap().unwrap();
+        assert!(parsed.disabled);
+        assert!(!catalog_summaries(std::slice::from_ref(&parsed)).contains("writer"));
+
+        let enabled = set_skill_enabled_on_disk(&parsed, true).unwrap();
+        assert!(!enabled.disabled);
+        assert!(catalog_summaries(std::slice::from_ref(&enabled)).contains("writer"));
+
+        // Re-discovery must NOT silently re-disable.
+        let rediscovered = discover_skills(&[dir.path().to_path_buf()]).unwrap();
+        let again = find_skill(&rediscovered, "writer").expect("skill present");
+        assert!(
+            !again.disabled,
+            "re-discovery must honor persisted enabled=true"
+        );
+        assert!(catalog_summaries(&rediscovered).contains("writer"));
+
+        // Disable again via API
+        let off = set_skill_enabled(&[dir.path().to_path_buf()], "writer", false).unwrap();
+        assert!(off.disabled);
+        let rediscovered2 = discover_skills(&[dir.path().to_path_buf()]).unwrap();
+        assert!(!catalog_summaries(&rediscovered2).contains("writer"));
     }
 
     #[test]
@@ -261,5 +391,91 @@ mod tests {
         let ctx = skill_context(&s);
         assert!(ctx.contains("cannot grant HardWrite"));
         assert!(ctx.contains("UNTRUSTED") || ctx.contains("SKILL"));
+    }
+
+    #[test]
+    fn skill_bundled_module_toml_detected_and_cannot_self_grant() {
+        // Skill directory MAY ship module.toml; tools still cannot self-grant (#137).
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("tool-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nid: tool-skill\nname: Tool Skill\ndescription: ships tools\nallows_write: true\nenabled: false\n---\n\nUse the bundled tools.\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("module.toml"),
+            r#"
+schema = "cd.module.v1"
+id = "tool-skill"
+name = "Tool Skill Module"
+version = "0.1.0"
+
+[entrypoint]
+command = "/usr/bin/true"
+args = []
+
+[[provided_tools]]
+name = "note_read"
+description = "Read"
+
+[[provided_tools]]
+name = "note_write"
+description = "Soft write"
+
+hard_write_tools = []
+
+[requested_capabilities]
+filesystem_roots = ["/tmp/skill-sandbox"]
+network_hosts = []
+secret_refs = []
+"#,
+        )
+        .unwrap();
+
+        let skills = discover_skills(&[dir.path().to_path_buf()]).unwrap();
+        let sk = find_skill(&skills, "tool-skill").expect("skill");
+        assert!(sk.disabled);
+        let mt = skill_module_toml_path(sk).expect("module.toml sibling");
+        assert!(mt.ends_with("module.toml"));
+        let src = skill_module_src_dir(sk).expect("src dir");
+        assert_eq!(src, skill_dir);
+
+        let manifest = crate::modules::parse_module_file(&mt).unwrap();
+        assert_eq!(manifest.id, "tool-skill");
+        // Module cannot self-grant — host/UI must grant (#135 spirit).
+        let self_grant = crate::modules::ModuleGrantStore::try_self_grant_from_manifest(&manifest);
+        assert!(self_grant.is_err());
+        // Side effects stay host-classified (default Read unless hard_write_tools lists the name).
+        let se =
+            crate::modules::side_effect_for_module_tool("note_write", &manifest.hard_write_tools);
+        assert_eq!(se, crate::tools::ToolSideEffect::Read);
+        let se_hw =
+            crate::modules::side_effect_for_module_tool("evil_delete", &["evil_delete".into()]);
+        assert_eq!(se_hw, crate::tools::ToolSideEffect::HardWrite);
+
+        // Enable skill; re-discover still has module path; tools still need host grants.
+        let enabled = set_skill_enabled_on_disk(sk, true).unwrap();
+        assert!(!enabled.disabled);
+        assert!(skill_module_toml_path(&enabled).is_some());
+        let store = crate::modules::ModuleGrantStore::new();
+        assert!(
+            !crate::modules::module_tools_allowed(&manifest, &store),
+            "requested caps without UI grant → tools blocked"
+        );
+    }
+
+    #[test]
+    fn explicit_enabled_overrides_allows_write_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pre.md");
+        fs::write(
+            &path,
+            "---\nid: pre\nname: Pre\ndescription: d\nallows_write: true\nenabled: true\n---\n\nbody\n",
+        )
+        .unwrap();
+        let s = parse_skill_file(&path).unwrap().unwrap();
+        assert!(!s.disabled);
     }
 }
