@@ -44,7 +44,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 | Audit denials + tamper-evidence | Implemented: outcomes include `denied`/`granted`/`pending`/`allowed`/`error`; SHA-256 hash chain + `verify_chain` (#143). |
 | Grok session opt-in + URL pin | Implemented (exact host `api.x.ai`; refresh prefers pinned auth host) |
 | Server LAN exposure guard | Implemented: non-loopback bind refuses empty API keys; `--allow-lan` warns on stderr (#144). Empty-key authorize bypass is loopback-only. |
-| MCP host-side side-effect policy | Config types; runtime dispatch still roadmap (#128/#129) |
+| MCP host-side side-effect policy | Implemented: spawn/register/dispatch (#128); HardWrite default + first-use approval (#129); results `wrap_untrusted` |
 | SQL single-SELECT allowlist | Keyword denylist + tests; AST harden residual |
 | Server multi-tenant isolation | workspace_id on routes; API keys hashed |
 
@@ -60,5 +60,5 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 - Remote models will see whatever tools return (nonce labeling reduces instruction-following risk; does not eliminate model-level injection)  
 - OIDC session reuse has ToS and token-theft residual risk  
 - DNS resolve step still trusts the OS resolver (pinning limits rebinding after connect; does not replace a resolver that lies)  
-- MCP stdio servers remain untrusted once enabled; approval-by-default for MCP tools is still open (#129)  
+- MCP stdio servers remain untrusted once enabled; tools default HardWrite + first-use approval (#129); absolute command only; child `env_clear` |
 - Team server TLS is operator-owned (reverse proxy); cd-server itself does not terminate TLS  

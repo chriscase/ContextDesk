@@ -94,6 +94,8 @@ pub struct ToolHost {
     dynamic_tools: std::collections::HashMap<String, crate::connectors::RegisteredTool>,
     /// Persisted connector configs (enabled entries drive future attachers).
     connector_configs: Vec<crate::connectors::ConnectorConfig>,
+    /// Live MCP stdio sessions keyed by server name (#128).
+    mcp_sessions: std::collections::HashMap<String, crate::mcp_client::McpSession>,
 }
 
 impl ToolHost {
@@ -133,6 +135,7 @@ impl ToolHost {
             router_budget: crate::router::RouterBudget::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
+            mcp_sessions: std::collections::HashMap::new(),
         }
     }
 
@@ -143,12 +146,13 @@ impl ToolHost {
 
     /// Store connector configs and (re)attach known dynamic tools.
     ///
-    /// Kind-specific executors for MCP/SQL/HTTP land in #128–#131; this wires
-    /// the registry surface and enables a stub tool when `settings.stub_tool` is set.
+    /// Spawns MCP servers (`kind: "mcp"`) and registers discovered tools (#128).
+    /// Stub tools via `settings.stub_tool` remain for registry tests.
     pub fn attach_connectors(&mut self, configs: &[crate::connectors::ConnectorConfig]) {
         self.connector_configs = configs.to_vec();
-        // Drop previous dynamic tools; re-register from configs.
+        // Drop previous dynamic tools and MCP children (Drop kills processes).
         self.dynamic_tools.clear();
+        self.mcp_sessions.clear();
         for c in configs.iter().filter(|c| c.enabled) {
             // Optional test/dev stub: settings.stub_tool = { name, description, detail }
             if let Some(stub) = c.settings.get("stub_tool") {
@@ -193,7 +197,45 @@ impl ToolHost {
                     exec: crate::connectors::ConnectorExecutor::Stub { detail },
                 });
             }
+
+            if c.kind == "mcp" {
+                if let Err(e) = self.attach_mcp_connector(c) {
+                    tracing::error!(
+                        connector_id = %c.id,
+                        error = %e,
+                        "MCP connector failed to spawn; tools not registered"
+                    );
+                }
+            }
         }
+    }
+
+    fn attach_mcp_connector(&mut self, c: &crate::connectors::ConnectorConfig) -> CoreResult<()> {
+        let mcp_cfg = mcp_server_config_from_connector(c)?;
+        let mut session = crate::mcp_client::McpSession::spawn(&mcp_cfg)?;
+        let tools = session.list_tools()?;
+        let server = mcp_cfg.name.clone();
+        for t in tools {
+            let bare = t
+                .name
+                .strip_prefix(&format!("mcp__{server}__"))
+                .unwrap_or(t.name.as_str())
+                .to_string();
+            self.register_tool(crate::connectors::RegisteredTool {
+                spec: crate::tools::ToolSpec {
+                    name: t.name.clone(),
+                    description: t.description,
+                    side_effect: t.side_effect,
+                    parameters: t.parameters,
+                },
+                exec: crate::connectors::ConnectorExecutor::Mcp {
+                    server_id: server.clone(),
+                    tool: bare,
+                },
+            });
+        }
+        self.mcp_sessions.insert(server, session);
+        Ok(())
     }
 
     /// Enabled connector configs currently attached.
@@ -1080,7 +1122,7 @@ impl ToolHost {
     async fn dispatch_dynamic(
         &mut self,
         name: &str,
-        _arguments: &Value,
+        arguments: &Value,
     ) -> CoreResult<(bool, String, String, Option<String>)> {
         let Some(reg) = self.dynamic_tools.get(name).cloned() else {
             return Err(CoreError::Message(format!("unknown tool `{name}`")));
@@ -1089,9 +1131,19 @@ impl ToolHost {
             crate::connectors::ConnectorExecutor::Stub { detail } => {
                 Ok((true, format!("{name} ok"), detail, None))
             }
-            crate::connectors::ConnectorExecutor::Mcp { .. } => Err(CoreError::Message(format!(
-                "MCP tool `{name}` not wired yet (see #128)"
-            ))),
+            crate::connectors::ConnectorExecutor::Mcp { server_id, tool } => {
+                let session = self.mcp_sessions.get_mut(&server_id).ok_or_else(|| {
+                    CoreError::Message(format!("MCP server `{server_id}` is not running"))
+                })?;
+                let raw = session.call_tool(&tool, arguments.clone())?;
+                let wrapped = crate::injection::wrap_untrusted(&format!("mcp:{server_id}"), &raw);
+                Ok((
+                    true,
+                    format!("mcp `{server_id}/{tool}` ok"),
+                    wrapped,
+                    Some(format!("mcp:{server_id}:{tool}")),
+                ))
+            }
             crate::connectors::ConnectorExecutor::Sql { .. } => Err(CoreError::Message(format!(
                 "SQL tool `{name}` not wired yet (see #130)"
             ))),
@@ -1100,6 +1152,70 @@ impl ToolHost {
             ))),
         }
     }
+}
+
+/// Build [`McpServerConfig`] from a `kind: "mcp"` connector entry.
+fn mcp_server_config_from_connector(
+    c: &crate::connectors::ConnectorConfig,
+) -> CoreResult<crate::connectors::McpServerConfig> {
+    let name = c
+        .settings
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(c.id.as_str())
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(CoreError::Config("MCP connector missing name".into()));
+    }
+    let command = c
+        .settings
+        .get("command")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CoreError::Config("MCP connector missing settings.command".into()))?
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return Err(CoreError::Config("MCP command is empty".into()));
+    }
+    let args: Vec<String> = c
+        .settings
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let read_tools: Vec<String> = c
+        .settings
+        .get("read_tools")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let hard_write_tools: Vec<String> = c
+        .settings
+        .get("hard_write_tools")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::connectors::McpServerConfig {
+        name,
+        command: std::path::PathBuf::from(command),
+        args,
+        enabled: c.enabled,
+        hard_write_tools,
+        read_tools,
+    })
 }
 
 fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
@@ -1729,6 +1845,113 @@ mod tests {
             .unwrap();
         assert!(r.ok);
         assert!(r.detail_raw.contains("hello from dynamic"));
+    }
+
+    /// #128: bad MCP spawn is skipped (no panic); tools not registered.
+    #[test]
+    fn mcp_failed_spawn_skipped_without_panic() {
+        let (_dir, mut host) = host_with_docs();
+        host.attach_connectors(&[crate::connectors::ConnectorConfig {
+            id: "bad-mcp".into(),
+            kind: "mcp".into(),
+            enabled: true,
+            settings: json!({
+                "name": "bad",
+                "command": "npx",
+                "args": []
+            }),
+        }]);
+        assert!(
+            !host
+                .specs_for_model()
+                .iter()
+                .any(|s| s.name.starts_with("mcp__")),
+            "failed MCP must not register tools"
+        );
+    }
+
+    /// #128: offline fixture — attach MCP connector, discover tool, dispatch + wrap_untrusted.
+    #[tokio::test]
+    async fn mcp_echo_fixture_attach_dispatch_wraps_untrusted() {
+        let (python, script) = mcp_echo_fixture_paths();
+        let (_dir, mut host) = host_with_docs();
+        host.attach_connectors(&[crate::connectors::ConnectorConfig {
+            id: "mcp-echo".into(),
+            kind: "mcp".into(),
+            enabled: true,
+            settings: json!({
+                "name": "echo",
+                "command": python.to_string_lossy(),
+                "args": [script.to_string_lossy()],
+                "read_tools": ["echo"]
+            }),
+        }]);
+        let specs = host.specs_for_model();
+        assert!(
+            specs.iter().any(|s| s.name == "mcp__echo__echo"),
+            "MCP tool missing from specs: {:?}",
+            specs
+                .iter()
+                .map(|s| s.name.as_str())
+                .filter(|n| n.starts_with("mcp__"))
+                .collect::<Vec<_>>()
+        );
+        // First-use MCP approval (#129), then execute.
+        let r = host
+            .execute("mcp__echo__echo", &json!({"message": "wire"}), None)
+            .await
+            .unwrap();
+        assert!(!r.ok);
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("MCP requires first-use approval");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host
+            .execute("mcp__echo__echo", &json!({"message": "wire"}), Some(&rid))
+            .await
+            .unwrap();
+        assert!(r2.ok, "summary={} detail={}", r2.summary, r2.detail_raw);
+        assert!(
+            r2.detail_raw.contains("echo:wire"),
+            "missing echo payload: {}",
+            r2.detail_raw
+        );
+        assert!(
+            r2.detail_raw.contains("UNTRUSTED_DATA")
+                && r2.detail_raw.contains("mcp:echo")
+                && r2.detail_raw.contains("END_UNTRUSTED_DATA"),
+            "MCP result must be wrap_untrusted: {}",
+            r2.detail_raw
+        );
+    }
+
+    fn mcp_echo_fixture_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp_echo_server.py");
+        assert!(script.is_file(), "missing {}", script.display());
+        let python = std::env::var_os("PYTHON")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                for p in [
+                    "/opt/homebrew/bin/python3",
+                    "/usr/local/bin/python3",
+                    "/usr/bin/python3",
+                ] {
+                    let pb = std::path::PathBuf::from(p);
+                    if pb.is_file() {
+                        return Some(pb);
+                    }
+                }
+                None
+            })
+            .expect("python3 for MCP fixture");
+        (python, script)
     }
 
     #[test]

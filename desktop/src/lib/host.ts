@@ -199,6 +199,10 @@ export type ConnectorDto = {
   kind: string;
   enabled: boolean;
   label: string;
+  /** Non-secret kind settings (MCP command/args, etc.). */
+  settings?: Record<string, unknown>;
+  /** Tools discovered after host attach (MCP names like mcp__server__tool). */
+  discovered_tools?: string[];
 };
 
 export async function hostListConnectors(): Promise<ConnectorDto[]> {
@@ -223,9 +227,22 @@ export async function hostListConnectorKinds(): Promise<string[]> {
 
 /** Persist connector list (id/kind/enabled/settings only). Rebuilds host. */
 export async function hostSaveConnectors(
-  connectors: { id: string; kind: string; enabled: boolean; settings?: unknown }[],
+  connectors: {
+    id: string;
+    kind: string;
+    enabled: boolean;
+    settings?: unknown;
+  }[],
 ): Promise<ConnectorDto[]> {
-  if (!isTauri()) return connectors.map((c) => ({ ...c, label: c.kind, settings: undefined }));
+  if (!isTauri()) {
+    return connectors.map((c) => ({
+      id: c.id,
+      kind: c.kind,
+      enabled: c.enabled,
+      label: c.kind,
+      settings: (c.settings as Record<string, unknown>) ?? {},
+    }));
+  }
   return invoke<ConnectorDto[]>("save_connectors", {
     connectors: connectors.map((c) => ({
       id: c.id,

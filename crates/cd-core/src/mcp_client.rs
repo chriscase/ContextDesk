@@ -129,6 +129,9 @@ impl McpSession {
         let line = serde_json::to_string(&msg)?;
         writeln!(self.stdin, "{line}")
             .map_err(|e| CoreError::Message(format!("mcp write: {e}")))?;
+        self.stdin
+            .flush()
+            .map_err(|e| CoreError::Message(format!("mcp flush: {e}")))?;
         Ok(())
     }
 
@@ -292,5 +295,74 @@ mod tests {
     #[test]
     fn validate_absolute() {
         validate_mcp_command(&PathBuf::from("/usr/bin/true")).unwrap();
+    }
+
+    /// Offline #128 fixture: spawn → list_tools → call_tool (no network).
+    #[test]
+    fn echo_fixture_list_and_call_round_trip() {
+        let (python, script) = echo_fixture_paths();
+        let cfg = McpServerConfig {
+            name: "echo".into(),
+            command: python,
+            args: vec![script.to_string_lossy().into_owned()],
+            enabled: true,
+            hard_write_tools: vec![],
+            read_tools: vec!["echo".into()],
+        };
+        let mut sess = McpSession::spawn(&cfg).expect("spawn echo fixture");
+        let tools = sess.list_tools().expect("list_tools");
+        assert!(
+            tools.iter().any(|t| t.name == "mcp__echo__echo"),
+            "expected mcp__echo__echo, got {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let echo = tools.iter().find(|t| t.name == "mcp__echo__echo").unwrap();
+        assert_eq!(echo.side_effect, ToolSideEffect::Read);
+        let out = sess
+            .call_tool("echo", json!({"message": "hi-🔒"}))
+            .expect("call_tool");
+        assert!(
+            out.contains("echo:hi-🔒") || out.contains("echo:hi"),
+            "unexpected tool result: {out}"
+        );
+    }
+
+    fn echo_fixture_paths() -> (PathBuf, PathBuf) {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp_echo_server.py");
+        assert!(script.is_file(), "missing fixture at {}", script.display());
+        let python = std::env::var_os("PYTHON")
+            .map(PathBuf::from)
+            .or_else(|| which_abs("python3"))
+            .or_else(|| which_abs("python"))
+            .expect("python3 required for MCP fixture test");
+        assert!(
+            python.is_absolute(),
+            "python path must be absolute: {}",
+            python.display()
+        );
+        (python, script)
+    }
+
+    fn which_abs(bin: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(bin);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        // Common absolute fallbacks (macOS Homebrew / Linux).
+        for p in [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+        ] {
+            let pb = PathBuf::from(p);
+            if pb.is_file() {
+                return Some(pb);
+            }
+        }
+        None
     }
 }
