@@ -18,6 +18,8 @@ type Block =
   | { kind: "p"; text: string }
   | { kind: "pre"; lang: string; text: string; open: boolean }
   | { kind: "ul"; items: string[] }
+  | { kind: "ol"; items: string[] }
+  | { kind: "blockquote"; text: string }
   | { kind: "h"; level: 1 | 2 | 3; text: string }
   | {
       kind: "table";
@@ -164,6 +166,8 @@ function parseBlocks(text: string): Block[] {
         if (!isTableRow(rowLine) || isTableSep(rowLine)) break;
         if (rowLine.startsWith("```") || /^#{1,3}\s+/.test(rowLine)) break;
         if (/^[-*]\s+/.test(rowLine) && !rowLine.includes("|")) break;
+        if (/^\d+[.)]\s+/.test(rowLine) && !rowLine.includes("|")) break;
+        if (/^>\s?/.test(rowLine)) break;
         const cells = parseTableRow(rowLine);
         // Pad / trim to header width
         const normalized = headers.map((_, ci) => cells[ci] ?? "");
@@ -207,12 +211,34 @@ function parseBlocks(text: string): Block[] {
       continue;
     }
 
+    // Ordered list: 1. / 1)
+    if (/^\d+[.)]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+[.)]\s+/, ""));
+        i += 1;
+      }
+      blocks.push({ kind: "ol", items });
+      continue;
+    }
+
+    // Blockquote: consecutive lines starting with >
+    if (/^>\s?/.test(line)) {
+      const parts: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        parts.push(lines[i].replace(/^>\s?/, ""));
+        i += 1;
+      }
+      blocks.push({ kind: "blockquote", text: parts.join("\n") });
+      continue;
+    }
+
     if (line.trim() === "") {
       i += 1;
       continue;
     }
 
-    // Paragraph — stop before tables, fences, lists, headings
+    // Paragraph — stop before tables, fences, lists, quotes, headings
     const para: string[] = [line];
     i += 1;
     while (
@@ -221,6 +247,8 @@ function parseBlocks(text: string): Block[] {
       !lines[i].startsWith("```") &&
       !/^#{1,3}\s+/.test(lines[i]) &&
       !/^[-*]\s+/.test(lines[i]) &&
+      !/^\d+[.)]\s+/.test(lines[i]) &&
+      !/^>\s?/.test(lines[i]) &&
       !isTableStart(lines, i)
     ) {
       // Lone table-looking line without a following separator: keep as prose
@@ -397,22 +425,64 @@ function TableView({
   );
 }
 
+function CodeBlock({
+  lang,
+  text,
+  open,
+}: {
+  lang: string;
+  text: string;
+  open: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* clipboard may be unavailable offline / denied */
+    }
+  };
+  return (
+    <div
+      className="md-pre-wrap md-block-enter"
+      data-open={open ? "true" : "false"}
+    >
+      <div className="md-pre-toolbar">
+        <span className="md-pre-lang">{lang || "code"}</span>
+        <button
+          type="button"
+          className="md-pre-copy"
+          onClick={() => void onCopy()}
+          title="Copy code"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre
+        className="md-pre"
+        data-open={open ? "true" : "false"}
+        data-lang={lang || undefined}
+      >
+        <code dangerouslySetInnerHTML={{ __html: escapeHtml(text) }} />
+      </pre>
+    </div>
+  );
+}
+
 function BlocksView({ blocks }: { blocks: Block[] }) {
   return (
     <>
       {blocks.map((b, idx) => {
         if (b.kind === "pre") {
           return (
-            <pre
+            <CodeBlock
               key={`pre-${idx}-${b.lang}`}
-              className="md-pre md-block-enter"
-              data-open={b.open ? "true" : "false"}
-              data-lang={b.lang || undefined}
-            >
-              <code
-                dangerouslySetInnerHTML={{ __html: escapeHtml(b.text) }}
-              />
-            </pre>
+              lang={b.lang}
+              text={b.text}
+              open={b.open}
+            />
           );
         }
         if (b.kind === "table") {
@@ -428,6 +498,27 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
                 />
               ))}
             </ul>
+          );
+        }
+        if (b.kind === "ol") {
+          return (
+            <ol key={`ol-${idx}`} className="md-ol md-block-enter">
+              {b.items.map((it, j) => (
+                <li
+                  key={j}
+                  dangerouslySetInnerHTML={{ __html: renderInline(it) }}
+                />
+              ))}
+            </ol>
+          );
+        }
+        if (b.kind === "blockquote") {
+          return (
+            <blockquote
+              key={`bq-${idx}`}
+              className="md-blockquote md-block-enter"
+              dangerouslySetInnerHTML={{ __html: renderInline(b.text) }}
+            />
           );
         }
         if (b.kind === "h") {
@@ -455,7 +546,13 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
 /** Prefer structured blocks when tables/code fences need real layout. */
 function needsStructuredRender(blocks: Block[]): boolean {
   return blocks.some(
-    (b) => b.kind === "table" || b.kind === "pre" || b.kind === "ul" || b.kind === "h",
+    (b) =>
+      b.kind === "table" ||
+      b.kind === "pre" ||
+      b.kind === "ul" ||
+      b.kind === "ol" ||
+      b.kind === "blockquote" ||
+      b.kind === "h",
   );
 }
 
