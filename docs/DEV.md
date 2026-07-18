@@ -77,7 +77,8 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 | Kind | Module | Status | Notes |
 |------|--------|--------|--------|
 | Files / memory | workspace + `memory_fs` | **Shipped** | Allowlisted roots; Settings workspace |
-| SQLite RO | `sql_ro` | **Shipped** | Single-SELECT denylist; host `sql_ro_query` |
+| SQLite RO | `sql_ro` + `sql_query__{id}` | **Shipped** | Connector `kind:sqlite` absolute path; `SQLITE_OPEN_READ_ONLY` + `query_only`; wall-clock interrupt timeout; agent tool via registry (#130) |
+| Postgres RO | `sql_ro::execute_postgres_ro` | **Shipped** | Connector `kind:postgres`; session `default_transaction_read_only` + `statement_timeout`; password keychain-only; **sslmode=disable** in this build (TLS residual for prefer/require) |
 | Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors. **Wire path (#132):** Settings → keychain PAT → `set_confluence` / `apply_host_connectors` → `specs_for_model` exposes `confluence_search`/`confluence_get_page` → dispatch → `cql_search`/`fetch_page`. Offline: `cargo test -p cd-core --lib confluence` (includes wiremock Bearer + space filter). |
 | X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
 | Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
@@ -101,6 +102,24 @@ Forward-looking MCP config shape (not a current Settings feature):
 ```
 
 No marketplace auto-start.
+
+## Postgres read-only role (recommended)
+
+Agent SQL tools only run single-SELECT statements and set session `default_transaction_read_only` + `statement_timeout`, but the database role should still be least-privilege:
+
+```sql
+-- Run as a superuser / owner once per database.
+CREATE ROLE cd_ro LOGIN PASSWORD '...';  -- store password in OS keychain via Settings, not config.json
+GRANT CONNECT ON DATABASE your_db TO cd_ro;
+GRANT USAGE ON SCHEMA public TO cd_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO cd_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cd_ro;
+ALTER ROLE cd_ro NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+```
+
+Settings → Connectors → Postgres: host / database / user / sslmode (non-secret) + password (keychain). Tool name: `sql_query__{connector_id}`.
+
+**TLS residual:** this build supports `sslmode=disable` only for the tokio-postgres NoTls path; `prefer`/`require` are refused with a clear error until a rustls connector is added.
 
 ## Grok Build session (opt-in)
 

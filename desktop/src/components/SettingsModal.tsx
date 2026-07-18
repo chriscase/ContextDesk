@@ -9,6 +9,7 @@ import {
   hostGetX,
   hostListConnectors,
   hostListConnectorKinds,
+  hostSetConnectorSecret,
   hostListLocalCandidates,
   hostListWebResearchSources,
   hostSaveConnectors,
@@ -127,6 +128,8 @@ export function SettingsModal({
   const [connectorKinds, setConnectorKinds] = useState<string[]>([]);
   const [newConnectorKind, setNewConnectorKind] = useState("sqlite");
   const [connectorsNote, setConnectorsNote] = useState<string | null>(null);
+  /** Postgres passwords keyed by connector id (keychain on Save; never in config). */
+  const [pgPasswordDrafts, setPgPasswordDrafts] = useState<Record<string, string>>({});
   const baseId = useId();
 
   useEffect(() => {
@@ -553,6 +556,22 @@ export function SettingsModal({
       );
       setConnectors(saved);
       setConnectorsNote(null);
+      // Keychain secrets for Postgres (never written to config.json).
+      for (const c of saved.filter((x) => x.kind === "postgres")) {
+        const draft = pgPasswordDrafts[c.id]?.trim();
+        if (draft && !draft.split("").every((ch) => ch === "•")) {
+          try {
+            await hostSetConnectorSecret(c.id, "postgres_password", draft);
+          } catch (err) {
+            setConnectorsNote(
+              err instanceof Error
+                ? err.message
+                : "Could not store Postgres password in keychain",
+            );
+          }
+        }
+      }
+      setPgPasswordDrafts({});
     } catch (e) {
       setConnectorsNote(
         e instanceof Error ? e.message : "Could not save connectors",
@@ -1200,7 +1219,18 @@ export function SettingsModal({
                                 args: [] as string[],
                                 read_tools: [] as string[],
                               }
-                            : {};
+                            : kind === "sqlite"
+                              ? { path: "", timeout_ms: 5000 }
+                              : kind === "postgres"
+                                ? {
+                                    host: "127.0.0.1",
+                                    port: 5432,
+                                    database: "",
+                                    user: "cd_ro",
+                                    sslmode: "disable",
+                                    timeout_ms: 5000,
+                                  }
+                                : {};
                         setConnectors((list) => [
                           ...list,
                           {
@@ -1296,6 +1326,155 @@ export function SettingsModal({
                               No tools discovered yet — Save to spawn and list tools.
                             </p>
                           ) : null}
+                        </div>
+                      );
+                    })}
+                  {connectors
+                    .filter((c) => c.kind === "sqlite")
+                    .map((c) => {
+                      const settings = (c.settings ?? {}) as {
+                        path?: string;
+                        timeout_ms?: number;
+                      };
+                      return (
+                        <div key={`sqlite-cfg-${c.id}`} className="settings-connector-block">
+                          <p className="field__label">SQLite RO: {c.id}</p>
+                          <TextField
+                            id={`${baseId}-sqlite-path-${c.id}`}
+                            label="Absolute database path"
+                            hint="Opened SQLITE_OPEN_READ_ONLY + query_only; SELECT only."
+                            value={settings.path ?? ""}
+                            onChange={(e) => {
+                              const path = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: {
+                                          ...(x.settings ?? {}),
+                                          path,
+                                          timeout_ms:
+                                            (x.settings as { timeout_ms?: number })
+                                              ?.timeout_ms ?? 5000,
+                                        },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="/absolute/path/to/db.sqlite"
+                          />
+                          <p className="field__hint">
+                            Tool: <code>sql_query__{c.id}</code>
+                          </p>
+                        </div>
+                      );
+                    })}
+                  {connectors
+                    .filter((c) => c.kind === "postgres")
+                    .map((c) => {
+                      const settings = (c.settings ?? {}) as {
+                        host?: string;
+                        port?: number;
+                        database?: string;
+                        user?: string;
+                        sslmode?: string;
+                      };
+                      return (
+                        <div key={`pg-cfg-${c.id}`} className="settings-connector-block">
+                          <p className="field__label">Postgres RO: {c.id}</p>
+                          <TextField
+                            id={`${baseId}-pg-host-${c.id}`}
+                            label="Host"
+                            value={settings.host ?? "127.0.0.1"}
+                            onChange={(e) => {
+                              const host = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), host },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                          />
+                          <TextField
+                            id={`${baseId}-pg-db-${c.id}`}
+                            label="Database"
+                            value={settings.database ?? ""}
+                            onChange={(e) => {
+                              const database = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), database },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                          />
+                          <TextField
+                            id={`${baseId}-pg-user-${c.id}`}
+                            label="User (RO role)"
+                            hint="Prefer a dedicated read-only role — see docs/DEV.md."
+                            value={settings.user ?? "cd_ro"}
+                            onChange={(e) => {
+                              const user = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), user },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                          />
+                          <TextField
+                            id={`${baseId}-pg-ssl-${c.id}`}
+                            label="sslmode"
+                            hint="This build supports sslmode=disable (TLS residual for prefer/require)."
+                            value={settings.sslmode ?? "disable"}
+                            onChange={(e) => {
+                              const sslmode = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), sslmode },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                          />
+                          <TextField
+                            id={`${baseId}-pg-pw-${c.id}`}
+                            label="Password (keychain)"
+                            type="password"
+                            hint="Stored in OS keychain only — never in config.json."
+                            value={pgPasswordDrafts[c.id] ?? ""}
+                            onChange={(e) =>
+                              setPgPasswordDrafts((m) => ({
+                                ...m,
+                                [c.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="••••••••"
+                          />
+                          <p className="field__hint">
+                            Tool: <code>sql_query__{c.id}</code>
+                          </p>
                         </div>
                       );
                     })}

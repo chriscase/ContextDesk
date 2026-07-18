@@ -96,6 +96,8 @@ pub struct ToolHost {
     connector_configs: Vec<crate::connectors::ConnectorConfig>,
     /// Live MCP stdio sessions keyed by server name (#128).
     mcp_sessions: std::collections::HashMap<String, crate::mcp_client::McpSession>,
+    /// SQL RO backends keyed by connector id (#130).
+    sql_backends: std::collections::HashMap<String, crate::sql_ro::SqlBackend>,
 }
 
 impl ToolHost {
@@ -136,6 +138,7 @@ impl ToolHost {
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
             mcp_sessions: std::collections::HashMap::new(),
+            sql_backends: std::collections::HashMap::new(),
         }
     }
 
@@ -147,12 +150,25 @@ impl ToolHost {
     /// Store connector configs and (re)attach known dynamic tools.
     ///
     /// Spawns MCP servers (`kind: "mcp"`) and registers discovered tools (#128).
+    /// Attaches SQLite/Postgres RO sources and registers `sql_query__{id}` (#130).
     /// Stub tools via `settings.stub_tool` remain for registry tests.
+    ///
+    /// `postgres_passwords` maps connector id → password from keychain (host only).
     pub fn attach_connectors(&mut self, configs: &[crate::connectors::ConnectorConfig]) {
+        self.attach_connectors_with_secrets(configs, &std::collections::HashMap::new());
+    }
+
+    /// Like [`attach_connectors`] with optional Postgres passwords (never from config.json).
+    pub fn attach_connectors_with_secrets(
+        &mut self,
+        configs: &[crate::connectors::ConnectorConfig],
+        postgres_passwords: &std::collections::HashMap<String, String>,
+    ) {
         self.connector_configs = configs.to_vec();
-        // Drop previous dynamic tools and MCP children (Drop kills processes).
+        // Drop previous dynamic tools, MCP children, and SQL backends.
         self.dynamic_tools.clear();
         self.mcp_sessions.clear();
+        self.sql_backends.clear();
         for c in configs.iter().filter(|c| c.enabled) {
             // Optional test/dev stub: settings.stub_tool = { name, description, detail }
             if let Some(stub) = c.settings.get("stub_tool") {
@@ -207,7 +223,92 @@ impl ToolHost {
                     );
                 }
             }
+
+            if c.kind == "sqlite" {
+                if let Err(e) = self.attach_sqlite_connector(c) {
+                    tracing::error!(
+                        connector_id = %c.id,
+                        error = %e,
+                        "SQLite connector failed; sql tool not registered"
+                    );
+                }
+            }
+
+            if c.kind == "postgres" {
+                let pw = postgres_passwords.get(&c.id).cloned();
+                if let Err(e) = self.attach_postgres_connector(c, pw) {
+                    tracing::error!(
+                        connector_id = %c.id,
+                        error = %e,
+                        "Postgres connector failed; sql tool not registered"
+                    );
+                }
+            }
         }
+    }
+
+    fn attach_sqlite_connector(
+        &mut self,
+        c: &crate::connectors::ConnectorConfig,
+    ) -> CoreResult<()> {
+        let backend = crate::sql_ro::sqlite_backend_from_settings(&c.settings)?;
+        let tool_name = format!("sql_query__{}", c.id);
+        self.sql_backends.insert(c.id.clone(), backend);
+        self.register_tool(crate::connectors::RegisteredTool {
+            spec: crate::tools::ToolSpec {
+                name: tool_name,
+                description: format!(
+                    "Read-only SQL (SQLite) against connector `{}`. Single SELECT only; results capped.",
+                    c.id
+                ),
+                side_effect: crate::tools::ToolSideEffect::Read,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "sql": { "type": "string", "description": "Single SELECT (or WITH … SELECT)" }
+                    },
+                    "required": ["sql"],
+                    "additionalProperties": false
+                }),
+            },
+            exec: crate::connectors::ConnectorExecutor::Sql {
+                source_id: c.id.clone(),
+            },
+        });
+        Ok(())
+    }
+
+    fn attach_postgres_connector(
+        &mut self,
+        c: &crate::connectors::ConnectorConfig,
+        password: Option<String>,
+    ) -> CoreResult<()> {
+        let cfg = crate::sql_ro::postgres_config_from_settings(&c.settings, password)?;
+        let tool_name = format!("sql_query__{}", c.id);
+        self.sql_backends
+            .insert(c.id.clone(), crate::sql_ro::SqlBackend::Postgres(cfg));
+        self.register_tool(crate::connectors::RegisteredTool {
+            spec: crate::tools::ToolSpec {
+                name: tool_name,
+                description: format!(
+                    "Read-only SQL (Postgres) against connector `{}`. Single SELECT only; session is read-only with statement_timeout.",
+                    c.id
+                ),
+                side_effect: crate::tools::ToolSideEffect::Read,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "sql": { "type": "string", "description": "Single SELECT (or WITH … SELECT)" }
+                    },
+                    "required": ["sql"],
+                    "additionalProperties": false
+                }),
+            },
+            exec: crate::connectors::ConnectorExecutor::Sql {
+                source_id: c.id.clone(),
+            },
+        });
+        Ok(())
     }
 
     fn attach_mcp_connector(&mut self, c: &crate::connectors::ConnectorConfig) -> CoreResult<()> {
@@ -1144,9 +1245,28 @@ impl ToolHost {
                     Some(format!("mcp:{server_id}:{tool}")),
                 ))
             }
-            crate::connectors::ConnectorExecutor::Sql { .. } => Err(CoreError::Message(format!(
-                "SQL tool `{name}` not wired yet (see #130)"
-            ))),
+            crate::connectors::ConnectorExecutor::Sql { source_id } => {
+                let sql = arguments
+                    .get("sql")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::Message("sql_query requires `sql`".into()))?
+                    .to_string();
+                let backend = self.sql_backends.get(&source_id).ok_or_else(|| {
+                    CoreError::Message(format!("SQL source `{source_id}` is not attached"))
+                })?;
+                let result = crate::sql_ro::execute_sql_backend(backend, &sql)?;
+                let wrapped =
+                    crate::sql_ro::format_sql_for_model(&format!("sql:{source_id}"), &result);
+                let summary = if result.truncated {
+                    format!(
+                        "sql `{source_id}` ok ({} rows, truncated)",
+                        result.rows.len()
+                    )
+                } else {
+                    format!("sql `{source_id}` ok ({} rows)", result.rows.len())
+                };
+                Ok((true, summary, wrapped, Some(format!("sql:{source_id}"))))
+            }
             crate::connectors::ConnectorExecutor::Http { .. } => Err(CoreError::Message(format!(
                 "HTTP tool `{name}` not wired yet (see #131)"
             ))),
@@ -1929,6 +2049,65 @@ mod tests {
             "MCP result must be wrap_untrusted: {}",
             r2.detail_raw
         );
+    }
+
+    /// #130: sqlite connector registers sql_query__id and dispatches with wrap_untrusted.
+    #[tokio::test]
+    async fn sql_sqlite_connector_tool_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("agent.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+                 INSERT INTO items (name) VALUES ('alpha');",
+            )
+            .unwrap();
+        }
+        let (_ws, mut host) = host_with_docs();
+        host.attach_connectors(&[crate::connectors::ConnectorConfig {
+            id: "local-db".into(),
+            kind: "sqlite".into(),
+            enabled: true,
+            settings: json!({
+                "path": db.to_string_lossy(),
+                "timeout_ms": 3000
+            }),
+        }]);
+        assert!(
+            host.specs_for_model()
+                .iter()
+                .any(|s| s.name == "sql_query__local-db"),
+            "sql tool missing"
+        );
+        assert_eq!(
+            host.side_effect_for("sql_query__local-db"),
+            ToolSideEffect::Read
+        );
+        let r = host
+            .execute(
+                "sql_query__local-db",
+                &json!({"sql": "SELECT id, name FROM items"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+        assert!(r.detail_raw.contains("alpha"), "{}", r.detail_raw);
+        assert!(
+            r.detail_raw.contains("UNTRUSTED_DATA"),
+            "must wrap_untrusted: {}",
+            r.detail_raw
+        );
+        // Writes blocked
+        let bad = host
+            .execute(
+                "sql_query__local-db",
+                &json!({"sql": "DELETE FROM items"}),
+                None,
+            )
+            .await;
+        assert!(bad.is_err() || !bad.as_ref().unwrap().ok);
     }
 
     fn mcp_echo_fixture_paths() -> (std::path::PathBuf, std::path::PathBuf) {
