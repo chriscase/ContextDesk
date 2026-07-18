@@ -1,0 +1,22 @@
+[
+  {
+    "id": "good-full-sha",
+    "expect": "pass",
+    "body": "Closed with proof for #249.\nMerged: ee8c2f236ac97a0e1976df46189d517abce07ceb\n\n$ cargo test -p cd-core\ntest result: ok. 1 passed\nAdversarial: CONFIRMED"
+  },
+  {
+    "id": "bad-no-sha",
+    "expect": "fail",
+    "body": "Closed. Tests pass. Gate green. Verified on main."
+  },
+  {
+    "id": "bad-pr-number-only",
+    "expect": "fail",
+    "body": "PR #244 fixed this. Fixes #137. All good."
+  },
+  {
+    "id": "good-short-sha",
+    "expect": "pass",
+    "body": "Merged short sha ee8c2f2 in PR #190.\ntest result: ok. 2 passed; 0 failed"
+  }
+]
