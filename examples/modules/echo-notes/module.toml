@@ -1,0 +1,33 @@
+# Reference third-party module (#138) — schema `cd.module.v1` (normative: #134).
+# Install: Settings → Modules → local path to this directory (see docs/MODULES.md).
+# Entrypoint `command` MUST be absolute (host policy). Edit to your Node binary
+# if `/usr/bin/env` is wrong for your machine (e.g. Windows: full path to node.exe).
+
+schema = "cd.module.v1"
+id = "echo-notes"
+name = "Echo Notes"
+version = "0.1.0"
+
+# Host-assigned HardWrite list (module cannot self-elevate beyond this).
+hard_write_tools = []
+provided_connectors = []
+
+[entrypoint]
+# Absolute path required. Args run the dependency-light MCP stdio stub.
+command = "/usr/bin/env"
+args = ["node", "server.mjs"]
+
+[[provided_tools]]
+name = "note_read"
+description = "Read the in-memory note (Read side-effect; host-classified)"
+
+[[provided_tools]]
+name = "note_append"
+description = "Append a line to the in-memory note (SoftWrite; needs UI grant)"
+
+[requested_capabilities]
+# Empty caps → tools may attach without first-use capability grant.
+# Request roots/hosts/secrets only when the process truly needs them.
+filesystem_roots = []
+network_hosts = []
+secret_refs = []
