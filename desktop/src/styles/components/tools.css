@@ -99,7 +99,7 @@
 
 .tool-row__name {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
@@ -115,7 +115,7 @@
 
 .tool-row__chev {
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 1;
   text-align: center;
 }
@@ -130,7 +130,7 @@
   border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
   background: var(--bg-input);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;

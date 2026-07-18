@@ -13,8 +13,18 @@ body,
   overflow: hidden;
 }
 
+/* Root 16px × --ui-scale so rem tokens match annotations (#151). */
 html {
-  font-size: 13.5px;
+  font-size: calc(16px * var(--ui-scale, 1));
+}
+html[data-ui-scale="90"] {
+  --ui-scale: 0.9;
+}
+html[data-ui-scale="100"] {
+  --ui-scale: 1;
+}
+html[data-ui-scale="110"] {
+  --ui-scale: 1.1;
 }
 
 body {

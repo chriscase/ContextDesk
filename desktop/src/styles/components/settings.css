@@ -105,7 +105,7 @@
 }
 
 .settings-nav__title {
-  font-size: 10px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--text-faint);
@@ -136,7 +136,7 @@
   width: 18px;
   height: 18px;
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1;
 }
 
@@ -258,7 +258,7 @@
 }
 
 .news-sources__group-label {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -336,7 +336,7 @@
 }
 
 .preflight-row__level {
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -374,7 +374,7 @@
   gap: 4px;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   font-weight: 500;
   background: var(--surface-chip, var(--bg-hover));
   color: var(--text-muted);
