@@ -14,13 +14,11 @@ Point it at folders you allowlist and at markdown project memory, ask how a subs
 | **Identity** | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179)) |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md) |
 
-![Screenshot of the ContextDesk desktop app: a chat answer with inline file citations and a search trail beside an allowlisted workspace](docs/media/screenshot.png)
-
-<!--
-  The image above is captured and committed by the coordinator from a real
-  `npm run tauri:dev` run against fixtures/kb (see docs/media/README.md).
-  Do not fabricate or hand-draw this asset.
--->
+> **Screenshot:** a captured shot of the desktop app (a chat answer with inline file
+> citations and a search trail beside an allowlisted workspace) is pending a live
+> `npm run tauri:dev` run against a populated workspace — capture steps are in
+> [`docs/media/README.md`](docs/media/README.md), tracked in
+> [#176](https://github.com/chriscase/ContextDesk/issues/176). No asset is fabricated.
 
 ---
 
