@@ -23,7 +23,7 @@ tracing = "0.1"
 toml = "0.8"
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
