@@ -24,6 +24,10 @@ import {
   type ChatSession,
   type Msg,
 } from "../lib/session";
+import {
+  finalizeMessagesAfterStop,
+  shouldProcessEventWhileStopped,
+} from "../lib/turn";
 
 type Args = {
   sessionId: string;
@@ -143,7 +147,11 @@ export function useTurnController(args: Args) {
           sessionModel,
           sessionProvider,
           (ev) => {
-            if (stopRef.current) return;
+            // #249: do not drop turn_completed/error after Stop — that left
+            // streaming:true forever (original #105 AC#3). Host cancel: #90/#109.
+            if (!shouldProcessEventWhileStopped(stopRef.current, ev.kind)) {
+              return;
+            }
 
             if (ev.kind === "permission_required") {
               const { permission: perm } = applyEventsToMessage(
@@ -331,15 +339,45 @@ export function useTurnController(args: Args) {
   );
 
   const stopTurn = useCallback(() => {
+    // True cancellation is host-owned (#90/#109). UI must still finalize so no
+    // assistant bubble stays streaming:true (#249 / #105 AC#3).
     stopRef.current = true;
     if (sessionId) {
       void hostCancelTurn(sessionId);
+      setSessions((all) => {
+        const cur = all.find((s) => s.id === sessionId);
+        if (!cur) return all;
+        const messages = finalizeMessagesAfterStop(cur.messages);
+        if (messages === cur.messages) return all;
+        // Detect no-op when finalize returns equal content
+        const same =
+          messages.length === cur.messages.length &&
+          messages.every(
+            (m, i) =>
+              m.id === cur.messages[i]?.id &&
+              m.streaming === cur.messages[i]?.streaming,
+          );
+        if (same) return all;
+        const updated: ChatSession = {
+          ...cur,
+          messages,
+          updatedAt: nowIso(),
+        };
+        // Persist partial (or emptied) session so reload matches UI (#249 AC).
+        void persistSession(updated).then((saved) => {
+          setSessions((prev) =>
+            prev.map((s) => (s.id === saved.id ? saved : s)),
+          );
+        });
+        return all.map((s) => (s.id === sessionId ? updated : s));
+      });
     }
     setBusy(false);
+    setTurnStartedAt(null);
     setAgentError(
-      "Stop requested — waiting for the host to end the turn (cancel).",
+      "Stop requested — turn cancelled; partial answer kept when present.",
     );
-  }, [sessionId]);
+  }, [sessionId, setSessions, persistSession]);
 
   return {
     busy,

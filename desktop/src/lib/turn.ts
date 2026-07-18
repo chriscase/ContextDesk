@@ -160,3 +160,54 @@ export function applyEventsToMessage(
     permission,
   };
 }
+
+/**
+ * After Stop, still process finalizing events so the bubble is not left
+ * `streaming: true` forever (#249 / original #105 AC#3).
+ * Host cancel ownership: #90 / #109; this only gates UI event drop.
+ */
+export function shouldProcessEventWhileStopped(
+  stopped: boolean,
+  kind: string,
+): boolean {
+  if (!stopped) return true;
+  return kind === "turn_completed" || kind === "error";
+}
+
+/**
+ * Finalize in-flight assistant bubbles after Stop: clear streaming, keep
+ * partial text, drop empty assistant shells.
+ */
+export function finalizeMessagesAfterStop<
+  T extends {
+    role: string;
+    content?: string;
+    streaming?: boolean;
+    tools?: unknown[];
+    citations?: unknown[];
+  },
+>(messages: T[]): T[] {
+  const out: T[] = [];
+  for (const m of messages) {
+    if (m.role !== "assistant" || !m.streaming) {
+      out.push(m);
+      continue;
+    }
+    const text = (m.content ?? "").trim();
+    const hasTools = Boolean(m.tools && m.tools.length > 0);
+    const hasCite = Boolean(m.citations && m.citations.length > 0);
+    if (!text && !hasTools && !hasCite) {
+      // Empty cancelled shell — remove rather than leave a blank bubble.
+      continue;
+    }
+    out.push({ ...m, streaming: false });
+  }
+  return out;
+}
+
+/** True if any message is still mid-stream (adversarial post-Stop check). */
+export function anyMessageStreaming(
+  messages: { streaming?: boolean }[],
+): boolean {
+  return messages.some((m) => m.streaming === true);
+}

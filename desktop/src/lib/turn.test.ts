@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { EventDto } from "./host";
-import { applyEventsToMessage, shortSourceLabel, type ChatMsg } from "./turn";
+import {
+  anyMessageStreaming,
+  applyEventsToMessage,
+  finalizeMessagesAfterStop,
+  shortSourceLabel,
+  shouldProcessEventWhileStopped,
+  type ChatMsg,
+} from "./turn";
 
 function base(partial: Partial<ChatMsg> = {}): ChatMsg {
   return {
@@ -178,5 +185,51 @@ describe("applyEventsToMessage", () => {
     ];
     const localPerm = applyEventsToMessage(base(), local).permission;
     expect(localPerm?.typeConfirmPhrase).toBeNull();
+  });
+});
+
+describe("Stop finalize (#249)", () => {
+  it("still processes turn_completed and error while stopped", () => {
+    expect(shouldProcessEventWhileStopped(true, "text_delta")).toBe(false);
+    expect(shouldProcessEventWhileStopped(true, "turn_completed")).toBe(true);
+    expect(shouldProcessEventWhileStopped(true, "error")).toBe(true);
+    expect(shouldProcessEventWhileStopped(false, "text_delta")).toBe(true);
+  });
+
+  it("clears streaming and keeps partial text; drops empty shell", () => {
+    const msgs = [
+      { id: "u1", role: "user" as const, content: "hi", streaming: false },
+      {
+        id: "a1",
+        role: "assistant" as const,
+        content: "partial answer",
+        streaming: true,
+      },
+      {
+        id: "a2",
+        role: "assistant" as const,
+        content: "   ",
+        streaming: true,
+      },
+    ];
+    const out = finalizeMessagesAfterStop(msgs);
+    expect(anyMessageStreaming(out)).toBe(false);
+    expect(out.map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect(out.find((m) => m.id === "a1")?.content).toBe("partial answer");
+    expect(out.find((m) => m.id === "a1")?.streaming).toBe(false);
+  });
+
+  it("adversarial: after stop finalize no streaming:true remains", () => {
+    const mid = [
+      {
+        id: "a",
+        role: "assistant" as const,
+        content: "x",
+        streaming: true as boolean | undefined,
+      },
+    ];
+    expect(anyMessageStreaming(mid)).toBe(true);
+    const done = finalizeMessagesAfterStop(mid);
+    expect(anyMessageStreaming(done)).toBe(false);
   });
 });
