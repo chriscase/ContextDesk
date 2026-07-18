@@ -15,8 +15,11 @@
 //! Production uses [`SystemClock`] → [`crate::embed::now_unix_secs`]. Tests
 //! inject a fixed [`Clock`] or pass `now_secs` into store methods.
 
+pub mod migrate;
+pub mod sqlite_store;
 pub mod types;
 
+pub use sqlite_store::SqliteMemoryStore;
 pub use types::*;
 
 use crate::embed::{EmbedBackend, HybridWeights};
