@@ -1,9 +1,10 @@
 /* Design tokens — theme files override semantic colors only.
    Density tuned for coding-agent chrome (GrokPtah-adjacent), not marketing UI. */
 :root {
+  /* Bundled WOFF2 (#152): Inter + IBM Plex Mono first so offline keeps product type. */
   --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue",
     sans-serif;
-  --font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo,
+  --font-mono: "IBM Plex Mono", "SF Mono", "JetBrains Mono", ui-monospace, Menlo,
     Consolas, monospace;
 
   --radius-sm: 6px;

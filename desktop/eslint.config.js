@@ -17,6 +17,8 @@ export default tseslint.config(
       "eslint.config.js",
       "vite.config.ts",
       "scripts/**",
+      // Plain browser pre-paint scripts (#152); not TS modules.
+      "public/**",
     ],
   },
   js.configs.recommended,
