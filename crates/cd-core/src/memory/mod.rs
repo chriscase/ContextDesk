@@ -19,6 +19,7 @@ pub mod facade;
 pub mod migrate;
 pub mod recall;
 pub mod sqlite_store;
+pub mod tools;
 pub mod types;
 
 pub use facade::{
@@ -26,6 +27,10 @@ pub use facade::{
     workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory, WorkspaceMemoryLocation,
 };
 pub use sqlite_store::SqliteMemoryStore;
+pub use tools::{
+    format_recall_hits, is_destructive_memory_tool, memory_tool_specs, permission_target_for_write,
+    write_op_from_retract_args, write_op_from_save_args, write_op_from_supersede_args,
+};
 pub use types::*;
 
 use crate::embed::{EmbedBackend, HybridWeights};

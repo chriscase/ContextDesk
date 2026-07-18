@@ -135,18 +135,46 @@ impl PermissionState {
     ///
     /// Built-in Read tools auto-run. MCP tools (`mcp__*`) never auto-run on
     /// first use even if classified Read — they need a session tool grant.
+    ///
+    /// **#270 memory hardening:** any HardWrite whose target is `mem://…`
+    /// (or a destructive memory op path) **never** auto-runs on a session path
+    /// grant — a fresh UI AllowOnce is always required. File SoftWrite/HardWrite
+    /// session grants are unchanged.
     pub fn may_execute_without_prompt(&self, side_effect: ToolSideEffect, target: &str) -> bool {
         // target may be path or tool name for MCP (see tool_host resolve).
         if target.starts_with("mcp__") {
             return self.session_tool_allowed(target);
         }
+        // Destructive durable-memory ops: never session-auto (#270).
+        if is_destructive_memory_target(target) {
+            return false;
+        }
         match side_effect {
             ToolSideEffect::Read => true,
-            ToolSideEffect::SoftWrite | ToolSideEffect::HardWrite => {
+            ToolSideEffect::SoftWrite => self.session_path_allowed(target),
+            ToolSideEffect::HardWrite => {
+                // HardWrite to mem:// never auto-runs (#270), even with a broad grant.
+                if destructive_memory_hard_write(side_effect, target) {
+                    return false;
+                }
                 self.session_path_allowed(target)
             }
         }
     }
+}
+
+/// True when a permission target identifies a destructive memory op (#270).
+///
+/// Matches `mem://retract/…`, `mem://purge/…` (SoftWrite retract still needs a
+/// fresh Accept — session path grants never auto-satisfy these targets).
+pub fn is_destructive_memory_target(target: &str) -> bool {
+    let t = target.trim();
+    t.starts_with("mem://retract/") || t.starts_with("mem://purge/")
+}
+
+/// HardWrite + mem:// target ⇒ never auto-execute (session grant ignored).
+pub fn destructive_memory_hard_write(side_effect: ToolSideEffect, target: &str) -> bool {
+    matches!(side_effect, ToolSideEffect::HardWrite) && target.trim().starts_with("mem://")
 }
 
 /// Exact match or child under grant with path separator boundary.
@@ -217,6 +245,47 @@ mod tests {
         st.allow_session_path("/proj/mem");
         assert!(!st.session_path_allowed("/proj/memory-evil/x"));
         assert!(st.session_path_allowed("/proj/mem/x"));
+    }
+
+    /// #270: a broad `mem://` session grant must NOT auto-satisfy retract/purge.
+    #[test]
+    fn broad_mem_session_grant_does_not_auto_retract() {
+        let mut st = PermissionState::default();
+        // Path-boundary grant that covers all mem:// targets (see path_under_grant).
+        st.allow_session_path("mem:");
+        assert!(
+            st.session_path_allowed("mem://retract/00000000-0000-0000-0000-000000000001"),
+            "precondition: broad grant matches mem:// targets"
+        );
+        assert!(
+            !st.may_execute_without_prompt(
+                ToolSideEffect::SoftWrite,
+                "mem://retract/00000000-0000-0000-0000-000000000001"
+            ),
+            "retract must still require a fresh UI Accept"
+        );
+        assert!(
+            !st.may_execute_without_prompt(
+                ToolSideEffect::HardWrite,
+                "mem://purge/00000000-0000-0000-0000-000000000001"
+            ),
+            "purge HardWrite must never auto-run"
+        );
+        // Non-destructive memory SoftWrite can still use session grants.
+        assert!(st.may_execute_without_prompt(ToolSideEffect::SoftWrite, "mem://workspace/new"));
+        // File HardWrite session grants still work (unchanged).
+        st.allow_session_path("/proj/out");
+        assert!(st.may_execute_without_prompt(ToolSideEffect::HardWrite, "/proj/out/file.txt"));
+    }
+
+    #[test]
+    fn hardwrite_mem_target_never_session_auto() {
+        let mut st = PermissionState::default();
+        st.allow_session_path("mem:");
+        assert!(!st.may_execute_without_prompt(
+            ToolSideEffect::HardWrite,
+            "mem://workspace/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@v3"
+        ));
     }
 
     /// #129: MCP tools never auto-run until session tool grant.
