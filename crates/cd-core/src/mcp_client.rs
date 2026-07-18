@@ -8,8 +8,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
@@ -33,7 +34,8 @@ pub struct McpSession {
     name: String,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Background reader feeds lines so `request` can `recv_timeout` (#252).
+    line_rx: Receiver<Result<String, String>>,
     hard_write_tools: Vec<String>,
     read_tools: Vec<String>,
     request_timeout: Duration,
@@ -96,11 +98,38 @@ impl McpSession {
             .stdout
             .take()
             .ok_or_else(|| CoreError::Message("mcp stdout".into()))?;
+        // Dedicated reader thread: blocking read_line cannot observe the wall-clock
+        // deadline mid-read (#252). Lines arrive on mpsc; request uses recv_timeout.
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        std::thread::Builder::new()
+            .name(format!("mcp-stdout-{}", cfg.name))
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    let mut buf = String::new();
+                    match reader.read_line(&mut buf) {
+                        Ok(0) => {
+                            let _ = tx.send(Err("mcp eof".into()));
+                            break;
+                        }
+                        Ok(_) => {
+                            if tx.send(Ok(buf)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(format!("mcp read: {e}")));
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| CoreError::Message(format!("mcp reader thread: {e}")))?;
         let mut sess = Self {
             name: cfg.name.clone(),
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            line_rx: rx,
             hard_write_tools: cfg.hard_write_tools.clone(),
             read_tools: cfg.read_tools.clone(),
             request_timeout: opts.request_timeout.unwrap_or(MCP_REQUEST_TIMEOUT),
@@ -132,11 +161,13 @@ impl McpSession {
         self.stdin
             .flush()
             .map_err(|e| CoreError::Message(format!("mcp flush: {e}")))?;
-        // Wall-clock timeout + line cap (#135).
+        // Wall-clock timeout interrupts a stalled read (#135 / #252): recv_timeout
+        // on the background reader, not only a check before blocking read_line.
         let deadline = Instant::now() + self.request_timeout;
         let mut lines = 0u32;
         loop {
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(CoreError::Message(
                     "mcp wall-clock timeout waiting for response".into(),
                 ));
@@ -147,16 +178,19 @@ impl McpSession {
                 ));
             }
             lines += 1;
-            let mut buf = String::new();
-            // set_read_timeout is not on BufReader for ChildStdout portably —
-            // rely on wall-clock between successful reads + line budget.
-            let n = self
-                .stdout
-                .read_line(&mut buf)
-                .map_err(|e| CoreError::Message(format!("mcp read: {e}")))?;
-            if n == 0 {
-                return Err(CoreError::Message("mcp eof".into()));
-            }
+            let remaining = deadline.saturating_duration_since(now);
+            let buf = match self.line_rx.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(e)) => return Err(CoreError::Message(e)),
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(CoreError::Message(
+                        "mcp wall-clock timeout waiting for response".into(),
+                    ));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(CoreError::Message("mcp reader disconnected".into()));
+                }
+            };
             if buf.len() > 256 * 1024 {
                 return Err(CoreError::Policy("mcp response too large".into()));
             }
@@ -349,6 +383,58 @@ mod tests {
         validate_mcp_command(&PathBuf::from("/usr/bin/true")).unwrap();
         #[cfg(windows)]
         validate_mcp_command(&PathBuf::from(r"C:\Windows\System32\cmd.exe")).unwrap();
+    }
+
+    /// #252: silent child must not hang forever on blocking read_line.
+    #[test]
+    fn hang_stub_times_out_within_budget() {
+        let sleep_cmd = if cfg!(windows) {
+            PathBuf::from(r"C:\Windows\System32\ping.exe")
+        } else {
+            // Prefer sleep; fall back to true that exits (would eof, still not hang).
+            ["/bin/sleep", "/usr/bin/sleep"]
+                .iter()
+                .map(PathBuf::from)
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| PathBuf::from("/bin/sleep"))
+        };
+        let args = if cfg!(windows) {
+            // ping -n 30 127.0.0.1 ≈ 30s of silence on stdout for our JSON-RPC reader
+            vec!["-n".into(), "30".into(), "127.0.0.1".into()]
+        } else {
+            vec!["30".into()]
+        };
+        let cfg = McpServerConfig {
+            name: "hang".into(),
+            command: sleep_cmd,
+            args,
+            enabled: true,
+            hard_write_tools: vec![],
+            read_tools: vec![],
+        };
+        let t0 = Instant::now();
+        let result = McpSession::spawn_with(
+            &cfg,
+            McpSpawnOptions {
+                request_timeout: Some(Duration::from_millis(350)),
+                ..Default::default()
+            },
+        );
+        let elapsed = t0.elapsed();
+        assert!(
+            result.is_err(),
+            "initialize must time out against silent child"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("timeout") || msg.contains("eof") || msg.contains("mcp"),
+            "unexpected err: {msg}"
+        );
+        // Must not wait the full sleep; allow generous CI jitter under 5s.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "hung too long: {elapsed:?}"
+        );
     }
 
     /// Offline #128 fixture: spawn → list_tools → call_tool (no network).
