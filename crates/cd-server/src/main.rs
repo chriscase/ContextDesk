@@ -18,6 +18,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use subtle::ConstantTimeEq;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -28,8 +29,12 @@ struct Args {
     print_branding: bool,
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: String,
+    /// Comma-separated API keys. Discouraged: visible in `ps` — prefer `--api-keys-file` or `CD_API_KEYS`.
     #[arg(long, env = "CD_API_KEYS", default_value = "")]
     api_keys: String,
+    /// Newline- or comma-separated API keys from a file (preferred over `--api-keys` argv).
+    #[arg(long)]
+    api_keys_file: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     allow_lan: bool,
     #[arg(long)]
@@ -83,7 +88,7 @@ fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Resul
         return Err(StatusCode::UNAUTHORIZED);
     }
     let h = hash_key(token);
-    if !state.key_hashes.iter().any(|k| k == &h) {
+    if !key_hash_authorized(&state.key_hashes, &h) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     if let Some(allowed) = state.key_workspaces.get(&h) {
@@ -284,18 +289,21 @@ async fn main() {
 
     let addr: SocketAddr = args.bind.parse().expect("invalid --bind address");
 
-    let keys: Vec<String> = args
-        .api_keys
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
+    let keys = match load_api_keys(&args.api_keys, args.api_keys_file.as_ref()) {
+        Ok(k) => k,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+    };
     let key_hashes: Vec<[u8; 32]> = keys.iter().map(|k| hash_key(k)).collect();
 
     match guard_exposure(&addr, args.allow_lan, key_hashes.len()) {
         Err(msg) => {
             eprintln!("{msg}");
+            eprintln!(
+                "See docs/THREAT_MODEL.md and docs/DEV.md (cd-server / TLS at reverse proxy)."
+            );
             std::process::exit(2);
         }
         Ok(warnings) => {
@@ -358,15 +366,17 @@ pub fn guard_exposure(
     if !loopback && key_count == 0 {
         return Err(format!(
             "Refusing non-loopback bind {addr} with no API keys. \
-             Set --api-keys / CD_API_KEYS (comma-separated) before --allow-lan exposure. \
-             Unauthenticated LAN bind is not allowed."
+             Prefer --api-keys-file PATH or CD_API_KEYS env (avoid --api-keys on argv — visible in ps). \
+             Unauthenticated LAN bind is not allowed. \
+             TLS: terminate HTTPS at a reverse proxy (cd-server is HTTP-only; see docs/THREAT_MODEL.md)."
         ));
     }
 
     if allow_lan && !loopback {
         warnings.push(format!(
             "cd-server is bound beyond loopback ({addr}) via --allow-lan. \
-             Expect TLS at a reverse proxy and rotate API keys; traffic is not encrypted by cd-server itself."
+             Terminate TLS at a reverse proxy (cd-server does not speak HTTPS). \
+             Prefer --api-keys-file over --api-keys (argv leaks in process lists)."
         ));
     }
 
@@ -378,6 +388,43 @@ pub fn guard_exposure(
     }
 
     Ok(warnings)
+}
+
+/// Constant-time membership check for API key hashes (#171).
+pub fn key_hash_authorized(known: &[[u8; 32]], candidate: &[u8; 32]) -> bool {
+    let mut ok = false;
+    for k in known {
+        // OR of constant-time equals — no early exit on first match for timing.
+        let eq = bool::from(k.ct_eq(candidate));
+        ok = ok || eq;
+    }
+    ok
+}
+
+/// Load API keys from optional file + comma-separated string (#171).
+/// File lines and commas are both separators; empties stripped.
+pub fn load_api_keys(
+    api_keys_csv: &str,
+    api_keys_file: Option<&PathBuf>,
+) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    if let Some(path) = api_keys_file {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read --api-keys-file {}: {e}", path.display()))?;
+        for part in text.split([',', '\n', '\r']) {
+            let t = part.trim();
+            if !t.is_empty() {
+                keys.push(t.to_string());
+            }
+        }
+    }
+    for part in api_keys_csv.split(',') {
+        let t = part.trim();
+        if !t.is_empty() {
+            keys.push(t.to_string());
+        }
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
@@ -446,6 +493,34 @@ mod tests {
     fn guard_v6_loopback_no_key_ok() {
         let a = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8787);
         assert!(guard_exposure(&a, false, 0).is_ok());
+    }
+
+    #[test]
+    fn guard_allow_lan_empty_keys_rejected() {
+        // #171: allow_lan + no keys must refuse (same as non-loopback bind).
+        assert!(guard_exposure(&lan_v4(), true, 0).is_err());
+        assert!(guard_exposure(&lan_v4(), true, 1).is_ok());
+    }
+
+    #[test]
+    fn key_hash_authorized_constant_time_match() {
+        let a = hash_key("alpha");
+        let b = hash_key("beta");
+        let known = vec![a, b];
+        assert!(key_hash_authorized(&known, &a));
+        assert!(key_hash_authorized(&known, &b));
+        assert!(!key_hash_authorized(&known, &hash_key("gamma")));
+        assert!(!key_hash_authorized(&[], &a));
+    }
+
+    #[test]
+    fn load_api_keys_from_file_and_csv() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("keys.txt");
+        fs::write(&f, "k1\nk2,\n\nk3\n").unwrap();
+        let keys = load_api_keys("k4,k5", Some(&f)).unwrap();
+        assert_eq!(keys, vec!["k1", "k2", "k3", "k4", "k5"]);
+        assert!(load_api_keys("", None).unwrap().is_empty());
     }
 
     fn test_state(root: PathBuf, keys: &[(&str, &str)]) -> AppState {

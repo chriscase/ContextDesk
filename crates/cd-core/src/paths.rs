@@ -200,4 +200,43 @@ mod tests {
             "unexpected: {msg}"
         );
     }
+
+    /// Runs on Windows and Unix (#178): backslash / `..` segments normalize safely.
+    #[test]
+    fn normalize_lexically_handles_dotdot_and_separators() {
+        let p = normalize_lexically(Path::new("a/b/../c"));
+        assert_eq!(p, PathBuf::from("a/c"));
+        // Mixed separators: Path components are OS-aware; result has no `..`.
+        let mixed = if cfg!(windows) {
+            PathBuf::from(r"docs\sub\..\note.md")
+        } else {
+            PathBuf::from("docs/sub/../note.md")
+        };
+        let n = normalize_lexically(&mixed);
+        assert!(!n.components().any(|c| matches!(c, Component::ParentDir)));
+        assert!(n.ends_with("note.md") || n.file_name().map(|f| f == "note.md").unwrap_or(false));
+    }
+
+    /// Relative escape via `..` stays policy-blocked under a real root (#178, all OS).
+    #[test]
+    fn resolve_allowed_rejects_parent_escape() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("ok")).unwrap();
+        fs::write(dir.path().join("ok/a.md"), "x").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        // Lexical escape relative path
+        let err = resolve_allowed_path(&ws, Path::new("../outside.md"), false);
+        // May fail as outside or missing under roots — must not succeed under workspace.
+        if let Ok(p) = err {
+            // If OS resolves, still must be under root
+            assert!(
+                p.starts_with(dir.path()) || p.starts_with(dir.path().canonicalize().unwrap()),
+                "escaped: {}",
+                p.display()
+            );
+        }
+        // Absolute path under root still works
+        let ok = resolve_allowed_path(&ws, dir.path().join("ok/a.md"), false).unwrap();
+        assert!(ok.ends_with("a.md"));
+    }
 }
