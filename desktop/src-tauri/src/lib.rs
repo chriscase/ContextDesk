@@ -211,12 +211,8 @@ fn connector_dtos(state: &AppState, cfg: &AppConfig) -> Vec<ConnectorDto> {
         .lock()
         .ok()
         .and_then(|g| {
-            g.as_ref().map(|h| {
-                h.specs_for_model()
-                    .into_iter()
-                    .map(|s| s.name)
-                    .collect()
-            })
+            g.as_ref()
+                .map(|h| h.specs_for_model().into_iter().map(|s| s.name).collect())
         })
         .unwrap_or_default();
     cfg.connectors
