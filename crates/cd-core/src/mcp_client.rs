@@ -18,6 +18,7 @@ pub struct McpSession {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     hard_write_tools: Vec<String>,
+    read_tools: Vec<String>,
 }
 
 /// Discovered MCP tool.
@@ -63,6 +64,7 @@ impl McpSession {
             stdin,
             stdout: BufReader::new(stdout),
             hard_write_tools: cfg.hard_write_tools.clone(),
+            read_tools: cfg.read_tools.clone(),
         };
         // initialize
         let _ = sess.request(
@@ -150,11 +152,11 @@ impl McpSession {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or(json!({"type":"object"}));
-                let side = if self.hard_write_tools.iter().any(|h| h == &raw_name) {
-                    ToolSideEffect::HardWrite
-                } else {
-                    ToolSideEffect::Read
-                };
+                let side = classify_mcp_tool_side_effect(
+                    &raw_name,
+                    &self.read_tools,
+                    &self.hard_write_tools,
+                );
                 out.push(McpToolInfo {
                     name: format!("mcp__{}__{}", self.name, raw_name),
                     description: desc,
@@ -211,6 +213,22 @@ pub fn parse_mcp_tool_name(full: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
+/// Classify MCP tool side effect (#129): HardWrite unless in `read_tools`.
+/// `hard_write_tools` always wins (HardWrite).
+pub fn classify_mcp_tool_side_effect(
+    raw_name: &str,
+    read_tools: &[String],
+    hard_write_tools: &[String],
+) -> ToolSideEffect {
+    if hard_write_tools.iter().any(|h| h == raw_name) {
+        ToolSideEffect::HardWrite
+    } else if read_tools.iter().any(|r| r == raw_name) {
+        ToolSideEffect::Read
+    } else {
+        ToolSideEffect::HardWrite
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,8 +242,29 @@ mod tests {
             args: vec![],
             enabled: true,
             hard_write_tools: vec![],
+            read_tools: vec![],
         };
         assert!(McpSession::spawn(&cfg).is_err());
+    }
+
+    #[test]
+    fn classify_mcp_side_effect_defaults_to_hard_write() {
+        assert_eq!(
+            classify_mcp_tool_side_effect("write_file", &[], &[]),
+            ToolSideEffect::HardWrite
+        );
+        assert_eq!(
+            classify_mcp_tool_side_effect("read_file", &["read_file".into()], &[]),
+            ToolSideEffect::Read
+        );
+        assert_eq!(
+            classify_mcp_tool_side_effect(
+                "read_file",
+                &["read_file".into()],
+                &["read_file".into()]
+            ),
+            ToolSideEffect::HardWrite
+        );
     }
 
     #[test]

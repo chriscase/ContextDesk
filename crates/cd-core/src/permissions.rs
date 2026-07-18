@@ -93,10 +93,12 @@ impl PermissionRequest {
     }
 }
 
-/// Session-scoped path allows (narrow).
+/// Session-scoped path allows (narrow) + per-tool grants for MCP (#129).
 #[derive(Debug, Default, Clone)]
 pub struct PermissionState {
     session_paths: Vec<String>,
+    /// Full tool names (e.g. `mcp__server__tool`) approved for the session.
+    approved_tools: Vec<String>,
 }
 
 impl PermissionState {
@@ -108,6 +110,14 @@ impl PermissionState {
         }
     }
 
+    /// Record first-use approval for a named tool (MCP full name).
+    pub fn allow_session_tool(&mut self, tool_name: impl Into<String>) {
+        let t = tool_name.into();
+        if !self.approved_tools.iter().any(|x| x == &t) {
+            self.approved_tools.push(t);
+        }
+    }
+
     /// True if this path was session-allowed (boundary-safe, not raw prefix).
     pub fn session_path_allowed(&self, path: &str) -> bool {
         let path = path.trim();
@@ -116,8 +126,20 @@ impl PermissionState {
             .any(|grant| path_under_grant(path, grant))
     }
 
+    /// True if this tool name was session-approved (#129).
+    pub fn session_tool_allowed(&self, tool_name: &str) -> bool {
+        self.approved_tools.iter().any(|t| t == tool_name)
+    }
+
     /// Whether a tool may run without a new UI prompt.
+    ///
+    /// Built-in Read tools auto-run. MCP tools (`mcp__*`) never auto-run on
+    /// first use even if classified Read — they need a session tool grant.
     pub fn may_execute_without_prompt(&self, side_effect: ToolSideEffect, target: &str) -> bool {
+        // target may be path or tool name for MCP (see tool_host resolve).
+        if target.starts_with("mcp__") {
+            return self.session_tool_allowed(target);
+        }
         match side_effect {
             ToolSideEffect::Read => true,
             ToolSideEffect::SoftWrite | ToolSideEffect::HardWrite => {
@@ -195,5 +217,16 @@ mod tests {
         st.allow_session_path("/proj/mem");
         assert!(!st.session_path_allowed("/proj/memory-evil/x"));
         assert!(st.session_path_allowed("/proj/mem/x"));
+    }
+
+    /// #129: MCP tools never auto-run until session tool grant.
+    #[test]
+    fn mcp_requires_session_tool_grant() {
+        let mut st = PermissionState::default();
+        let name = "mcp__docs__read_file";
+        assert!(!st.may_execute_without_prompt(ToolSideEffect::Read, name));
+        st.allow_session_tool(name);
+        assert!(st.may_execute_without_prompt(ToolSideEffect::Read, name));
+        assert!(!st.may_execute_without_prompt(ToolSideEffect::Read, "mcp__docs__other"));
     }
 }

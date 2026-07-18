@@ -322,7 +322,11 @@ impl ToolHost {
                 );
             }
             PermissionDecision::AllowSessionPath => {
-                self.permissions.allow_session_path(&req.target);
+                if req.tool_name.starts_with("mcp__") {
+                    self.permissions.allow_session_tool(&req.tool_name);
+                } else {
+                    self.permissions.allow_session_path(&req.target);
+                }
                 self.audit_log(
                     &req.tool_name,
                     req.side_effect,
@@ -384,21 +388,41 @@ impl ToolHost {
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
 
-        if !may_auto_execute(side) && !self.permissions.may_execute_without_prompt(side, &target) {
+        // #129: MCP tools always need first-use approval (even if classified Read).
+        let mcp_first_use =
+            name.starts_with("mcp__") && !self.permissions.session_tool_allowed(name);
+        let needs_prompt = mcp_first_use
+            || (!may_auto_execute(side)
+                && !self.permissions.may_execute_without_prompt(side, &target));
+
+        if needs_prompt {
             if let Some(rid) = granted_request_id {
                 if !self.consume_grant(rid, name, &target) {
                     return Err(CoreError::Policy(
                         "invalid grant: unknown request_id or tool/target mismatch".into(),
                     ));
                 }
+                // First-use: promote AllowOnce to session tool grant for allowlisted Read MCP.
+                if name.starts_with("mcp__") {
+                    self.permissions.allow_session_tool(name);
+                }
             } else {
                 // Store original arguments on the request so Accept can re-execute
                 // without trusting the UI to re-parse human preview text as JSON.
+                let reason = if name.starts_with("mcp__") {
+                    if let Some((server, tool)) = crate::mcp_client::parse_mcp_tool_name(name) {
+                        format!("MCP server `{server}` requests tool `{tool}`")
+                    } else {
+                        "Untrusted MCP tool".into()
+                    }
+                } else {
+                    "tool requested write".into()
+                };
                 let req = PermissionRequest::with_arguments(
                     name,
                     side,
                     &target,
-                    "tool requested write",
+                    reason,
                     preview_args(arguments),
                     risk_for(side, name),
                     arguments.clone(),
@@ -1089,6 +1113,10 @@ fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
 }
 
 fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) -> String {
+    // MCP tools: target is the full tool name for per-tool session grants (#129).
+    if name.starts_with("mcp__") {
+        return name.to_string();
+    }
     match name {
         names::READ_FILE_SLICE => args
             .get("path")
@@ -1618,6 +1646,58 @@ mod tests {
             .execute("read_file_slice", &json!({"path": "/etc/passwd"}), None)
             .await;
         assert!(err.is_err());
+    }
+
+    /// #129: MCP-named tools require PermissionRequired before execute.
+    #[tokio::test]
+    async fn mcp_named_tool_requires_first_use_approval() {
+        let (_dir, mut host) = host_with_docs();
+        host.register_tool(crate::connectors::RegisteredTool {
+            spec: crate::tools::ToolSpec {
+                name: "mcp__docs__read_file".into(),
+                description: "MCP read".into(),
+                side_effect: ToolSideEffect::Read,
+                parameters: json!({"type": "object"}),
+            },
+            exec: crate::connectors::ConnectorExecutor::Stub {
+                detail: "mcp ok".into(),
+            },
+        });
+        let r = host
+            .execute("mcp__docs__read_file", &json!({}), None)
+            .await
+            .unwrap();
+        assert!(!r.ok);
+        let rid = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired {
+                    request_id,
+                    reason,
+                    tool_name,
+                    ..
+                } => {
+                    assert!(reason.contains("MCP server") || reason.contains("docs"));
+                    assert_eq!(tool_name, "mcp__docs__read_file");
+                    Some(request_id.clone())
+                }
+                _ => None,
+            })
+            .expect("permission required");
+        host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let r2 = host
+            .execute("mcp__docs__read_file", &json!({}), Some(&rid))
+            .await
+            .unwrap();
+        assert!(r2.ok, "{}", r2.summary);
+        // Subsequent call in session auto-runs (session tool grant).
+        let r3 = host
+            .execute("mcp__docs__read_file", &json!({}), None)
+            .await
+            .unwrap();
+        assert!(r3.ok);
     }
 
     /// #127: dynamic tool appears in specs and dispatches via execute.
