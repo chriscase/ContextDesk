@@ -163,9 +163,12 @@ pub struct McpServerConfig {
     /// Enabled.
     #[serde(default)]
     pub enabled: bool,
-    /// Host-assigned side effects: tools treated as read unless listed.
+    /// Tools that are always HardWrite (redundant with default after #129; kept for explicit lists).
     #[serde(default)]
     pub hard_write_tools: Vec<String>,
+    /// Tools allowed as Read (auto-run after first-use grant). All others default HardWrite (#129).
+    #[serde(default)]
+    pub read_tools: Vec<String>,
 }
 
 /// Validate MCP command is absolute.
