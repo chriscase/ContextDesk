@@ -75,16 +75,23 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ed25519 minisign private key for updater artifacts (#173).
+          # Set repo secrets TAURI_SIGNING_PRIVATE_KEY (+ optional PASSWORD).
+          # Public key is committed in desktop/src-tauri/tauri.conf.json plugins.updater.pubkey.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           # Draft so operators can smoke-test before publishing.
           releaseDraft: true
+          # Attach latest.json + signatures when createUpdaterArtifacts is true (#173).
+          includeUpdaterJson: true
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           releaseName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
           releaseBody: |
             Desktop installers for ContextDesk (draft).
 
-            Built by `.github/workflows/release.yml` (#172).
+            Built by `.github/workflows/release.yml` (#172 + #173 updater artifacts).
             Code signing / notarization is operator-owned (see docs/PACKAGING.md).
-            Updater channel is separate (#173).
+            In-app updates: Settings → General → Check for updates (opt-in, signed).
           args: ${{ matrix.args }}

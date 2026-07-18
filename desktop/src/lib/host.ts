@@ -827,3 +827,52 @@ export async function hostSetWebResearchSources(
 export function setupToWorkspaceRoots(setup: AppSetupState): string[] {
   return setup.workspaceRoots;
 }
+
+/** Update check result for Settings (#173). No install until user confirms. */
+export type UpdateCheckDto = {
+  available: boolean;
+  currentVersion: string;
+  version?: string;
+  body?: string | null;
+  date?: string | null;
+};
+
+/**
+ * Opt-in signed updater check (#173). Uses tauri-plugin-updater; never installs.
+ * Returns `available: false` when not in Tauri or no update / network failure.
+ */
+export async function hostCheckForUpdates(): Promise<UpdateCheckDto> {
+  if (!isTauri()) {
+    return { available: false, currentVersion: "browser" };
+  }
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const { getVersion } = await import("@tauri-apps/api/app");
+  const currentVersion = await getVersion();
+  const update = await check();
+  if (!update) {
+    return { available: false, currentVersion };
+  }
+  return {
+    available: true,
+    currentVersion,
+    version: update.version,
+    body: update.body,
+    date: update.date,
+  };
+}
+
+/**
+ * Download + install after explicit UI confirm (#173). Re-checks so install is
+ * never silent; user confirmation is required by the caller first.
+ */
+export async function hostInstallUpdate(): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Updates require the desktop app");
+  }
+  const { check } = await import("@tauri-apps/plugin-updater");
+  const update = await check();
+  if (!update) {
+    throw new Error("No update available");
+  }
+  await update.downloadAndInstall();
+}

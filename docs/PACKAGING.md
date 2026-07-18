@@ -69,3 +69,25 @@ cargo run -p cd-server -- --bind 0.0.0.0:8787 --allow-lan \
 
 Non-loopback requires `--allow-lan` **and** at least one API key (startup refuses otherwise).  
 **TLS:** terminate HTTPS at a reverse proxy — cd-server is HTTP-only. Avoid `--api-keys` on argv (leaks in process lists); prefer `--api-keys-file` or `CD_API_KEYS`.
+
+## Opt-in signed updater (#173)
+
+- **Plugin:** `tauri-plugin-updater` (Rust + `@tauri-apps/plugin-updater` JS).
+- **Public key** is committed under `desktop/src-tauri/tauri.conf.json` → `plugins.updater.pubkey`.
+- **Private key** is **never** committed. Store as GitHub Actions secrets:
+  - `TAURI_SIGNING_PRIVATE_KEY` — minisign private key string (from `npx tauri signer generate`)
+  - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — optional password if the key has one
+- **Endpoint:** HTTPS only — `https://github.com/chriscase/ContextDesk/releases/latest/download/latest.json`
+- **Artifacts:** `bundle.createUpdaterArtifacts: true` + release workflow `includeUpdaterJson: true`.
+- **UX:** Settings → General → **Check for updates**. No background auto-install; confirm dialog before download+install.
+- **CSP:** Update fetch runs in Rust, not the webview; `connect-src` does not need the GitHub host.
+
+### Operator: generate / rotate keys
+
+```sh
+npx @tauri-apps/cli signer generate -w ./cd.key
+# Commit only the printed public key into tauri.conf.json plugins.updater.pubkey
+# Put private key contents into repo secret TAURI_SIGNING_PRIVATE_KEY
+```
+
+If you lose the private key, generate a new pair, update the committed pubkey, and cut a fresh release — prior installers cannot verify new signatures until they ship with the new pubkey (or users reinstall).
