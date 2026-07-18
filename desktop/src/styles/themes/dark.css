@@ -10,11 +10,14 @@ html[data-theme="dark"] {
   --border-strong: #3a4150;
   --text: #e8eaed;
   --text-muted: #8b919c;
-  --text-faint: #5c6370;
+  /* ≥4.5:1 on --bg-app/#0b0c0e and --bg-panel/#12141a (#150) */
+  --text-faint: #7a808c;
   --accent: #6ea8fe;
   --accent-strong: #4c8dff;
   --accent-soft: rgb(110 168 254 / 0.14);
   --accent-on: #0b1020;
+  /* Body links: same hue as accent; already ≥4.5:1 on app/panel */
+  --link: #6ea8fe;
   --success: #7fd99a;
   --warning: #f0b429;
   --danger: #f07178;

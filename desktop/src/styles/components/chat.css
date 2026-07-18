@@ -18,8 +18,8 @@
   font-size: 10px;
   line-height: 1.3;
   letter-spacing: 0.01em;
+  /* AA via --text-faint alone — no opacity compounding (#150) */
   color: var(--text-faint);
-  opacity: 0.85;
   user-select: text;
 }
 

@@ -10,13 +10,16 @@ html[data-theme="light"] {
   --border-strong: #b7c0d0;
   --text: #1a1d24;
   --text-muted: #5c6573;
-  --text-faint: #8a94a6;
+  /* ≥4.5:1 on --bg-app/#f4f5f7 and --bg-panel/#ffffff (#150) */
+  --text-faint: #66707e;
   --accent: #2f6fed;
   --accent-strong: #1f5ad4;
   --accent-soft: rgb(47 111 237 / 0.1);
   --accent-on: #ffffff;
-  --success: #2f8f57;
-  --warning: #b8860b;
+  /* Dedicated AA link token (accent alone is ~4.17:1 on --bg-app) */
+  --link: #1f5ad4;
+  --success: #1f7a48;
+  --warning: #8b6914;
   --danger: #c23b44;
   --tool-bg: #eef2f7;
   --chat-user-bg: #e8ebf2;
