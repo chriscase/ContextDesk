@@ -1,23 +1,10 @@
 import { type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { Composer } from "../Composer";
-import { MarkdownBody } from "../MarkdownBody";
-import { ThinkingIndicator } from "../ThinkingIndicator";
-import { StreamLiveRegion } from "../StreamLiveRegion";
 import { nextRovingIndex } from "../../lib/a11y";
-import { ToolCallList } from "../ToolCallList";
-import { SourceCitations } from "../SourceCitations";
-import { formatMsgMetaFooter, shortSourceLabel, type ChatSession, type Msg } from "../../lib/session";
-import { hostOpenExternalUrl, hostReadFile, type BrandingDto, type ModelOptionDto } from "../../lib/host";
-
-function isHttpUrl(s: string): boolean {
-  return /^https?:\/\//i.test(s.trim());
-}
-
-function openExternalUrl(url: string) {
-  void hostOpenExternalUrl(url).catch((err) => {
-    console.error("open external url failed", err);
-  });
-}
+import { useMessageWindow } from "../../hooks/useMessageWindow";
+import type { ChatSession, Msg } from "../../lib/session";
+import type { BrandingDto, ModelOptionDto } from "../../lib/host";
+import { MessageRow } from "./MessageRow";
 
 export type ChatPaneProps = {
   branding: BrandingDto;
@@ -90,6 +77,8 @@ export function ChatPane(props: ChatPaneProps) {
     setSourcePath,
     setSourceContent,
   } = props;
+
+  const windowed = useMessageWindow(visibleMessages, chatScrollRef);
 
   return (
             <div
@@ -242,154 +231,49 @@ export function ChatPane(props: ChatPaneProps) {
                     ) : null}
                   </div>
                 ) : (
-                  visibleMessages.map((m) => (
-                    <article
-                      key={m.id}
-                      className="msg"
-                      data-role={m.role}
-                      data-msg-id={m.id}
-                    >
-                      <div className="msg__role">{m.role}</div>
-                      {m.tools ? <ToolCallList tools={m.tools} /> : null}
-                      {m.trail?.length ? (
-                        <div className="search-trail" aria-label="Search trail">
-                          {m.trail.map((s) => (
-                            <span key={s} className="search-trail__step">
-                              {s}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      {m.citations?.length ? (
-                        <SourceCitations
-                          citations={m.citations.map((c) => ({
-                            id: c.id,
-                            label: shortSourceLabel(c.label, c.id),
-                            title: c.title,
-                          }))}
-                          onOpenFile={(path) => {
-                            setSourcePath(path);
-                            setPane("source");
-                            setSourceContent("Loading…");
-                            void hostReadFile(path)
-                              .then((body) => setSourceContent(body))
-                              .catch((err) =>
-                                setSourceContent(
-                                  `Could not read ${path}:\n${
-                                    err instanceof Error
-                                      ? err.message
-                                      : String(err)
-                                  }`,
-                                ),
-                              );
-                          }}
+                  <div
+                    className="chat-transcript"
+                    data-virtualized={windowed.virtualized ? "true" : "false"}
+                    style={
+                      windowed.virtualized
+                        ? {
+                            position: "relative",
+                            height: windowed.totalHeight,
+                          }
+                        : undefined
+                    }
+                  >
+                    {windowed.mounted.map(({ msg: m, top }) => (
+                      <div
+                        key={m.id}
+                        className="chat-transcript__row"
+                        style={
+                          windowed.virtualized
+                            ? {
+                                position: "absolute",
+                                top,
+                                left: 0,
+                                right: 0,
+                              }
+                            : undefined
+                        }
+                      >
+                        <MessageRow
+                          msg={m}
+                          turnStartedAt={turnStartedAt}
+                          effectiveChatModel={effectiveChatModel}
+                          setSourcePath={setSourcePath}
+                          setSourceContent={setSourceContent}
+                          setPane={setPane}
+                          onHeightChange={
+                            windowed.virtualized
+                              ? windowed.onHeightChange
+                              : undefined
+                          }
                         />
-                      ) : null}
-                      <div className="msg__bubble">
-                        {m.role === "assistant" ? (
-                          <>
-                            {m.streaming &&
-                            !m.content.trim() &&
-                            turnStartedAt ? (
-                              <ThinkingIndicator
-                                startedAt={turnStartedAt}
-                                model={effectiveChatModel}
-                                hasTokens={false}
-                              />
-                            ) : null}
-                            {m.content ? (
-                              <div
-                                className="msg__content"
-                                data-streaming={m.streaming ? "true" : "false"}
-                                onClick={(e) => {
-                                  const t = e.target as HTMLElement;
-                                  // Markdown external links → system browser (not WKWebView).
-                                  const a = t.closest(
-                                    "a.md-ext-link, a[href^='http']",
-                                  ) as HTMLAnchorElement | null;
-                                  if (a?.href && isHttpUrl(a.href)) {
-                                    e.preventDefault();
-                                    openExternalUrl(a.href);
-                                    return;
-                                  }
-                                  const citeEl = t.closest(
-                                    "[data-cite]",
-                                  ) as HTMLElement | null;
-                                  const cite = citeEl?.getAttribute("data-cite");
-                                  if (!cite) return;
-                                  if (isHttpUrl(cite)) {
-                                    openExternalUrl(cite);
-                                    return;
-                                  }
-                                  setSourcePath(cite);
-                                  setPane("source");
-                                  setSourceContent("Loading…");
-                                  void hostReadFile(cite)
-                                    .then((body) => setSourceContent(body))
-                                    .catch((err) =>
-                                      setSourceContent(
-                                        `Could not read ${cite}:\n${
-                                          err instanceof Error
-                                            ? err.message
-                                            : String(err)
-                                        }`,
-                                      ),
-                                    );
-                                }}
-                              >
-                                <MarkdownBody
-                                  text={m.content}
-                                  streaming={m.streaming}
-                                />
-                                {(m.streaming || m.content) && (
-                                  <StreamLiveRegion
-                                    text={m.content}
-                                    streaming={Boolean(m.streaming)}
-                                  />
-                                )}
-                              </div>
-                            ) : null}
-                            {m.streaming &&
-                            m.content.trim() &&
-                            turnStartedAt ? (
-                              <div className="thinking-ind-wrap">
-                                <ThinkingIndicator
-                                  startedAt={turnStartedAt}
-                                  model={effectiveChatModel}
-                                  hasTokens
-                                />
-                              </div>
-                            ) : null}
-                          </>
-                        ) : (
-                          <div
-                            className="msg__content"
-                            data-streaming={m.streaming ? "true" : "false"}
-                          >
-                            {m.content}
-                          </div>
-                        )}
                       </div>
-                      {m.role === "assistant" &&
-                      m.meta &&
-                      !m.streaming &&
-                      formatMsgMetaFooter(m.meta) ? (
-                        <footer
-                          className="msg__meta"
-                          title={[
-                            m.meta.model,
-                            m.meta.provider_label,
-                            m.meta.provider_id,
-                            m.meta.base_url,
-                          ]
-                            .filter(Boolean)
-                            .join("\n")}
-                        >
-                          {formatMsgMetaFooter(m.meta)}
-                        </footer>
-                      ) : null}
-                    </article>
-                  ))
+                    ))}
+                  </div>
                 )}
               </div>
               {unreadBelow > 0 ? (
