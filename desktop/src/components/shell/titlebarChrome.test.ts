@@ -54,6 +54,17 @@ describe("overlay titlebar chrome (#153)", () => {
       "utf8",
     );
     expect(cap).toMatch(/core:window:allow-start-dragging/);
+    // tauri dev serves http://localhost:* — ACL treats that as remote.
+    expect(cap).toMatch(/"remote"/);
+    expect(cap).toMatch(/localhost/);
+  });
+
+  it("tauri window is labeled main and registers default capability", () => {
+    const conf = JSON.parse(
+      readFileSync(join(desktop, "src-tauri/tauri.conf.json"), "utf8"),
+    );
+    expect(conf.app.windows[0].label).toBe("main");
+    expect(conf.app.security.capabilities).toContain("default");
   });
 
   it("theme-init sets data-platform=macos on Mac UA", () => {
