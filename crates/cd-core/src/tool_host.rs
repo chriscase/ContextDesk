@@ -542,6 +542,11 @@ impl ToolHost {
         self.durable_memory_enabled = enabled;
     }
 
+    /// Borrow the durable memory store when configured (ambient recall / tools).
+    pub fn durable_memory_store(&self) -> Option<std::sync::Arc<dyn crate::memory::MemoryStore>> {
+        self.durable_memory.clone()
+    }
+
     /// Opt-in hybrid `search_kb` path (#119). Off by default (keyword-only).
     pub fn set_hybrid_retrieval(&mut self, enabled: bool) {
         self.hybrid_retrieval = enabled;

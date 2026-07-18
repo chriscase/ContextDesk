@@ -94,6 +94,31 @@ impl SqliteMemoryStore {
         Ok(row.map(|(m, b)| (m, bytes_to_f32_vec(&b))))
     }
 
+    /// Insert with a predetermined id (idempotent import). No-op if id exists.
+    pub fn put_imported(
+        &self,
+        id: Uuid,
+        draft: MemoryDraft,
+        now_secs: i64,
+    ) -> CoreResult<MemoryRecord> {
+        if let Some(existing) = self.get(&id)? {
+            return Ok(existing);
+        }
+        let conn = self.conn.lock().map_err(|_| lock_err())?;
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
+        let result = Self::insert_row(&conn, &draft, id, now_secs, None, 1);
+        match result {
+            Ok(r) => {
+                conn.execute("COMMIT", []).map_err(sqlite_err)?;
+                Ok(r)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(e)
+            }
+        }
+    }
+
     fn insert_row(
         conn: &Connection,
         draft: &MemoryDraft,

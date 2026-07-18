@@ -15,16 +15,23 @@
 //! Production uses [`SystemClock`] → [`crate::embed::now_unix_secs`]. Tests
 //! inject a fixed [`Clock`] or pass `now_secs` into store methods.
 
+pub mod ambient;
 pub mod facade;
+pub mod import;
 pub mod migrate;
 pub mod recall;
 pub mod sqlite_store;
 pub mod tools;
 pub mod types;
 
+pub use ambient::{inject_memory_context, AmbientBudget, AmbientInjection};
 pub use facade::{
     ensure_workspace_memory_gitignored, personal_memory_db_path, workspace_memory_db_path,
     workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory, WorkspaceMemoryLocation,
+};
+pub use import::{
+    import_memory_fs_sqlite, import_memory_jsonl_sqlite, is_migrated_memory_fs_path,
+    stable_import_id, ImportReport,
 };
 pub use sqlite_store::SqliteMemoryStore;
 pub use tools::{
