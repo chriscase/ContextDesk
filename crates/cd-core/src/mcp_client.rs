@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
@@ -35,7 +36,8 @@ pub struct McpSession {
     child: Child,
     stdin: ChildStdin,
     /// Background reader feeds lines so `request` can `recv_timeout` (#252).
-    line_rx: Receiver<Result<String, String>>,
+    /// Mutex so `McpSession` stays `Sync` for async ToolHost/Tauri bounds.
+    line_rx: Mutex<Receiver<Result<String, String>>>,
     hard_write_tools: Vec<String>,
     read_tools: Vec<String>,
     request_timeout: Duration,
@@ -129,7 +131,7 @@ impl McpSession {
             name: cfg.name.clone(),
             child,
             stdin,
-            line_rx: rx,
+            line_rx: Mutex::new(rx),
             hard_write_tools: cfg.hard_write_tools.clone(),
             read_tools: cfg.read_tools.clone(),
             request_timeout: opts.request_timeout.unwrap_or(MCP_REQUEST_TIMEOUT),
@@ -179,7 +181,7 @@ impl McpSession {
             }
             lines += 1;
             let remaining = deadline.saturating_duration_since(now);
-            let buf = match self.line_rx.recv_timeout(remaining) {
+            let buf = match self.line_rx.lock().expect("mcp line_rx").recv_timeout(remaining) {
                 Ok(Ok(line)) => line,
                 Ok(Err(e)) => return Err(CoreError::Message(e)),
                 Err(RecvTimeoutError::Timeout) => {
