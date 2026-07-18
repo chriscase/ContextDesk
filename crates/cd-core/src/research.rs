@@ -485,6 +485,29 @@ impl ChatBackend for CapabilityAwareBackend {
     }
 }
 
+/// Build a SSRF-pinned HTTP client for Grok OIDC token refresh (#141 / #251).
+///
+/// **Fail closed:** if pin/resolve rejects (e.g. hostname → private IP), returns
+/// `Err` — never constructs an unpinned `reqwest::Client`.
+pub fn pinned_oidc_refresh_client(
+    refresh_url: &str,
+    policy: &SsrfPolicy,
+    resolver: &impl crate::ssrf::DnsResolver,
+    timeout: std::time::Duration,
+) -> CoreResult<reqwest::Client> {
+    let url = if refresh_url.trim().starts_with("http") {
+        refresh_url.trim()
+    } else {
+        "https://auth.x.ai"
+    };
+    match crate::ssrf::build_pinned_client_for_url(url, policy, resolver, timeout) {
+        Ok((_u, c)) => Ok(c),
+        Err(e) => Err(CoreError::Message(format!(
+            "refresh client pin failed: {e}"
+        ))),
+    }
+}
+
 /// Build a [`ChatBackend`] for `profile` (#122).
 ///
 /// Owns SSRF policy selection, Anthropic/OpenAI client construction, and Grok
@@ -531,25 +554,14 @@ pub async fn backend_for(
             };
             crate::grok_auth::assert_grok_base_allowed(base)?;
             let creds = crate::grok_auth::load_grok_session_credentials()?;
-            // #141: pin OIDC refresh host (auth.x.ai) — no auto-redirects.
+            // #141 / #251: pin OIDC refresh host — fail closed, never unpinned fallback.
             let refresh_url = creds.oidc_issuer.as_deref().unwrap_or("https://auth.x.ai");
-            let http = match crate::ssrf::build_pinned_client_for_url(
-                if refresh_url.starts_with("http") {
-                    refresh_url
-                } else {
-                    "https://auth.x.ai"
-                },
+            let http = pinned_oidc_refresh_client(
+                refresh_url,
                 &SsrfPolicy::default(),
                 &crate::ssrf::SystemResolver,
                 std::time::Duration::from_secs(60),
-            ) {
-                Ok((_u, c)) => c,
-                Err(_) => reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(60))
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|e| CoreError::Message(format!("http client: {e}")))?,
-            };
+            )?;
             let creds = crate::grok_auth::ensure_fresh_credentials(creds, |token_url, body| {
                 let http = http.clone();
                 async move {
@@ -896,8 +908,48 @@ fn append_grant_deny_note(history: &mut Vec<ChatMessage>, tool_name: &str, targe
 mod tests {
     use super::*;
     use crate::permissions::PermissionDecision;
+    use crate::ssrf::{MapResolver, SsrfPolicy};
     use std::fs;
+    use std::net::IpAddr;
     use tempfile::tempdir;
+
+    /// #251: private resolve must not fall back to an unpinned refresh client.
+    #[test]
+    fn oidc_refresh_pin_fails_closed_on_private_resolve() {
+        let resolver =
+            MapResolver::from_pairs([("auth.x.ai", vec!["10.0.0.1".parse::<IpAddr>().unwrap()])]);
+        let err = pinned_oidc_refresh_client(
+            "https://auth.x.ai/oauth/token",
+            &SsrfPolicy::default(),
+            &resolver,
+            std::time::Duration::from_secs(60),
+        )
+        .expect_err("must not build unpinned client");
+        let s = err.to_string();
+        assert!(
+            s.contains("pin failed") || s.contains("private") || s.contains("blocked"),
+            "unexpected err: {s}"
+        );
+        // No network request is made — MapResolver is pure offline.
+    }
+
+    #[test]
+    fn oidc_refresh_pin_source_has_no_unpinned_fallback() {
+        // Structural: the refresh path must not construct Client::builder on Err.
+        let src = include_str!("research.rs");
+        // Find pinned_oidc_refresh_client body — must not contain unpinned builder.
+        let start = src
+            .find("pub fn pinned_oidc_refresh_client")
+            .expect("function present");
+        // ASCII-only substring scan (clippy::string_slice).
+        let end = (start + 800).min(src.len());
+        let slice = src.get(start..end).expect("ascii function body slice");
+        assert!(
+            !slice.contains("Client::builder()"),
+            "pinned_oidc_refresh_client must not fall back to Client::builder"
+        );
+        assert!(slice.contains("refresh client pin failed"));
+    }
 
     /// #111: after approving save_memory, history has assistant(tool_calls)+tool(result).
     #[tokio::test]
