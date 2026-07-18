@@ -6,8 +6,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use cd_core::chat::ChatMessage;
+use cd_core::config::{config_path, load_config};
+use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
-use cd_core::research::{build_host, events_to_dto, research_local};
+use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
+use cd_core::providers::ProviderProfile;
+use cd_core::research::{build_host, events_to_dto, research_local, research_turn};
 use cd_core::workspace::Workspace;
 use clap::Parser;
 use futures_util::stream::{self, Stream};
@@ -41,6 +46,15 @@ struct Args {
     root: Option<PathBuf>,
 }
 
+/// Optional chat provider for server research turns (#165).
+/// Secret is held only in-process (never over HTTP responses).
+#[derive(Clone)]
+struct ServerProvider {
+    profile: ProviderProfile,
+    /// Resolved API key material when required by the kind; never logged.
+    api_key: Option<String>,
+}
+
 #[derive(Clone)]
 struct AppState {
     key_hashes: Arc<Vec<[u8; 32]>>,
@@ -48,6 +62,71 @@ struct AppState {
     workspaces: Arc<Mutex<HashMap<String, WorkspaceData>>>,
     /// api key hash -> allowed workspace ids (empty vec = all if single-tenant dev)
     key_workspaces: Arc<HashMap<[u8; 32], Vec<String>>>,
+    /// Active provider from config/keychain; `None` → always local-retrieval / degraded.
+    provider: Option<ServerProvider>,
+}
+
+/// Load generic provider profile + keychain secret for server research (#165).
+/// Offline-safe: missing config/keychain yields `None` (degraded path).
+fn load_server_provider(branding: &cd_core::Branding) -> Option<ServerProvider> {
+    let path = config_path(branding).ok()?;
+    let cfg = load_config(&path).ok()?;
+    let profile = cfg.providers.active()?.clone();
+    let api_key = profile.api_key_ref.as_ref().and_then(|r| {
+        let store = KeychainSecretStore::new();
+        store.get(r).ok().flatten()
+    });
+    Some(ServerProvider { profile, api_key })
+}
+
+/// Run research via `research_turn` when a provider is configured; honor `force_local`.
+/// Returns events plus honest degrade metadata (never pretends LLM when local-only).
+async fn run_research_turn(
+    host: &mut cd_core::tool_host::ToolHost,
+    provider: Option<&ServerProvider>,
+    query: &str,
+    session_id: &str,
+    force_local: bool,
+) -> Result<(Vec<StreamEvent>, bool, Option<String>), StatusCode> {
+    let events = match (force_local, provider) {
+        (true, _) | (false, None) => research_local(host, query, session_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        (false, Some(p)) => {
+            let mut history: Vec<ChatMessage> = Vec::new();
+            research_turn(
+                host,
+                &p.profile,
+                p.api_key.clone(),
+                query,
+                &mut history,
+                session_id,
+                false,
+            )
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        }
+    };
+
+    let model = events.iter().find_map(|e| match e {
+        StreamEvent::TurnStarted { model, .. } => model.clone(),
+        _ => None,
+    });
+    // Honest degrade: local-retrieval model, or no provider / forced local, or error path models.
+    let degraded = force_local
+        || provider.is_none()
+        || model.as_deref() == Some("local-retrieval")
+        || model
+            .as_ref()
+            .map(|m| {
+                m.contains("unreachable")
+                    || m.contains("provider_error")
+                    || m.contains("not_wired")
+                    || m.contains("ollama_unreachable")
+            })
+            .unwrap_or(false);
+
+    Ok((events, degraded, model))
 }
 
 struct WorkspaceData {
@@ -217,12 +296,18 @@ async fn research(
     };
     let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let sid = body.session_id.unwrap_or_else(|| "server".into());
-    let _ = body.force_local;
-    let events = research_local(&mut host, &body.query, &sid)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (events, degraded, model) = run_research_turn(
+        &mut host,
+        state.provider.as_ref(),
+        &body.query,
+        &sid,
+        body.force_local,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "events": events_to_dto(&events),
+        "degraded": degraded,
+        "model": model,
     })))
 }
 
@@ -247,9 +332,10 @@ async fn research_sse(
         data.workspace.clone()
     };
     let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let events = research_local(&mut host, &q.query, "sse")
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // SSE still buffers full turn for now (#166 owns true incremental stream).
+    // Honor force_local=false path when provider configured (#165).
+    let (events, _degraded, _model) =
+        run_research_turn(&mut host, state.provider.as_ref(), &q.query, "sse", false).await?;
     let dtos = events_to_dto(&events);
     let stream = stream::iter(dtos.into_iter().map(|dto| {
         let data = serde_json::to_string(&dto).unwrap_or_else(|_| "{}".into());
@@ -334,10 +420,18 @@ async fn main() {
         key_workspaces.insert(*h, vec!["default".into()]);
     }
 
+    let provider = load_server_provider(&branding);
+    if provider.is_some() {
+        tracing::info!("research provider profile loaded (secret via keychain only)");
+    } else {
+        tracing::info!("no provider configured — /v1/research will use local-retrieval (degraded)");
+    }
+
     let state = AppState {
         key_hashes: Arc::new(key_hashes),
         workspaces: Arc::new(Mutex::new(workspaces)),
         key_workspaces: Arc::new(key_workspaces),
+        provider,
     };
 
     let app = build_app(state);
@@ -524,6 +618,14 @@ mod tests {
     }
 
     fn test_state(root: PathBuf, keys: &[(&str, &str)]) -> AppState {
+        test_state_with_provider(root, keys, None)
+    }
+
+    fn test_state_with_provider(
+        root: PathBuf,
+        keys: &[(&str, &str)],
+        provider: Option<ServerProvider>,
+    ) -> AppState {
         // keys: (api_key, workspace_id)
         let ws_a = Workspace::new("a", vec![root.join("a")]);
         let ws_b = Workspace::new("b", vec![root.join("b")]);
@@ -559,6 +661,7 @@ mod tests {
             key_hashes: Arc::new(key_hashes),
             workspaces: Arc::new(Mutex::new(workspaces)),
             key_workspaces: Arc::new(key_workspaces),
+            provider,
         }
     }
 
@@ -613,6 +716,50 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["degraded"], true, "{v}");
+        assert_eq!(v["model"], "local-retrieval", "{v}");
+        assert!(!v["events"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn research_no_provider_is_degraded_without_force_local() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a/x.md"), "payments gateway\n").unwrap();
+        // provider: None — must not panic or call network
+        let state = test_state(dir.path().to_path_buf(), &[("k", "ws-a")]);
+        let app = build_app(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/research")
+            .header("authorization", "Bearer k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws-a","query":"payments","force_local":false}"#,
+            ))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["degraded"], true, "{v}");
+        assert_eq!(v["model"], "local-retrieval", "{v}");
+    }
+
+    #[test]
+    fn run_research_force_local_skips_provider_profile() {
+        // Pure contract: force_local implies degraded regardless of profile presence.
+        let p = ServerProvider {
+            profile: ProviderProfile::ollama_local(),
+            api_key: None,
+        };
+        assert!(p.profile.kind == cd_core::providers::ProviderKind::Ollama);
     }
 
     #[tokio::test]
