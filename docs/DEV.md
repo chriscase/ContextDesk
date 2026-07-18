@@ -11,6 +11,9 @@
 ```sh
 # Doc honesty gate (claim↔code; also runs in CI job `claims`)
 sh scripts/check_claims.sh
+# Close-proof fixtures (#254) — offline; no network
+sh scripts/check_close_proof.sh --offline
+sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_sample.json
 
 # Full gate — see AGENTS.md "Build / test / lint"
 cargo fmt --all -- --check

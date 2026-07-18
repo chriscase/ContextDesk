@@ -30,6 +30,23 @@ jobs:
       - name: check Shipped anchors in docs/CLAIMS.md
         run: sh scripts/check_claims.sh
 
+  close-proof:
+    name: close-proof discipline (#254)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: offline fixtures (must reject no-SHA closes)
+        run: |
+          sh scripts/check_close_proof.sh --offline
+          sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_sample.json
+      - name: sample closed remediation issues (needs gh)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Soft: network sample; offline already hard-gates the standard.
+          sh scripts/check_close_proof.sh || true
+
   rust:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
