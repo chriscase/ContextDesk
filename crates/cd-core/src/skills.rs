@@ -404,16 +404,28 @@ mod tests {
             "---\nid: tool-skill\nname: Tool Skill\ndescription: ships tools\nallows_write: true\nenabled: false\n---\n\nUse the bundled tools.\n",
         )
         .unwrap();
+        // Absolute entrypoint is platform-dependent (same pattern as modules tests).
+        let abs_cmd = if cfg!(windows) {
+            r"C:\\Windows\\System32\\cmd.exe"
+        } else {
+            "/usr/bin/true"
+        };
+        let fs_root = if cfg!(windows) {
+            r"C:\\Windows\\Temp\\skill-sandbox"
+        } else {
+            "/tmp/skill-sandbox"
+        };
         fs::write(
             skill_dir.join("module.toml"),
-            r#"
+            format!(
+                r#"
 schema = "cd.module.v1"
 id = "tool-skill"
 name = "Tool Skill Module"
 version = "0.1.0"
 
 [entrypoint]
-command = "/usr/bin/true"
+command = "{abs_cmd}"
 args = []
 
 [[provided_tools]]
@@ -427,10 +439,11 @@ description = "Soft write"
 hard_write_tools = []
 
 [requested_capabilities]
-filesystem_roots = ["/tmp/skill-sandbox"]
+filesystem_roots = ["{fs_root}"]
 network_hosts = []
 secret_refs = []
-"#,
+"#
+            ),
         )
         .unwrap();
 

@@ -1174,11 +1174,8 @@ struct SkillDto {
 }
 
 fn skill_to_dto(s: cd_core::skills::Skill) -> SkillDto {
-    let module_id = cd_core::skills::skill_module_toml_path(&s).and_then(|p| {
-        cd_core::modules::parse_module_file(&p)
-            .ok()
-            .map(|m| m.id)
-    });
+    let module_id = cd_core::skills::skill_module_toml_path(&s)
+        .and_then(|p| cd_core::modules::parse_module_file(&p).ok().map(|m| m.id));
     SkillDto {
         has_module: module_id.is_some(),
         module_id,
@@ -1226,7 +1223,8 @@ fn set_skill_enabled_cmd(
     }
     let cfg = state.config.lock().expect("config").clone();
     let dirs = skill_dirs_for(&state, &cfg);
-    let skill = cd_core::skills::set_skill_enabled(&dirs, &id, enabled).map_err(|e| e.to_string())?;
+    let skill =
+        cd_core::skills::set_skill_enabled(&dirs, &id, enabled).map_err(|e| e.to_string())?;
 
     if !enabled {
         // Disabling the skill does not force-remove the module install; user manages Modules.
@@ -1255,7 +1253,8 @@ fn set_skill_enabled_cmd(
     };
 
     let mdir = modules_dir(&state)?;
-    let m = cd_core::modules::install_module_from_dir(&src_dir, &mdir).map_err(|e| e.to_string())?;
+    let m =
+        cd_core::modules::install_module_from_dir(&src_dir, &mdir).map_err(|e| e.to_string())?;
     let grants = cd_core::modules::ModuleGrantStore::load(&grants_path(&state)?)
         .map_err(|e| e.to_string())?;
 
