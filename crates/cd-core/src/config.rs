@@ -103,6 +103,12 @@ pub struct AppConfig {
     /// Soft max files for indexing (default 100_000). Truncation is recorded, not silent.
     #[serde(default = "default_index_max_files")]
     pub index_max_files: usize,
+    /// In-RAM working-set byte budget for the keyword index (default 256 MiB).
+    /// The persistent store still holds every chunk on disk; this bounds resident
+    /// memory by keeping the most-recently-modified files searchable. Capping is
+    /// recorded (`KeywordIndex::is_bytes_capped`), never silent. `0` → default.
+    #[serde(default = "default_index_max_bytes")]
+    pub index_max_bytes: usize,
     /// Workspace connector registry entries (#127). No secrets — keychain refs only.
     #[serde(default)]
     pub connectors: Vec<crate::connectors::ConnectorConfig>,
@@ -127,6 +133,10 @@ pub struct AppConfig {
 
 fn default_index_max_files() -> usize {
     100_000
+}
+
+fn default_index_max_bytes() -> usize {
+    256 * 1024 * 1024
 }
 
 fn default_theme() -> String {

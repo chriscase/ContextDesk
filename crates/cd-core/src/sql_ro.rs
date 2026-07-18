@@ -90,13 +90,39 @@ impl PostgresConnectConfig {
         if let Some(pw) = &self.password {
             s.push_str(&format!(" password={}", escape_conn_val(pw)));
         }
-        if self.sslmode.eq_ignore_ascii_case("disable") {
-            s.push_str(" sslmode=disable");
-        } else {
-            // prefer/require/verify-*: rustls connector path (#250).
-            s.push_str(&format!(" sslmode={}", escape_conn_val(&self.sslmode)));
-        }
+        // sslmode is emitted as the *wire* value tokio-postgres accepts.
+        // verify-ca/verify-full are mapped to `require` here because
+        // tokio-postgres 0.7 rejects those strings at DSN parse; the actual
+        // certificate-chain + hostname verification is enforced in the rustls
+        // ClientConfig (see postgres_dsn_sslmode / postgres_rustls_client_config).
+        // The wire values are safe literals, so no escaping is needed.
+        s.push_str(&format!(" sslmode={}", postgres_dsn_sslmode(&self.sslmode)));
         s
+    }
+}
+
+/// Map the configured `sslmode` to the **wire** value that `tokio-postgres`
+/// accepts in a connection string (#250).
+///
+/// `tokio-postgres` 0.7 only parses `disable` | `prefer` | `require` in the DSN
+/// `sslmode` key and REJECTS `verify-ca` / `verify-full` at parse time
+/// (`config.rs`: `InvalidValue("sslmode")`), so advertising those modes via the
+/// DSN string can never connect. We therefore map both `verify-*` modes — and
+/// `require` — to the wire value `require` (TLS is mandatory) and perform the
+/// real certificate-chain + hostname checking in the rustls `ClientConfig`
+/// (see [`postgres_rustls_client_config`]), never via the rejected sslmode
+/// string. The mapping is only ever equal-or-stricter than the requested mode,
+/// never weaker: `verify-*` still requires TLS *and* rustls still validates the
+/// chain and hostname.
+pub fn postgres_dsn_sslmode(sslmode: &str) -> &'static str {
+    match sslmode.trim().to_ascii_lowercase().as_str() {
+        "disable" => "disable",
+        "prefer" => "prefer",
+        "require" | "verify-ca" | "verify-full" => "require",
+        // Unknown modes are rejected earlier by
+        // `postgres_tls_stack_for_sslmode`; default to `prefer` here so we never
+        // emit a string tokio-postgres will reject at parse.
+        _ => "prefer",
     }
 }
 
@@ -121,6 +147,12 @@ pub fn postgres_tls_stack_for_sslmode(sslmode: &str) -> CoreResult<PostgresTlsSt
 }
 
 /// Build a rustls `ClientConfig` with webpki roots for Postgres TLS.
+///
+/// Uses rustls' safe-default server verifier, which validates the full
+/// certificate chain against the webpki roots **and** the server hostname
+/// (the DSN `host`, passed through by `tokio-postgres-rustls`). This is what
+/// makes `verify-ca` / `verify-full` genuinely enforced even though they are
+/// mapped to the wire value `require` (see [`postgres_dsn_sslmode`]).
 pub fn postgres_rustls_client_config() -> CoreResult<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -299,7 +331,11 @@ pub fn execute_postgres_ro_blocking(
 ///
 /// - `sslmode=disable` → `NoTls`
 /// - `prefer` / `require` / `verify-ca` / `verify-full` → rustls (`tokio-postgres-rustls`)
-///   with webpki roots (#250). `require` fails if the server has no TLS.
+///   with webpki roots (#250). `require` / `verify-*` fail if the server has no
+///   TLS. Because tokio-postgres rejects the literal `verify-ca` / `verify-full`
+///   strings in a DSN, those modes are sent to the wire as `require` (see
+///   [`postgres_dsn_sslmode`]) while rustls still validates the certificate
+///   chain and hostname against webpki roots.
 pub async fn execute_postgres_ro(
     cfg: &PostgresConnectConfig,
     sql: &str,
@@ -752,6 +788,91 @@ mod tests {
             PostgresTlsStack::Rustls
         );
         assert!(p.connection_string().contains("sslmode=prefer"));
+    }
+
+    #[test]
+    fn dsn_sslmode_mapping_never_weaker() {
+        // disable/prefer pass through; require + both verify-* map to `require`.
+        assert_eq!(postgres_dsn_sslmode("disable"), "disable");
+        assert_eq!(postgres_dsn_sslmode("prefer"), "prefer");
+        assert_eq!(postgres_dsn_sslmode("require"), "require");
+        assert_eq!(postgres_dsn_sslmode("verify-ca"), "require");
+        assert_eq!(postgres_dsn_sslmode("verify-full"), "require");
+        // Case/whitespace-insensitive.
+        assert_eq!(postgres_dsn_sslmode("  VERIFY-FULL "), "require");
+        // Unknown falls back to a value tokio-postgres accepts (never rejected).
+        assert_eq!(postgres_dsn_sslmode("bogus"), "prefer");
+    }
+
+    /// tokio-postgres itself REJECTS the literal `verify-ca`/`verify-full`
+    /// sslmode strings — this documents the break #250 fixes so a regression
+    /// (emitting the raw string again) fails loudly here, offline.
+    #[test]
+    fn tokio_postgres_rejects_literal_verify_modes() {
+        for mode in ["verify-ca", "verify-full"] {
+            let dsn = format!("host=db.example.com dbname=app user=ro sslmode={mode}");
+            let parsed = dsn.parse::<tokio_postgres::Config>();
+            assert!(
+                parsed.is_err(),
+                "expected tokio-postgres to reject sslmode={mode}, got {parsed:?}"
+            );
+        }
+        // The wire value we map to must parse.
+        let ok = "host=db.example.com dbname=app user=ro sslmode=require"
+            .parse::<tokio_postgres::Config>();
+        assert!(ok.is_ok(), "sslmode=require must parse: {ok:?}");
+    }
+
+    /// verify-full: the DSN we build must (a) not contain the rejected string,
+    /// (b) actually parse as a tokio-postgres Config (no silent parse failure),
+    /// (c) select the rustls stack, and (d) build a valid strict TLS config.
+    #[test]
+    fn verify_full_builds_parseable_dsn_and_tls_config() {
+        let cfg = PostgresConnectConfig {
+            host: "db.example.com".into(),
+            port: 5432,
+            database: "app".into(),
+            user: "cd_ro".into(),
+            sslmode: "verify-full".into(),
+            password: Some("s3cret".into()),
+            timeout_ms: 3000,
+        };
+        let dsn = cfg.connection_string();
+        // (a) no rejected verify-* literal on the wire; mapped to require.
+        assert!(dsn.contains("sslmode=require"), "{dsn}");
+        assert!(!dsn.contains("verify-full"), "{dsn}");
+        assert!(!dsn.contains("verify-ca"), "{dsn}");
+        // (b) tokio-postgres parses the exact DSN we would connect with.
+        let parsed = dsn.parse::<tokio_postgres::Config>();
+        assert!(parsed.is_ok(), "verify-full DSN must parse: {parsed:?}");
+        // (c) TLS stack is rustls (encrypted), not NoTls.
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&cfg.sslmode).unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        // (d) the strict cert/hostname-verifying rustls config builds offline.
+        let _ = postgres_rustls_client_config().unwrap();
+    }
+
+    /// verify-ca gets the same require+rustls treatment (parseable, encrypted).
+    #[test]
+    fn verify_ca_builds_parseable_dsn() {
+        let cfg = PostgresConnectConfig {
+            host: "db.example.com".into(),
+            port: 5432,
+            database: "app".into(),
+            user: "cd_ro".into(),
+            sslmode: "verify-ca".into(),
+            password: None,
+            timeout_ms: 3000,
+        };
+        let dsn = cfg.connection_string();
+        assert!(dsn.contains("sslmode=require"), "{dsn}");
+        assert!(!dsn.contains("verify-ca"), "{dsn}");
+        assert!(
+            dsn.parse::<tokio_postgres::Config>().is_ok(),
+            "verify-ca DSN must parse: {dsn}"
+        );
     }
 
     #[test]

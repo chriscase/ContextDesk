@@ -9,6 +9,14 @@
   With `"bundle.active": true` in `tauri.conf.json`, installers land under  
   `desktop/src-tauri/target/release/bundle/` (e.g. `.dmg`, `.msi` / NSIS, `.AppImage`, `.deb`).
 
+  > **Unsigned local bundle:** the installers are written to `bundle/` even without any
+  > signing keys. Because updater artifacts are enabled (`bundle.createUpdaterArtifacts`,
+  > #173), `tauri build` then exits non-zero at its final *updater-signing* step unless
+  > `TAURI_SIGNING_PRIVATE_KEY` is set — the `.app` / `.dmg` under `bundle/` are already
+  > complete at that point, so a local smoke-test just uses them. Set the key (see the
+  > updater section) to also emit the signed `*.app.tar.gz` used for auto-update. In CI the
+  > key comes from a GitHub Actions secret; nothing signing-related is committed.
+
 ### Icons (regenerate)
 
 Source art: `desktop/src-tauri/icons/app-icon-source.png` (≥512×512 PNG).

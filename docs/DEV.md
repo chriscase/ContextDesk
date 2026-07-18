@@ -26,13 +26,30 @@ npm install
 npm run tauri:dev    # preferred — free-port aware
 
 # Large-workspace index bench (#117; ignored by default CI — AGENTS #8)
-# Creates a synthetic 50k-file tree, indexes with SQLite store + soft max 100k.
+# Creates a synthetic 50k-file tree, indexes with a SQLite store + soft max 100k, and
+# asserts: (a) no file-cap truncation at the default cap, (b) the in-RAM working set
+# stays within the configured byte budget (checked at both the default budget and a
+# deliberately small 1 MiB budget), (c) search still returns hits over the resident set.
 cargo test -p cd-core --lib index_50k_soft_cap_allows_large_tree -- --ignored --nocapture
+
+# Fast hermetic byte-budget bound (runs in default CI):
+cargo test -p cd-core index
 ```
 
-Index soft caps: `AppConfig.index_max_files` (default **100_000**). When the cap is
-hit, `ReindexStats.truncated` is true and a `tracing::warn!` is emitted (never silent).
-Per-file max is 512 KiB; walk depth max is 12 (see `index.rs`).
+Index caps (all in `index.rs`; surfaced via `AppConfig`):
+
+- **`index_max_files`** — soft file cap (default **100_000**; was a hard 5_000). When hit,
+  `ReindexStats.truncated` is true and a `tracing::warn!` is emitted — never silent.
+- **`index_max_bytes`** — in-RAM working-set **byte budget** (default **256 MiB**; `0` → default).
+  The SQLite store still holds *every* chunk on disk; this bounds only the resident
+  `chunks`/`postings` set so peak memory does not grow linearly-unbounded with corpus size.
+  When the budget clips the resident set, the **most-recently-modified** files are kept
+  (`KeywordIndex::load_from_store` streams recency-first and stops at the budget), a
+  `tracing::warn!` fires, and `KeywordIndex::is_bytes_capped()` returns true (UI-readable).
+  Inspect resident size with `KeywordIndex::index_bytes()`.
+- **`MAX_FILE_BYTES`** — per-file read cap, **512 KiB** (larger files / binaries skipped
+  before any `read_to_string`, so huge dumps never allocate in full).
+- **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
 
 ## Dev ports (multi-Tauri machines)
 
@@ -81,7 +98,7 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 |------|--------|--------|--------|
 | Files / memory | workspace + `memory_fs` | **Shipped** | Allowlisted roots; Settings workspace |
 | SQLite RO | `sql_ro` + `sql_query__{id}` | **Shipped** | Connector `kind:sqlite` absolute path; `SQLITE_OPEN_READ_ONLY` + `query_only`; wall-clock interrupt timeout; agent tool via registry (#130) |
-| Postgres RO | `sql_ro::execute_postgres_ro` | **Shipped** | Connector `kind:postgres`; session `default_transaction_read_only` + `statement_timeout`; password keychain-only; **sslmode=disable** → NoTls; **prefer/require/verify-*** → rustls (`tokio-postgres-rustls` + webpki roots, #250) |
+| Postgres RO | `sql_ro::execute_postgres_ro` | **Shipped** | Connector `kind:postgres`; session `default_transaction_read_only` + `statement_timeout`; password keychain-only; **sslmode=disable** → NoTls; **prefer/require/verify-ca/verify-full** → rustls (`tokio-postgres-rustls` + webpki roots, #250). `verify-ca`/`verify-full` are sent on the wire as `require` (tokio-postgres rejects those literal strings) while rustls validates the cert chain + hostname. |
 | Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors. **Wire path (#132):** Settings → keychain PAT → `set_confluence` / `apply_host_connectors` → `specs_for_model` exposes `confluence_search`/`confluence_get_page` → dispatch → `cql_search`/`fetch_page`. Offline: `cargo test -p cd-core --lib confluence` (includes wiremock Bearer + space filter). |
 | X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
 | Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
@@ -122,7 +139,12 @@ ALTER ROLE cd_ro NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 
 Settings → Connectors → Postgres: host / database / user / sslmode (non-secret) + password (keychain). Tool name: `sql_query__{connector_id}`.
 
-**TLS (#250):** `sslmode=disable` uses NoTls. Default and `prefer` / `require` / `verify-ca` / `verify-full` use rustls with platform webpki roots. Offline unit tests select the stack per mode; a live TLS server is not required for default CI. Opt-in live check: set `CD_PG_TEST_DSN` (libpq URL or key=value) and run `cargo test -p cd-core live_postgres -- --ignored --nocapture`.
+**TLS (#250):** `sslmode=disable` uses `NoTls`. The default (`prefer`) and `require` / `verify-ca` / `verify-full` use rustls with the platform webpki roots.
+
+- **Wire mapping.** `tokio-postgres` 0.7 only accepts `disable` | `prefer` | `require` in the DSN `sslmode` key and rejects `verify-ca` / `verify-full` at parse time. So those two modes are mapped to the wire value `require` (TLS mandatory), and the certificate-chain **and** hostname verification that `verify-full` implies is enforced in the rustls `ClientConfig` instead — never via the rejected sslmode string (see `postgres_dsn_sslmode`). The mapping is only ever equal-or-stricter than the requested mode, never weaker.
+- **Verification scope.** rustls' safe-default verifier validates against the bundled webpki roots on every TLS mode here, so `require`/`verify-*` all check that the server cert chains to a public CA and matches the host. A Postgres server presenting a private/self-signed cert that does not chain to a webpki root will therefore fail the TLS handshake; use `sslmode=disable` on a trusted network for such servers (custom root bundles are out of scope for #250).
+- **Offline tests.** Unit tests select the stack per mode and assert the built DSN actually parses as a `tokio_postgres::Config` (proving `verify-full` no longer dies at DSN parse) — no live DB needed. Run `cargo test -p cd-core sql_ro`.
+- **Opt-in live check.** Set `CD_PG_TEST_DSN` (libpq URL `postgresql://user:pass@host:5432/db?sslmode=prefer` or key=value `host=… dbname=… user=… password=… sslmode=verify-full`) and run `cargo test -p cd-core live_postgres -- --ignored --nocapture`. The test skips cleanly (stays `ignored`) when the env var is unset.
 
 ## Grok Build session (opt-in)
 
@@ -162,6 +184,65 @@ DNS rebinding residual: hostname resolution is not re-checked after every hop; p
 - **LAN / non-loopback:** requires `--allow-lan` **and** API keys. Prefer `--api-keys-file` or `CD_API_KEYS` — avoid `--api-keys` on the command line (visible in `ps`).
 - **TLS:** cd-server is **HTTP-only**. Terminate TLS at a reverse proxy when using `--allow-lan` (see `docs/THREAT_MODEL.md`).
 - Startup refuses unauthenticated non-loopback binds (`guard_exposure`, #144/#171).
+
+### Team workspaces, roles, persistent shared memory, audit (#167, finishes #50)
+
+The **headless server is legitimately file/flag-configured** — AGENTS.md #7 (settings-first)
+governs the desktop happy path, not `cd-server`. Pass `--config server.toml` (or set
+`CD_SERVER_CONFIG`) to define multiple team workspaces, each with its own roots and its
+own admin/member API-key set:
+
+```toml
+# server.toml — contains NO raw provider secrets
+data_dir = "/var/lib/cd-server"      # optional; default: <config dir>/server
+
+[[workspaces]]
+id = "team-a"
+roots = ["/srv/knowledge/team-a"]
+keys = [
+  { key = "short-dev-token", role = "admin" },       # hashed at load (dev only)
+  { key_hash = "…64 hex…",   role = "member" },       # preferred for strong tokens
+]
+
+[[workspaces]]
+id = "team-b"
+roots = ["/srv/knowledge/team-b"]
+keys = [ { key_hash = "…", role = "admin" } ]
+```
+
+- **Roles.** `admin` may write shared memory and manage the workspace; `member` may
+  search / read and use scoped (permission-gated) writes. Admin-only endpoints reject a
+  `member` key with **403** (`/v1/memory/publish`). Legacy `--root` + `--api-keys` still
+  work: those keys are granted `admin` on the `default` workspace.
+- **No raw secrets in the config file.** Provide strong tokens as `key_hash` (a plain
+  sha256 hex of the token — not a secret). The loader **refuses** a `key` that looks like a
+  raw provider secret (`sk-…` / `xai-…` / high-entropy), reusing the `cd_core::config`
+  `api_key_ref` guard. Generate a hash the same way `hash_key` does:
+  `printf %s 'YOUR_TOKEN' | shasum -a 256`. Treat any file that does hold raw tokens as an
+  operational secret (chmod 600, never commit) — same as `--api-keys-file`.
+- **Persistent shared memory.** `/v1/memory/publish` appends to
+  `<data_dir>/workspaces/<id>/memory.jsonl` **before** acknowledging; the server reloads it
+  into RAM on boot, so a publish → restart → list round-trip returns the note.
+- **Audit trail.** Writes and denials append a hash-chained `cd_core::audit::AuditEntry`
+  to `<data_dir>/audit.jsonl` (`AuditLog` scrubs secrets). Research/session tool writes are
+  audited too (the audit path is passed into `build_host`). Verify integrity with
+  `AuditLog::verify_chain`.
+
+Manual two-workspace check:
+
+```bash
+cd-server --bind 127.0.0.1:8799 --config server.toml
+# admin publishes:
+curl -s -XPOST localhost:8799/v1/memory/publish -H 'authorization: Bearer <admin>' \
+  -H 'content-type: application/json' -d '{"workspace_id":"team-a","title":"Arch","body":"…"}'
+# member is denied (403):
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST localhost:8799/v1/memory/publish \
+  -H 'authorization: Bearer <member>' -H 'content-type: application/json' \
+  -d '{"workspace_id":"team-a","title":"x","body":"y"}'
+# restart the process, then list — the note persists:
+curl -s -XPOST localhost:8799/v1/memory/list -H 'authorization: Bearer <member>' \
+  -H 'content-type: application/json' -d '{"workspace_id":"team-a"}'
+```
 
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
 

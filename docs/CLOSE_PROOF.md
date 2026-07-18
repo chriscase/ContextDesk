@@ -55,8 +55,43 @@ or keep the issue **OPEN** with:
 Residual: <exact unmet acceptance criterion>
 ```
 
-## CI enforcement
+## CI enforcement (what the guard actually checks)
 
-`scripts/check_close_proof.sh` (see CI job **close-proof**) validates recently
-closed `remediation` issues for a hex SHA in the close/timeline comments, and
-runs offline fixtures that must fail when SHA is missing.
+`scripts/check_close_proof.sh` (CI job **close-proof**) is now blocking and
+enforces the standard on the **closing comment specifically** — not merely on
+"a hex SHA appears somewhere in the thread". For each remediation issue it
+requires all three of:
+
+1. **A plausible commit SHA** — a standalone **7–40 hex token containing at
+   least one `a–f` letter**. Pure-decimal runs (PR numbers, dates like
+   `20260718`, test counts) are **not** accepted as SHAs, and a bare `PR #NNN`
+   link is not a commit reference.
+2. **Pasted verification** — a line matching any of: `test result`,
+   `<N> passed`, `cargo test`, `cargo clippy`, a standalone uppercase `PASS`,
+   a fenced ```` ``` ```` code block, or a screenshot / image link
+   (`.png/.jpg/.gif/.svg/.webp`). Bare prose — `tests pass`, `gate green`,
+   `verified` — does **not** satisfy this.
+3. **No duplicate closing body** — two *different* issues sharing a
+   byte-identical closing comment are flagged as the scripted #180 anti-pattern.
+
+### Cutoff (no retroactive breakage)
+
+The live check hard-fails **only** issues closed **strictly after**
+`CLOSE_PROOF_CUTOFF` (default **2026-07-18**). All remediation history to date
+was closed on or before that date, so turning the guard on does not
+retroactively break already-closed issues; enforcement applies to closes made
+**2026-07-19 onward**. Override the boundary with the `CLOSE_PROOF_CUTOFF`
+environment variable.
+
+### How to run it
+
+```text
+sh scripts/check_close_proof.sh --offline          # self-tests: matchers + dup detection
+sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_sample.json
+sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_dupes.json
+sh scripts/check_close_proof.sh                    # + live sample (needs gh + token)
+```
+
+The offline fixtures include a SHA-**without**-pasted-proof case (must be
+rejected) and a duplicate-body case (must be flagged). Dependencies are kept
+light: POSIX `sh` + `gh` + `jq`.
