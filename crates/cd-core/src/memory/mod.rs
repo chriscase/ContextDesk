@@ -26,8 +26,9 @@ pub mod types;
 
 pub use ambient::{inject_memory_context, AmbientBudget, AmbientInjection};
 pub use facade::{
-    ensure_workspace_memory_gitignored, personal_memory_db_path, workspace_memory_db_path,
-    workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory, WorkspaceMemoryLocation,
+    attach_durable_memory_to_host, ensure_workspace_memory_gitignored, personal_memory_db_path,
+    workspace_memory_db_path, workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory,
+    WorkspaceMemoryLocation,
 };
 pub use import::{
     import_memory_fs_sqlite, import_memory_jsonl_sqlite, is_migrated_memory_fs_path,

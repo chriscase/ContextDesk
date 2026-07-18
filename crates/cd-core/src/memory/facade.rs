@@ -154,6 +154,55 @@ pub fn ensure_workspace_memory_gitignored(
     Ok(())
 }
 
+/// Open personal + workspace stores from config and attach to a [`crate::tool_host::ToolHost`].
+///
+/// This is the product seam (#264 skeptic fix): without it, `durable_memory` stays
+/// `None` and Phase-1 tools/ambient never run. Idempotent import of memory_fs notes
+/// runs once when the workspace store is first opened (stable ids).
+pub fn attach_durable_memory_to_host(
+    host: &mut crate::tool_host::ToolHost,
+    branding: &Branding,
+    memory_cfg: &MemoryConfig,
+) -> CoreResult<()> {
+    if !memory_cfg.durable_memory_enabled {
+        host.set_durable_memory_enabled(false);
+        host.set_ambient_recall_enabled(false);
+        return Ok(());
+    }
+    let personal = personal_memory_db_path(branding)?;
+    let root = host
+        .workspace
+        .roots
+        .first()
+        .ok_or_else(|| CoreError::Policy("no workspace roots for durable memory".into()))?;
+    if memory_cfg.workspace_location == WorkspaceMemoryLocation::InRepo {
+        ensure_workspace_memory_gitignored(root, branding)?;
+    }
+    let ws_path = workspace_memory_db_path(
+        root,
+        branding,
+        memory_cfg.workspace_location,
+        &host.workspace.id,
+    )?;
+    let store = TwoScopeMemory::open(&personal, &ws_path, host.workspace.id.clone())?;
+    // One-shot import of legacy memory_fs notes (idempotent).
+    let now = crate::embed::now_unix_secs();
+    match super::import::import_memory_fs_sqlite(store.workspace(), &host.workspace, now) {
+        Ok(r) if r.inserted > 0 => {
+            tracing::info!(
+                inserted = r.inserted,
+                skipped = r.skipped_existing,
+                "memory_fs import into durable store"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "memory_fs import skipped"),
+    }
+    host.set_durable_memory(std::sync::Arc::new(store), true);
+    host.set_ambient_recall_enabled(memory_cfg.ambient_recall_enabled);
+    Ok(())
+}
+
 /// Facade over personal + workspace stores.
 pub struct TwoScopeMemory {
     personal: SqliteMemoryStore,
@@ -331,6 +380,37 @@ mod tests {
             gi2.lines().filter(|l| !l.trim().is_empty()).count(),
             line_count
         );
+    }
+
+    #[test]
+    fn attach_to_host_enables_durable_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        // Point personal store into temp via branding config dir is home-based;
+        // use in-memory open path by calling set after attach fails on missing home?
+        // Attach uses home for personal — in CI home exists. Use real attach.
+        let ws = crate::workspace::Workspace {
+            id: "attach-ws".into(),
+            name: "a".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = crate::tool_host::ToolHost::new(ws, idx, None);
+        assert!(!host.durable_memory_active());
+        attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+        assert!(host.durable_memory_active());
+        assert!(host.ambient_recall_enabled());
+        let names: Vec<_> = host.specs().into_iter().map(|s| s.name).collect();
+        assert!(names.iter().any(|n| n == "recall_memory"));
+        assert!(names.iter().any(|n| n == "retract_memory"));
+        // Disabled config turns tools off
+        let off = MemoryConfig {
+            durable_memory_enabled: false,
+            ..MemoryConfig::default()
+        };
+        attach_durable_memory_to_host(&mut host, &branding, &off).unwrap();
+        assert!(!host.durable_memory_enabled());
     }
 
     #[test]
