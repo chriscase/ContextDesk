@@ -76,6 +76,9 @@ type Props = {
   setup: AppSetupState;
   theme: "dark" | "light";
   onThemeChange: (t: "dark" | "light") => void;
+  /** Type scale multiplier (#151). */
+  uiScale?: "90" | "100" | "110";
+  onUiScaleChange?: (s: "90" | "100" | "110") => void;
   onClose: () => void;
   onSaveSetup: (next: AppSetupState) => void;
   onRecheckHost?: () => void | Promise<void>;
@@ -97,6 +100,8 @@ export function SettingsModal({
   setup,
   theme,
   onThemeChange,
+  uiScale = "100",
+  onUiScaleChange,
   onClose,
   onSaveSetup,
   onRecheckHost,
@@ -2109,6 +2114,22 @@ export function SettingsModal({
                 >
                   <option value="dark">Dark</option>
                   <option value="light">Light</option>
+                </SelectField>
+                <SelectField
+                  id={`${baseId}-ui-scale`}
+                  label="UI scale"
+                  hint="Scales the rem type system (root font-size). Persists locally."
+                  value={uiScale}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    const next =
+                      v === "90" || v === "110" || v === "100" ? v : "100";
+                    onUiScaleChange?.(next);
+                  }}
+                >
+                  <option value="90">Small (90%)</option>
+                  <option value="100">Default (100%)</option>
+                  <option value="110">Large (110%)</option>
                 </SelectField>
               </div>
             ) : null}

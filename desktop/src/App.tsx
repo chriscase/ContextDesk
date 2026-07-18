@@ -78,6 +78,15 @@ function loadTheme(): "dark" | "light" {
   return t === "light" ? "light" : "dark";
 }
 
+/** UI type scale preference (#151): 90 | 100 | 110 percent of 16px root. */
+export type UiScale = "90" | "100" | "110";
+
+function loadUiScale(): UiScale {
+  const s = localStorage.getItem("cd-ui-scale");
+  if (s === "90" || s === "110" || s === "100") return s;
+  return "100";
+}
+
 function loadSetup(): AppSetupState {
   try {
     const raw = localStorage.getItem("cd-setup");
@@ -381,6 +390,7 @@ export function App() {
   };
 
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
+  const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -687,6 +697,11 @@ export function App() {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("cd-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-ui-scale", uiScale);
+    localStorage.setItem("cd-ui-scale", uiScale);
+  }, [uiScale]);
 
   useEffect(() => {
     void hostGetBranding().then((b) => {
@@ -1392,6 +1407,8 @@ export function App() {
         setup={setup}
         theme={theme}
         onThemeChange={setTheme}
+        uiScale={uiScale}
+        onUiScaleChange={setUiScale}
         onClose={closeSettings}
         onSaveSetup={onSaveSetup}
         onRecheckHost={refreshHostPreflight}
