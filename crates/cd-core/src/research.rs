@@ -144,16 +144,16 @@ pub fn build_host_with_options(
 
 /// Local research without an LLM: search_kb + cited synthesis from hits.
 /// This is a real shipped entry point used when no model is available and in fixtures.
-pub fn research_local(
+pub async fn research_local(
     host: &mut ToolHost,
     query: &str,
     session_id: &str,
 ) -> CoreResult<Vec<StreamEvent>> {
-    research_local_with_skills(host, query, session_id, &[])
+    research_local_with_skills(host, query, session_id, &[]).await
 }
 
 /// Local research with optional skill directories for `/skill` slash invoke.
-pub fn research_local_with_skills(
+pub async fn research_local_with_skills(
     host: &mut ToolHost,
     query: &str,
     session_id: &str,
@@ -186,11 +186,13 @@ pub fn research_local_with_skills(
         query = if rest.is_empty() { sid } else { rest };
     }
 
-    let result = host.execute(
-        "search_kb",
-        &serde_json::json!({ "query": query, "limit": 8 }),
-        None,
-    )?;
+    let result = host
+        .execute(
+            "search_kb",
+            &serde_json::json!({ "query": query, "limit": 8 }),
+            None,
+        )
+        .await?;
     events.extend(result.events.clone());
     let budget = host.router_budget().clone();
     host.set_max_results_per_source(budget.max_results_per_source);
@@ -585,7 +587,7 @@ pub async fn research_turn_with_cancel(
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
-        let ev = research_local(host, user_text, session_id)?;
+        let ev = research_local(host, user_text, session_id).await?;
         if let Some(sink) = live {
             for e in &ev {
                 sink(e.clone());
@@ -745,7 +747,7 @@ pub async fn research_scripted_tool_turn(
         .iter()
         .any(|e| matches!(e, StreamEvent::TextDelta { .. }));
     if !has_text {
-        let local = research_local(host, query, session_id)?;
+        let local = research_local(host, query, session_id).await?;
         // merge text/citations from local, skip duplicate turn started
         for e in local {
             if matches!(e, StreamEvent::TurnStarted { .. }) {
@@ -765,7 +767,7 @@ pub async fn research_scripted_tool_turn(
 /// When `history` is provided (#111), appends a paired
 /// `Role::Assistant(tool_calls)` + `Role::Tool(result)` so the next model turn
 /// sees the outcome. Denials append a short model-visible note instead.
-pub fn grant_and_execute(
+pub async fn grant_and_execute(
     host: &mut ToolHost,
     request_id: &str,
     decision: PermissionDecision,
@@ -802,7 +804,7 @@ pub fn grant_and_execute(
     } else {
         name
     };
-    let result = host.execute(tool_name, args, rid)?;
+    let result = host.execute(tool_name, args, rid).await?;
     if let Some(h) = history {
         append_grant_tool_outcome(h, tool_name, args, &result.detail_for_model);
     }
@@ -859,8 +861,8 @@ mod tests {
     use tempfile::tempdir;
 
     /// #111: after approving save_memory, history has assistant(tool_calls)+tool(result).
-    #[test]
-    fn grant_appends_tool_outcome_to_history() {
+    #[tokio::test]
+    async fn grant_appends_tool_outcome_to_history() {
         let dir = tempdir().unwrap();
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
         let mut host = build_host(ws, None).unwrap();
@@ -868,7 +870,7 @@ mod tests {
             "title": "notes",
             "body_markdown": "JWT auth lives in middleware."
         });
-        let pending = host.execute("save_memory", &args, None).unwrap();
+        let pending = host.execute("save_memory", &args, None).await.unwrap();
         assert!(!pending.ok);
         let rid = pending
             .events
@@ -889,6 +891,7 @@ mod tests {
             &serde_json::json!({}),
             Some(&mut history),
         )
+        .await
         .unwrap();
         assert!(events
             .iter()
@@ -944,19 +947,16 @@ mod tests {
         let backend = CaptureBackend {
             saw_tool_result: std::sync::Mutex::new(false),
         };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let events2 = rt
-            .block_on(run_agent_turn(
-                &backend,
-                &mut host,
-                "did that save?",
-                &mut history,
-                &AgentOptions::default(),
-            ))
-            .unwrap();
+        // Already inside #[tokio::test] — await directly (no nested runtime).
+        let events2 = run_agent_turn(
+            &backend,
+            &mut host,
+            "did that save?",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .unwrap();
         assert!(
             *backend.saw_tool_result.lock().unwrap(),
             "follow-up turn must receive prior tool result in history"
@@ -971,13 +971,13 @@ mod tests {
         assert!(text.contains("save") || text.contains("JWT"), "text={text}");
     }
 
-    #[test]
-    fn grant_deny_appends_model_visible_note() {
+    #[tokio::test]
+    async fn grant_deny_appends_model_visible_note() {
         let dir = tempdir().unwrap();
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
         let mut host = build_host(ws, None).unwrap();
         let args = serde_json::json!({"title": "x", "body_markdown": "y"});
-        let pending = host.execute("save_memory", &args, None).unwrap();
+        let pending = host.execute("save_memory", &args, None).await.unwrap();
         let rid = pending
             .events
             .iter()
@@ -996,6 +996,7 @@ mod tests {
             &args,
             Some(&mut history),
         )
+        .await
         .unwrap();
         assert_eq!(history.len(), 1);
         assert!(matches!(history[0].role, Role::User));
@@ -1208,8 +1209,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn research_local_cites_fixture() {
+    #[tokio::test]
+    async fn research_local_cites_fixture() {
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("billing.md"),
@@ -1218,7 +1219,9 @@ mod tests {
         .unwrap();
         let ws = Workspace::new("fix", vec![dir.path().to_path_buf()]);
         let mut host = build_host(ws, None).unwrap();
-        let events = research_local(&mut host, "payments invoices", "s1").unwrap();
+        let events = research_local(&mut host, "payments invoices", "s1")
+            .await
+            .unwrap();
         let text: String = events
             .iter()
             .filter_map(|e| match e {

@@ -287,7 +287,7 @@ impl ToolHost {
     ///
     /// `granted_request_id` must be a request previously approved via
     /// [`Self::complete_permission`] (AllowOnce). Free-floating grants are rejected.
-    pub fn execute(
+    pub async fn execute(
         &mut self,
         name: &str,
         arguments: &Value,
@@ -377,23 +377,23 @@ impl ToolHost {
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
             names::SAVE_MEMORY => self.tool_save_memory(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
-            names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments)?,
-            names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments)?,
+            names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
+            names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
             names::WEB_SEARCH => {
-                let (ok, summary, raw, cites) = self.tool_web_search(arguments)?;
+                let (ok, summary, raw, cites) = self.tool_web_search(arguments).await?;
                 let first = cites.first().map(|(u, _, _)| u.clone());
                 web_cites = cites;
                 (ok, summary, raw, first)
             }
             names::WEB_FETCH => {
-                let (ok, summary, raw, cite) = self.tool_web_fetch(arguments)?;
+                let (ok, summary, raw, cite) = self.tool_web_fetch(arguments).await?;
                 if let Some((url, label, title)) = cite.clone() {
                     web_cites.push((url, label, title));
                 }
                 (ok, summary, raw, cite.map(|(u, _, _)| u))
             }
             names::X_SEARCH => {
-                let (ok, summary, raw, cites) = self.tool_x_search(arguments)?;
+                let (ok, summary, raw, cites) = self.tool_x_search(arguments).await?;
                 let first = cites.first().map(|(u, _, _)| u.clone());
                 web_cites = cites;
                 (ok, summary, raw, first)
@@ -569,18 +569,18 @@ impl ToolHost {
         ))
     }
 
-    fn throttle_confluence(&mut self) -> CoreResult<()> {
+    async fn throttle_confluence(&mut self) -> CoreResult<()> {
         if let Some(last) = self.last_confluence_call {
             let elapsed = last.elapsed();
             if elapsed < self.confluence_min_interval {
-                std::thread::sleep(self.confluence_min_interval - elapsed);
+                tokio::time::sleep(self.confluence_min_interval - elapsed).await;
             }
         }
         self.last_confluence_call = Some(Instant::now());
         Ok(())
     }
 
-    fn tool_confluence_search(
+    async fn tool_confluence_search(
         &mut self,
         args: &Value,
     ) -> CoreResult<(bool, String, String, Option<String>)> {
@@ -615,8 +615,8 @@ impl ToolHost {
         } else {
             format!("text ~ \"{}\"", q.replace('"', "\\\""))
         };
-        self.throttle_confluence()?;
-        let hits = block_on_http(confluence_ro::cql_search(&cfg, &cql, &pat, limit))?;
+        self.throttle_confluence().await?;
+        let hits = confluence_ro::cql_search(&cfg, &cql, &pat, limit).await?;
         let mut lines = Vec::new();
         let mut first = None;
         for h in &hits {
@@ -641,7 +641,7 @@ impl ToolHost {
         ))
     }
 
-    fn tool_confluence_get_page(
+    async fn tool_confluence_get_page(
         &mut self,
         args: &Value,
     ) -> CoreResult<(bool, String, String, Option<String>)> {
@@ -665,8 +665,8 @@ impl ToolHost {
                 "confluence_get_page requires page_id".into(),
             ));
         }
-        self.throttle_confluence()?;
-        let body = block_on_http(confluence_ro::fetch_page(&cfg, page_id, &pat))?;
+        self.throttle_confluence().await?;
+        let body = confluence_ro::fetch_page(&cfg, page_id, &pat).await?;
         Ok((
             true,
             format!("fetched confluence page {page_id}"),
@@ -675,11 +675,11 @@ impl ToolHost {
         ))
     }
 
-    fn throttle_web(&mut self) -> CoreResult<()> {
+    async fn throttle_web(&mut self) -> CoreResult<()> {
         if let Some(last) = self.last_web_call {
             let elapsed = last.elapsed();
             if elapsed < self.web_min_interval {
-                std::thread::sleep(self.web_min_interval - elapsed);
+                tokio::time::sleep(self.web_min_interval - elapsed).await;
             }
         }
         self.last_web_call = Some(Instant::now());
@@ -687,7 +687,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, citations as (url, label, title)).
-    fn tool_web_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
+    async fn tool_web_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -712,13 +712,9 @@ impl ToolHost {
             .unwrap_or_default();
         // Sanitize early for clearer errors before network.
         let q = web_research::sanitize_search_query(q)?;
-        self.throttle_web()?;
-        let (hits, notes) = block_on_http(web_research::web_search(
-            &q,
-            limit,
-            &self.web_research_sources,
-            &packs,
-        ))?;
+        self.throttle_web().await?;
+        let (hits, notes) =
+            web_research::web_search(&q, limit, &self.web_research_sources, &packs).await?;
         let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
         let cites: Vec<(String, String, Option<String>)> = hits
             .iter()
@@ -747,7 +743,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, citations).
-    fn tool_x_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
+    async fn tool_x_search(&mut self, args: &Value) -> CoreResult<ToolRunResult> {
         if !self.x_enabled {
             return Err(CoreError::Policy(
                 "X search is disabled. Enable it in Settings → Connectors and add an API key."
@@ -776,9 +772,8 @@ impl ToolHost {
             .unwrap_or(10)
             .clamp(10, 25) as usize;
         let q = crate::x_search::sanitize_x_query(q)?;
-        self.throttle_web()?;
-        let (hits, notes) = match block_on_http(crate::x_search::search_recent(&q, limit, &bearer))
-        {
+        self.throttle_web().await?;
+        let (hits, notes) = match crate::x_search::search_recent(&q, limit, &bearer).await {
             Ok(r) => r,
             Err(e) => {
                 let raw = format!(
@@ -812,7 +807,7 @@ impl ToolHost {
     }
 
     /// Returns (ok, summary, raw, optional (url, label, title)).
-    fn tool_web_fetch(&mut self, args: &Value) -> CoreResult<ToolRunResultOne> {
+    async fn tool_web_fetch(&mut self, args: &Value) -> CoreResult<ToolRunResultOne> {
         if !self.web_research_enabled {
             return Err(CoreError::Policy(
                 "Web research is disabled. Enable it in Settings → Connectors.".into(),
@@ -828,9 +823,9 @@ impl ToolHost {
         }
         // SSRF validation before any network I/O (hard fail — policy).
         let _ = web_research::validate_web_url(url)?;
-        self.throttle_web()?;
+        self.throttle_web().await?;
         // Network / HTTP failures are soft: return tool result so the agent can retry.
-        let fetched = match block_on_http(web_research::web_fetch(url)) {
+        let fetched = match web_research::web_fetch(url).await {
             Ok(f) => f,
             Err(e) => {
                 let raw = format!(
@@ -1078,22 +1073,6 @@ fn citation_display_label(path: &str) -> String {
         .to_string()
 }
 
-fn block_on_http<F, T>(fut: F) -> CoreResult<T>
-where
-    F: std::future::Future<Output = CoreResult<T>>,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(h) => tokio::task::block_in_place(|| h.block_on(fut)),
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| CoreError::Message(format!("runtime: {e}")))?;
-            rt.block_on(fut)
-        }
-    }
-}
-
 /// Serialize tool specs to OpenAI tools array.
 pub fn openai_tools_json() -> Value {
     let tools: Vec<Value> = mvp_tool_specs()
@@ -1133,19 +1112,20 @@ mod tests {
         (dir, host)
     }
 
-    #[test]
-    fn search_and_read_work() {
+    #[tokio::test]
+    async fn search_and_read_work() {
         let (_dir, mut host) = host_with_docs();
         let r = host
             .execute("search_kb", &json!({"query": "JWT gateway"}), None)
+            .await
             .unwrap();
         assert!(r.ok);
         assert!(r.detail_raw.contains("JWT") || r.summary.contains("hit"));
         assert!(r.detail_for_model.contains("UNTRUSTED_DATA"));
     }
 
-    #[test]
-    fn malicious_tool_payload_cannot_hard_write_without_grant() {
+    #[tokio::test]
+    async fn malicious_tool_payload_cannot_hard_write_without_grant() {
         // Prompt-injection style payload in args must still hit the side-effect gate.
         let (_tmp, mut host) = host_with_docs();
         let r = host
@@ -1158,6 +1138,7 @@ mod tests {
                 }),
                 None,
             )
+            .await
             .unwrap();
         // SoftWrite still requires grant; must not execute silently.
         assert!(!r.ok);
@@ -1167,8 +1148,8 @@ mod tests {
             .any(|e| matches!(e, StreamEvent::PermissionRequired { .. })));
     }
 
-    #[test]
-    fn hard_write_blocked_without_grant() {
+    #[tokio::test]
+    async fn hard_write_blocked_without_grant() {
         // Use save_memory which is SoftWrite — test SoftWrite blocked
         let (_dir, mut host) = host_with_docs();
         let r = host
@@ -1177,6 +1158,7 @@ mod tests {
                 &json!({"title": "t", "body_markdown": "hello memory"}),
                 None,
             )
+            .await
             .unwrap();
         assert!(!r.ok);
         assert!(r
@@ -1251,11 +1233,12 @@ mod tests {
         assert!(names.iter().any(|n| n == names::X_SEARCH));
     }
 
-    #[test]
-    fn x_search_blocked_when_disabled() {
+    #[tokio::test]
+    async fn x_search_blocked_when_disabled() {
         let (_tmp, mut host) = host_with_docs();
         let err = host
             .execute(names::X_SEARCH, &json!({"query": "nasa"}), None)
+            .await
             .unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("disabled")
@@ -1272,8 +1255,8 @@ mod tests {
         assert!(props.get("packs").is_some(), "packs param missing");
     }
 
-    #[test]
-    fn web_fetch_ssrf_denied_without_network() {
+    #[tokio::test]
+    async fn web_fetch_ssrf_denied_without_network() {
         let (_tmp, mut host) = host_with_docs();
         host.set_web_research(true);
         let err = host
@@ -1282,6 +1265,7 @@ mod tests {
                 &json!({"url": "http://127.0.0.1:8080/secret"}),
                 None,
             )
+            .await
             .unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("reject")
@@ -1292,17 +1276,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn web_search_blocked_when_disabled() {
+    #[tokio::test]
+    async fn web_search_blocked_when_disabled() {
         let (_tmp, mut host) = host_with_docs();
         let err = host
             .execute(names::WEB_SEARCH, &json!({"query": "rust"}), None)
+            .await
             .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("disabled"), "{err}");
     }
 
-    #[test]
-    fn web_fetch_blocked_when_disabled() {
+    #[tokio::test]
+    async fn web_fetch_blocked_when_disabled() {
         let (_tmp, mut host) = host_with_docs();
         let err = host
             .execute(
@@ -1310,12 +1295,13 @@ mod tests {
                 &json!({"url": "https://example.com/"}),
                 None,
             )
+            .await
             .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("disabled"), "{err}");
     }
 
-    #[test]
-    fn confluence_search_requires_pat() {
+    #[tokio::test]
+    async fn confluence_search_requires_pat() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
         let idx = KeywordIndex::build(&ws).unwrap();
@@ -1329,6 +1315,7 @@ mod tests {
         );
         let err = host
             .execute(names::CONFLUENCE_SEARCH, &json!({"query": "auth"}), None)
+            .await
             .unwrap_err();
         assert!(
             err.to_string().contains("PAT") || err.to_string().contains("secure"),
@@ -1351,8 +1338,8 @@ mod tests {
         assert_eq!(g.side_effect, ToolSideEffect::Read);
     }
 
-    #[test]
-    fn save_skill_soft_write_requires_grant_and_previews_draft() {
+    #[tokio::test]
+    async fn save_skill_soft_write_requires_grant_and_previews_draft() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
         let idx = KeywordIndex::build(&ws).unwrap();
@@ -1365,7 +1352,7 @@ mod tests {
             "allows_write": false
         });
         // Without grant → PermissionRequired with human draft + structured arguments
-        let r = host.execute(names::SAVE_SKILL, &args, None).unwrap();
+        let r = host.execute(names::SAVE_SKILL, &args, None).await.unwrap();
         assert!(!r.ok);
         let (preview, stored_args, rid) = r
             .events
@@ -1409,6 +1396,7 @@ mod tests {
             &json!({}),
             None,
         )
+        .await
         .unwrap();
         assert!(
             events.iter().any(|e| matches!(
@@ -1432,11 +1420,11 @@ mod tests {
         assert!(catalog.iter().any(|s| s.id == "auth-trace"));
     }
 
-    #[test]
-    fn save_memory_accept_with_empty_client_args_uses_host_store() {
+    #[tokio::test]
+    async fn save_memory_accept_with_empty_client_args_uses_host_store() {
         let (dir, mut host) = host_with_docs();
         let args = json!({"title": "arch", "body_markdown": "We use JWT."});
-        let r = host.execute("save_memory", &args, None).unwrap();
+        let r = host.execute("save_memory", &args, None).await.unwrap();
         let rid = r
             .events
             .iter()
@@ -1455,6 +1443,7 @@ mod tests {
             &json!({}),
             None,
         )
+        .await
         .unwrap();
         assert!(events
             .iter()
@@ -1462,11 +1451,11 @@ mod tests {
         assert!(dir.path().join(".contextdesk/memory/arch.md").exists());
     }
 
-    #[test]
-    fn soft_write_with_allow_once() {
+    #[tokio::test]
+    async fn soft_write_with_allow_once() {
         let (dir, mut host) = host_with_docs();
         let args = json!({"title": "arch", "body_markdown": "We use JWT."});
-        let r = host.execute("save_memory", &args, None).unwrap();
+        let r = host.execute("save_memory", &args, None).await.unwrap();
         assert!(!r.ok);
         let rid = r
             .events
@@ -1478,27 +1467,34 @@ mod tests {
             .expect("permission event");
         host.complete_permission(&rid, PermissionDecision::AllowOnce, None)
             .unwrap();
-        let r2 = host.execute("save_memory", &args, Some(&rid)).unwrap();
+        let r2 = host
+            .execute("save_memory", &args, Some(&rid))
+            .await
+            .unwrap();
         assert!(r2.ok, "{}", r2.summary);
         let mem = dir.path().join(".contextdesk/memory/arch.md");
         assert!(mem.exists());
     }
 
-    #[test]
-    fn rejects_free_floating_grant() {
+    #[tokio::test]
+    async fn rejects_free_floating_grant() {
         let (_dir, mut host) = host_with_docs();
-        let err = host.execute(
-            "save_memory",
-            &json!({"title": "x", "body_markdown": "y"}),
-            Some("not-a-real-request"),
-        );
+        let err = host
+            .execute(
+                "save_memory",
+                &json!({"title": "x", "body_markdown": "y"}),
+                Some("not-a-real-request"),
+            )
+            .await;
         assert!(err.is_err());
     }
 
-    #[test]
-    fn read_outside_denied() {
+    #[tokio::test]
+    async fn read_outside_denied() {
         let (_dir, mut host) = host_with_docs();
-        let err = host.execute("read_file_slice", &json!({"path": "/etc/passwd"}), None);
+        let err = host
+            .execute("read_file_slice", &json!({"path": "/etc/passwd"}), None)
+            .await;
         assert!(err.is_err());
     }
 
@@ -1509,14 +1505,14 @@ mod tests {
     }
 
     /// #143: Deny leaves an audit trail; AllowOnce + execute ordered outcomes.
-    #[test]
-    fn deny_and_grant_record_audit() {
+    #[tokio::test]
+    async fn deny_and_grant_record_audit() {
         let (dir, mut host) = host_with_docs();
         let audit_path = dir.path().join("audit.jsonl");
         let args = json!({"title": "n", "body_markdown": "body"});
 
         // Pending + deny
-        let r = host.execute("save_memory", &args, None).unwrap();
+        let r = host.execute("save_memory", &args, None).await.unwrap();
         let rid = r
             .events
             .iter()
@@ -1535,7 +1531,7 @@ mod tests {
         assert!(text.contains("pending"), "pending missing: {text}");
 
         // Fresh allow + execute
-        let r2 = host.execute("save_memory", &args, None).unwrap();
+        let r2 = host.execute("save_memory", &args, None).await.unwrap();
         let rid2 = r2
             .events
             .iter()
@@ -1546,7 +1542,10 @@ mod tests {
             .unwrap();
         host.complete_permission(&rid2, PermissionDecision::AllowOnce, None)
             .unwrap();
-        let r3 = host.execute("save_memory", &args, Some(&rid2)).unwrap();
+        let r3 = host
+            .execute("save_memory", &args, Some(&rid2))
+            .await
+            .unwrap();
         assert!(r3.ok);
         let text2 = std::fs::read_to_string(&audit_path).unwrap();
         assert!(

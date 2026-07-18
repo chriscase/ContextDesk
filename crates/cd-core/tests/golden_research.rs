@@ -9,13 +9,15 @@ fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/kb")
 }
 
-#[test]
-fn golden_billing_local_research() {
+#[tokio::test]
+async fn golden_billing_local_research() {
     let root = fixture_root();
     assert!(root.join("billing.md").is_file(), "missing fixtures/kb");
     let ws = Workspace::new("golden", vec![root]);
     let mut host = build_host(ws, None).expect("host");
-    let events = research_local(&mut host, "payments invoices settlement", "g1").expect("research");
+    let events = research_local(&mut host, "payments invoices settlement", "g1")
+        .await
+        .expect("research");
 
     let text: String = events
         .iter()

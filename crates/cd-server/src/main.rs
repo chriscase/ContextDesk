@@ -214,6 +214,7 @@ async fn research(
     let sid = body.session_id.unwrap_or_else(|| "server".into());
     let _ = body.force_local;
     let events = research_local(&mut host, &body.query, &sid)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({
         "events": events_to_dto(&events),
@@ -242,6 +243,7 @@ async fn research_sse(
     };
     let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let events = research_local(&mut host, &q.query, "sse")
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let dtos = events_to_dto(&events);
     let stream = stream::iter(dtos.into_iter().map(|dto| {
