@@ -110,8 +110,10 @@ impl AuditLog {
         hasher.update(e.prev_hash.as_bytes());
         hasher.update(canonical.as_bytes());
         e.hash = hex_encode(&hasher.finalize());
-        let mut line = serde_json::to_string(&e)?;
-        line = scrub_line(&line);
+        // Serialize once. Do **not** run high-entropy scrub on the whole JSON line:
+        // that would redact the 64-hex `hash` field and break `verify_chain`.
+        // Fields were already scrubbed above; the hash is computed over that.
+        let line = serde_json::to_string(&e)?;
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -200,15 +202,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn scrub_line(s: &str) -> String {
-    // crude: redact sk- and bearer-looking tokens
-    let mut out = s.to_string();
-    for prefix in ["sk-", "xai-", "Bearer "] {
-        if let Some(i) = out.find(prefix) {
-            let end = (i + prefix.len() + 8).min(out.len());
-            out.replace_range(i..end, &format!("{prefix}***"));
-        }
-    }
-    out
+    crate::redact::scrub_secrets(s)
 }
 
 #[cfg(test)]

@@ -4,6 +4,16 @@ export type MemoryDoc = {
   path: string;
   title: string;
   body: string;
+  /** Durable store id when reading from MemoryStore (Phase 1). */
+  id?: string;
+  /** Kind taxonomy string (fact, decision, …). */
+  kind?: string;
+  /** personal | workspace */
+  scope?: string;
+  /** status: active | superseded | retracted | … */
+  status?: string;
+  /** Accept preview: redaction classes applied before persist. */
+  redactionPreview?: string[];
 };
 
 type Props = {
@@ -102,7 +112,13 @@ export function MemoryPane({
                     setSyncedPath(d.path);
                   }}
                 >
-                  {d.title}
+                  <span>{d.title}</span>
+                  {d.kind ? (
+                    <span className="badge badge--muted"> {d.kind}</span>
+                  ) : null}
+                  {d.status && d.status !== "active" ? (
+                    <span className="badge"> {d.status}</span>
+                  ) : null}
                 </button>
               </li>
             ))
@@ -110,7 +126,17 @@ export function MemoryPane({
         </ul>
         {active ? (
           <div className="pane__editor">
-            <div className="field__label">{active.path}</div>
+            <div className="field__label">
+              {active.path}
+              {active.scope ? ` · ${active.scope}` : ""}
+              {active.id ? ` · ${active.id.slice(0, 8)}…` : ""}
+            </div>
+            {active.redactionPreview && active.redactionPreview.length > 0 ? (
+              <div className="callout callout--warn" role="status">
+                Secrets redacted before save:{" "}
+                {active.redactionPreview.join(", ")}
+              </div>
+            ) : null}
             <textarea
               className="field__control"
               rows={16}

@@ -86,6 +86,8 @@ pub struct AgentOptions {
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Keep last N messages in model context (full history retained in `history`).
     pub compact_keep_last: usize,
+    /// Ambient durable-memory injection (MEMORY.md §10.1 default ON).
+    pub ambient_recall_enabled: bool,
 }
 
 impl Default for AgentOptions {
@@ -99,6 +101,7 @@ impl Default for AgentOptions {
             model: None,
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
+            ambient_recall_enabled: true,
         }
     }
 }
@@ -119,6 +122,7 @@ impl AgentOptions {
             model,
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
+            ambient_recall_enabled: true,
         }
     }
 }
@@ -319,6 +323,47 @@ pub async fn run_agent_turn_with_sink(
                 message: "Conversation grew large — older turns were compacted for the model. Full history is still saved."
                     .into(),
             });
+        }
+        // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
+        if opts.ambient_recall_enabled {
+            if let Some(store) = host.durable_memory_store() {
+                let hist_text: String = model_ctx
+                    .iter()
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let budget = crate::memory::AmbientBudget::default();
+                if let Ok(inj) = crate::memory::inject_memory_context(
+                    store.as_ref(),
+                    user_text,
+                    &hist_text,
+                    true,
+                    budget,
+                    crate::embed::HybridWeights::default(),
+                    crate::embed::now_unix_secs(),
+                ) {
+                    if !inj.context_block.is_empty() {
+                        // First-party context — not wrap_untrusted (write-time redaction).
+                        model_ctx.insert(
+                            0,
+                            ChatMessage {
+                                role: Role::System,
+                                content: inj.context_block,
+                                tool_call_id: None,
+                                tool_calls: None,
+                            },
+                        );
+                        for (source_id, label) in inj.citations {
+                            out.push(StreamEvent::Citation {
+                                source_id,
+                                label,
+                                locator: Some("memory".into()),
+                            });
+                        }
+                        trail.push(format!("ambient_recall:{} hits", inj.count));
+                    }
+                }
+            }
         }
         let mut attempt = 0u8;
         let completion = loop {

@@ -36,6 +36,12 @@ pub mod names {
     pub const READ_FILE_SLICE: &str = "read_file_slice";
     /// Append or create a project memory markdown note (SoftWrite).
     pub const SAVE_MEMORY: &str = "save_memory";
+    /// Hybrid memory recall (Read) — durable store.
+    pub const RECALL_MEMORY: &str = "recall_memory";
+    /// Supersede a durable memory (SoftWrite).
+    pub const SUPERSEDE_MEMORY: &str = "supersede_memory";
+    /// Retract (soft-forget) a durable memory (SoftWrite; never session-auto).
+    pub const RETRACT_MEMORY: &str = "retract_memory";
     /// Propose authoring a skill markdown playbook (SoftWrite + Accept).
     pub const SAVE_SKILL: &str = "save_skill";
     /// Confluence CQL search (read-only; PAT from host).
