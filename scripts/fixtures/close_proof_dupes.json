@@ -1,0 +1,17 @@
+[
+  {
+    "id": "issue-#301",
+    "expect": "fail",
+    "body": "Implemented on main. Merged: aaaaaaa1111bbbbbbb2222ccccccc3333ddddddd. test result: ok. 1 passed"
+  },
+  {
+    "id": "issue-#302",
+    "expect": "fail",
+    "body": "Implemented on main. Merged: aaaaaaa1111bbbbbbb2222ccccccc3333ddddddd. test result: ok. 1 passed"
+  },
+  {
+    "id": "issue-#303",
+    "expect": "pass",
+    "body": "Distinct, issue-specific close for #303.\nMerged: 9f8e7d6c5b4a39281706f5e4d3c2b1a099887766\ntest result: ok. 4 passed; 0 failed"
+  }
+]
