@@ -78,7 +78,7 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 |------|--------|--------|--------|
 | Files / memory | workspace + `memory_fs` | **Shipped** | Allowlisted roots; Settings workspace |
 | SQLite RO | `sql_ro` | **Shipped** | Single-SELECT denylist; host `sql_ro_query` |
-| Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors |
+| Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors. **Wire path (#132):** Settings → keychain PAT → `set_confluence` / `apply_host_connectors` → `specs_for_model` exposes `confluence_search`/`confluence_get_page` → dispatch → `cql_search`/`fetch_page`. Offline: `cargo test -p cd-core --lib confluence` (includes wiremock Bearer + space filter). |
 | X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
 | Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
 | MCP (stdio) | `mcp_client` + `connectors::validate_mcp_command` | **Planned** | Plumbing exists; **not** in `AppConfig` / Settings UI yet |
