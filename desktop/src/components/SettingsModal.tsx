@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { shouldResetSettingsOnOpen } from "../lib/settingsOpenGate";
 import {
   hostCheckOllama,
   hostConfluenceHasToken,
@@ -138,66 +139,82 @@ export function SettingsModal({
   /** HTTP bearer drafts (keychain on Save). */
   const [httpBearerDrafts, setHttpBearerDrafts] = useState<Record<string, string>>({});
   const baseId = useId();
+  /** True after an open→true transition; avoids wiping typed secrets on setup re-renders (#157). */
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (open) {
-      setDraft(setup);
-      setSection(initialSection);
-      setCfTokenDraft("");
-      setCfStatus(null);
-      setXTokenDraft("");
-      setXStatus(null);
-      setApiKeyDraft("");
-      void (async () => {
-        const cf = await hostGetConfluence();
-        const has = await hostConfluenceHasToken();
-        const x = await hostGetX();
-        const xHas = await hostXHasToken();
-        const webOn = await hostGetWebResearchEnabled();
-        const sources = await hostListWebResearchSources();
-        const budget = await hostGetRouterBudget();
-        if (budget) setRouterBudget(budget);
-        if (sources.length) setNewsSources(sources);
-        const [clist, ckinds] = await Promise.all([
-          hostListConnectors(),
-          hostListConnectorKinds(),
-        ]);
-        setConnectors(clist);
-        if (ckinds.length) {
-          setConnectorKinds(ckinds);
-          setNewConnectorKind(ckinds[0] ?? "sqlite");
-        }
-        setDraft((d) => ({
-          ...d,
-          confluence: cf
-            ? {
-                enabled: cf.enabled,
-                baseUrl: cf.base_url,
-                spaces: cf.spaces.join(", "),
-                hasToken: has ?? Boolean(cf.pat_ref),
-              }
-            : d.confluence,
-          x: x
-            ? {
-                enabled: x.enabled,
-                hasToken: xHas ?? Boolean(x.api_key_ref),
-              }
-            : d.x ?? { enabled: false, hasToken: false },
-          webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
-        }));
-        if (setup.providerKind !== "none") {
-          const pid = profileIdForKind(setup.providerKind);
-          const keyOk = await hostProviderHasSecret(pid);
-          if (keyOk !== null) {
-            setDraft((d) => ({ ...d, hasApiKey: keyOk }));
-          }
-        }
-        const cands = await hostListLocalCandidates();
-        setCandidates(cands);
-        const suggested = await hostSuggestDefaultWorkspace();
-        setDefaultWs(suggested);
-      })();
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
     }
+    // Already open: parent `setup` identity churn must not clear drafts/secrets.
+    if (!shouldResetSettingsOnOpen(open, wasOpenRef.current)) {
+      return;
+    }
+    wasOpenRef.current = true;
+    setDraft(setup);
+    setSection(initialSection);
+    setCfTokenDraft("");
+    setCfStatus(null);
+    setXTokenDraft("");
+    setXStatus(null);
+    setApiKeyDraft("");
+    void (async () => {
+      // Abort if modal closed before host fetches return.
+      const stillOpen = () => wasOpenRef.current;
+      const cf = await hostGetConfluence();
+      const has = await hostConfluenceHasToken();
+      const x = await hostGetX();
+      const xHas = await hostXHasToken();
+      const webOn = await hostGetWebResearchEnabled();
+      const sources = await hostListWebResearchSources();
+      const budget = await hostGetRouterBudget();
+      if (!stillOpen()) return;
+      if (budget) setRouterBudget(budget);
+      if (sources.length) setNewsSources(sources);
+      const [clist, ckinds] = await Promise.all([
+        hostListConnectors(),
+        hostListConnectorKinds(),
+      ]);
+      if (!stillOpen()) return;
+      setConnectors(clist);
+      if (ckinds.length) {
+        setConnectorKinds(ckinds);
+        setNewConnectorKind(ckinds[0] ?? "sqlite");
+      }
+      setDraft((d) => ({
+        ...d,
+        confluence: cf
+          ? {
+              enabled: cf.enabled,
+              baseUrl: cf.base_url,
+              spaces: cf.spaces.join(", "),
+              hasToken: has ?? Boolean(cf.pat_ref),
+            }
+          : d.confluence,
+        x: x
+          ? {
+              enabled: x.enabled,
+              hasToken: xHas ?? Boolean(x.api_key_ref),
+            }
+          : d.x ?? { enabled: false, hasToken: false },
+        webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
+      }));
+      if (setup.providerKind !== "none") {
+        const pid = profileIdForKind(setup.providerKind);
+        const keyOk = await hostProviderHasSecret(pid);
+        if (!stillOpen()) return;
+        if (keyOk !== null) {
+          setDraft((d) => ({ ...d, hasApiKey: keyOk }));
+        }
+      }
+      const cands = await hostListLocalCandidates();
+      if (!stillOpen()) return;
+      setCandidates(cands);
+      const suggested = await hostSuggestDefaultWorkspace();
+      if (!stillOpen()) return;
+      setDefaultWs(suggested);
+    })();
   }, [open, setup, initialSection]);
 
   useEffect(() => {
