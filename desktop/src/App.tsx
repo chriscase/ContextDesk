@@ -3,10 +3,13 @@
  * Thin wiring of session store, turn controller, shell state, and chrome.
  */
 import {
+  useCallback,
   useEffect,
+  useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { CommandPalette } from "./components/CommandPalette";
 import { PermissionModal } from "./components/PermissionModal";
 import { RenameChatModal } from "./components/RenameChatModal";
 import { SettingsModal } from "./components/SettingsModal";
@@ -18,6 +21,7 @@ import { Titlebar } from "./components/shell/Titlebar";
 import { Workspace } from "./components/shell/Workspace";
 import { useChatScroll } from "./hooks/useChatScroll";
 import { useChatSessions } from "./hooks/useChatSessions";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
@@ -26,6 +30,7 @@ import {
   modelSelectionKey,
   parseModelSelectionKey,
 } from "./lib/host";
+import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview } from "./lib/session";
 
 export function App() {
@@ -62,6 +67,7 @@ export function App() {
     y: number;
     sessionId: string;
   } | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   const compactKeep = activeSession?.compactKeepLast ?? 6;
   const showFullHistory = activeSession?.showFullHistory ?? false;
@@ -150,6 +156,116 @@ export function App() {
   const ctxTarget = chatCtxMenu
     ? sessions.find((s) => s.id === chatCtxMenu.sessionId)
     : null;
+
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
+
+  const switchSessionByDelta = useCallback(
+    (delta: number) => {
+      if (openChatSessions.length === 0) return;
+      const idx = Math.max(
+        0,
+        openChatSessions.findIndex((s) => s.id === resolvedSessionId),
+      );
+      const next =
+        (idx + delta + openChatSessions.length) % openChatSessions.length;
+      setActiveSessionId(openChatSessions[next]!.id);
+      shell.setPane("chat");
+    },
+    [openChatSessions, resolvedSessionId, setActiveSessionId, shell],
+  );
+
+  const paletteItems: PaletteItem[] = useMemo(() => {
+    const actions: PaletteItem[] = [
+      {
+        id: "action:new-chat",
+        label: "New chat",
+        keywords: ["create", "n"],
+        group: "action",
+      },
+      {
+        id: "action:settings",
+        label: "Open Settings",
+        keywords: [",", "preflight"],
+        group: "action",
+      },
+      {
+        id: "action:rename",
+        label: "Rename current chat",
+        keywords: ["f2"],
+        group: "action",
+      },
+      {
+        id: "action:archive",
+        label: "Open archive",
+        group: "action",
+      },
+    ];
+    const sessionItems: PaletteItem[] = openChatSessions.map((s) => ({
+      id: `session:${s.id}`,
+      label: s.title,
+      detail: s.pinned ? "pinned" : undefined,
+      group: "session" as const,
+    }));
+    return [...actions, ...sessionItems];
+  }, [openChatSessions]);
+
+  const onPaletteSelect = useCallback(
+    (id: string) => {
+      setPaletteOpen(false);
+      if (id === "action:new-chat") {
+        createSession();
+        shell.setPane("chat");
+        return;
+      }
+      if (id === "action:settings") {
+        shell.openSettings("preflight", chatScrollRef.current);
+        return;
+      }
+      if (id === "action:rename" && activeSession) {
+        setRenameTarget({ id: activeSession.id, title: activeSession.title });
+        return;
+      }
+      if (id === "action:archive") {
+        shell.setPane("archive");
+        return;
+      }
+      if (id.startsWith("session:")) {
+        const sid = id.slice("session:".length);
+        setActiveSessionId(sid);
+        shell.setPane("chat");
+      }
+    },
+    [createSession, shell, chatScrollRef, activeSession, setActiveSessionId],
+  );
+
+  useKeyboardShortcuts({
+    onNewChat: () => {
+      createSession();
+      shell.setPane("chat");
+    },
+    onOpenPalette: openPalette,
+    onOpenSettings: () =>
+      shell.openSettings("preflight", chatScrollRef.current),
+    onPrevSession: () => switchSessionByDelta(-1),
+    onNextSession: () => switchSessionByDelta(1),
+    onSessionByIndex: (i) => {
+      const s = openChatSessions[i];
+      if (s) {
+        setActiveSessionId(s.id);
+        shell.setPane("chat");
+      }
+    },
+    onRenameActive: () => {
+      if (activeSession) {
+        setRenameTarget({ id: activeSession.id, title: activeSession.title });
+      }
+    },
+    onEscape: closePalette,
+    paletteOpen,
+    settingsOpen: shell.settingsOpen,
+    permissionOpen: Boolean(turn.permission),
+  });
 
   return (
     <div className="app-shell">
@@ -341,6 +457,12 @@ export function App() {
         </div>
       )}
 
+      <CommandPalette
+        open={paletteOpen}
+        items={paletteItems}
+        onClose={closePalette}
+        onSelect={onPaletteSelect}
+      />
       <PermissionModal
         prompt={turn.permission}
         onRespond={turn.respondPermission}

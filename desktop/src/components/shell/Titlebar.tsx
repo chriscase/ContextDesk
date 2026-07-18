@@ -55,6 +55,13 @@ export function Titlebar({
         </button>
       </div>
       <div className="titlebar__actions">
+        <span
+          className="titlebar__kbd-hint titlebar__no-drag"
+          title="Command palette"
+          aria-hidden
+        >
+          ⌘K
+        </span>
         <button
           type="button"
           className="icon-btn titlebar__no-drag"
