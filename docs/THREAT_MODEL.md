@@ -63,3 +63,15 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 - MCP stdio servers remain untrusted once enabled; tools default HardWrite + first-use approval (#129); absolute command only; child `env_clear` |
 - Team server TLS is operator-owned (reverse proxy); **cd-server is HTTP-only by design** — `--allow-lan` requires TLS termination at a reverse proxy (#171)  
 
+
+## Desktop updater trust boundary (#173)
+
+| Asset | Trust |
+|-------|--------|
+| Update payloads | Fetched over HTTPS from GitHub Releases `latest.json` only |
+| Integrity | Minisign / Ed25519 signature verified against **pinned** `plugins.updater.pubkey` in the app binary |
+| Private key | CI secret only; never in repo, never over IPC, never in webview |
+| Install decision | Explicit user confirmation in Settings (HardWrite-style); no silent auto-install |
+| Webview CSP | Updater HTTP is Rust-side; webview does not need expanded `connect-src` for GitHub |
+
+Compromise of GitHub releases without the private key cannot force a signed update. Compromise of the private key requires rotating the pubkey in a new install path.

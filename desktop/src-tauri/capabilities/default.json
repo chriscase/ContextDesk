@@ -1,11 +1,12 @@
 {
   "identifier": "default",
-  "description": "Default capabilities — no shell. dialog:allow-open for workspace folder picker; dialog:allow-confirm and dialog:allow-message for WKWebView-safe confirms/alerts (rename uses in-app modal, not a save dialog). Window chrome uses Overlay titleBarStyle in tauri.conf only — no extra permissions.",
+  "description": "Default capabilities — no shell. dialog:allow-open for workspace folder picker; dialog:allow-confirm and dialog:allow-message for WKWebView-safe confirms/alerts (rename uses in-app modal, not a save dialog). Window chrome uses Overlay titleBarStyle in tauri.conf only — no extra permissions. updater:default grants check/download/install for the opt-in signed updater channel only (#173); UI must confirm before install.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:allow-open",
     "dialog:allow-confirm",
-    "dialog:allow-message"
+    "dialog:allow-message",
+    "updater:default"
   ]
 }
