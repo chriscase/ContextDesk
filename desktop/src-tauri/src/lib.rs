@@ -106,6 +106,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
         audit,
         index_cache,
         Some(cfg.index_max_files),
+        Some(cfg.index_max_bytes),
         Some(cfg.router.clone()),
     )
     .map_err(|e| e.to_string())?;

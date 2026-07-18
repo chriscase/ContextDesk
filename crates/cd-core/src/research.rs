@@ -138,15 +138,20 @@ pub fn build_host_with_index_cache(
     audit_path: Option<PathBuf>,
     index_cache_dir: Option<PathBuf>,
 ) -> CoreResult<ToolHost> {
-    build_host_with_options(workspace, audit_path, index_cache_dir, None, None)
+    build_host_with_options(workspace, audit_path, index_cache_dir, None, None, None)
 }
 
-/// Build host with index cache, max files, and router budget.
+/// Build host with index cache, file cap, index byte budget, and router budget.
+///
+/// `index_max_bytes` bounds the resident index working set (`None`/`0` → default,
+/// #117). The on-disk store still holds every chunk.
+#[allow(clippy::too_many_arguments)]
 pub fn build_host_with_options(
     workspace: Workspace,
     audit_path: Option<PathBuf>,
     index_cache_dir: Option<PathBuf>,
     index_max_files: Option<usize>,
+    index_max_bytes: Option<usize>,
     router: Option<crate::router::RouterBudget>,
 ) -> CoreResult<ToolHost> {
     build_host_with_connectors(
@@ -154,22 +159,32 @@ pub fn build_host_with_options(
         audit_path,
         index_cache_dir,
         index_max_files,
+        index_max_bytes,
         router,
         &[],
     )
 }
 
 /// Build host and attach workspace connector configs (#127).
+///
+/// `index_max_bytes` bounds the resident index working set (`None`/`0` → default);
+/// the on-disk store still holds every chunk (#115/#117).
+#[allow(clippy::too_many_arguments)]
 pub fn build_host_with_connectors(
     workspace: Workspace,
     audit_path: Option<PathBuf>,
     index_cache_dir: Option<PathBuf>,
     index_max_files: Option<usize>,
+    index_max_bytes: Option<usize>,
     router: Option<crate::router::RouterBudget>,
     connectors: &[crate::connectors::ConnectorConfig],
 ) -> CoreResult<ToolHost> {
-    let index =
-        KeywordIndex::open_or_build(&workspace, index_cache_dir.as_deref(), index_max_files)?;
+    let index = KeywordIndex::open_or_build_bounded(
+        &workspace,
+        index_cache_dir.as_deref(),
+        index_max_files,
+        index_max_bytes,
+    )?;
     let audit = audit_path.map(AuditLog::new);
     let mut host = ToolHost::new(workspace, index, audit);
     if let Some(b) = router {

@@ -26,13 +26,30 @@ npm install
 npm run tauri:dev    # preferred — free-port aware
 
 # Large-workspace index bench (#117; ignored by default CI — AGENTS #8)
-# Creates a synthetic 50k-file tree, indexes with SQLite store + soft max 100k.
+# Creates a synthetic 50k-file tree, indexes with a SQLite store + soft max 100k, and
+# asserts: (a) no file-cap truncation at the default cap, (b) the in-RAM working set
+# stays within the configured byte budget (checked at both the default budget and a
+# deliberately small 1 MiB budget), (c) search still returns hits over the resident set.
 cargo test -p cd-core --lib index_50k_soft_cap_allows_large_tree -- --ignored --nocapture
+
+# Fast hermetic byte-budget bound (runs in default CI):
+cargo test -p cd-core index
 ```
 
-Index soft caps: `AppConfig.index_max_files` (default **100_000**). When the cap is
-hit, `ReindexStats.truncated` is true and a `tracing::warn!` is emitted (never silent).
-Per-file max is 512 KiB; walk depth max is 12 (see `index.rs`).
+Index caps (all in `index.rs`; surfaced via `AppConfig`):
+
+- **`index_max_files`** — soft file cap (default **100_000**; was a hard 5_000). When hit,
+  `ReindexStats.truncated` is true and a `tracing::warn!` is emitted — never silent.
+- **`index_max_bytes`** — in-RAM working-set **byte budget** (default **256 MiB**; `0` → default).
+  The SQLite store still holds *every* chunk on disk; this bounds only the resident
+  `chunks`/`postings` set so peak memory does not grow linearly-unbounded with corpus size.
+  When the budget clips the resident set, the **most-recently-modified** files are kept
+  (`KeywordIndex::load_from_store` streams recency-first and stops at the budget), a
+  `tracing::warn!` fires, and `KeywordIndex::is_bytes_capped()` returns true (UI-readable).
+  Inspect resident size with `KeywordIndex::index_bytes()`.
+- **`MAX_FILE_BYTES`** — per-file read cap, **512 KiB** (larger files / binaries skipped
+  before any `read_to_string`, so huge dumps never allocate in full).
+- **`MAX_DEPTH`** — directory-walk depth cap, **12** (runaway nesting is skipped).
 
 ## Dev ports (multi-Tauri machines)
 

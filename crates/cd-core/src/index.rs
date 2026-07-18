@@ -14,6 +14,13 @@ use std::time::SystemTime;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// Default soft file cap (was hard 5_000; now configurable via AppConfig).
 const DEFAULT_MAX_FILES: usize = 100_000;
+/// Default in-RAM working-set byte budget for the index (256 MiB).
+///
+/// The persistent store (#115) still holds **every** chunk on disk; this bounds
+/// only the resident chunk/postings working set so peak memory does not grow
+/// linearly-unbounded with corpus size. The most-recently-modified files are
+/// kept resident (recency-first), and capping is recorded — never silent.
+const DEFAULT_MAX_INDEX_BYTES: usize = 256 * 1024 * 1024;
 /// Max directory depth when walking roots.
 const MAX_DEPTH: usize = 12;
 /// Soft max chars per chunk (structure-aware chunker).
@@ -68,6 +75,12 @@ pub struct KeywordIndex {
     store_path: Option<PathBuf>,
     /// Soft max files (default 100_000).
     max_files: usize,
+    /// In-RAM working-set byte budget (default 256 MiB). Bounds `chunks`/`postings`
+    /// memory; the on-disk store still holds every chunk.
+    max_index_bytes: usize,
+    /// True when the in-RAM working set was clipped to `max_index_bytes`
+    /// (search covers the most-recent resident subset). Recorded, not silent.
+    bytes_capped: bool,
 }
 
 impl Default for KeywordIndex {
@@ -78,6 +91,8 @@ impl Default for KeywordIndex {
             roots: Vec::new(),
             store_path: None,
             max_files: DEFAULT_MAX_FILES,
+            max_index_bytes: DEFAULT_MAX_INDEX_BYTES,
+            bytes_capped: false,
         }
     }
 }
@@ -107,11 +122,30 @@ impl KeywordIndex {
     ///
     /// When `cache_dir` is `Some`, the SQLite file is
     /// `<cache_dir>/<workspace_id>.sqlite`. When `None`, in-memory only.
-    /// `max_files` overrides the soft cap when `Some`.
+    /// `max_files` overrides the soft cap when `Some`. Uses the default in-RAM
+    /// byte budget; see [`Self::open_or_build_bounded`] to override it.
     pub fn open_or_build(
         workspace: &Workspace,
         cache_dir: Option<&Path>,
         max_files: Option<usize>,
+    ) -> CoreResult<Self> {
+        Self::open_or_build_bounded(workspace, cache_dir, max_files, None)
+    }
+
+    /// Like [`Self::open_or_build`] but with an explicit in-RAM byte budget.
+    ///
+    /// `max_index_bytes` caps the resident chunk/postings working set (default
+    /// [`DEFAULT_MAX_INDEX_BYTES`] when `None`/`0`). The on-disk store still holds
+    /// every chunk; the resident set keeps the most-recently-modified files so a
+    /// huge corpus indexes fully to disk while memory stays bounded.
+    ///
+    /// `max_files == Some(0)` (e.g. an unset `AppConfig::default()` field) is
+    /// treated as the built-in default rather than "index nothing".
+    pub fn open_or_build_bounded(
+        workspace: &Workspace,
+        cache_dir: Option<&Path>,
+        max_files: Option<usize>,
+        max_index_bytes: Option<usize>,
     ) -> CoreResult<Self> {
         let store_path = cache_dir.map(|d| {
             let _ = fs::create_dir_all(d);
@@ -123,7 +157,9 @@ impl KeywordIndex {
             postings: HashMap::new(),
             roots: workspace.roots.clone(),
             store_path: store_path.clone(),
-            max_files: max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, 1_000_000),
+            max_files: resolve_max_files(max_files),
+            max_index_bytes: resolve_max_index_bytes(max_index_bytes),
+            bytes_capped: false,
         };
 
         if let Some(ref path) = store_path {
@@ -143,7 +179,34 @@ impl KeywordIndex {
 
     /// Configure soft max files (Settings / AppConfig).
     pub fn set_max_files(&mut self, n: usize) {
-        self.max_files = n.clamp(1, 1_000_000);
+        self.max_files = resolve_max_files(Some(n));
+    }
+
+    /// Configure the in-RAM working-set byte budget (Settings / AppConfig).
+    ///
+    /// Takes effect on the next [`Self::refresh`] / reload. `0` resets to the
+    /// built-in default.
+    pub fn set_max_index_bytes(&mut self, n: usize) {
+        self.max_index_bytes = resolve_max_index_bytes(Some(n));
+    }
+
+    /// Configured in-RAM byte budget.
+    pub fn max_index_bytes(&self) -> usize {
+        self.max_index_bytes
+    }
+
+    /// Estimated resident bytes of the in-RAM working set (chunk text + paths +
+    /// per-chunk struct overhead). This is the exact quantity bounded by
+    /// [`Self::max_index_bytes`], so `index_bytes() <= max_index_bytes()` always
+    /// holds after a load (modulo a single mandatory first chunk).
+    pub fn index_bytes(&self) -> usize {
+        self.chunks.iter().map(chunk_heap_bytes).sum()
+    }
+
+    /// True when the resident working set was clipped to the byte budget
+    /// (search then covers the most-recent resident subset only).
+    pub fn is_bytes_capped(&self) -> bool {
+        self.bytes_capped
     }
 
     /// Incremental reindex: skip re-read when size+mtime unchanged.
@@ -240,8 +303,9 @@ impl KeywordIndex {
             let path = self.store_path.clone().unwrap();
             self.load_from_store(&path)?;
         } else {
-            // Pure in-memory: rebuild postings from current chunks only
-            // (chunks already updated by upsert for memory-only path)
+            // Pure in-memory: bound the resident set to the byte budget (recency
+            // first), then rebuild postings from the surviving chunks.
+            self.enforce_memory_budget();
             self.rebuild_postings();
         }
 
@@ -328,11 +392,14 @@ impl KeywordIndex {
         let conn =
             Connection::open(path).map_err(|e| CoreError::Message(format!("index open: {e}")))?;
         self.chunks.clear();
+        self.bytes_capped = false;
+        // Most-recent-first so the bounded resident set keeps the freshest files.
+        // Chunks of a file stay in reading order via the secondary `c.id` sort.
         let mut stmt = conn
             .prepare(
                 "SELECT f.path, c.start_line, c.end_line, c.text, f.mtime_secs
                  FROM chunks c JOIN files f ON f.id = c.file_id
-                 ORDER BY c.id",
+                 ORDER BY f.mtime_secs DESC, c.id ASC",
             )
             .map_err(|e| CoreError::Message(format!("index prepare: {e}")))?;
         let rows = stmt
@@ -346,8 +413,27 @@ impl KeywordIndex {
                 })
             })
             .map_err(|e| CoreError::Message(format!("index query: {e}")))?;
+        // Stream chunks into the resident set, stopping once the byte budget is
+        // reached. Peak memory is therefore bounded during load, not just after —
+        // the store on disk still holds every chunk.
+        let budget = self.max_index_bytes;
+        let mut resident = 0usize;
         for r in rows.flatten() {
+            let sz = chunk_heap_bytes(&r);
+            if !self.chunks.is_empty() && resident.saturating_add(sz) > budget {
+                self.bytes_capped = true;
+                break;
+            }
+            resident = resident.saturating_add(sz);
             self.chunks.push(r);
+        }
+        if self.bytes_capped {
+            tracing::warn!(
+                budget_bytes = budget,
+                resident_bytes = resident,
+                resident_chunks = self.chunks.len(),
+                "index working set capped to max_index_bytes; search covers the most-recent resident subset"
+            );
         }
         self.rebuild_postings();
         Ok(())
@@ -435,6 +521,51 @@ impl KeywordIndex {
         let p = PathBuf::from(path_key);
         self.chunks.retain(|c| c.path != p);
         Ok(())
+    }
+
+    /// Trim the in-memory (store-less) working set to the byte budget, keeping the
+    /// most-recently-modified chunks. No-op when already within budget. Used only on
+    /// the memory-only path; the store path bounds during load in [`Self::load_from_store`].
+    fn enforce_memory_budget(&mut self) {
+        let budget = self.max_index_bytes;
+        let total: usize = self.chunks.iter().map(chunk_heap_bytes).sum();
+        if total <= budget {
+            self.bytes_capped = false;
+            return;
+        }
+        // Priority order: newest mtime first, ties by original insertion order.
+        let mut order: Vec<usize> = (0..self.chunks.len()).collect();
+        order.sort_by(|&a, &b| {
+            self.chunks[b]
+                .mtime_secs
+                .cmp(&self.chunks[a].mtime_secs)
+                .then(a.cmp(&b))
+        });
+        let mut keep = vec![false; self.chunks.len()];
+        let mut resident = 0usize;
+        for (rank, &i) in order.iter().enumerate() {
+            let sz = chunk_heap_bytes(&self.chunks[i]);
+            if rank == 0 || resident.saturating_add(sz) <= budget {
+                keep[i] = true;
+                resident = resident.saturating_add(sz);
+            } else {
+                break;
+            }
+        }
+        let mut kept = Vec::with_capacity(keep.iter().filter(|&&k| k).count());
+        for (i, c) in std::mem::take(&mut self.chunks).into_iter().enumerate() {
+            if keep[i] {
+                kept.push(c);
+            }
+        }
+        self.chunks = kept;
+        self.bytes_capped = true;
+        tracing::warn!(
+            budget_bytes = budget,
+            resident_bytes = resident,
+            resident_chunks = self.chunks.len(),
+            "index working set capped to max_index_bytes (memory-only); search covers the most-recent resident subset"
+        );
     }
 
     fn rebuild_postings(&mut self) {
@@ -719,6 +850,32 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
     out
 }
 
+/// Estimated resident heap bytes for one chunk: text + path + fixed struct/slot
+/// overhead. Used both to bound the working set and to report [`KeywordIndex::index_bytes`],
+/// so the reported figure is exactly the quantity that is bounded.
+fn chunk_heap_bytes(c: &Chunk) -> usize {
+    c.text.len() + c.path.as_os_str().len() + std::mem::size_of::<Chunk>()
+}
+
+/// Resolve the soft file cap: `Some(n>0)` clamped to a sane range, else the default.
+/// `Some(0)` (e.g. an unset `AppConfig::default()` field) maps to the default so a
+/// fresh install indexes a full workspace instead of a single file.
+fn resolve_max_files(n: Option<usize>) -> usize {
+    match n {
+        Some(v) if v > 0 => v.clamp(1, 1_000_000),
+        _ => DEFAULT_MAX_FILES,
+    }
+}
+
+/// Resolve the in-RAM byte budget: `Some(n>0)`, else the default. `0`/`None` map to
+/// [`DEFAULT_MAX_INDEX_BYTES`].
+fn resolve_max_index_bytes(n: Option<usize>) -> usize {
+    match n {
+        Some(v) if v > 0 => v,
+        _ => DEFAULT_MAX_INDEX_BYTES,
+    }
+}
+
 fn fingerprint(size: i64, mtime: i64, text: &str) -> String {
     // Cheap stable id: size, mtime, and length of text (content hash only when re-read).
     format!("{size}:{mtime}:{}", text.len())
@@ -939,8 +1096,12 @@ mod tests {
     /// ```text
     /// cargo test -p cd-core --lib index_50k_soft_cap_allows_large_tree -- --ignored --nocapture
     /// ```
-    /// Uses a SQLite store so walk flushes per-file (peak RAM is post-load postings,
-    /// not an unbounded all-in-memory walk buffer). Default soft cap is 100_000.
+    /// Uses a SQLite store so the walk flushes per file. Proves three things at
+    /// 50k scale: (a) no 5k / file-cap truncation at the default cap, (b) the in-RAM
+    /// working set stays within the configured byte budget, and (c) search still
+    /// returns hits. The two-phase check exercises both the "everything fits under
+    /// the default budget" path and a deliberately small budget that clips the
+    /// resident set while the store keeps every chunk.
     #[test]
     #[ignore = "slow synthetic 50k-file tree; run with --ignored"]
     fn index_50k_soft_cap_allows_large_tree() {
@@ -950,6 +1111,7 @@ mod tests {
         for i in 0..n {
             let sub = dir.path().join(format!("b{}", i % 200));
             let _ = fs::create_dir_all(&sub);
+            // Every file carries the shared marker "unique" plus a per-file token.
             fs::write(
                 sub.join(format!("f{i}.md")),
                 format!("token_{i} unique document body\n"),
@@ -957,12 +1119,28 @@ mod tests {
             .unwrap();
         }
         let ws = Workspace::new("big50k", vec![dir.path().to_path_buf()]);
+
+        // Phase 1 — default byte budget: whole 50k corpus fits, nothing truncated.
         let idx =
             KeywordIndex::open_or_build(&ws, Some(cache.path()), Some(DEFAULT_MAX_FILES)).unwrap();
         assert!(!idx.is_empty(), "index should not be empty after 50k walk");
-        // Not truncated at default cap.
+        assert_eq!(
+            idx.len(),
+            n,
+            "all 50k single-chunk files should be resident"
+        );
+        assert!(
+            !idx.is_bytes_capped(),
+            "50k small files should fit under the default budget"
+        );
+        assert!(
+            idx.index_bytes() <= idx.max_index_bytes(),
+            "index_bytes {} must be within budget {}",
+            idx.index_bytes(),
+            idx.max_index_bytes()
+        );
+        // Second open reports mostly unchanged (incremental, #115 preserved).
         let stats = {
-            // Second refresh should report mostly unchanged.
             let mut idx2 =
                 KeywordIndex::open_or_build(&ws, Some(cache.path()), Some(DEFAULT_MAX_FILES))
                     .unwrap();
@@ -972,10 +1150,112 @@ mod tests {
             !stats.truncated,
             "default cap must not truncate 50k files: {stats:?}"
         );
-        let hits = idx.search("token_42", 5);
-        assert!(!hits.is_empty(), "expected hit for seeded token_42");
-        let hits2 = idx.search("token_49999", 5);
-        assert!(!hits2.is_empty(), "expected hit near end of corpus");
+        assert!(!idx.search("token_42", 5).is_empty(), "hit token_42");
+        assert!(
+            !idx.search("token_49999", 5).is_empty(),
+            "hit near end of corpus"
+        );
+
+        // Phase 2 — deliberately tiny budget (1 MiB): the resident working set is
+        // bounded even with 50k files, yet search over the resident subset still
+        // works (shared marker present in every file). The on-disk store is intact.
+        let budget = 1024 * 1024usize;
+        let bounded = KeywordIndex::open_or_build_bounded(
+            &ws,
+            Some(cache.path()),
+            Some(DEFAULT_MAX_FILES),
+            Some(budget),
+        )
+        .unwrap();
+        assert!(
+            bounded.is_bytes_capped(),
+            "1 MiB budget must clip a 50k-file working set"
+        );
+        assert!(
+            bounded.index_bytes() <= budget,
+            "resident bytes {} exceed 1 MiB budget",
+            bounded.index_bytes()
+        );
+        assert!(
+            bounded.len() < n,
+            "resident set {} should be a strict subset of {n}",
+            bounded.len()
+        );
+        assert!(
+            !bounded.search("unique", 5).is_empty(),
+            "search over the bounded resident subset should still return hits"
+        );
+    }
+
+    /// Fast, hermetic byte-budget bound (runs in default `cargo test index`).
+    ///
+    /// Builds a corpus larger than a tiny budget and asserts the resident working
+    /// set (a) is clipped, (b) stays within the configured byte budget, and (c) is
+    /// still searchable — on both the SQLite-backed and memory-only paths.
+    #[test]
+    fn byte_budget_bounds_working_set() {
+        let dir = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let n = 300usize;
+        for i in 0..n {
+            fs::write(
+                dir.path().join(format!("f{i:04}.md")),
+                format!(
+                    "shared_marker token_{i} the quick brown fox jumps over the lazy dog again here\n"
+                ),
+            )
+            .unwrap();
+        }
+        let ws = Workspace::new("budget", vec![dir.path().to_path_buf()]);
+        let budget = 24 * 1024usize; // 24 KiB — well below the full corpus.
+
+        // SQLite-backed: streaming load respects the budget (bounded during load).
+        let idx = KeywordIndex::open_or_build_bounded(&ws, Some(cache.path()), None, Some(budget))
+            .unwrap();
+        assert!(
+            idx.is_bytes_capped(),
+            "expected the working set to be capped; resident={} budget={budget}",
+            idx.index_bytes()
+        );
+        assert!(
+            idx.index_bytes() <= budget,
+            "index_bytes {} exceeds budget {budget}",
+            idx.index_bytes()
+        );
+        assert!(
+            !idx.is_empty() && idx.len() < n,
+            "expected a partial resident set, got {} of {n} chunks",
+            idx.len()
+        );
+        assert!(
+            !idx.search("shared_marker", 5).is_empty(),
+            "search over the bounded resident subset returned no hits"
+        );
+
+        // Memory-only path enforces the same budget via post-hoc trim.
+        let mem = KeywordIndex::open_or_build_bounded(&ws, None, None, Some(budget)).unwrap();
+        assert!(mem.is_bytes_capped(), "memory-only path should also cap");
+        assert!(
+            mem.index_bytes() <= budget,
+            "memory-only index_bytes {} exceeds budget {budget}",
+            mem.index_bytes()
+        );
+        assert!(
+            !mem.search("shared_marker", 5).is_empty(),
+            "memory-only bounded search returned no hits"
+        );
+
+        // Default budget (via None) keeps the whole small corpus resident.
+        let full = KeywordIndex::open_or_build_bounded(&ws, None, None, None).unwrap();
+        assert!(
+            !full.is_bytes_capped(),
+            "default budget must not clip 300 tiny files"
+        );
+        assert_eq!(
+            full.len(),
+            n,
+            "all 300 single-chunk files resident by default"
+        );
     }
 
     /// #119: without embed backend, hybrid hits are a superset of keyword path for same limit pool.
