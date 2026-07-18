@@ -782,6 +782,50 @@ impl OllamaClient {
     pub async fn health(&self) -> bool {
         self.list_tags().await.is_ok()
     }
+
+    /// Embed a single prompt via Ollama `/api/embeddings` (#119).
+    ///
+    /// Not invoked by default `cargo test` (network). Prefer
+    /// [`crate::embed::MockHashEmbedBackend`] offline.
+    pub async fn embed(&self, prompt: &str) -> CoreResult<Vec<f32>> {
+        let url = format!("{}/api/embeddings", self.base_url);
+        let body = json!({
+            "model": self.model,
+            "prompt": prompt,
+        });
+        let resp = self
+            .http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CoreError::Message(format!("ollama embed: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| CoreError::Message(format!("ollama embed body: {e}")))?;
+        if !status.is_success() {
+            return Err(CoreError::Message(format!(
+                "ollama embed HTTP {status}: {}",
+                text.chars().take(160).collect::<String>()
+            )));
+        }
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| CoreError::Message(format!("ollama embed json: {e}")))?;
+        let arr = v
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| CoreError::Message("ollama embed: missing embedding array".into()))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for x in arr {
+            let f = x
+                .as_f64()
+                .ok_or_else(|| CoreError::Message("ollama embed: non-float component".into()))?;
+            out.push(f as f32);
+        }
+        Ok(out)
+    }
 }
 
 /// Serialize a chat message for Ollama `/api/chat` (includes tool_calls).

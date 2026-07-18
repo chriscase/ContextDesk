@@ -32,6 +32,9 @@ pub struct Chunk {
     pub end_line: usize,
     /// Text body.
     pub text: String,
+    /// Source file mtime (unix secs) for recency scoring (#119).
+    #[serde(default)]
+    pub mtime_secs: i64,
 }
 
 /// Counts from an incremental refresh (for tests and tracing).
@@ -299,9 +302,25 @@ impl KeywordIndex {
               text TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
+            -- Embedding cache keyed by content fingerprint (#119); optional / empty by default.
+            CREATE TABLE IF NOT EXISTS embeddings (
+              content_key TEXT PRIMARY KEY,
+              dims INTEGER NOT NULL,
+              vector BLOB NOT NULL
+            );
             "#,
         )
         .map_err(|e| CoreError::Message(format!("index schema: {e}")))?;
+        // Migrate older stores that predate embeddings table.
+        let _ = conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS embeddings (
+              content_key TEXT PRIMARY KEY,
+              dims INTEGER NOT NULL,
+              vector BLOB NOT NULL
+            );
+            "#,
+        );
         Ok(())
     }
 
@@ -311,7 +330,7 @@ impl KeywordIndex {
         self.chunks.clear();
         let mut stmt = conn
             .prepare(
-                "SELECT f.path, c.start_line, c.end_line, c.text
+                "SELECT f.path, c.start_line, c.end_line, c.text, f.mtime_secs
                  FROM chunks c JOIN files f ON f.id = c.file_id
                  ORDER BY c.id",
             )
@@ -323,6 +342,7 @@ impl KeywordIndex {
                     start_line: row.get::<_, i64>(1)? as usize,
                     end_line: row.get::<_, i64>(2)? as usize,
                     text: row.get(3)?,
+                    mtime_secs: row.get::<_, i64>(4).unwrap_or(0),
                 })
             })
             .map_err(|e| CoreError::Message(format!("index query: {e}")))?;
@@ -390,9 +410,16 @@ impl KeywordIndex {
             return Ok(());
         }
 
-        // Memory-only: replace chunks for this path
+        // Memory-only: replace chunks for this path; stamp mtime for recency.
         self.chunks.retain(|c| c.path != path);
-        self.chunks.extend(file_chunks);
+        let stamped: Vec<Chunk> = file_chunks
+            .into_iter()
+            .map(|mut c| {
+                c.mtime_secs = mtime;
+                c
+            })
+            .collect();
+        self.chunks.extend(stamped);
         Ok(())
     }
 
@@ -478,6 +505,156 @@ impl KeywordIndex {
             .collect()
     }
 
+    /// Hybrid search: keyword + optional semantic (embeddings) + recency (#119).
+    ///
+    /// When `embed` is `None`, results match keyword ranking with a mild recency
+    /// boost only (same hit set as [`Self::search`] when recency weight is 0 for
+    /// ties — default still includes small recency). Callers that need **strict**
+    /// keyword equivalence should use [`Self::search`].
+    ///
+    /// On embed failure: `tracing::warn!` once and fall back to keyword+recency.
+    pub async fn search_hybrid(
+        &self,
+        query: &str,
+        limit: usize,
+        embed: Option<&dyn crate::embed::EmbedBackend>,
+        weights: crate::embed::HybridWeights,
+    ) -> Vec<(f32, &Chunk)> {
+        use crate::embed::{
+            chunk_content_key, cosine_similarity, hybrid_score, now_unix_secs, recency_boost,
+        };
+
+        // Keyword baseline scores (same as search, unlimited then re-rank).
+        let kw_hits = self.search(query, 50.max(limit));
+        if kw_hits.is_empty() && embed.is_none() {
+            return vec![];
+        }
+
+        // Candidate pool: keyword hits; if empty but we have embed, score all chunks (cap).
+        let mut candidates: Vec<(usize, f32)> = if kw_hits.is_empty() {
+            self.chunks
+                .iter()
+                .enumerate()
+                .take(200)
+                .map(|(i, _)| (i, 0.0f32))
+                .collect()
+        } else {
+            // Map keyword results back to indices
+            kw_hits
+                .iter()
+                .filter_map(|(s, c)| {
+                    self.chunks
+                        .iter()
+                        .position(|x| {
+                            x.path == c.path
+                                && x.start_line == c.start_line
+                                && x.end_line == c.end_line
+                        })
+                        .map(|i| (i, *s))
+                })
+                .collect()
+        };
+
+        let keyword_max = candidates
+            .iter()
+            .map(|(_, s)| *s)
+            .fold(0.0f32, f32::max)
+            .max(1e-6);
+
+        let now = now_unix_secs();
+        let mut query_vec: Option<Vec<f32>> = None;
+        let mut chunk_vecs: HashMap<usize, Vec<f32>> = HashMap::new();
+
+        if let Some(backend) = embed {
+            match backend.embed(&[query.to_string()]).await {
+                Ok(mut v) if !v.is_empty() => {
+                    query_vec = Some(v.remove(0));
+                    // Batch embed candidate texts (cache-aware when store present).
+                    let texts: Vec<String> = candidates
+                        .iter()
+                        .filter_map(|(i, _)| self.chunks.get(*i).map(|c| c.text.clone()))
+                        .collect();
+                    match backend.embed(&texts).await {
+                        Ok(vecs) => {
+                            for (k, (i, _)) in candidates.iter().enumerate() {
+                                if let Some(vec) = vecs.get(k) {
+                                    // Best-effort persist
+                                    if let Some(c) = self.chunks.get(*i) {
+                                        let _ =
+                                            self.cache_embedding(&chunk_content_key(&c.text), vec);
+                                    }
+                                    chunk_vecs.insert(*i, vec.clone());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "embed candidates failed; keyword+recency only");
+                            query_vec = None;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!("embed returned empty vectors; keyword+recency only");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "embed query failed; keyword+recency only");
+                }
+            }
+        }
+
+        let has_sem = query_vec.is_some() && !chunk_vecs.is_empty();
+        let mut scored: Vec<(f32, usize)> = candidates
+            .drain(..)
+            .map(|(i, kw)| {
+                let chunk = &self.chunks[i];
+                let rec = recency_boost(chunk.mtime_secs, now);
+                let sem = if has_sem {
+                    match (query_vec.as_ref(), chunk_vecs.get(&i)) {
+                        (Some(q), Some(c)) => cosine_similarity(q, c),
+                        _ => 0.0,
+                    }
+                } else {
+                    0.0
+                };
+                let score = hybrid_score(kw, keyword_max, sem, rec, weights);
+                (score, i)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+            .into_iter()
+            .take(limit.clamp(1, 50))
+            .filter_map(|(s, i)| self.chunks.get(i).map(|c| (s, c)))
+            .collect()
+    }
+
+    /// Store an embedding blob in the SQLite cache (no-op when memory-only).
+    fn cache_embedding(&self, content_key: &str, vector: &[f32]) -> CoreResult<()> {
+        let Some(ref sp) = self.store_path else {
+            return Ok(());
+        };
+        if !sp.exists() {
+            return Ok(());
+        }
+        let conn = Connection::open(sp)
+            .map_err(|e| CoreError::Message(format!("embed cache open: {e}")))?;
+        let _ = conn.execute_batch(
+            r#"CREATE TABLE IF NOT EXISTS embeddings (
+              content_key TEXT PRIMARY KEY,
+              dims INTEGER NOT NULL,
+              vector BLOB NOT NULL
+            );"#,
+        );
+        let bytes = f32_slice_to_bytes(vector);
+        conn.execute(
+            "INSERT OR REPLACE INTO embeddings (content_key, dims, vector) VALUES (?1,?2,?3)",
+            params![content_key, vector.len() as i64, bytes],
+        )
+        .map_err(|e| CoreError::Message(format!("embed cache write: {e}")))?;
+        Ok(())
+    }
+
     /// Paths currently represented in the index (for tests).
     pub fn indexed_paths(&self) -> HashSet<PathBuf> {
         self.chunks.iter().map(|c| c.path.clone()).collect()
@@ -529,6 +706,7 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
                 start_line: start + 1,
                 end_line: end,
                 text: body,
+                mtime_secs: 0,
             });
         }
         if end >= lines.len() {
@@ -544,6 +722,14 @@ fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
 fn fingerprint(size: i64, mtime: i64, text: &str) -> String {
     // Cheap stable id: size, mtime, and length of text (content hash only when re-read).
     format!("{size}:{mtime}:{}", text.len())
+}
+
+fn f32_slice_to_bytes(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
 }
 
 fn mtime_secs(meta: &fs::Metadata) -> i64 {
@@ -789,5 +975,90 @@ mod tests {
         assert!(!hits.is_empty(), "expected hit for seeded token_42");
         let hits2 = idx.search("token_49999", 5);
         assert!(!hits2.is_empty(), "expected hit near end of corpus");
+    }
+
+    /// #119: without embed backend, hybrid hits are a superset of keyword path for same limit pool.
+    #[tokio::test]
+    async fn hybrid_without_embed_preserves_keyword_hits() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("auth.md"),
+            "# Auth\n\nSession tokens live in the gateway middleware.\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("billing.md"),
+            "# Billing\n\nInvoices and refunds are tracked here.\n",
+        )
+        .unwrap();
+        let ws = Workspace::new("hyb", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let kw: Vec<_> = idx
+            .search("gateway session", 5)
+            .into_iter()
+            .map(|(_, c)| (c.path.clone(), c.start_line))
+            .collect();
+        let hy: Vec<_> = idx
+            .search_hybrid(
+                "gateway session",
+                5,
+                None,
+                crate::embed::HybridWeights {
+                    keyword: 1.0,
+                    semantic: 0.0,
+                    recency: 0.0,
+                },
+            )
+            .await
+            .into_iter()
+            .map(|(_, c)| (c.path.clone(), c.start_line))
+            .collect();
+        // Same paths for pure keyword weights (order may differ only on ties).
+        for p in &kw {
+            assert!(hy.contains(p), "hybrid missing keyword hit {p:?}");
+        }
+    }
+
+    /// #119: mock embed ranks semantic neighbor above pure keyword decoy.
+    #[tokio::test]
+    async fn hybrid_semantic_boosts_paraphrase() {
+        let dir = tempdir().unwrap();
+        // Keyword decoy: shares rare tokens with a naive query but wrong topic.
+        fs::write(
+            dir.path().join("decoy.md"),
+            "# Unrelated\n\nThe word credentials appears once in a random list: apple banana credentials zebra.\n",
+        )
+        .unwrap();
+        // Semantic target: auth topic without the query's exact rare tokens.
+        fs::write(
+            dir.path().join("auth.md"),
+            "# Sign-in\n\nUsers authenticate with passwords and session tokens at the login endpoint.\n",
+        )
+        .unwrap();
+        let ws = Workspace::new("sem", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let backend = crate::embed::MockHashEmbedBackend::new(32);
+        // Paraphrase query — few exact keyword overlaps with auth.md, but semantic neighbor.
+        let hits = idx
+            .search_hybrid(
+                "user authentication credentials sign-in",
+                5,
+                Some(&backend),
+                crate::embed::HybridWeights {
+                    keyword: 0.25,
+                    semantic: 0.65,
+                    recency: 0.10,
+                },
+            )
+            .await;
+        assert!(!hits.is_empty());
+        let top = hits[0].1.path.file_name().unwrap().to_string_lossy();
+        assert!(
+            top.contains("auth"),
+            "expected auth.md on top, got {top} hits={:?}",
+            hits.iter()
+                .map(|(s, c)| (s, c.path.file_name().unwrap().to_string_lossy().to_string()))
+                .collect::<Vec<_>>()
+        );
     }
 }
