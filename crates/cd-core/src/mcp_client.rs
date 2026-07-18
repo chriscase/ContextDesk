@@ -5,11 +5,28 @@ use crate::error::{CoreError, CoreResult};
 use crate::tools::{ToolSideEffect, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Default wall-clock timeout for a single JSON-RPC request (#135).
+pub const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Spawn options for module isolation (#135).
+#[derive(Debug, Clone, Default)]
+pub struct McpSpawnOptions {
+    /// Working directory for the child (module dir or empty temp). Defaults to module/config dir.
+    pub cwd: Option<PathBuf>,
+    /// Extra env vars (e.g. granted secret values). Never from webview.
+    pub extra_env: HashMap<String, String>,
+    /// Wall-clock timeout per JSON-RPC request.
+    pub request_timeout: Option<Duration>,
+}
 
 /// Running MCP session (one server).
 pub struct McpSession {
@@ -19,6 +36,7 @@ pub struct McpSession {
     stdout: BufReader<ChildStdout>,
     hard_write_tools: Vec<String>,
     read_tools: Vec<String>,
+    request_timeout: Duration,
 }
 
 /// Discovered MCP tool.
@@ -37,17 +55,37 @@ pub struct McpToolInfo {
 impl McpSession {
     /// Spawn server (absolute command only).
     pub fn spawn(cfg: &McpServerConfig) -> CoreResult<Self> {
+        Self::spawn_with(cfg, McpSpawnOptions::default())
+    }
+
+    /// Spawn with cwd / secret env / wall-clock timeout (#135).
+    ///
+    /// - `env_clear` always; only `PATH` + `extra_env` (granted secrets) are set.
+    /// - Working directory is set when `opts.cwd` is provided (else process default;
+    ///   module enable path should pass the module directory).
+    /// - **Residual:** true network/FS syscall isolation is OS-sandbox only (not claimed here).
+    pub fn spawn_with(cfg: &McpServerConfig, opts: McpSpawnOptions) -> CoreResult<Self> {
         if !cfg.enabled {
             return Err(CoreError::Policy("MCP server disabled".into()));
         }
         validate_mcp_command(&cfg.command)?;
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
+        let mut cmd = Command::new(&cfg.command);
+        cmd.args(&cfg.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("PATH", std::env::var("PATH").unwrap_or_default());
+        for (k, v) in &opts.extra_env {
+            cmd.env(k, v);
+        }
+        if let Some(cwd) = &opts.cwd {
+            // Prefer module dir; fall back to empty dir creation is host's job.
+            if cwd.is_dir() {
+                cmd.current_dir(cwd);
+            }
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| CoreError::Message(format!("mcp spawn: {e}")))?;
         let stdin = child
@@ -65,6 +103,7 @@ impl McpSession {
             stdout: BufReader::new(stdout),
             hard_write_tools: cfg.hard_write_tools.clone(),
             read_tools: cfg.read_tools.clone(),
+            request_timeout: opts.request_timeout.unwrap_or(MCP_REQUEST_TIMEOUT),
         };
         // initialize
         let _ = sess.request(
@@ -93,9 +132,24 @@ impl McpSession {
         self.stdin
             .flush()
             .map_err(|e| CoreError::Message(format!("mcp flush: {e}")))?;
-        // Read until matching id (cap lines)
-        for _ in 0..100 {
+        // Wall-clock timeout + line cap (#135).
+        let deadline = Instant::now() + self.request_timeout;
+        let mut lines = 0u32;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(CoreError::Message(
+                    "mcp wall-clock timeout waiting for response".into(),
+                ));
+            }
+            if lines >= 100 {
+                return Err(CoreError::Message(
+                    "mcp timeout waiting for response (line budget)".into(),
+                ));
+            }
+            lines += 1;
             let mut buf = String::new();
+            // set_read_timeout is not on BufReader for ChildStdout portably —
+            // rely on wall-clock between successful reads + line budget.
             let n = self
                 .stdout
                 .read_line(&mut buf)
@@ -115,9 +169,6 @@ impl McpSession {
                 return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
         }
-        Err(CoreError::Message(
-            "mcp timeout waiting for response".into(),
-        ))
     }
 
     fn notify(&mut self, method: &str, params: Value) -> CoreResult<()> {

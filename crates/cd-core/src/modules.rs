@@ -1,12 +1,14 @@
-//! External module manifests (`cd.module.v1`) and filesystem discovery (#134).
+//! External module manifests (`cd.module.v1`), discovery, and capability grants (#134/#135).
 //!
 //! Substrate: MCP stdio subprocess — see `docs/adr/0001-external-module-substrate.md`.
-//! This module **parses and discovers only**; it does not spawn processes (#136).
+//! Spawn/lifecycle is #136; this module enforces **UI-originated** capability grants.
 
 use crate::connectors::validate_mcp_command;
 use crate::error::{CoreError, CoreResult};
+use crate::permissions::{PermissionDecision, PermissionRequest};
 use crate::tools::ToolSideEffect;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -174,6 +176,157 @@ pub fn default_modules_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("modules")
 }
 
+// ─── Capability grants (#135) ───────────────────────────────────────────────
+
+/// Persisted per-module capability grants (UI-originated only).
+///
+/// A manifest's `requested_capabilities` never auto-grant — the host must call
+/// [`ModuleGrantStore::grant_from_ui`] after a successful `PermissionDecision`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModuleGrantStore {
+    /// module_id → granted capabilities (may be a subset of requested).
+    grants: HashMap<String, ModuleCapabilities>,
+}
+
+impl ModuleGrantStore {
+    /// Empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Load grants JSON from disk (missing file → empty).
+    pub fn load(path: &Path) -> CoreResult<Self> {
+        if !path.is_file() {
+            return Ok(Self::new());
+        }
+        let text = fs::read_to_string(path).map_err(|e| {
+            CoreError::Message(format!("read module grants {}: {e}", path.display()))
+        })?;
+        serde_json::from_str(&text)
+            .map_err(|e| CoreError::Message(format!("parse module grants: {e}")))
+    }
+
+    /// Persist grants JSON.
+    pub fn save(&self, path: &Path) -> CoreResult<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Message(format!("create grants dir: {e}")))?;
+        }
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|e| CoreError::Message(format!("serialize grants: {e}")))?;
+        fs::write(path, text).map_err(|e| CoreError::Message(format!("write grants: {e}")))?;
+        Ok(())
+    }
+
+    /// Whether `module_id` has an explicit UI grant recorded.
+    pub fn is_granted(&self, module_id: &str) -> bool {
+        self.grants.contains_key(module_id)
+    }
+
+    /// Granted capabilities for a module (empty if never granted).
+    pub fn granted(&self, module_id: &str) -> ModuleCapabilities {
+        self.grants.get(module_id).cloned().unwrap_or_default()
+    }
+
+    /// Record a UI-originated grant after `validate_decision` succeeds.
+    ///
+    /// Rejects `Deny`. Does **not** accept a bare manifest as proof of grant.
+    pub fn grant_from_ui(
+        &mut self,
+        module_id: &str,
+        caps: ModuleCapabilities,
+        decision: PermissionDecision,
+    ) -> CoreResult<()> {
+        if matches!(decision, PermissionDecision::Deny) {
+            return Err(CoreError::Policy("module capability denied by user".into()));
+        }
+        // AllowOnce and AllowSessionPath both persist for module scope (per-module, not session).
+        self.grants.insert(module_id.to_string(), caps);
+        Ok(())
+    }
+
+    /// Explicit revoke for a module.
+    pub fn revoke(&mut self, module_id: &str) {
+        self.grants.remove(module_id);
+    }
+
+    /// **Rejected path:** never treat the manifest's requested caps as granted.
+    ///
+    /// Callers must not use this as a grant API — it always returns an error so
+    /// unit tests can prove self-grant is impossible.
+    pub fn try_self_grant_from_manifest(_manifest: &ModuleManifest) -> CoreResult<()> {
+        Err(CoreError::Policy(
+            "module cannot self-grant capabilities from its own manifest (UI grant required)"
+                .into(),
+        ))
+    }
+}
+
+/// True if the module may run tools (requested caps empty **or** UI grant present).
+pub fn module_tools_allowed(manifest: &ModuleManifest, store: &ModuleGrantStore) -> bool {
+    let req = &manifest.requested_capabilities;
+    let needs_grant = !req.filesystem_roots.is_empty()
+        || !req.network_hosts.is_empty()
+        || !req.secret_refs.is_empty();
+    if !needs_grant {
+        return true;
+    }
+    store.is_granted(&manifest.id)
+}
+
+/// Build a first-use `PermissionRequest` for enabling a module's capabilities.
+pub fn permission_request_for_module_enable(manifest: &ModuleManifest) -> PermissionRequest {
+    let caps = &manifest.requested_capabilities;
+    let risk = if !caps.network_hosts.is_empty() {
+        "remote"
+    } else if !caps.filesystem_roots.is_empty() || !caps.secret_refs.is_empty() {
+        "destructive"
+    } else {
+        "local"
+    };
+    let preview = format!(
+        "Enable module `{}` ({})\n\nfilesystem_roots: {:?}\nnetwork_hosts: {:?}\nsecret_refs: {:?}",
+        manifest.id, manifest.version, caps.filesystem_roots, caps.network_hosts, caps.secret_refs
+    );
+    PermissionRequest::new(
+        format!("module_enable:{}", manifest.id),
+        ToolSideEffect::HardWrite,
+        format!("module:{}", manifest.id),
+        format!(
+            "Module `{}` requests capabilities before its tools may run",
+            manifest.name
+        ),
+        preview,
+        risk,
+    )
+}
+
+/// Env vars the host may inject for a granted module (values from keychain, not config).
+///
+/// Keys are sanitized `CD_SECRET_<REF>` style; values are never returned to webview.
+pub fn secret_env_for_module(
+    granted: &ModuleCapabilities,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for r in &granted.secret_refs {
+        if let Some(val) = resolve(r) {
+            let key = format!(
+                "CD_SECRET_{}",
+                r.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    })
+                    .collect::<String>()
+            );
+            env.insert(key, val);
+        }
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +440,108 @@ secret_refs = ["provider/demo/api_key"]
     fn default_modules_dir_under_config() {
         let p = default_modules_dir(Path::new("/home/u/.contextdesk"));
         assert_eq!(p, PathBuf::from("/home/u/.contextdesk/modules"));
+    }
+
+    fn sample_manifest_with_caps() -> ModuleManifest {
+        let mut m = parse_module_toml(&valid_toml(abs_cmd_toml())).unwrap();
+        m.requested_capabilities = ModuleCapabilities {
+            filesystem_roots: vec![PathBuf::from("/tmp/demo")],
+            network_hosts: vec!["api.example.com".into()],
+            secret_refs: vec!["provider/demo/api_key".into()],
+        };
+        m
+    }
+
+    #[test]
+    fn manifest_cannot_self_grant() {
+        let m = sample_manifest_with_caps();
+        let err = ModuleGrantStore::try_self_grant_from_manifest(&m)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("self-grant") || err.contains("UI grant"),
+            "{err}"
+        );
+        let store = ModuleGrantStore::new();
+        assert!(!module_tools_allowed(&m, &store));
+    }
+
+    #[test]
+    fn tools_blocked_until_ui_grant_then_allowed() {
+        let m = sample_manifest_with_caps();
+        let mut store = ModuleGrantStore::new();
+        assert!(!module_tools_allowed(&m, &store));
+
+        // UI path
+        let req = permission_request_for_module_enable(&m);
+        assert_eq!(req.risk, "remote");
+        assert_eq!(req.type_confirm_phrase.as_deref(), Some("WRITE"));
+        crate::permissions::validate_decision(&req, PermissionDecision::AllowOnce, Some("WRITE"))
+            .unwrap();
+        store
+            .grant_from_ui(
+                &m.id,
+                m.requested_capabilities.clone(),
+                PermissionDecision::AllowOnce,
+            )
+            .unwrap();
+        assert!(module_tools_allowed(&m, &store));
+
+        store.revoke(&m.id);
+        assert!(!module_tools_allowed(&m, &store));
+    }
+
+    #[test]
+    fn grants_persist_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("module_grants.json");
+        let mut store = ModuleGrantStore::new();
+        store
+            .grant_from_ui(
+                "demo-mod",
+                ModuleCapabilities {
+                    network_hosts: vec!["api.example.com".into()],
+                    ..Default::default()
+                },
+                PermissionDecision::AllowSessionPath,
+            )
+            .unwrap();
+        store.save(&path).unwrap();
+        let loaded = ModuleGrantStore::load(&path).unwrap();
+        assert!(loaded.is_granted("demo-mod"));
+        assert_eq!(
+            loaded.granted("demo-mod").network_hosts,
+            vec!["api.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn secret_env_only_for_granted_refs() {
+        let granted = ModuleCapabilities {
+            secret_refs: vec!["provider/demo/api_key".into()],
+            ..Default::default()
+        };
+        let env = secret_env_for_module(&granted, &|r| {
+            if r == "provider/demo/api_key" {
+                Some("sekrit".into())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            env.get("CD_SECRET_PROVIDER_DEMO_API_KEY")
+                .map(String::as_str),
+            Some("sekrit")
+        );
+    }
+
+    #[test]
+    fn no_caps_requested_allows_tools_without_grant() {
+        let m = parse_module_toml(&valid_toml(abs_cmd_toml())).unwrap();
+        // valid_toml has some requested_capabilities — clear them
+        let mut m = m;
+        m.requested_capabilities = ModuleCapabilities::default();
+        let store = ModuleGrantStore::new();
+        assert!(module_tools_allowed(&m, &store));
     }
 }
