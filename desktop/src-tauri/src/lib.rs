@@ -1382,7 +1382,7 @@ fn approve_module_enable(
         "allow_session_path" => cd_core::permissions::PermissionDecision::AllowSessionPath,
         _ => return Err("invalid decision".into()),
     };
-    cd_core::permissions::validate_decision(&req, dec, typed.as_deref()).map_err(|e| e)?;
+    cd_core::permissions::validate_decision(&req, dec, typed.as_deref())?;
     if matches!(dec, cd_core::permissions::PermissionDecision::Deny) {
         return Ok(false);
     }
