@@ -145,6 +145,8 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         host.set_x_search(false, None);
     }
     host.set_router_budget(cfg.router.clone());
+    // #127: workspace connector registry → dynamic tools (no secrets in config).
+    host.attach_connectors(&cfg.connectors);
 }
 
 #[derive(Debug, Serialize)]

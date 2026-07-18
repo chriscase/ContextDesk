@@ -103,6 +103,9 @@ pub struct AppConfig {
     /// Soft max files for indexing (default 100_000). Truncation is recorded, not silent.
     #[serde(default = "default_index_max_files")]
     pub index_max_files: usize,
+    /// Workspace connector registry entries (#127). No secrets — keychain refs only.
+    #[serde(default)]
+    pub connectors: Vec<crate::connectors::ConnectorConfig>,
 }
 
 fn default_index_max_files() -> usize {
@@ -235,6 +238,12 @@ mod tests {
                 enabled: true,
                 api_key_ref: Some(X_API_KEY_REF.into()),
             },
+            connectors: vec![crate::connectors::ConnectorConfig {
+                id: "files-main".into(),
+                kind: "files".into(),
+                enabled: true,
+                settings: serde_json::json!({}),
+            }],
             ..AppConfig::default()
         };
         save_config(&path, &cfg).unwrap();
@@ -244,6 +253,8 @@ mod tests {
         assert_eq!(loaded.confluence.spaces, vec!["ENG"]);
         assert!(loaded.web_research_enabled);
         assert!(loaded.x.is_configured());
+        assert_eq!(loaded.connectors.len(), 1);
+        assert_eq!(loaded.connectors[0].kind, "files");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("ATATT"));
@@ -251,6 +262,7 @@ mod tests {
         assert!(text.contains(CONFLUENCE_PAT_REF));
         assert!(text.contains(X_API_KEY_REF));
         assert!(text.contains("web_research_enabled"));
+        assert!(text.contains("files-main"));
     }
 
     #[test]

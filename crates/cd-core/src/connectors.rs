@@ -1,79 +1,101 @@
-//! Connector trait and built-in file/memory connectors; SQL RO helpers.
+//! Connector config, dynamic tool registry kinds, and SQL RO helpers (#127).
+//!
+//! Kind-specific execution is filled in by sibling issues (MCP #128, SQL #130, HTTP #131).
 
 use crate::error::{CoreError, CoreResult};
+use crate::tools::{ToolSideEffect, ToolSpec};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::PathBuf;
 
-/// Connector configuration entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Connector configuration entry (persisted in `AppConfig.connectors`).
+///
+/// Secrets must never appear here — only keychain ref ids in `settings` JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectorConfig {
-    /// Id.
+    /// Stable id (slug).
     pub id: String,
     /// Kind: files | memory | mcp | sqlite | postgres | http | confluence.
     pub kind: String,
     /// Enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Kind-specific JSON.
+    /// Kind-specific JSON (no secrets).
     #[serde(default)]
-    pub settings: serde_json::Value,
+    pub settings: Value,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Trait for pluggable connectors (sync for simplicity; async wrappers later).
-pub trait Connector: Send + Sync {
-    /// Connector id.
-    fn id(&self) -> &str;
-    /// Human label.
-    fn label(&self) -> &str;
-    /// Whether enabled.
-    fn enabled(&self) -> bool;
-}
-
-/// Files connector (workspace roots).
-pub struct FilesConnector {
-    /// Id.
-    pub id: String,
-    /// Roots.
-    pub roots: Vec<PathBuf>,
-    /// Enabled.
-    pub enabled: bool,
-}
-
-impl Connector for FilesConnector {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn label(&self) -> &str {
-        "Files"
-    }
-    fn enabled(&self) -> bool {
-        self.enabled
+impl ConnectorConfig {
+    /// Human label for Settings (generic kinds only).
+    pub fn label(&self) -> String {
+        match self.kind.as_str() {
+            "files" => "Files (workspace roots)".into(),
+            "memory" => "Project memory".into(),
+            "mcp" => "MCP server".into(),
+            "sqlite" => "SQLite (read-only)".into(),
+            "postgres" => "Postgres (read-only)".into(),
+            "http" => "HTTP / OpenAPI preset".into(),
+            "confluence" => "Confluence (read-only)".into(),
+            other => other.to_string(),
+        }
     }
 }
 
-/// Memory connector.
-pub struct MemoryConnector {
-    /// Id.
-    pub id: String,
-    /// Directory.
-    pub dir: PathBuf,
-    /// Enabled.
-    pub enabled: bool,
+/// Known generic connector kinds for Settings dropdowns (#127).
+pub const CONNECTOR_KINDS: &[&str] = &[
+    "files",
+    "memory",
+    "sqlite",
+    "postgres",
+    "mcp",
+    "http",
+    "confluence",
+];
+
+/// How a dynamic tool is executed (filled by #128/#130/#131).
+#[derive(Debug, Clone)]
+pub enum ConnectorExecutor {
+    /// Stub / test executor returning fixed text (registry plumbing).
+    Stub {
+        /// Fixed model-visible detail.
+        detail: String,
+    },
+    /// MCP tool name on a named server (#128).
+    Mcp {
+        /// Server id from connector settings.
+        server_id: String,
+        /// Remote tool name.
+        tool: String,
+    },
+    /// SQL source id (#130).
+    Sql {
+        /// Connector id.
+        source_id: String,
+    },
+    /// HTTP preset id (#131).
+    Http {
+        /// Preset id.
+        preset_id: String,
+    },
 }
 
-impl Connector for MemoryConnector {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn label(&self) -> &str {
-        "Memory"
-    }
-    fn enabled(&self) -> bool {
-        self.enabled
+/// A tool registered on the host from a connector (#127).
+#[derive(Debug, Clone)]
+pub struct RegisteredTool {
+    /// Spec advertised to the model.
+    pub spec: ToolSpec,
+    /// Dispatch handle.
+    pub exec: ConnectorExecutor,
+}
+
+impl RegisteredTool {
+    /// Side-effect class for permission gating.
+    pub fn side_effect(&self) -> ToolSideEffect {
+        self.spec.side_effect
     }
 }
 

@@ -88,6 +88,10 @@ pub struct ToolHost {
     max_results_per_source: usize,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
+    /// Dynamic tools from connector registry (#127).
+    dynamic_tools: std::collections::HashMap<String, crate::connectors::RegisteredTool>,
+    /// Persisted connector configs (enabled entries drive future attachers).
+    connector_configs: Vec<crate::connectors::ConnectorConfig>,
 }
 
 impl ToolHost {
@@ -122,7 +126,74 @@ impl ToolHost {
             x_bearer: None,
             max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
             router_budget: crate::router::RouterBudget::default(),
+            dynamic_tools: std::collections::HashMap::new(),
+            connector_configs: Vec::new(),
         }
+    }
+
+    /// Register a dynamic tool (connector-provided). Overwrites same name.
+    pub fn register_tool(&mut self, tool: crate::connectors::RegisteredTool) {
+        self.dynamic_tools.insert(tool.spec.name.clone(), tool);
+    }
+
+    /// Store connector configs and (re)attach known dynamic tools.
+    ///
+    /// Kind-specific executors for MCP/SQL/HTTP land in #128–#131; this wires
+    /// the registry surface and enables a stub tool when `settings.stub_tool` is set.
+    pub fn attach_connectors(&mut self, configs: &[crate::connectors::ConnectorConfig]) {
+        self.connector_configs = configs.to_vec();
+        // Drop previous dynamic tools; re-register from configs.
+        self.dynamic_tools.clear();
+        for c in configs.iter().filter(|c| c.enabled) {
+            // Optional test/dev stub: settings.stub_tool = { name, description, detail }
+            if let Some(stub) = c.settings.get("stub_tool") {
+                let name = stub
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let description = stub
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Connector stub tool")
+                    .to_string();
+                let detail = stub
+                    .get("detail")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stub ok")
+                    .to_string();
+                let side = match stub
+                    .get("side_effect")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("read")
+                {
+                    "soft_write" => crate::tools::ToolSideEffect::SoftWrite,
+                    "hard_write" => crate::tools::ToolSideEffect::HardWrite,
+                    _ => crate::tools::ToolSideEffect::Read,
+                };
+                self.register_tool(crate::connectors::RegisteredTool {
+                    spec: crate::tools::ToolSpec {
+                        name: name.to_string(),
+                        description,
+                        side_effect: side,
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }),
+                    },
+                    exec: crate::connectors::ConnectorExecutor::Stub { detail },
+                });
+            }
+        }
+    }
+
+    /// Enabled connector configs currently attached.
+    pub fn connector_configs(&self) -> &[crate::connectors::ConnectorConfig] {
+        &self.connector_configs
     }
 
     /// Set full router budget (rounds, deadline, per-source caps).
@@ -179,6 +250,7 @@ impl ToolHost {
     }
 
     /// Tool specs; Confluence / web / X tools omitted when not enabled.
+    /// Appends enabled dynamic connector tools (#127).
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
@@ -191,6 +263,11 @@ impl ToolHost {
         }
         if !self.x_search_available() {
             specs.retain(|t| t.name != names::X_SEARCH);
+        }
+        for t in self.dynamic_tools.values() {
+            if !specs.iter().any(|s| s.name == t.spec.name) {
+                specs.push(t.spec.clone());
+            }
         }
         specs
     }
@@ -293,7 +370,7 @@ impl ToolHost {
         arguments: &Value,
         granted_request_id: Option<&str>,
     ) -> CoreResult<ToolResult> {
-        let side = side_effect_for(name);
+        let side = self.side_effect_for(name);
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
 
@@ -398,8 +475,12 @@ impl ToolHost {
                 web_cites = cites;
                 (ok, summary, raw, first)
             }
-            _ => {
-                return Err(CoreError::Message(format!("unknown tool `{name}`")));
+            other => {
+                // #127: dynamic connector registry before hard-fail.
+                match self.dispatch_dynamic(other, arguments).await {
+                    Ok(r) => r,
+                    Err(e) => return Err(e),
+                }
             }
         };
 
@@ -949,12 +1030,42 @@ impl ToolHost {
     }
 }
 
-fn side_effect_for(name: &str) -> ToolSideEffect {
-    mvp_tool_specs()
-        .into_iter()
-        .find(|t| t.name == name)
-        .map(|t| t.side_effect)
-        .unwrap_or(ToolSideEffect::HardWrite)
+impl ToolHost {
+    /// Resolve side-effect for built-in or dynamic tools (#127).
+    pub fn side_effect_for(&self, name: &str) -> ToolSideEffect {
+        if let Some(t) = self.dynamic_tools.get(name) {
+            return t.side_effect();
+        }
+        mvp_tool_specs()
+            .into_iter()
+            .find(|t| t.name == name)
+            .map(|t| t.side_effect)
+            .unwrap_or(ToolSideEffect::HardWrite)
+    }
+
+    async fn dispatch_dynamic(
+        &mut self,
+        name: &str,
+        _arguments: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let Some(reg) = self.dynamic_tools.get(name).cloned() else {
+            return Err(CoreError::Message(format!("unknown tool `{name}`")));
+        };
+        match reg.exec {
+            crate::connectors::ConnectorExecutor::Stub { detail } => {
+                Ok((true, format!("{name} ok"), detail, None))
+            }
+            crate::connectors::ConnectorExecutor::Mcp { .. } => Err(CoreError::Message(format!(
+                "MCP tool `{name}` not wired yet (see #128)"
+            ))),
+            crate::connectors::ConnectorExecutor::Sql { .. } => Err(CoreError::Message(format!(
+                "SQL tool `{name}` not wired yet (see #130)"
+            ))),
+            crate::connectors::ConnectorExecutor::Http { .. } => Err(CoreError::Message(format!(
+                "HTTP tool `{name}` not wired yet (see #131)"
+            ))),
+        }
+    }
 }
 
 fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
@@ -1496,6 +1607,37 @@ mod tests {
             .execute("read_file_slice", &json!({"path": "/etc/passwd"}), None)
             .await;
         assert!(err.is_err());
+    }
+
+    /// #127: dynamic tool appears in specs and dispatches via execute.
+    #[tokio::test]
+    async fn dynamic_stub_tool_registers_and_dispatches() {
+        let (_dir, mut host) = host_with_docs();
+        host.attach_connectors(&[crate::connectors::ConnectorConfig {
+            id: "stub-1".into(),
+            kind: "http".into(),
+            enabled: true,
+            settings: json!({
+                "stub_tool": {
+                    "name": "connector_echo",
+                    "description": "Echo stub for registry tests",
+                    "detail": "hello from dynamic connector",
+                    "side_effect": "read"
+                }
+            }),
+        }]);
+        let specs = host.specs_for_model();
+        assert!(
+            specs.iter().any(|s| s.name == "connector_echo"),
+            "dynamic tool missing from specs"
+        );
+        assert_eq!(host.side_effect_for("connector_echo"), ToolSideEffect::Read);
+        let r = host
+            .execute("connector_echo", &json!({}), None)
+            .await
+            .unwrap();
+        assert!(r.ok);
+        assert!(r.detail_raw.contains("hello from dynamic"));
     }
 
     #[test]

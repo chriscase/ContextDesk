@@ -130,6 +130,25 @@ pub fn build_host_with_options(
     index_max_files: Option<usize>,
     router: Option<crate::router::RouterBudget>,
 ) -> CoreResult<ToolHost> {
+    build_host_with_connectors(
+        workspace,
+        audit_path,
+        index_cache_dir,
+        index_max_files,
+        router,
+        &[],
+    )
+}
+
+/// Build host and attach workspace connector configs (#127).
+pub fn build_host_with_connectors(
+    workspace: Workspace,
+    audit_path: Option<PathBuf>,
+    index_cache_dir: Option<PathBuf>,
+    index_max_files: Option<usize>,
+    router: Option<crate::router::RouterBudget>,
+    connectors: &[crate::connectors::ConnectorConfig],
+) -> CoreResult<ToolHost> {
     let index =
         KeywordIndex::open_or_build(&workspace, index_cache_dir.as_deref(), index_max_files)?;
     let audit = audit_path.map(AuditLog::new);
@@ -137,6 +156,7 @@ pub fn build_host_with_options(
     if let Some(b) = router {
         host.set_router_budget(b);
     }
+    host.attach_connectors(connectors);
     Ok(host)
 }
 
