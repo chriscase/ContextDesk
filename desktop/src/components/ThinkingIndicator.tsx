@@ -32,6 +32,9 @@ export function ThinkingIndicator({
   hasTokens = false,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
+  const [livePhase, setLivePhase] = useState(() =>
+    phaseLabel(0, hasTokens),
+  );
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 100);
@@ -41,17 +44,24 @@ export function ThinkingIndicator({
   const elapsed = Math.max(0, now - startedAt);
   const label = phaseLabel(elapsed, hasTokens);
 
+  // Announce phase changes only — never the 100ms timer tick (#149).
+  useEffect(() => {
+    setLivePhase((prev) => (prev === label ? prev : label));
+  }, [label]);
+
   return (
     <div
       className="thinking-ind"
       data-has-tokens={hasTokens ? "true" : "false"}
-      role="status"
-      aria-live="polite"
     >
+      {/* Live region isolated from timer so SR is not spammed */}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {livePhase}
+      </span>
       <span className="thinking-ind__orb" aria-hidden>
         <span className="thinking-ind__orb-core" />
       </span>
-      <div className="thinking-ind__copy">
+      <div className="thinking-ind__copy" aria-hidden>
         <span className="thinking-ind__label">{label}</span>
         {model ? (
           <span className="thinking-ind__model" title="Active model">
@@ -59,7 +69,11 @@ export function ThinkingIndicator({
           </span>
         ) : null}
       </div>
-      <span className="thinking-ind__time" title="Time waiting for response">
+      <span
+        className="thinking-ind__time"
+        title="Time waiting for response"
+        aria-hidden="true"
+      >
         {formatElapsed(elapsed)}
       </span>
     </div>
