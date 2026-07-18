@@ -612,14 +612,20 @@ mod tests {
     #[test]
     fn sqlite_settings_require_absolute_path() {
         assert!(sqlite_backend_from_settings(&serde_json::json!({"path": "rel.db"})).is_err());
+        // `/tmp/...` is not absolute on Windows — use OS-native absolute sample.
+        let abs = if cfg!(windows) {
+            r"C:\tmp\x.db"
+        } else {
+            "/tmp/x.db"
+        };
         let b = sqlite_backend_from_settings(&serde_json::json!({
-            "path": "/tmp/x.db",
+            "path": abs,
             "timeout_ms": 2000
         }))
         .unwrap();
         match b {
             SqlBackend::Sqlite { path, timeout_ms } => {
-                assert_eq!(path, PathBuf::from("/tmp/x.db"));
+                assert_eq!(path, PathBuf::from(abs));
                 assert_eq!(timeout_ms, 2000);
             }
             _ => panic!("expected sqlite"),
