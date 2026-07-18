@@ -1,0 +1,14 @@
+{
+  "schema": "cd.module.registry.v1",
+  "name": "ContextDesk example index (metadata only)",
+  "entries": [
+    {
+      "id": "echo-notes",
+      "name": "Echo Notes",
+      "version": "0.1.0",
+      "description": "Reference MCP module under examples/modules/echo-notes — install via local path only.",
+      "homepage": null,
+      "local_path": null
+    }
+  ]
+}

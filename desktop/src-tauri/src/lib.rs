@@ -1528,6 +1528,113 @@ fn remove_module(state: State<'_, AppState>, id: String) -> Result<bool, String>
     Ok(true)
 }
 
+/// Module registry settings (#139). Empty URL by default; no company hardcode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModuleRegistrySettingsDto {
+    enabled: bool,
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModuleRegistryEntryDto {
+    id: String,
+    name: String,
+    version: String,
+    description: String,
+    homepage: Option<String>,
+    local_path: Option<String>,
+    /// True when Install can hand off to #136 with a local path.
+    can_install_local: bool,
+}
+
+/// Get registry browse settings (defaults: disabled, empty URL).
+#[tauri::command]
+fn get_module_registry_settings(
+    state: State<'_, AppState>,
+) -> Result<ModuleRegistrySettingsDto, String> {
+    let cfg = state.config.lock().expect("config");
+    Ok(ModuleRegistrySettingsDto {
+        enabled: cfg.module_registry_enabled,
+        url: cfg.module_registry_url.clone(),
+    })
+}
+
+/// Persist registry opt-in + URL. Does **not** fetch or install (NON_GOALS #7).
+#[tauri::command]
+fn set_module_registry_settings(
+    state: State<'_, AppState>,
+    enabled: bool,
+    url: String,
+) -> Result<ModuleRegistrySettingsDto, String> {
+    let url = url.trim().to_string();
+    if enabled && !url.is_empty() {
+        // SSRF gate on save so bad URLs fail early (no fetch yet).
+        cd_core::module_registry::validate_registry_fetch_url(&url, &SsrfPolicy::default())
+            .map_err(|e| e.to_string())?;
+    }
+    let mut cfg = state.config.lock().expect("config");
+    cfg.module_registry_enabled = enabled;
+    cfg.module_registry_url = url.clone();
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    Ok(ModuleRegistrySettingsDto { enabled, url })
+}
+
+/// Browse registry **metadata only** (#139).
+///
+/// Never installs or executes modules (docs/NON_GOALS.md #7). Remote fetch uses
+/// SSRF-pinned HTTP when enabled; optional `file_path` loads a local JSON index
+/// (offline browse; no code execution).
+#[tauri::command]
+async fn browse_module_registry(
+    state: State<'_, AppState>,
+    file_path: Option<String>,
+) -> Result<Vec<ModuleRegistryEntryDto>, String> {
+    let idx = if let Some(fp) = file_path
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        // Local JSON only — still metadata; does not install.
+        let text = std::fs::read_to_string(fp).map_err(|e| format!("read registry file: {e}"))?;
+        cd_core::module_registry::parse_registry_json(&text).map_err(|e| e.to_string())?
+    } else {
+        let cfg = state.config.lock().expect("config").clone();
+        if !cd_core::module_registry::registry_browse_enabled(
+            cfg.module_registry_enabled,
+            &cfg.module_registry_url,
+        ) {
+            return Err(
+                "registry browse is disabled (enable and set a URL, or pass a local file path)"
+                    .into(),
+            );
+        }
+        // Network: metadata JSON only — never module code / install (NON_GOALS #7).
+        cd_core::module_registry::fetch_registry_index(
+            &cfg.module_registry_url,
+            &SsrfPolicy::default(),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+    };
+    Ok(idx
+        .entries
+        .into_iter()
+        .map(|e| {
+            let can = cd_core::module_registry::install_path_for_entry(&e).is_some();
+            ModuleRegistryEntryDto {
+                id: e.id,
+                name: e.name,
+                version: e.version,
+                description: e.description,
+                homepage: e.homepage,
+                local_path: e.local_path,
+                can_install_local: can,
+            }
+        })
+        .collect())
+}
+
 /// Re-install from a local path (same id); local only (NON_GOALS #7).
 #[tauri::command]
 fn update_module(
@@ -2517,6 +2624,9 @@ pub fn run() {
             set_module_enabled,
             approve_module_enable,
             remove_module,
+            get_module_registry_settings,
+            set_module_registry_settings,
+            browse_module_registry,
             update_module,
             reindex,
             read_memory_file,

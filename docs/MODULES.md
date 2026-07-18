@@ -123,9 +123,21 @@ Edit `entrypoint.command` if your Node binary is not reachable via
 6. **Absolute entrypoints only** — no shell strings, no `npx` without a full
    path; host rejects relative commands.
 
+## Browse-only registry (#139)
+
+Optional discovery index (`cd.module.registry.v1` JSON). **Never auto-installs**
+(NON_GOALS #7). Defaults: registry disabled, URL empty (no hardcoded company
+index). Fetch is SSRF-gated; Settings can also browse a local JSON file.
+
+Install from an entry only when `local_path` is set — that hands off to the
+same local Install path as above (#136). Otherwise download/build yourself and
+paste the directory path.
+
+Fixture: [`examples/modules/registry-fixture.json`](../examples/modules/registry-fixture.json).
+
 ## Out of scope
 
-- Marketplace auto-install (#139 is browse-only discovery at most)
+- Marketplace auto-install (forbidden; browse is metadata-only)
 - Embedding a third-party agent runtime (NON_GOALS #8)
 - WASM / native dylib substrates (rejected in ADR 0001)
 
