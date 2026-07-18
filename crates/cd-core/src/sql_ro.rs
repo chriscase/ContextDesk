@@ -504,6 +504,79 @@ pub fn postgres_password_ref(connector_id: &str) -> String {
     format!("connector/{connector_id}/password")
 }
 
+/// Parse opt-in live test DSN (URL or libpq key=value). Default sslmode = prefer.
+pub fn postgres_config_from_test_dsn(dsn: &str) -> CoreResult<PostgresConnectConfig> {
+    let dsn = dsn.trim();
+    if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
+        let url =
+            url::Url::parse(dsn).map_err(|e| CoreError::Config(format!("bad pg url: {e}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| CoreError::Config("pg url missing host".into()))?
+            .to_string();
+        let port = url.port().unwrap_or(5432);
+        let database = url.path().trim_start_matches('/').to_string();
+        if database.is_empty() {
+            return Err(CoreError::Config("pg url missing database path".into()));
+        }
+        let user = url.username().to_string();
+        let password = url.password().map(|p| p.to_string());
+        let mut sslmode = default_sslmode();
+        for (k, v) in url.query_pairs() {
+            if k == "sslmode" {
+                sslmode = v.to_string();
+            }
+        }
+        return Ok(PostgresConnectConfig {
+            host,
+            port,
+            database,
+            user,
+            sslmode,
+            password,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        });
+    }
+    // key=value pairs
+    let mut host = String::new();
+    let mut port = 5432u16;
+    let mut database = String::new();
+    let mut user = String::new();
+    let mut password = None;
+    let mut sslmode = default_sslmode();
+    for part in dsn.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            match k {
+                "host" => host = v.to_string(),
+                "port" => {
+                    port = v
+                        .parse()
+                        .map_err(|_| CoreError::Config(format!("bad port: {v}")))?;
+                }
+                "dbname" | "database" => database = v.to_string(),
+                "user" => user = v.to_string(),
+                "password" => password = Some(v.to_string()),
+                "sslmode" => sslmode = v.to_string(),
+                _ => {}
+            }
+        }
+    }
+    if host.is_empty() || database.is_empty() || user.is_empty() {
+        return Err(CoreError::Config(
+            "CD_PG_TEST_DSN needs host, dbname/database, user (or postgresql:// URL)".into(),
+        ));
+    }
+    Ok(PostgresConnectConfig {
+        host,
+        port,
+        database,
+        user,
+        sslmode,
+        password,
+        timeout_ms: DEFAULT_TIMEOUT_MS,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,22 +786,57 @@ mod tests {
     }
 
     /// Live Postgres — opt-in only (AGENTS.md offline default).
+    ///
+    /// `CD_PG_TEST_DSN` may be:
+    /// - libpq URL: `postgresql://user:pass@host:5432/db?sslmode=prefer`
+    /// - key=value: `host=… port=… dbname=… user=… password=… sslmode=prefer`
+    ///
+    /// Default sslmode when omitted: **prefer** (rustls path, #250).
     #[test]
     #[ignore = "requires live Postgres; set CD_PG_TEST_DSN env and run with --ignored"]
     fn live_postgres_select_ro() {
         let dsn = std::env::var("CD_PG_TEST_DSN").expect("CD_PG_TEST_DSN");
-        // Parse minimally: expect host=... form or skip
-        let cfg = PostgresConnectConfig {
-            host: "127.0.0.1".into(),
-            port: 5432,
-            database: "postgres".into(),
-            user: "postgres".into(),
-            sslmode: "disable".into(),
-            password: None,
-            timeout_ms: 3000,
-        };
-        let _ = dsn;
+        let cfg = postgres_config_from_test_dsn(&dsn).expect("parse CD_PG_TEST_DSN");
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&cfg.sslmode).unwrap(),
+            if cfg.sslmode.eq_ignore_ascii_case("disable") {
+                PostgresTlsStack::NoTls
+            } else {
+                PostgresTlsStack::Rustls
+            }
+        );
         let r = execute_postgres_ro_blocking(&cfg, "SELECT 1 AS n").expect("live select");
         assert!(!r.rows.is_empty());
+    }
+
+    #[test]
+    fn parse_test_dsn_defaults_sslmode_prefer() {
+        let cfg = postgres_config_from_test_dsn(
+            "host=db.example.com port=5432 dbname=app user=ro password=x",
+        )
+        .unwrap();
+        assert_eq!(cfg.sslmode, "prefer");
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&cfg.sslmode).unwrap(),
+            PostgresTlsStack::Rustls
+        );
+    }
+
+    #[test]
+    fn parse_test_dsn_url_with_sslmode() {
+        let cfg = postgres_config_from_test_dsn(
+            "postgresql://ro:secret@db.example.com:5433/app?sslmode=require",
+        )
+        .unwrap();
+        assert_eq!(cfg.host, "db.example.com");
+        assert_eq!(cfg.port, 5433);
+        assert_eq!(cfg.database, "app");
+        assert_eq!(cfg.user, "ro");
+        assert_eq!(cfg.password.as_deref(), Some("secret"));
+        assert_eq!(cfg.sslmode, "require");
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&cfg.sslmode).unwrap(),
+            PostgresTlsStack::Rustls
+        );
     }
 }

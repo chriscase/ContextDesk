@@ -81,7 +81,7 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 |------|--------|--------|--------|
 | Files / memory | workspace + `memory_fs` | **Shipped** | Allowlisted roots; Settings workspace |
 | SQLite RO | `sql_ro` + `sql_query__{id}` | **Shipped** | Connector `kind:sqlite` absolute path; `SQLITE_OPEN_READ_ONLY` + `query_only`; wall-clock interrupt timeout; agent tool via registry (#130) |
-| Postgres RO | `sql_ro::execute_postgres_ro` | **Shipped** | Connector `kind:postgres`; session `default_transaction_read_only` + `statement_timeout`; password keychain-only; **sslmode=disable** in this build (TLS residual for prefer/require) |
+| Postgres RO | `sql_ro::execute_postgres_ro` | **Shipped** | Connector `kind:postgres`; session `default_transaction_read_only` + `statement_timeout`; password keychain-only; **sslmode=disable** → NoTls; **prefer/require/verify-*** → rustls (`tokio-postgres-rustls` + webpki roots, #250) |
 | Confluence RO | `confluence_ro` | **Shipped** | PAT in keychain (`confluence/default/pat`); space allowlist; Settings Connectors. **Wire path (#132):** Settings → keychain PAT → `set_confluence` / `apply_host_connectors` → `specs_for_model` exposes `confluence_search`/`confluence_get_page` → dispatch → `cql_search`/`fetch_page`. Offline: `cargo test -p cd-core --lib confluence` (includes wiremock Bearer + space filter). |
 | X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
 | Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
@@ -122,7 +122,7 @@ ALTER ROLE cd_ro NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 
 Settings → Connectors → Postgres: host / database / user / sslmode (non-secret) + password (keychain). Tool name: `sql_query__{connector_id}`.
 
-**TLS residual:** this build supports `sslmode=disable` only for the tokio-postgres NoTls path; `prefer`/`require` are refused with a clear error until a rustls connector is added.
+**TLS (#250):** `sslmode=disable` uses NoTls. Default and `prefer` / `require` / `verify-ca` / `verify-full` use rustls with platform webpki roots. Offline unit tests select the stack per mode; a live TLS server is not required for default CI. Opt-in live check: set `CD_PG_TEST_DSN` (libpq URL or key=value) and run `cargo test -p cd-core live_postgres -- --ignored --nocapture`.
 
 ## Grok Build session (opt-in)
 
