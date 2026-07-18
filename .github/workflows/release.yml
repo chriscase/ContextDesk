@@ -1,0 +1,90 @@
+# Tag-driven desktop installers (#172). Not run on PR/main — only v* tags + workflow_dispatch.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name for the draft release (e.g. v0.1.0-rc1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  desktop-bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ""
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux deps (WebKit / appindicator)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build frontend + generate tauri conf
+        working-directory: desktop
+        run: |
+          node scripts/gen-tauri-conf.mjs
+          npm run build
+
+      - name: Bundle desktop (tauri-action)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          # Draft so operators can smoke-test before publishing.
+          releaseDraft: true
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          releaseBody: |
+            Desktop installers for ContextDesk (draft).
+
+            Built by `.github/workflows/release.yml` (#172).
+            Code signing / notarization is operator-owned (see docs/PACKAGING.md).
+            Updater channel is separate (#173).
+          args: ${{ matrix.args }}
