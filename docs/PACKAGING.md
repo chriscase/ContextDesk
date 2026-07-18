@@ -57,7 +57,15 @@ Platform code signing is operator-specific; not committed here. Do not put certi
 ## Server
 
 ```sh
-cargo run -p cd-server -- --bind 127.0.0.1:8787 --root /path/to/docs --api-keys "dev-key"
+# Loopback single-user (no keys OK):
+cargo run -p cd-server -- --bind 127.0.0.1:8787 --root /path/to/docs
+
+# Preferred keys source (not visible in `ps`):
+printf 'dev-key\n' > /tmp/cd-keys
+cargo run -p cd-server -- --bind 0.0.0.0:8787 --allow-lan \
+  --api-keys-file /tmp/cd-keys --root /path/to/docs
+# or: CD_API_KEYS=dev-key cargo run -p cd-server -- ...
 ```
 
-Non-loopback requires `--allow-lan`. Put TLS at a reverse proxy.
+Non-loopback requires `--allow-lan` **and** at least one API key (startup refuses otherwise).  
+**TLS:** terminate HTTPS at a reverse proxy — cd-server is HTTP-only. Avoid `--api-keys` on argv (leaks in process lists); prefer `--api-keys-file` or `CD_API_KEYS`.

@@ -153,6 +153,15 @@ Desktop probe UI passes `allow_private` into the host (`probe_url`). Prefer publ
 
 DNS rebinding residual: hostname resolution is not re-checked after every hop; prefer literal hosts you control for sensitive gateways.
 
+## cd-server (headless)
+
+- **Loopback, no keys:** fine for single-user local dev (`--bind 127.0.0.1:8787`).
+- **LAN / non-loopback:** requires `--allow-lan` **and** API keys. Prefer `--api-keys-file` or `CD_API_KEYS` — avoid `--api-keys` on the command line (visible in `ps`).
+- **TLS:** cd-server is **HTTP-only**. Terminate TLS at a reverse proxy when using `--allow-lan` (see `docs/THREAT_MODEL.md`).
+- Startup refuses unauthenticated non-loopback binds (`guard_exposure`, #144/#171).
+
+Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
+
 ## Secrets
 
 Copy `.env.example` → `.env` for local experiments. Never commit `.env`.

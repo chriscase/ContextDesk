@@ -212,6 +212,10 @@ mod tests {
     #[test]
     fn mcp_requires_absolute() {
         assert!(validate_mcp_command(&PathBuf::from("npx")).is_err());
+        // Absolute form is OS-specific (`/` is not absolute on Windows).
+        #[cfg(unix)]
         assert!(validate_mcp_command(&PathBuf::from("/usr/bin/node")).is_ok());
+        #[cfg(windows)]
+        assert!(validate_mcp_command(&PathBuf::from(r"C:\Windows\System32\cmd.exe")).is_ok());
     }
 }
