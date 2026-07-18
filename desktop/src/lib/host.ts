@@ -464,6 +464,13 @@ export type MessageMetaDto = {
   provider_id?: string;
   base_url?: string;
   provider_kind?: string;
+  /** Model requested at send (client snapshot) when host fact is missing. */
+  requested_model?: string;
+  /**
+   * True when `model` came from a host `turn_started` event (not send-time guess).
+   * Footer uses honest "requested:" label when false (#155).
+   */
+  host_confirmed?: boolean;
 };
 
 /** Durable chat session (host Session JSON). */
