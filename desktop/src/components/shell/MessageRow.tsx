@@ -207,7 +207,7 @@ function MessageRowImpl({
           </>
         ) : (
           <div
-            className="msg__content"
+            className="msg__content msg__content--user"
             data-streaming={m.streaming ? "true" : "false"}
           >
             {m.content}
