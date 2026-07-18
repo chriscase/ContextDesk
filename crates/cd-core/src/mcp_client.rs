@@ -181,7 +181,12 @@ impl McpSession {
             }
             lines += 1;
             let remaining = deadline.saturating_duration_since(now);
-            let buf = match self.line_rx.lock().expect("mcp line_rx").recv_timeout(remaining) {
+            let buf = match self
+                .line_rx
+                .lock()
+                .expect("mcp line_rx")
+                .recv_timeout(remaining)
+            {
                 Ok(Ok(line)) => line,
                 Ok(Err(e)) => return Err(CoreError::Message(e)),
                 Err(RecvTimeoutError::Timeout) => {
