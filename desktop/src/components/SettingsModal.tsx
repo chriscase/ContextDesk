@@ -130,6 +130,8 @@ export function SettingsModal({
   const [connectorsNote, setConnectorsNote] = useState<string | null>(null);
   /** Postgres passwords keyed by connector id (keychain on Save; never in config). */
   const [pgPasswordDrafts, setPgPasswordDrafts] = useState<Record<string, string>>({});
+  /** HTTP bearer drafts (keychain on Save). */
+  const [httpBearerDrafts, setHttpBearerDrafts] = useState<Record<string, string>>({});
   const baseId = useId();
 
   useEffect(() => {
@@ -572,6 +574,21 @@ export function SettingsModal({
         }
       }
       setPgPasswordDrafts({});
+      for (const c of saved.filter((x) => x.kind === "http")) {
+        const draft = httpBearerDrafts[c.id]?.trim();
+        if (draft && !draft.split("").every((ch) => ch === "•")) {
+          try {
+            await hostSetConnectorSecret(c.id, "http_bearer", draft);
+          } catch (err) {
+            setConnectorsNote(
+              err instanceof Error
+                ? err.message
+                : "Could not store HTTP bearer in keychain",
+            );
+          }
+        }
+      }
+      setHttpBearerDrafts({});
     } catch (e) {
       setConnectorsNote(
         e instanceof Error ? e.message : "Could not save connectors",
@@ -1230,7 +1247,14 @@ export function SettingsModal({
                                     sslmode: "disable",
                                     timeout_ms: 5000,
                                   }
-                                : {};
+                                : kind === "http"
+                                  ? {
+                                      host: "",
+                                      base_path: "",
+                                      get_routes: [] as string[],
+                                      allow_private: false,
+                                    }
+                                  : {};
                         setConnectors((list) => [
                           ...list,
                           {
@@ -1474,6 +1498,104 @@ export function SettingsModal({
                           />
                           <p className="field__hint">
                             Tool: <code>sql_query__{c.id}</code>
+                          </p>
+                        </div>
+                      );
+                    })}
+                  {connectors
+                    .filter((c) => c.kind === "http")
+                    .map((c) => {
+                      const settings = (c.settings ?? {}) as {
+                        host?: string;
+                        base_path?: string;
+                        get_routes?: string[];
+                        allow_private?: boolean;
+                      };
+                      return (
+                        <div key={`http-cfg-${c.id}`} className="settings-connector-block">
+                          <p className="field__label">HTTP preset: {c.id}</p>
+                          <TextField
+                            id={`${baseId}-http-host-${c.id}`}
+                            label="Host (exact, no scheme)"
+                            hint="SSRF-gated public HTTPS by default."
+                            value={settings.host ?? ""}
+                            onChange={(e) => {
+                              const host = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), host },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="api.example.com"
+                          />
+                          <TextField
+                            id={`${baseId}-http-base-${c.id}`}
+                            label="Base path"
+                            value={settings.base_path ?? ""}
+                            onChange={(e) => {
+                              const base_path = e.target.value;
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: { ...(x.settings ?? {}), base_path },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="/v1"
+                          />
+                          <TextField
+                            id={`${baseId}-http-routes-${c.id}`}
+                            label="GET routes (comma-separated)"
+                            hint="Only exact listed routes may be called."
+                            value={(settings.get_routes ?? []).join(", ")}
+                            onChange={(e) => {
+                              const get_routes = e.target.value
+                                .split(",")
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              setConnectors((list) =>
+                                list.map((x) =>
+                                  x.id === c.id
+                                    ? {
+                                        ...x,
+                                        settings: {
+                                          ...(x.settings ?? {}),
+                                          get_routes,
+                                        },
+                                      }
+                                    : x,
+                                ),
+                              );
+                            }}
+                            placeholder="/health, /status"
+                          />
+                          <TextField
+                            id={`${baseId}-http-bearer-${c.id}`}
+                            label="Bearer token (keychain, optional)"
+                            type="password"
+                            hint="Stored in OS keychain only — never in config.json."
+                            value={httpBearerDrafts[c.id] ?? ""}
+                            onChange={(e) =>
+                              setHttpBearerDrafts((m) => ({
+                                ...m,
+                                [c.id]: e.target.value,
+                              }))
+                            }
+                            placeholder="••••••••"
+                          />
+                          <p className="field__hint">
+                            Tool: <code>http_get__{c.id}</code> — private/LAN blocked unless
+                            advanced allow_private is set in config.
                           </p>
                         </div>
                       );

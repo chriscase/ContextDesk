@@ -83,7 +83,7 @@ Bare `npm run dev` (Vite only) defaults to 1450 and may hop if free; for Tauri a
 | X search | `x_search` | **Shipped** | Bearer in keychain; Settings |
 | Web research | `web_research` | **Shipped** | SSRF-gated search/fetch; packs |
 | MCP (stdio) | `mcp_client` + `ToolHost::attach_mcp_connector` | **Shipped** | `kind:"mcp"` connectors; absolute command; Settings command/args; offline fixture `tests/fixtures/mcp_echo_server.py`; first-use approval (#129) |
-| HTTP presets | `http_preset` | **Planned** | Allowlisted host + GET; **not** exposed in Settings |
+| HTTP presets | `http_preset` + `http_get__{id}` | **Shipped** | Exact host + GET route allowlist; SSRF default; optional keychain bearer; Settings Connectors (#131) |
 
 Forward-looking MCP config shape (not a current Settings feature):
 

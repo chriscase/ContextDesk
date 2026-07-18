@@ -145,19 +145,24 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         host.set_x_search(false, None);
     }
     host.set_router_budget(cfg.router.clone());
-    // #127/#128/#130: connector registry → dynamic tools (passwords from keychain only).
+    // #127–#131: connector registry → dynamic tools (secrets from keychain only).
     let mut pg_passwords = std::collections::HashMap::new();
-    for c in cfg
-        .connectors
-        .iter()
-        .filter(|c| c.enabled && c.kind == "postgres")
-    {
-        let r = cd_core::sql_ro::postgres_password_ref(&c.id);
-        if let Ok(Some(pw)) = state.secrets.get(&r) {
-            pg_passwords.insert(c.id.clone(), pw);
+    let mut http_bearers = std::collections::HashMap::new();
+    for c in cfg.connectors.iter().filter(|c| c.enabled) {
+        if c.kind == "postgres" {
+            let r = cd_core::sql_ro::postgres_password_ref(&c.id);
+            if let Ok(Some(pw)) = state.secrets.get(&r) {
+                pg_passwords.insert(c.id.clone(), pw);
+            }
+        }
+        if c.kind == "http" {
+            let r = cd_core::http_preset::http_bearer_ref(&c.id);
+            if let Ok(Some(b)) = state.secrets.get(&r) {
+                http_bearers.insert(c.id.clone(), b);
+            }
         }
     }
-    host.attach_connectors_with_secrets(&cfg.connectors, &pg_passwords);
+    host.attach_connectors_with_all_secrets(&cfg.connectors, &pg_passwords, &http_bearers);
 }
 
 #[derive(Debug, Serialize)]
@@ -320,6 +325,7 @@ fn set_connector_secret(
     }
     let r = match kind.as_str() {
         "postgres_password" | "password" => cd_core::sql_ro::postgres_password_ref(connector_id),
+        "http_bearer" | "bearer" => cd_core::http_preset::http_bearer_ref(connector_id),
         other => return Err(format!("unknown connector secret kind: {other}")),
     };
     state.secrets.set(&r, secret).map_err(|e| e.to_string())?;
@@ -338,6 +344,7 @@ fn connector_has_secret(
         "postgres_password" | "password" => {
             cd_core::sql_ro::postgres_password_ref(connector_id.trim())
         }
+        "http_bearer" | "bearer" => cd_core::http_preset::http_bearer_ref(connector_id.trim()),
         other => return Err(format!("unknown connector secret kind: {other}")),
     };
     state.secrets.has(&r).map_err(|e| e.to_string())

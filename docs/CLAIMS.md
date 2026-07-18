@@ -15,7 +15,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Multi-model chat selection | Shipped | desktop/src-tauri/src/lib.rs:list_chat_models | UI composer |
 | SQLite RO tool | Shipped | crates/cd-core/src/sql_ro.rs:execute_sqlite_ro_with_timeout | #130 |
 | MCP stdio tools wired end-to-end | Shipped | crates/cd-core/src/tool_host.rs:attach_mcp_connector | #128 |
-| HTTP/OpenAPI presets as agent tools | Roadmap | crates/cd-core/src/http_preset.rs: | #131 |
+| HTTP/OpenAPI presets as agent tools | Shipped | crates/cd-core/src/http_preset.rs:preset_get | #131 |
 | Postgres RO | Shipped | crates/cd-core/src/sql_ro.rs:execute_postgres_ro | #130 |
 | Team server roles + shared memory | Roadmap | crates/cd-server/src/main.rs: | #167 |
 | Rename-friendly branding runtime load | Roadmap | crates/cd-core/src/branding.rs:Branding | #179 |

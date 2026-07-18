@@ -181,17 +181,6 @@ pub fn validate_mcp_command(cmd: &std::path::Path) -> CoreResult<()> {
     Ok(())
 }
 
-/// HTTP connector preset (typed — no free-form URL tool).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpPreset {
-    /// Id.
-    pub id: String,
-    /// Allowed host.
-    pub host: String,
-    /// Base path.
-    pub base_path: String,
-}
-
 /// Confluence RO config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfluenceConfig {

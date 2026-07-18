@@ -98,6 +98,10 @@ pub struct ToolHost {
     mcp_sessions: std::collections::HashMap<String, crate::mcp_client::McpSession>,
     /// SQL RO backends keyed by connector id (#130).
     sql_backends: std::collections::HashMap<String, crate::sql_ro::SqlBackend>,
+    /// HTTP presets keyed by connector id (#131).
+    http_presets: std::collections::HashMap<String, crate::http_preset::HttpPresetConfig>,
+    /// Optional bearer tokens for HTTP presets (from keychain; never config).
+    http_bearers: std::collections::HashMap<String, String>,
 }
 
 impl ToolHost {
@@ -139,6 +143,8 @@ impl ToolHost {
             connector_configs: Vec::new(),
             mcp_sessions: std::collections::HashMap::new(),
             sql_backends: std::collections::HashMap::new(),
+            http_presets: std::collections::HashMap::new(),
+            http_bearers: std::collections::HashMap::new(),
         }
     }
 
@@ -164,11 +170,27 @@ impl ToolHost {
         configs: &[crate::connectors::ConnectorConfig],
         postgres_passwords: &std::collections::HashMap<String, String>,
     ) {
+        self.attach_connectors_with_all_secrets(
+            configs,
+            postgres_passwords,
+            &std::collections::HashMap::new(),
+        );
+    }
+
+    /// Full secret map for SQL + HTTP connector attach (keychain at host boundary only).
+    pub fn attach_connectors_with_all_secrets(
+        &mut self,
+        configs: &[crate::connectors::ConnectorConfig],
+        postgres_passwords: &std::collections::HashMap<String, String>,
+        http_bearers: &std::collections::HashMap<String, String>,
+    ) {
         self.connector_configs = configs.to_vec();
-        // Drop previous dynamic tools, MCP children, and SQL backends.
+        // Drop previous dynamic tools, MCP children, SQL, and HTTP presets.
         self.dynamic_tools.clear();
         self.mcp_sessions.clear();
         self.sql_backends.clear();
+        self.http_presets.clear();
+        self.http_bearers.clear();
         for c in configs.iter().filter(|c| c.enabled) {
             // Optional test/dev stub: settings.stub_tool = { name, description, detail }
             if let Some(stub) = c.settings.get("stub_tool") {
@@ -244,7 +266,57 @@ impl ToolHost {
                     );
                 }
             }
+
+            if c.kind == "http" {
+                let bearer = http_bearers.get(&c.id).cloned();
+                if let Err(e) = self.attach_http_connector(c, bearer) {
+                    tracing::error!(
+                        connector_id = %c.id,
+                        error = %e,
+                        "HTTP connector failed; tools not registered"
+                    );
+                }
+            }
         }
+    }
+
+    fn attach_http_connector(
+        &mut self,
+        c: &crate::connectors::ConnectorConfig,
+        bearer: Option<String>,
+    ) -> CoreResult<()> {
+        let preset = crate::http_preset::config_from_connector_settings(&c.id, &c.settings)?;
+        let tool_name = format!("http_get__{}", c.id);
+        let routes_desc = preset.get_routes.join(", ");
+        if let Some(b) = bearer {
+            self.http_bearers.insert(c.id.clone(), b);
+        }
+        self.http_presets.insert(c.id.clone(), preset);
+        self.register_tool(crate::connectors::RegisteredTool {
+            spec: crate::tools::ToolSpec {
+                name: tool_name,
+                description: format!(
+                    "HTTP GET against allowlisted routes on connector `{}` (routes: {routes_desc}). Read-only; SSRF-gated.",
+                    c.id
+                ),
+                side_effect: crate::tools::ToolSideEffect::Read,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "route": {
+                            "type": "string",
+                            "description": "Exact allowlisted route template (must match get_routes)"
+                        }
+                    },
+                    "required": ["route"],
+                    "additionalProperties": false
+                }),
+            },
+            exec: crate::connectors::ConnectorExecutor::Http {
+                preset_id: c.id.clone(),
+            },
+        });
+        Ok(())
     }
 
     fn attach_sqlite_connector(
@@ -1267,9 +1339,27 @@ impl ToolHost {
                 };
                 Ok((true, summary, wrapped, Some(format!("sql:{source_id}"))))
             }
-            crate::connectors::ConnectorExecutor::Http { .. } => Err(CoreError::Message(format!(
-                "HTTP tool `{name}` not wired yet (see #131)"
-            ))),
+            crate::connectors::ConnectorExecutor::Http { preset_id } => {
+                let route = arguments
+                    .get("route")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CoreError::Message("http_get requires `route`".into()))?
+                    .to_string();
+                let preset = self.http_presets.get(&preset_id).cloned().ok_or_else(|| {
+                    CoreError::Message(format!("HTTP preset `{preset_id}` is not attached"))
+                })?;
+                let bearer = self.http_bearers.get(&preset_id).map(|s| s.as_str());
+                let body =
+                    crate::http_preset::preset_get(&preset, &route, bearer, preset.allow_private)
+                        .await?;
+                let wrapped = crate::http_preset::format_http_for_model(&preset_id, &route, &body);
+                Ok((
+                    true,
+                    format!("http `{preset_id}{route}` ok"),
+                    wrapped,
+                    Some(format!("http:{preset_id}:{route}")),
+                ))
+            }
         }
     }
 }
@@ -2048,6 +2138,39 @@ mod tests {
                 && r2.detail_raw.contains("END_UNTRUSTED_DATA"),
             "MCP result must be wrap_untrusted: {}",
             r2.detail_raw
+        );
+    }
+
+    /// #131: http connector registers tool; non-allowlisted route rejected offline.
+    #[tokio::test]
+    async fn http_connector_registers_and_rejects_bad_route() {
+        let (_ws, mut host) = host_with_docs();
+        host.attach_connectors(&[crate::connectors::ConnectorConfig {
+            id: "api".into(),
+            kind: "http".into(),
+            enabled: true,
+            settings: json!({
+                "host": "example.com",
+                "base_path": "/v1",
+                "get_routes": ["/health"],
+                "allow_private": false
+            }),
+        }]);
+        assert!(host
+            .specs_for_model()
+            .iter()
+            .any(|s| s.name == "http_get__api"));
+        let bad = host
+            .execute("http_get__api", &json!({"route": "/admin"}), None)
+            .await;
+        assert!(bad.is_err() || !bad.as_ref().unwrap().ok);
+        let msg = match &bad {
+            Ok(r) => r.summary.clone() + &r.detail_raw,
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("allowlist") || msg.contains("not in preset") || msg.contains("Policy"),
+            "{msg}"
         );
     }
 
