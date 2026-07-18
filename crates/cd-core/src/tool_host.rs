@@ -395,8 +395,17 @@ impl ToolHost {
     fn attach_mcp_connector(&mut self, c: &crate::connectors::ConnectorConfig) -> CoreResult<()> {
         let mcp_cfg = mcp_server_config_from_connector(c)?;
         let mut session = crate::mcp_client::McpSession::spawn(&mcp_cfg)?;
+        self.register_mcp_session(mcp_cfg.name.clone(), &mut session)?;
+        self.mcp_sessions.insert(mcp_cfg.name.clone(), session);
+        Ok(())
+    }
+
+    fn register_mcp_session(
+        &mut self,
+        server: String,
+        session: &mut crate::mcp_client::McpSession,
+    ) -> CoreResult<()> {
         let tools = session.list_tools()?;
-        let server = mcp_cfg.name.clone();
         for t in tools {
             let bare = t
                 .name
@@ -416,8 +425,60 @@ impl ToolHost {
                 },
             });
         }
-        self.mcp_sessions.insert(server, session);
         Ok(())
+    }
+
+    /// Attach an enabled external module after capability grant (#136).
+    ///
+    /// Requires [`crate::modules::module_tools_allowed`]. Spawns MCP with module cwd
+    /// and granted secret env only (AGENTS #1). No network install here (NON_GOALS #7).
+    pub fn attach_module(
+        &mut self,
+        manifest: &crate::modules::ModuleManifest,
+        grants: &crate::modules::ModuleGrantStore,
+        resolve_secret: &dyn Fn(&str) -> Option<String>,
+    ) -> CoreResult<()> {
+        if !crate::modules::module_tools_allowed(manifest, grants) {
+            return Err(CoreError::Policy(format!(
+                "module `{}` capabilities not granted (UI approval required)",
+                manifest.id
+            )));
+        }
+        let read_tools: Vec<String> = manifest
+            .provided_tools
+            .iter()
+            .map(|t| t.name.clone())
+            .filter(|n| !manifest.hard_write_tools.iter().any(|h| h == n))
+            .collect();
+        let mcp_cfg = crate::connectors::McpServerConfig {
+            name: manifest.id.clone(),
+            command: manifest.entrypoint.command.clone(),
+            args: manifest.entrypoint.args.clone(),
+            enabled: true,
+            hard_write_tools: manifest.hard_write_tools.clone(),
+            read_tools,
+        };
+        let granted = grants.granted(&manifest.id);
+        let opts = crate::mcp_client::McpSpawnOptions {
+            cwd: if manifest.path.is_dir() {
+                Some(manifest.path.clone())
+            } else {
+                None
+            },
+            extra_env: crate::modules::secret_env_for_module(&granted, resolve_secret),
+            request_timeout: None,
+        };
+        let mut session = crate::mcp_client::McpSession::spawn_with(&mcp_cfg, opts)?;
+        self.register_mcp_session(mcp_cfg.name.clone(), &mut session)?;
+        self.mcp_sessions.insert(mcp_cfg.name, session);
+        Ok(())
+    }
+
+    /// Drop a module MCP session and its registered tools (#136 disable/remove).
+    pub fn detach_module(&mut self, module_id: &str) {
+        self.mcp_sessions.remove(module_id);
+        self.dynamic_tools
+            .retain(|name, _| !name.starts_with(&format!("mcp__{module_id}__")));
     }
 
     /// Enabled connector configs currently attached.

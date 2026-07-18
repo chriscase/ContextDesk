@@ -176,6 +176,77 @@ pub fn default_modules_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("modules")
 }
 
+/// Install a module from a local directory containing `module.toml` into `modules_dir/<id>/`.
+///
+/// **Local path only** — no network fetch (NON_GOALS #7). Validates via [`parse_module_file`].
+pub fn install_module_from_dir(src: &Path, modules_dir: &Path) -> CoreResult<ModuleManifest> {
+    let manifest_path =
+        if src.is_file() && src.file_name().and_then(|s| s.to_str()) == Some("module.toml") {
+            src.to_path_buf()
+        } else {
+            src.join("module.toml")
+        };
+    if !manifest_path.is_file() {
+        return Err(CoreError::Message(format!(
+            "no module.toml at {}",
+            manifest_path.display()
+        )));
+    }
+    let m = parse_module_file(&manifest_path)?;
+    let dest = modules_dir.join(&m.id);
+    if dest.exists() {
+        return Err(CoreError::Message(format!(
+            "module `{}` already installed at {}",
+            m.id,
+            dest.display()
+        )));
+    }
+    fs::create_dir_all(&dest).map_err(|e| CoreError::Message(format!("create module dir: {e}")))?;
+    // Copy module.toml + sibling files from source directory (shallow).
+    let src_dir = manifest_path.parent().unwrap_or(src);
+    if let Ok(rd) = fs::read_dir(src_dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_file() {
+                let name = p.file_name().unwrap();
+                fs::copy(&p, dest.join(name))
+                    .map_err(|e| CoreError::Message(format!("copy {}: {e}", p.display())))?;
+            }
+        }
+    }
+    parse_module_file(&dest.join("module.toml"))
+}
+
+/// Remove an installed module directory.
+pub fn remove_module_dir(modules_dir: &Path, module_id: &str) -> CoreResult<()> {
+    let dest = modules_dir.join(module_id);
+    if !dest.exists() {
+        return Err(CoreError::Message(format!(
+            "module `{module_id}` not installed"
+        )));
+    }
+    fs::remove_dir_all(&dest).map_err(|e| CoreError::Message(format!("remove module: {e}")))?;
+    Ok(())
+}
+
+/// Update an installed module by re-copying from a local source dir (same id required).
+pub fn update_module_from_dir(src: &Path, modules_dir: &Path) -> CoreResult<ModuleManifest> {
+    let m = {
+        let manifest_path = if src.is_file() {
+            src.to_path_buf()
+        } else {
+            src.join("module.toml")
+        };
+        parse_module_file(&manifest_path)?
+    };
+    let dest = modules_dir.join(&m.id);
+    if dest.exists() {
+        fs::remove_dir_all(&dest)
+            .map_err(|e| CoreError::Message(format!("remove old module: {e}")))?;
+    }
+    install_module_from_dir(src, modules_dir)
+}
+
 // ─── Capability grants (#135) ───────────────────────────────────────────────
 
 /// Persisted per-module capability grants (UI-originated only).
@@ -543,5 +614,23 @@ secret_refs = ["provider/demo/api_key"]
         m.requested_capabilities = ModuleCapabilities::default();
         let store = ModuleGrantStore::new();
         assert!(module_tools_allowed(&m, &store));
+    }
+
+    #[test]
+    fn install_from_local_dir_and_remove() {
+        let src = tempfile::tempdir().unwrap();
+        let mut f = fs::File::create(src.path().join("module.toml")).unwrap();
+        f.write_all(valid_toml(abs_cmd_toml()).as_bytes()).unwrap();
+        fs::write(src.path().join("README.md"), "demo").unwrap();
+
+        let mods = tempfile::tempdir().unwrap();
+        let m = install_module_from_dir(src.path(), mods.path()).unwrap();
+        assert_eq!(m.id, "demo-mod");
+        assert!(mods.path().join("demo-mod/module.toml").is_file());
+        assert!(mods.path().join("demo-mod/README.md").is_file());
+
+        // Relative entrypoint rejected at parse (already in install)
+        remove_module_dir(mods.path(), "demo-mod").unwrap();
+        assert!(!mods.path().join("demo-mod").exists());
     }
 }

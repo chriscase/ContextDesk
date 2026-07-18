@@ -111,6 +111,9 @@ pub struct AppConfig {
     /// recency + optional semantic when an embed backend is attached on the host).
     #[serde(default)]
     pub hybrid_retrieval: bool,
+    /// Enabled external module ids (#136). Install is local-only (NON_GOALS #7).
+    #[serde(default)]
+    pub enabled_modules: Vec<String>,
 }
 
 fn default_index_max_files() -> usize {

@@ -8,6 +8,7 @@ import { AppearanceSection } from "./settings/AppearanceSection";
 import { AiSection } from "./settings/AiSection";
 import { ConnectorsSection } from "./settings/ConnectorsSection";
 import { GeneralSection } from "./settings/GeneralSection";
+import { ModulesSection } from "./settings/ModulesSection";
 import { PreflightSection } from "./settings/PreflightSection";
 import { WorkspaceSection } from "./settings/WorkspaceSection";
 import {
@@ -46,6 +47,7 @@ const NAV: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "workspace", label: "Workspace", icon: <IconWorkspace /> },
   { id: "ai", label: "AI / Models", icon: <IconAi /> },
   { id: "connectors", label: "Connectors", icon: <IconConnectors /> },
+  { id: "modules", label: "Modules", icon: <IconConnectors /> },
   { id: "appearance", label: "Appearance", icon: <IconAppearance /> },
   { id: "general", label: "General", icon: <IconSliders /> },
 ];
@@ -183,6 +185,10 @@ export function SettingsModal({
                 xStatus={c.xStatus}
                 setXStatus={c.setXStatus}
               />
+            ) : null}
+
+            {c.section === "modules" ? (
+              <ModulesSection baseId={c.baseId} />
             ) : null}
 
             {c.section === "appearance" ? (
