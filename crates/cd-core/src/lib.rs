@@ -17,6 +17,7 @@ pub mod config;
 pub mod confluence_ro;
 pub mod connectors;
 pub mod discovery;
+pub mod embed;
 pub mod error;
 pub mod events;
 pub mod grok_auth;
