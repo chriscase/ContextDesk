@@ -941,7 +941,9 @@ mod tests {
         let start = src
             .find("pub fn pinned_oidc_refresh_client")
             .expect("function present");
-        let slice = &src[start..start + 800.min(src.len() - start)];
+        // ASCII-only substring scan (clippy::string_slice).
+        let end = (start + 800).min(src.len());
+        let slice = src.get(start..end).expect("ascii function body slice");
         assert!(
             !slice.contains("Client::builder()"),
             "pinned_oidc_refresh_client must not fall back to Client::builder"
