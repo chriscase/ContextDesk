@@ -15,8 +15,13 @@
     "body": "PR #244 fixed this. Fixes #137. All good."
   },
   {
+    "id": "bad-sha-no-proof",
+    "expect": "fail",
+    "body": "Closed #260. Merged commit 1c9c2e5a90b34ff2d6e18a0c77c4b9d5e2f10abc. Looks correct on main, closing."
+  },
+  {
     "id": "good-short-sha",
     "expect": "pass",
-    "body": "Merged short sha ee8c2f2 in PR #190.\ntest result: ok. 2 passed; 0 failed"
+    "body": "Merged short sha 6d33b72 in PR #190.\ntest result: ok. 2 passed; 0 failed"
   }
 ]

@@ -35,17 +35,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: offline fixtures (must reject no-SHA closes)
+      - name: offline self-tests + fixtures (SHA, pasted-proof, duplicate bodies)
         run: |
+          # Hard gate: exercises the matchers and duplicate detection offline.
           sh scripts/check_close_proof.sh --offline
+          # Per-record fixture (includes a SHA-but-no-proof case that must be rejected).
           sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_sample.json
-      - name: sample closed remediation issues (needs gh)
+          # Duplicate-body fixture: must print a DUPLICATE flag and classify the pair as failing.
+          out=$(sh scripts/check_close_proof.sh --fixture scripts/fixtures/close_proof_dupes.json)
+          printf '%s\n' "$out"
+          echo "$out" | grep -q "^DUPLICATE:" || { echo "expected a DUPLICATE flag" >&2; exit 1; }
+      - name: enforce live remediation closes (blocking, scoped after cutoff)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Soft: network sample; offline already hard-gates the standard.
-          sh scripts/check_close_proof.sh || true
+          # Enforcement begins strictly AFTER this date. All remediation history
+          # was closed on/before 2026-07-18, so this never breaks past closes;
+          # it hard-fails only issues closed 2026-07-19 or later that lack a SHA
+          # or pasted proof in their closing comment, or that duplicate another
+          # issue's closing body. See docs/CLOSE_PROOF.md.
+          CLOSE_PROOF_CUTOFF: "2026-07-18"
+        run: sh scripts/check_close_proof.sh
 
   rust:
     name: rust (${{ matrix.os }})
