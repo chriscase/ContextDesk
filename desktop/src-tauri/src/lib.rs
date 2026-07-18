@@ -113,11 +113,9 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     apply_host_connectors(&mut host, &cfg, state);
     // Durable memory (MEMORY.md Phase 1) — product seam; without this, tools stay
     // on legacy memory_fs and ambient/recall never run.
-    if let Err(e) = cd_core::memory::attach_durable_memory_to_host(
-        &mut host,
-        &state.branding,
-        &cfg.memory,
-    ) {
+    if let Err(e) =
+        cd_core::memory::attach_durable_memory_to_host(&mut host, &state.branding, &cfg.memory)
+    {
         tracing::warn!(error = %e, "durable memory attach failed; using memory_fs fallback");
     }
     *state.host.lock().expect("host") = Some(host);
