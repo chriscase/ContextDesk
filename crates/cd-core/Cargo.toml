@@ -30,6 +30,9 @@ tokio-postgres = "0.7"
 # Filesystem watch for incremental index invalidation (#116)
 notify = "6.1"
 sha2 = "0.10"
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1.0.9"
+tokio-postgres-rustls = "0.14.0"
 
 [dev-dependencies]
 tempfile = "3"

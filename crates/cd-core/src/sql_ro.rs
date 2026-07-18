@@ -54,7 +54,7 @@ pub struct PostgresConnectConfig {
     pub database: String,
     /// Role (prefer a dedicated RO role — see docs/DEV.md).
     pub user: String,
-    /// `disable` | `prefer` | `require` (prefer/require need TLS residual if unavailable).
+    /// `disable` | `prefer` | `require` | `verify-ca` | `verify-full` (#250 rustls).
     #[serde(default = "default_sslmode")]
     pub sslmode: String,
     /// Password — set by host from keychain only; never persist in config.json.
@@ -90,14 +90,44 @@ impl PostgresConnectConfig {
         if let Some(pw) = &self.password {
             s.push_str(&format!(" password={}", escape_conn_val(pw)));
         }
-        // tokio-postgres NoTls path only for disable; others documented residual.
         if self.sslmode.eq_ignore_ascii_case("disable") {
             s.push_str(" sslmode=disable");
         } else {
+            // prefer/require/verify-*: rustls connector path (#250).
             s.push_str(&format!(" sslmode={}", escape_conn_val(&self.sslmode)));
         }
         s
     }
+}
+
+/// Which TLS stack to use for a given `sslmode` (#250).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresTlsStack {
+    /// Plaintext only (`sslmode=disable`).
+    NoTls,
+    /// rustls with webpki roots (`prefer` / `require` / `verify-*`).
+    Rustls,
+}
+
+/// Select TLS stack for `sslmode` without opening a socket (offline-testable).
+pub fn postgres_tls_stack_for_sslmode(sslmode: &str) -> CoreResult<PostgresTlsStack> {
+    match sslmode.trim().to_ascii_lowercase().as_str() {
+        "disable" => Ok(PostgresTlsStack::NoTls),
+        "prefer" | "require" | "verify-ca" | "verify-full" => Ok(PostgresTlsStack::Rustls),
+        other => Err(CoreError::Config(format!(
+            "unsupported Postgres sslmode=`{other}` (use disable|prefer|require|verify-ca|verify-full)"
+        ))),
+    }
+}
+
+/// Build a rustls `ClientConfig` with webpki roots for Postgres TLS.
+pub fn postgres_rustls_client_config() -> CoreResult<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(cfg)
 }
 
 fn escape_conn_val(v: &str) -> String {
@@ -267,28 +297,43 @@ pub fn execute_postgres_ro_blocking(
 
 /// Async Postgres RO: SET read_only + statement_timeout, then SELECT.
 ///
-/// Requires `sslmode=disable` in this build (NoTls). Prefer/require is refused with a
-/// clear error so we never silently drop TLS requirements.
+/// - `sslmode=disable` → `NoTls`
+/// - `prefer` / `require` / `verify-ca` / `verify-full` → rustls (`tokio-postgres-rustls`)
+///   with webpki roots (#250). `require` fails if the server has no TLS.
 pub async fn execute_postgres_ro(
     cfg: &PostgresConnectConfig,
     sql: &str,
 ) -> CoreResult<SqlRoResult> {
     validate_readonly_sql(sql)?;
-    if !cfg.sslmode.eq_ignore_ascii_case("disable") {
-        return Err(CoreError::Config(format!(
-            "Postgres sslmode=`{}` requires TLS; this build supports sslmode=disable only (set sslmode=disable for local RO, or track TLS residual)",
-            cfg.sslmode
-        )));
-    }
+    let stack = postgres_tls_stack_for_sslmode(&cfg.sslmode)?;
     let dsn = cfg.connection_string();
-    let (client, connection) = tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
-        .await
-        .map_err(|e| CoreError::Message(format!("postgres connect: {e}")))?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::warn!(error = %e, "postgres connection closed");
+    let client = match stack {
+        PostgresTlsStack::NoTls => {
+            let (client, connection) =
+                tokio_postgres::connect(&dsn, tokio_postgres::NoTls)
+                    .await
+                    .map_err(|e| CoreError::Message(format!("postgres connect: {e}")))?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::warn!(error = %e, "postgres connection closed");
+                }
+            });
+            client
         }
-    });
+        PostgresTlsStack::Rustls => {
+            let tls_cfg = postgres_rustls_client_config()?;
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_cfg);
+            let (client, connection) = tokio_postgres::connect(&dsn, tls)
+                .await
+                .map_err(|e| CoreError::Message(format!("postgres connect (tls): {e}")))?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::warn!(error = %e, "postgres tls connection closed");
+                }
+            });
+            client
+        }
+    };
 
     for stmt in postgres_ro_session_sqls(cfg.timeout_ms) {
         client
@@ -590,23 +635,50 @@ mod tests {
     }
 
     #[test]
-    fn postgres_ssl_require_refused_without_tls_stack() {
-        let cfg = PostgresConnectConfig {
-            host: "127.0.0.1".into(),
-            port: 5432,
-            database: "app".into(),
-            user: "cd_ro".into(),
-            sslmode: "require".into(),
-            password: None,
-            timeout_ms: 1000,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let err = rt.block_on(execute_postgres_ro(&cfg, "SELECT 1"));
-        assert!(err.is_err());
-        assert!(format!("{}", err.unwrap_err()).contains("sslmode"));
+    fn postgres_tls_stack_selected_per_sslmode() {
+        assert_eq!(
+            postgres_tls_stack_for_sslmode("disable").unwrap(),
+            PostgresTlsStack::NoTls
+        );
+        assert_eq!(
+            postgres_tls_stack_for_sslmode("prefer").unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        assert_eq!(
+            postgres_tls_stack_for_sslmode("require").unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        assert_eq!(
+            postgres_tls_stack_for_sslmode("verify-full").unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        assert!(postgres_tls_stack_for_sslmode("bogus").is_err());
+        // Default sslmode is prefer → rustls path (no user edit required).
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&default_sslmode()).unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        // Rustls config builds offline (webpki roots).
+        let _ = postgres_rustls_client_config().unwrap();
+    }
+
+    #[test]
+    fn postgres_default_config_selects_tls_without_user_edit() {
+        let p = postgres_config_from_settings(
+            &serde_json::json!({
+                "host": "db.example.com",
+                "database": "app",
+                "user": "ro"
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.sslmode, "prefer");
+        assert_eq!(
+            postgres_tls_stack_for_sslmode(&p.sslmode).unwrap(),
+            PostgresTlsStack::Rustls
+        );
+        assert!(p.connection_string().contains("sslmode=prefer"));
     }
 
     #[test]
