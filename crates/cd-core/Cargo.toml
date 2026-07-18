@@ -24,6 +24,8 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Postgres RO agent tool (#130) — NoTls for sslmode=disable; prefer/require refused clearly
+tokio-postgres = "0.7"
 # Filesystem watch for incremental index invalidation (#116)
 notify = "6.1"
 sha2 = "0.10"

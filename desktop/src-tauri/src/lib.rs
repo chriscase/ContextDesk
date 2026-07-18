@@ -145,8 +145,19 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         host.set_x_search(false, None);
     }
     host.set_router_budget(cfg.router.clone());
-    // #127: workspace connector registry → dynamic tools (no secrets in config).
-    host.attach_connectors(&cfg.connectors);
+    // #127/#128/#130: connector registry → dynamic tools (passwords from keychain only).
+    let mut pg_passwords = std::collections::HashMap::new();
+    for c in cfg
+        .connectors
+        .iter()
+        .filter(|c| c.enabled && c.kind == "postgres")
+    {
+        let r = cd_core::sql_ro::postgres_password_ref(&c.id);
+        if let Ok(Some(pw)) = state.secrets.get(&r) {
+            pg_passwords.insert(c.id.clone(), pw);
+        }
+    }
+    host.attach_connectors_with_secrets(&cfg.connectors, &pg_passwords);
 }
 
 #[derive(Debug, Serialize)]
@@ -289,6 +300,47 @@ fn save_connectors(
     *state.config.lock().expect("config lock") = cfg.clone();
     let _ = ensure_host(&state);
     Ok(connector_dtos(&state, &cfg))
+}
+
+/// Store a connector secret in the keychain (Postgres password, etc.). Never returns the secret.
+#[tauri::command]
+fn set_connector_secret(
+    state: State<'_, AppState>,
+    connector_id: String,
+    kind: String,
+    secret: String,
+) -> Result<(), String> {
+    let connector_id = connector_id.trim();
+    if connector_id.is_empty() {
+        return Err("connector_id required".into());
+    }
+    let secret = secret.trim();
+    if secret.is_empty() || secret.chars().all(|c| c == '•') {
+        return Err("empty secret".into());
+    }
+    let r = match kind.as_str() {
+        "postgres_password" | "password" => cd_core::sql_ro::postgres_password_ref(connector_id),
+        other => return Err(format!("unknown connector secret kind: {other}")),
+    };
+    state.secrets.set(&r, secret).map_err(|e| e.to_string())?;
+    let _ = ensure_host(&state);
+    Ok(())
+}
+
+/// Whether a connector secret exists in the keychain (bool only over IPC).
+#[tauri::command]
+fn connector_has_secret(
+    state: State<'_, AppState>,
+    connector_id: String,
+    kind: String,
+) -> Result<bool, String> {
+    let r = match kind.as_str() {
+        "postgres_password" | "password" => {
+            cd_core::sql_ro::postgres_password_ref(connector_id.trim())
+        }
+        other => return Err(format!("unknown connector secret kind: {other}")),
+    };
+    state.secrets.has(&r).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1971,6 +2023,10 @@ pub fn run() {
             list_connectors,
             list_connector_kinds,
             save_connectors,
+            set_connector_secret,
+            connector_has_secret,
+            set_connector_secret,
+            connector_has_secret,
             set_provider_secret,
             provider_has_secret,
             save_active_provider,

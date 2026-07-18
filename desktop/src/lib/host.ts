@@ -225,6 +225,28 @@ export async function hostListConnectorKinds(): Promise<string[]> {
   return invoke<string[]>("list_connector_kinds");
 }
 
+/** Store connector secret in keychain (Postgres password). Bool-only status via has. */
+export async function hostSetConnectorSecret(
+  connectorId: string,
+  kind: "postgres_password" | "password",
+  secret: string,
+): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("set_connector_secret", {
+    connectorId,
+    kind,
+    secret,
+  });
+}
+
+export async function hostConnectorHasSecret(
+  connectorId: string,
+  kind: "postgres_password" | "password" = "postgres_password",
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("connector_has_secret", { connectorId, kind });
+}
+
 /** Persist connector list (id/kind/enabled/settings only). Rebuilds host. */
 export async function hostSaveConnectors(
   connectors: {
