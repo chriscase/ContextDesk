@@ -237,12 +237,7 @@ secret_refs = ["provider/demo/api_key"]
 
     #[test]
     fn reject_bad_semver() {
-        let abs = if cfg!(windows) {
-            r"C:\Windows\System32\cmd.exe"
-        } else {
-            "/usr/bin/true"
-        };
-        let mut t = valid_toml(abs);
+        let mut t = valid_toml(abs_cmd_toml());
         t = t.replace("1.2.3", "not-a-version");
         let err = parse_module_toml(&t).unwrap_err().to_string();
         assert!(err.contains("semver"), "{err}");
@@ -258,12 +253,7 @@ secret_refs = ["provider/demo/api_key"]
 
     #[test]
     fn reject_unknown_schema() {
-        let abs = if cfg!(windows) {
-            r"C:\Windows\System32\cmd.exe"
-        } else {
-            "/usr/bin/true"
-        };
-        let mut t = valid_toml(abs);
+        let mut t = valid_toml(abs_cmd_toml());
         t = t.replace("cd.module.v1", "cd.module.v0");
         let err = parse_module_toml(&t).unwrap_err().to_string();
         assert!(err.contains("schema"), "{err}");
@@ -275,13 +265,8 @@ secret_refs = ["provider/demo/api_key"]
         let mods = dir.path().join("modules");
         let good = mods.join("demo-mod");
         fs::create_dir_all(&good).unwrap();
-        let abs = if cfg!(windows) {
-            r"C:\Windows\System32\cmd.exe"
-        } else {
-            "/usr/bin/true"
-        };
         let mut f = fs::File::create(good.join("module.toml")).unwrap();
-        f.write_all(valid_toml(abs).as_bytes()).unwrap();
+        f.write_all(valid_toml(abs_cmd_toml()).as_bytes()).unwrap();
 
         // Non-module dir
         fs::create_dir_all(mods.join("notes")).unwrap();
