@@ -106,6 +106,11 @@ pub struct AppConfig {
     /// Workspace connector registry entries (#127). No secrets — keychain refs only.
     #[serde(default)]
     pub connectors: Vec<crate::connectors::ConnectorConfig>,
+    /// Opt-in hybrid retrieval for `search_kb` (#119). Default false — keyword-only path
+    /// unchanged. When true, `search_kb` uses `KeywordIndex::search_hybrid` (keyword +
+    /// recency + optional semantic when an embed backend is attached on the host).
+    #[serde(default)]
+    pub hybrid_retrieval: bool,
 }
 
 fn default_index_max_files() -> usize {

@@ -88,6 +88,12 @@ pub struct ToolHost {
     x_bearer: Option<String>,
     /// Cap for search_kb (and similar) results; from router budget.
     max_results_per_source: usize,
+    /// When true, `search_kb` uses hybrid scoring (#119). Default false.
+    hybrid_retrieval: bool,
+    /// Optional embed backend for hybrid semantic scores (never in default tests).
+    embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    /// Hybrid weight knobs (documented in `embed` module).
+    hybrid_weights: crate::embed::HybridWeights,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Dynamic tools from connector registry (#127).
@@ -138,6 +144,9 @@ impl ToolHost {
             x_enabled: false,
             x_bearer: None,
             max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
+            hybrid_retrieval: false,
+            embed_backend: None,
+            hybrid_weights: crate::embed::HybridWeights::default(),
             router_budget: crate::router::RouterBudget::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
@@ -452,6 +461,30 @@ impl ToolHost {
     }
 
     /// Enable or disable open-web research tools (Settings toggle).
+    /// Opt-in hybrid `search_kb` path (#119). Off by default (keyword-only).
+    pub fn set_hybrid_retrieval(&mut self, enabled: bool) {
+        self.hybrid_retrieval = enabled;
+    }
+
+    /// Whether hybrid retrieval is enabled for `search_kb`.
+    pub fn hybrid_retrieval(&self) -> bool {
+        self.hybrid_retrieval
+    }
+
+    /// Attach an optional embed backend for semantic hybrid scores (host-owned).
+    pub fn set_embed_backend(
+        &mut self,
+        backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    ) {
+        self.embed_backend = backend;
+    }
+
+    /// Override hybrid weights (tests / advanced config).
+    pub fn set_hybrid_weights(&mut self, weights: crate::embed::HybridWeights) {
+        self.hybrid_weights = weights;
+    }
+
+    /// Enable or disable open-web research tools.
     pub fn set_web_research(&mut self, enabled: bool) {
         self.web_research_enabled = enabled;
     }
@@ -699,7 +732,7 @@ impl ToolHost {
         // (source_id, short label, optional title for expanded UI)
         let mut web_cites: Vec<(String, String, Option<String>)> = Vec::new();
         let (ok, summary, raw, citation) = match name {
-            names::SEARCH_KB => self.tool_search(arguments)?,
+            names::SEARCH_KB => self.tool_search(arguments).await?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
             names::SAVE_MEMORY => self.tool_save_memory(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
@@ -781,7 +814,10 @@ impl ToolHost {
         })
     }
 
-    fn tool_search(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+    async fn tool_search(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -797,7 +833,17 @@ impl ToolHost {
             .min(50) as usize;
         // Smaller of tool arg and router budget per-source cap.
         let limit = requested.min(self.max_results_per_source);
-        let hits = self.index.search(query, limit);
+
+        // Product path (#119): hybrid when opt-in; otherwise exact keyword `search`.
+        let hits: Vec<(f32, &crate::index::Chunk)> = if self.hybrid_retrieval {
+            let embed = self.embed_backend.as_deref();
+            self.index
+                .search_hybrid(query, limit, embed, self.hybrid_weights)
+                .await
+        } else {
+            self.index.search(query, limit)
+        };
+
         let mut lines = Vec::new();
         let mut first_path = None;
         for (score, chunk) in &hits {
@@ -816,9 +862,14 @@ impl ToolHost {
         } else {
             lines.join("\n")
         };
+        let mode = if self.hybrid_retrieval {
+            "hybrid"
+        } else {
+            "keyword"
+        };
         Ok((
             true,
-            format!("{} hit(s) for `{query}`", hits.len()),
+            format!("{} hit(s) for `{query}` ({mode})", hits.len()),
             raw,
             first_path,
         ))
@@ -2328,5 +2379,46 @@ mod tests {
         // Chain still verifies.
         let log = AuditLog::new(&audit_path);
         log.verify_chain().unwrap();
+    }
+
+    /// #119 product path: when hybrid is on, search_kb uses search_hybrid (summary marks hybrid).
+    #[tokio::test]
+    async fn search_kb_hybrid_opt_in_uses_hybrid_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "JWT gateway auth login\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        // Default: keyword-only
+        let r = host
+            .execute("search_kb", &json!({"query": "JWT"}), None)
+            .await
+            .unwrap();
+        assert!(r.ok);
+        assert!(
+            r.summary.contains("(keyword)"),
+            "default path should be keyword: {}",
+            r.summary
+        );
+
+        host.set_hybrid_retrieval(true);
+        host.set_embed_backend(Some(std::sync::Arc::new(
+            crate::embed::MockHashEmbedBackend::new(32),
+        )));
+        let r2 = host
+            .execute("search_kb", &json!({"query": "JWT"}), None)
+            .await
+            .unwrap();
+        assert!(r2.ok);
+        assert!(
+            r2.summary.contains("(hybrid)"),
+            "opt-in path should be hybrid: {}",
+            r2.summary
+        );
+        assert!(
+            r2.detail_raw.contains("a.md") || r2.summary.contains("hit"),
+            "expected hits: {}",
+            r2.detail_raw
+        );
     }
 }
