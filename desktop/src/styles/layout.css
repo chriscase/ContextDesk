@@ -589,7 +589,7 @@ button.citation-chip:hover {
 }
 
 .md-ext-link {
-  color: var(--accent);
+  color: var(--link, var(--accent));
   text-decoration: none;
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   font-weight: 500;
