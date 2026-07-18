@@ -799,6 +799,19 @@ export async function hostSetWebResearchEnabled(
   return invoke<boolean>("set_web_research_enabled", { enabled });
 }
 
+/** Hybrid search_kb opt-in (#119). Default off = keyword-only. */
+export async function hostGetHybridRetrieval(): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("get_hybrid_retrieval");
+}
+
+export async function hostSetHybridRetrieval(enabled: boolean): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Hybrid retrieval requires Tauri host");
+  }
+  return invoke<boolean>("set_hybrid_retrieval", { enabled });
+}
+
 export type NewsSourceDto = {
   id: string;
   label: string;

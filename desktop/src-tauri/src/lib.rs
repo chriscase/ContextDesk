@@ -138,6 +138,37 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     }
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
+    // #119: hybrid search_kb when opt-in; optional Ollama embeddings (no network in tests).
+    host.set_hybrid_retrieval(cfg.hybrid_retrieval);
+    if cfg.hybrid_retrieval {
+        if let Some(profile) = cfg.providers.active() {
+            if profile.kind == cd_core::providers::ProviderKind::Ollama {
+                match cd_core::chat::OllamaClient::new(
+                    &profile.base_url,
+                    // Prefer a small embed model id when available; chat model still works
+                    // for hosts that share one local model.
+                    "nomic-embed-text",
+                ) {
+                    Ok(client) => {
+                        host.set_embed_backend(Some(std::sync::Arc::new(
+                            cd_core::embed::OllamaEmbedBackend::new(client),
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hybrid retrieval on but Ollama embed client failed");
+                        host.set_embed_backend(None);
+                    }
+                }
+            } else {
+                // Keyword + recency hybrid without semantic when no local embed model.
+                host.set_embed_backend(None);
+            }
+        } else {
+            host.set_embed_backend(None);
+        }
+    } else {
+        host.set_embed_backend(None);
+    }
     if cfg.x.enabled {
         let bearer = state.secrets.get(&key_ref_x_api_key()).ok().flatten();
         host.set_x_search(true, bearer);
@@ -651,6 +682,22 @@ fn get_confluence_settings(state: State<'_, AppState>) -> ConfluenceSettings {
 #[tauri::command]
 fn get_web_research_enabled(state: State<'_, AppState>) -> bool {
     state.config.lock().expect("config").web_research_enabled
+}
+
+#[tauri::command]
+fn get_hybrid_retrieval(state: State<'_, AppState>) -> bool {
+    state.config.lock().expect("config").hybrid_retrieval
+}
+
+#[tauri::command]
+fn set_hybrid_retrieval(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    let mut cfg = state.config.lock().expect("config");
+    cfg.hybrid_retrieval = enabled;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -2082,6 +2129,8 @@ pub fn run() {
             test_x_config,
             get_web_research_enabled,
             set_web_research_enabled,
+            get_hybrid_retrieval,
+            set_hybrid_retrieval,
             get_router_budget,
             set_router_budget,
             list_web_research_sources,

@@ -22,9 +22,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Live event sink (stream as produced) | Shipped | crates/cd-core/src/agent.rs:run_agent_turn_with_sink | #90, #108 |
 | Server incremental SSE research | Shipped | crates/cd-server/src/main.rs:research_sse | #166 |
 | Opt-in signed updater (config + UI) | Shipped | desktop/src-tauri/tauri.conf.json:pubkey | #173, Settings Check for updates |
-| Hybrid embed scoring (core API) | Shipped | crates/cd-core/src/index.rs:search_hybrid | #119 core; product wire residual |
+| Hybrid embed scoring (core API) | Shipped | crates/cd-core/src/index.rs:search_hybrid | #119 |
+| search_kb hybrid opt-in product path | Shipped | crates/cd-core/src/tool_host.rs:set_hybrid_retrieval | #119 |
 | Team server roles + shared memory | Roadmap | crates/cd-server/src/main.rs:AppState | #167 |
-| search_kb uses hybrid when embed on | Roadmap | crates/cd-core/src/tool_host.rs:tool_search | #119 residual |
 | Skin / theme registry beyond dark/light/slate | Roadmap | desktop/src/styles/themes/ | #99 |
 | External module sandbox | Roadmap | docs/ | #94 |
 | README product screenshot in docs/assets | Roadmap | docs/examples/host-adapter.md | #176 residual |

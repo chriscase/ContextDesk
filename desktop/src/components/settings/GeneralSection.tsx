@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   hostCheckForUpdates,
+  hostGetHybridRetrieval,
   hostInstallUpdate,
+  hostSetHybridRetrieval,
   type RouterBudgetDto,
 } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
@@ -22,6 +24,14 @@ export function GeneralSection({
 }: GeneralSectionProps) {
   const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+  const [hybridOn, setHybridOn] = useState(false);
+  const [hybridNote, setHybridNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    void hostGetHybridRetrieval().then((v) => {
+      if (v !== null) setHybridOn(v);
+    });
+  }, []);
 
   const onCheckUpdates = async () => {
     setUpdateBusy(true);
@@ -84,6 +94,39 @@ export function GeneralSection({
         </button>
       </div>
       {updateNote ? <p className="field__hint">{updateNote}</p> : null}
+      <h3 className="settings-connector-block__title">Hybrid retrieval</h3>
+      <p className="field__hint">
+        Opt-in hybrid scoring for <code>search_kb</code> (keyword + recency +
+        optional local embeddings). Default off keeps pure keyword search.
+        When on and the active provider is Ollama, local embeddings are used
+        when available (#119).
+      </p>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={hybridOn}
+          onChange={(e) => {
+            const next = e.target.checked;
+            setHybridOn(next);
+            void hostSetHybridRetrieval(next)
+              .then((v) => {
+                setHybridOn(v);
+                setHybridNote(
+                  v
+                    ? "Hybrid retrieval on — search_kb uses hybrid scoring."
+                    : "Hybrid retrieval off — keyword-only search_kb.",
+                );
+              })
+              .catch((err) =>
+                setHybridNote(
+                  err instanceof Error ? err.message : "Could not save hybrid setting",
+                ),
+              );
+          }}
+        />
+        <span>Enable hybrid retrieval (search_kb)</span>
+      </label>
+      {hybridNote ? <p className="field__hint">{hybridNote}</p> : null}
       <h3 className="settings-connector-block__title">Retrieval budgets</h3>
       <p className="field__hint">
         Enforced on the agent loop and search_kb. Reflected in the search trail
