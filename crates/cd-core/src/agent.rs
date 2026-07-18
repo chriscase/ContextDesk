@@ -424,7 +424,7 @@ pub async fn run_agent_turn_with_sink(
             // Tool execution errors must not kill the whole turn (e.g. HTTP 401
             // on a news site). Feed the failure back as tool content so the
             // model can try another URL or answer from search snippets.
-            let result = match host.execute(&tc.function.name, &args, None) {
+            let result = match host.execute(&tc.function.name, &args, None).await {
                 Ok(r) => r,
                 Err(e) => {
                     let id = uuid::Uuid::new_v4().to_string();
@@ -483,12 +483,14 @@ pub async fn run_agent_turn_with_sink(
 }
 
 /// Prefetch retrieval when tools unsupported: force search_kb then answer.
-pub fn prefetch_context(host: &mut ToolHost, query: &str) -> CoreResult<String> {
-    let r = host.execute(
-        "search_kb",
-        &serde_json::json!({"query": query, "limit": 6}),
-        None,
-    )?;
+pub async fn prefetch_context(host: &mut ToolHost, query: &str) -> CoreResult<String> {
+    let r = host
+        .execute(
+            "search_kb",
+            &serde_json::json!({"query": query, "limit": 6}),
+            None,
+        )
+        .await?;
     Ok(wrap_untrusted("prefetch:search_kb", &r.detail_raw))
 }
 

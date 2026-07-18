@@ -966,7 +966,7 @@ fn list_skills_cmd(state: State<'_, AppState>) -> Result<Vec<SkillDto>, String> 
 /// Propose authoring a skill via the SoftWrite tool host path (PermissionRequired).
 /// Does **not** write until the UI completes the grant and re-executes.
 #[tauri::command]
-fn propose_save_skill_cmd(
+async fn propose_save_skill_cmd(
     state: State<'_, AppState>,
     id: String,
     name: String,
@@ -975,8 +975,11 @@ fn propose_save_skill_cmd(
     allows_write: bool,
 ) -> Result<Vec<EventDto>, String> {
     ensure_host(&state)?;
-    let mut host_guard = state.host.lock().expect("host");
-    let host = host_guard.as_mut().ok_or("host missing")?;
+    // #114: do not hold MutexGuard across `.await` (Send bound).
+    let mut host = {
+        let mut host_guard = state.host.lock().expect("host");
+        host_guard.take().ok_or("host missing")?
+    };
     let args = serde_json::json!({
         "id": id,
         "name": name,
@@ -986,7 +989,13 @@ fn propose_save_skill_cmd(
     });
     let result = host
         .execute(cd_core::tools::names::SAVE_SKILL, &args, None)
-        .map_err(|e| e.to_string())?;
+        .await
+        .map_err(|e| e.to_string());
+    {
+        let mut host_guard = state.host.lock().expect("host");
+        *host_guard = Some(host);
+    }
+    let result = result?;
     Ok(events_to_dto(&result.events))
 }
 
@@ -1075,63 +1084,46 @@ async fn agent_turn(
         let _ = channel.send(dto);
     };
 
-    // Always use local research when forced or for reliability without holding locks
-    // across await: run local path under mutex (sync). Live model path uses block_in_place.
-    let result = if req.force_local || profile.kind == cd_core::providers::ProviderKind::Ollama {
+    // #114: take host out of the mutex so we never hold it across `.await`.
+    // No block_in_place — turn is a normal async future.
+    let mut host = {
         let mut host_guard = state.host.lock().expect("host");
-        let host = host_guard.as_mut().ok_or("host missing")?;
-        // Try ollama via block_in_place only if not force_local
-        if !req.force_local {
-            let res = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    cd_core::research::research_turn_with_cancel(
-                        host,
-                        &profile,
-                        api_key.clone(),
-                        &user_text,
-                        &mut history,
-                        &req.session_id,
-                        false,
-                        Some(cancel.clone()),
-                        Some(&mut sink),
-                    ),
-                )
-            });
-            // #123: never swap a live-model error for silent keyword retrieval.
-            res.map_err(|e| e.to_string())
-        } else {
-            let ev = cd_core::research::research_local_with_skills(
-                host,
-                &user_text,
-                &req.session_id,
-                &skill_dirs,
-            )
-            .map_err(|e| e.to_string())?;
-            for e in &ev {
+        host_guard.take().ok_or("host missing")?
+    };
+    let result = if req.force_local {
+        let ev = cd_core::research::research_local_with_skills(
+            &mut host,
+            &user_text,
+            &req.session_id,
+            &skill_dirs,
+        )
+        .await
+        .map_err(|e| e.to_string());
+        if let Ok(ref events) = ev {
+            for e in events {
                 sink(e.clone());
             }
-            Ok(ev)
         }
+        ev
     } else {
-        let mut host_guard = state.host.lock().expect("host");
-        let host = host_guard.as_mut().ok_or("host missing")?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                cd_core::research::research_turn_with_cancel(
-                    host,
-                    &profile,
-                    api_key,
-                    &user_text,
-                    &mut history,
-                    &req.session_id,
-                    false,
-                    Some(cancel.clone()),
-                    Some(&mut sink),
-                ),
-            )
-        })
+        cd_core::research::research_turn_with_cancel(
+            &mut host,
+            &profile,
+            api_key,
+            &user_text,
+            &mut history,
+            &req.session_id,
+            false,
+            Some(cancel.clone()),
+            Some(&mut sink),
+        )
+        .await
         .map_err(|e| e.to_string())
     };
+    {
+        let mut host_guard = state.host.lock().expect("host");
+        *host_guard = Some(host);
+    }
 
     {
         let mut cancels = state.cancels.lock().expect("cancels");
@@ -1736,7 +1728,7 @@ struct GrantReq {
 }
 
 #[tauri::command]
-fn complete_permission_cmd(
+async fn complete_permission_cmd(
     state: State<'_, AppState>,
     req: GrantReq,
 ) -> Result<Vec<EventDto>, String> {
@@ -1756,10 +1748,13 @@ fn complete_permission_cmd(
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(sid.clone()).or_default().clone()
     });
-    let mut host_guard = state.host.lock().expect("host");
-    let host = host_guard.as_mut().ok_or("host missing")?;
+    // #114: take host out — MutexGuard is not Send across await.
+    let mut host = {
+        let mut host_guard = state.host.lock().expect("host");
+        host_guard.take().ok_or("host missing")?
+    };
     let events = grant_and_execute(
-        host,
+        &mut host,
         &req.request_id,
         decision,
         req.typed.as_deref(),
@@ -1767,8 +1762,13 @@ fn complete_permission_cmd(
         &req.arguments,
         history_buf.as_mut(),
     )
-    .map_err(|e| e.to_string())?;
-    drop(host_guard);
+    .await
+    .map_err(|e| e.to_string());
+    {
+        let mut host_guard = state.host.lock().expect("host");
+        *host_guard = Some(host);
+    }
+    let events = events?;
     if let (Some(sid), Some(h)) = (session_key, history_buf) {
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(sid, h);
