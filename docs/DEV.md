@@ -168,6 +168,65 @@ DNS rebinding residual: hostname resolution is not re-checked after every hop; p
 - **TLS:** cd-server is **HTTP-only**. Terminate TLS at a reverse proxy when using `--allow-lan` (see `docs/THREAT_MODEL.md`).
 - Startup refuses unauthenticated non-loopback binds (`guard_exposure`, #144/#171).
 
+### Team workspaces, roles, persistent shared memory, audit (#167, finishes #50)
+
+The **headless server is legitimately file/flag-configured** — AGENTS.md #7 (settings-first)
+governs the desktop happy path, not `cd-server`. Pass `--config server.toml` (or set
+`CD_SERVER_CONFIG`) to define multiple team workspaces, each with its own roots and its
+own admin/member API-key set:
+
+```toml
+# server.toml — contains NO raw provider secrets
+data_dir = "/var/lib/cd-server"      # optional; default: <config dir>/server
+
+[[workspaces]]
+id = "team-a"
+roots = ["/srv/knowledge/team-a"]
+keys = [
+  { key = "short-dev-token", role = "admin" },       # hashed at load (dev only)
+  { key_hash = "…64 hex…",   role = "member" },       # preferred for strong tokens
+]
+
+[[workspaces]]
+id = "team-b"
+roots = ["/srv/knowledge/team-b"]
+keys = [ { key_hash = "…", role = "admin" } ]
+```
+
+- **Roles.** `admin` may write shared memory and manage the workspace; `member` may
+  search / read and use scoped (permission-gated) writes. Admin-only endpoints reject a
+  `member` key with **403** (`/v1/memory/publish`). Legacy `--root` + `--api-keys` still
+  work: those keys are granted `admin` on the `default` workspace.
+- **No raw secrets in the config file.** Provide strong tokens as `key_hash` (a plain
+  sha256 hex of the token — not a secret). The loader **refuses** a `key` that looks like a
+  raw provider secret (`sk-…` / `xai-…` / high-entropy), reusing the `cd_core::config`
+  `api_key_ref` guard. Generate a hash the same way `hash_key` does:
+  `printf %s 'YOUR_TOKEN' | shasum -a 256`. Treat any file that does hold raw tokens as an
+  operational secret (chmod 600, never commit) — same as `--api-keys-file`.
+- **Persistent shared memory.** `/v1/memory/publish` appends to
+  `<data_dir>/workspaces/<id>/memory.jsonl` **before** acknowledging; the server reloads it
+  into RAM on boot, so a publish → restart → list round-trip returns the note.
+- **Audit trail.** Writes and denials append a hash-chained `cd_core::audit::AuditEntry`
+  to `<data_dir>/audit.jsonl` (`AuditLog` scrubs secrets). Research/session tool writes are
+  audited too (the audit path is passed into `build_host`). Verify integrity with
+  `AuditLog::verify_chain`.
+
+Manual two-workspace check:
+
+```bash
+cd-server --bind 127.0.0.1:8799 --config server.toml
+# admin publishes:
+curl -s -XPOST localhost:8799/v1/memory/publish -H 'authorization: Bearer <admin>' \
+  -H 'content-type: application/json' -d '{"workspace_id":"team-a","title":"Arch","body":"…"}'
+# member is denied (403):
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST localhost:8799/v1/memory/publish \
+  -H 'authorization: Bearer <member>' -H 'content-type: application/json' \
+  -d '{"workspace_id":"team-a","title":"x","body":"y"}'
+# restart the process, then list — the note persists:
+curl -s -XPOST localhost:8799/v1/memory/list -H 'authorization: Bearer <member>' \
+  -H 'content-type: application/json' -d '{"workspace_id":"team-a"}'
+```
+
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
 
 ## Secrets

@@ -68,7 +68,7 @@ Last audit: 2026-07-17 (updated same day: 2026-07-17 honesty pass — prior pass
 |---|--------|-------|
 | 6–7, 36–43 | DONE | Skills + multi-pane; SoftWrite Accept uses host-stored args (fixed) |
 | 8, 44–45, 47–48, 75 | PARTIAL | Confluence RO + SQLite RO + X/web wired; **#46 Postgres/timeouts TODO**; MCP/HTTP presets not in Settings (#93) |
-| 9–10, 49, 51–53 | PARTIAL | cd-server auth/SSE basics; **#50 team roles/audit residual** (#167); PROTOCOL snake_case DTOs + drift guard (#169/#181) |
+| 9–10, 49, 51–53 | DONE | cd-server auth/SSE basics; **#50 team workspaces + admin/member roles + disk-persistent shared memory + audit delivered in #167** (config-file workspaces, role-gated `/v1/memory/publish`, `<data_dir>/workspaces/<id>/memory.jsonl`, hash-chained `audit.jsonl`); PROTOCOL snake_case DTOs + drift guard (#169/#181) |
 | 19 | DONE | refresh_token + expiry + offline mock tests; ToS docs |
 | 54 | PARTIAL | slate skin CSS exists; Settings skin picker incomplete |
 | 55 | TODO | No tagged multi-OS release workflow (only ci.yml); see #172 |

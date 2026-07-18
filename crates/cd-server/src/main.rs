@@ -6,11 +6,12 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use cd_core::audit::{outcomes, AuditLog};
 use cd_core::chat::ChatMessage;
-use cd_core::config::{config_path, load_config};
+use cd_core::config::{config_path, ensure_config_dir, load_config};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
-use cd_core::keychain_store::{KeychainSecretStore, SecretStore};
+use cd_core::keychain_store::{looks_like_raw_secret, KeychainSecretStore, SecretStore};
 use cd_core::permissions::PermissionDecision;
 use cd_core::providers::ProviderProfile;
 use cd_core::research::{
@@ -18,6 +19,7 @@ use cd_core::research::{
     research_turn_with_cancel,
 };
 use cd_core::tool_host::ToolHost;
+use cd_core::tools::ToolSideEffect;
 use cd_core::workspace::Workspace;
 use clap::Parser;
 use futures_util::stream::Stream;
@@ -25,8 +27,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
@@ -50,6 +54,15 @@ struct Args {
     allow_lan: bool,
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Server config file (TOML) defining team workspaces + per-key admin/member roles.
+    /// The headless server is legitimately file/flag-configured (AGENTS #7 governs the
+    /// desktop happy path, not the server). See `docs/DEV.md` (cd-server team workspaces).
+    #[arg(long, env = "CD_SERVER_CONFIG")]
+    config: Option<PathBuf>,
+    /// Directory for persistent server state (shared memory JSONL + audit log).
+    /// Defaults to `<config dir>/server`, or `data_dir` from the config file.
+    #[arg(long, env = "CD_SERVER_DATA_DIR")]
+    data_dir: Option<PathBuf>,
 }
 
 /// Optional chat provider for server research turns (#165).
@@ -61,6 +74,21 @@ struct ServerProvider {
     api_key: Option<String>,
 }
 
+/// Per-key, per-workspace role (#167 / #50). `admin` may write shared memory and manage
+/// the workspace; `member` may search / read and use scoped write (permission-gated tools).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Role {
+    Admin,
+    Member,
+}
+
+impl Role {
+    fn is_admin(self) -> bool {
+        matches!(self, Role::Admin)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     key_hashes: Arc<Vec<[u8; 32]>>,
@@ -68,6 +96,12 @@ struct AppState {
     workspaces: Arc<Mutex<HashMap<String, WorkspaceData>>>,
     /// api key hash -> allowed workspace ids (empty vec = all if single-tenant dev)
     key_workspaces: Arc<HashMap<[u8; 32], Vec<String>>>,
+    /// api key hash -> { workspace_id -> Role } (#167). Missing entry with keys present
+    /// means the key has no role in that workspace (treated as unauthorized to mutate).
+    key_roles: Arc<HashMap<[u8; 32], HashMap<String, Role>>>,
+    /// Append-only, hash-chained audit log for writes AND denials (#167). Shared across
+    /// handlers; `AuditLog` already scrubs secrets before writing (`audit.rs`).
+    audit: Arc<AuditLog>,
     /// Active provider from config/keychain; `None` → always local-retrieval / degraded.
     provider: Option<ServerProvider>,
     /// Per-session ToolHost for permission pending state (#168).
@@ -148,7 +182,10 @@ async fn run_research_turn(
 struct WorkspaceData {
     workspace: Workspace,
     index: KeywordIndex,
+    /// In-RAM mirror of the on-disk shared memory (`memory_path`), loaded at boot.
     memory: Vec<MemoryNote>,
+    /// JSONL file the shared memory persists to (survives restart) (#167).
+    memory_path: PathBuf,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -158,10 +195,184 @@ struct MemoryNote {
     body: String,
 }
 
+// ---------------------------------------------------------------------------
+// Server config (TOML) — team workspaces + per-key roles (#167 / finishes #50).
+// ---------------------------------------------------------------------------
+
+/// Top-level server config file. Contains NO raw provider secrets: API keys are
+/// either short opaque dev tokens (hashed at load) or `key_hash` (sha256 hex) so a
+/// strong token never sits in the file. `looks_like_raw_secret` refuses a pasted
+/// provider secret, mirroring `cd_core::config`'s `api_key_ref` guard.
+#[derive(Debug, Deserialize)]
+struct ServerConfig {
+    /// Optional override for the persistent state dir (shared memory + audit).
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+    /// Team workspaces, each with its own roots + admin/member key set.
+    #[serde(default)]
+    workspaces: Vec<WsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WsConfig {
+    id: String,
+    roots: Vec<PathBuf>,
+    #[serde(default)]
+    keys: Vec<KeyEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyEntry {
+    /// Raw opaque token (dev). Hashed at load; refused if it looks like a provider secret.
+    #[serde(default)]
+    key: Option<String>,
+    /// Precomputed sha256 hex of the token — lets the file hold no secret at all.
+    #[serde(default)]
+    key_hash: Option<String>,
+    role: Role,
+}
+
+/// A workspace resolved from config or legacy flags, ready to build [`AppState`].
+struct ResolvedWorkspace {
+    id: String,
+    roots: Vec<PathBuf>,
+    /// (api-key-hash, role) pairs authorized on this workspace.
+    keys: Vec<([u8; 32], Role)>,
+}
+
 fn hash_key(k: &str) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(k.as_bytes());
     h.finalize().into()
+}
+
+/// Resolve a config key entry to its 32-byte auth hash, enforcing the no-raw-secret guard.
+fn resolve_key_hash(entry: &KeyEntry) -> Result<[u8; 32], String> {
+    if let Some(h) = &entry.key_hash {
+        let bytes = hex::decode(h.trim())
+            .map_err(|_| format!("invalid key_hash (must be sha256 hex): {h}"))?;
+        return <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| format!("key_hash must be 32 bytes / 64 hex chars: {h}"));
+    }
+    if let Some(k) = &entry.key {
+        if looks_like_raw_secret(k) {
+            return Err(
+                "refusing server config with a raw provider-style secret in `key`; \
+                 use `key_hash` (sha256 hex) for strong tokens"
+                    .into(),
+            );
+        }
+        return Ok(hash_key(k));
+    }
+    Err("each key entry needs `key` or `key_hash`".into())
+}
+
+/// Parse a server config file (TOML). Offline; no network, no keychain.
+fn load_server_config(path: &Path) -> Result<ServerConfig, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read --config {}: {e}", path.display()))?;
+    toml::from_str(&raw).map_err(|e| format!("failed to parse --config {}: {e}", path.display()))
+}
+
+/// Turn parsed config workspaces into [`ResolvedWorkspace`]s (hashing keys, enforcing guard).
+fn resolve_config_workspaces(cfg: &ServerConfig) -> Result<Vec<ResolvedWorkspace>, String> {
+    let mut out = Vec::new();
+    for ws in &cfg.workspaces {
+        if ws.id.trim().is_empty() {
+            return Err("workspace id must not be empty".into());
+        }
+        if ws.roots.is_empty() {
+            return Err(format!("workspace '{}' has no roots", ws.id));
+        }
+        let mut keys = Vec::new();
+        for entry in &ws.keys {
+            keys.push((resolve_key_hash(entry)?, entry.role));
+        }
+        out.push(ResolvedWorkspace {
+            id: ws.id.clone(),
+            roots: ws.roots.clone(),
+            keys,
+        });
+    }
+    Ok(out)
+}
+
+/// Per-workspace JSONL path under the server data dir.
+fn workspace_memory_path(data_dir: &Path, workspace_id: &str) -> PathBuf {
+    data_dir
+        .join("workspaces")
+        .join(workspace_id)
+        .join("memory.jsonl")
+}
+
+/// Load persisted shared memory from disk (missing file → empty). Skips unparsable lines.
+fn load_memory_jsonl(path: &Path) -> Vec<MemoryNote> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<MemoryNote>(l).ok())
+        .collect()
+}
+
+/// Append one shared-memory note to its JSONL file (creating parent dirs).
+fn append_memory_jsonl(path: &Path, note: &MemoryNote) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let line = serde_json::to_string(note)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
+/// Build [`AppState`] from resolved workspaces + a data dir. Loads persisted memory
+/// from disk (so a restart re-hydrates shared memory) and opens the shared audit log.
+fn build_state(
+    resolved: Vec<ResolvedWorkspace>,
+    data_dir: &Path,
+    provider: Option<ServerProvider>,
+) -> Result<AppState, String> {
+    let mut workspaces = HashMap::new();
+    let mut key_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut key_workspaces: HashMap<[u8; 32], Vec<String>> = HashMap::new();
+    let mut key_roles: HashMap<[u8; 32], HashMap<String, Role>> = HashMap::new();
+
+    for rw in resolved {
+        let ws = Workspace::new(&rw.id, rw.roots.clone());
+        let index = KeywordIndex::build(&ws).unwrap_or_default();
+        let memory_path = workspace_memory_path(data_dir, &rw.id);
+        let memory = load_memory_jsonl(&memory_path);
+        workspaces.insert(
+            rw.id.clone(),
+            WorkspaceData {
+                workspace: ws,
+                index,
+                memory,
+                memory_path,
+            },
+        );
+        for (h, role) in rw.keys {
+            if !key_hashes.contains(&h) {
+                key_hashes.push(h);
+            }
+            key_workspaces.entry(h).or_default().push(rw.id.clone());
+            key_roles.entry(h).or_default().insert(rw.id.clone(), role);
+        }
+    }
+
+    let audit = AuditLog::new(data_dir.join("audit.jsonl"));
+    Ok(AppState {
+        key_hashes: Arc::new(key_hashes),
+        workspaces: Arc::new(Mutex::new(workspaces)),
+        key_workspaces: Arc::new(key_workspaces),
+        key_roles: Arc::new(key_roles),
+        audit: Arc::new(audit),
+        provider,
+        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+    })
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Result<(), StatusCode> {
@@ -192,6 +403,62 @@ fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Resul
         }
     }
     Ok(())
+}
+
+/// Extract the caller's API-key hash from the `Authorization` header, if any.
+fn token_hash(headers: &HeaderMap) -> Option<[u8; 32]> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+        .unwrap_or(auth)
+        .trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(hash_key(token))
+    }
+}
+
+/// The caller's role in `workspace_id`. Loopback dev with no configured keys is treated
+/// as `admin` (single-user local). A key with no role entry for the workspace → `None`.
+fn role_for(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Option<Role> {
+    if state.key_hashes.is_empty() {
+        return Some(Role::Admin);
+    }
+    token_hash(headers)
+        .and_then(|h| state.key_roles.get(&h))
+        .and_then(|m| m.get(workspace_id))
+        .copied()
+}
+
+/// Enforce admin-only access on a mutating endpoint. Assumes [`authorize`] already ran
+/// (auth + workspace membership). Non-admins are refused with 403 and an audit `denied`
+/// entry; admins pass through with no side effect.
+fn require_admin(
+    headers: &HeaderMap,
+    state: &AppState,
+    workspace_id: &str,
+    tool: &str,
+    target: &str,
+) -> Result<(), StatusCode> {
+    match role_for(headers, state, workspace_id) {
+        Some(role) if role.is_admin() => Ok(()),
+        _ => {
+            let _ = state.audit.log(
+                tool,
+                ToolSideEffect::HardWrite,
+                target,
+                outcomes::DENIED,
+                "member role denied admin-only action",
+                0,
+            );
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -252,20 +519,46 @@ async fn publish_memory(
     Json(body): Json<PublishBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
     authorize(&headers, &state, &body.workspace_id)?;
-    let mut map = state
-        .workspaces
-        .lock()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let data = map
-        .get_mut(&body.workspace_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let id = uuid::Uuid::new_v4().to_string();
-    data.memory.push(MemoryNote {
-        id: id.clone(),
+    // Writing shared memory is admin-only; members are refused (403 + audit denial).
+    let deny_target = format!("{}/memory", body.workspace_id);
+    require_admin(
+        &headers,
+        &state,
+        &body.workspace_id,
+        "memory_publish",
+        &deny_target,
+    )?;
+
+    let note = MemoryNote {
+        id: uuid::Uuid::new_v4().to_string(),
         title: body.title,
         body: body.body,
-    });
-    Ok(Json(serde_json::json!({ "id": id })))
+    };
+    let bytes = note.body.len() as u64;
+    {
+        let mut map = state
+            .workspaces
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let data = map
+            .get_mut(&body.workspace_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        // Persist to disk FIRST so a crash never acknowledges an unsaved note.
+        append_memory_jsonl(&data.memory_path, &note).map_err(|e| {
+            tracing::error!("shared memory persist failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        data.memory.push(note.clone());
+    }
+    let _ = state.audit.log(
+        "memory_publish",
+        ToolSideEffect::HardWrite,
+        &format!("{}/{}", body.workspace_id, note.id),
+        outcomes::ALLOWED,
+        "published shared memory",
+        bytes,
+    );
+    Ok(Json(serde_json::json!({ "id": note.id })))
 }
 
 #[derive(Deserialize)]
@@ -310,7 +603,8 @@ async fn research(
         let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         data.workspace.clone()
     };
-    let mut host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut host = build_host(ws, Some(state.audit.path().to_path_buf()))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let sid = body.session_id.unwrap_or_else(|| "server".into());
     let (events, degraded, model) = run_research_turn(
         &mut host,
@@ -368,13 +662,14 @@ async fn research_sse(
     let force_local = q.force_local;
     let query = q.query.clone();
     let session_id = q.session_id.unwrap_or_else(|| "sse".into());
+    let audit_path = state.audit.path().to_path_buf();
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_task = cancel.clone();
 
     tokio::spawn(async move {
-        let Ok(mut host) = build_host(ws, None) else {
+        let Ok(mut host) = build_host(ws, Some(audit_path)) else {
             let _ = tx.send(StreamEvent::Error {
                 code: "host_build".into(),
                 message: "failed to build tool host".into(),
@@ -511,7 +806,8 @@ async fn ensure_session_host(
         let data = map.get(workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         data.workspace.clone()
     };
-    let host = build_host(ws, None).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let host = build_host(ws, Some(state.audit.path().to_path_buf()))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     sessions.insert(
         session_id.to_string(),
         SessionHost {
@@ -637,16 +933,63 @@ async fn main() {
 
     let addr: SocketAddr = args.bind.parse().expect("invalid --bind address");
 
-    let keys = match load_api_keys(&args.api_keys, args.api_keys_file.as_ref()) {
+    // Legacy flag path: --api-keys / CD_API_KEYS / --api-keys-file. These keys are
+    // granted `admin` on the legacy `default` workspace (preserves prior behavior).
+    let legacy_keys = match load_api_keys(&args.api_keys, args.api_keys_file.as_ref()) {
         Ok(k) => k,
         Err(msg) => {
             eprintln!("{msg}");
             std::process::exit(2);
         }
     };
-    let key_hashes: Vec<[u8; 32]> = keys.iter().map(|k| hash_key(k)).collect();
+    let legacy_hashes: Vec<[u8; 32]> = legacy_keys.iter().map(|k| hash_key(k)).collect();
 
-    match guard_exposure(&addr, args.allow_lan, key_hashes.len()) {
+    // Optional server config file: multiple team workspaces + per-key roles (#167).
+    let server_config = match args.config.as_ref() {
+        Some(path) => match load_server_config(path) {
+            Ok(c) => Some(c),
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+
+    let mut resolved = match server_config.as_ref().map(resolve_config_workspaces) {
+        Some(Ok(r)) => r,
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => Vec::new(),
+    };
+
+    // Legacy `default` workspace from --root (unless config already defines `default`).
+    if let Some(root) = args.root.clone() {
+        if !resolved.iter().any(|w| w.id == "default") {
+            resolved.push(ResolvedWorkspace {
+                id: "default".into(),
+                roots: vec![root],
+                keys: legacy_hashes.iter().map(|h| (*h, Role::Admin)).collect(),
+            });
+        }
+    }
+
+    // Total distinct auth keys across every workspace — drives the exposure guard.
+    let key_count = {
+        let mut all: Vec<[u8; 32]> = Vec::new();
+        for w in &resolved {
+            for (h, _) in &w.keys {
+                if !all.contains(h) {
+                    all.push(*h);
+                }
+            }
+        }
+        all.len()
+    };
+
+    match guard_exposure(&addr, args.allow_lan, key_count) {
         Err(msg) => {
             eprintln!("{msg}");
             eprintln!(
@@ -662,25 +1005,20 @@ async fn main() {
         }
     }
 
-    let mut workspaces = HashMap::new();
-    if let Some(root) = args.root {
-        let ws = Workspace::new("default", vec![root]);
-        let index = KeywordIndex::build(&ws).unwrap_or_default();
-        workspaces.insert(
-            "default".into(),
-            WorkspaceData {
-                workspace: ws,
-                index,
-                memory: vec![],
-            },
-        );
+    // Persistent state dir: --data-dir > config data_dir > <config dir>/server.
+    let data_dir = args
+        .data_dir
+        .clone()
+        .or_else(|| server_config.as_ref().and_then(|c| c.data_dir.clone()))
+        .unwrap_or_else(|| match ensure_config_dir(&branding) {
+            Ok(dir) => dir.join("server"),
+            Err(_) => PathBuf::from(".").join(".cd-server"),
+        });
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("failed to create data dir {}: {e}", data_dir.display());
+        std::process::exit(2);
     }
-
-    // Map each key to default workspace only when keys present
-    let mut key_workspaces = HashMap::new();
-    for h in &key_hashes {
-        key_workspaces.insert(*h, vec!["default".into()]);
-    }
+    tracing::info!(data_dir = %data_dir.display(), "server state dir (shared memory + audit)");
 
     let provider = load_server_provider(&branding);
     if provider.is_some() {
@@ -689,12 +1027,12 @@ async fn main() {
         tracing::info!("no provider configured — /v1/research will use local-retrieval (degraded)");
     }
 
-    let state = AppState {
-        key_hashes: Arc::new(key_hashes),
-        workspaces: Arc::new(Mutex::new(workspaces)),
-        key_workspaces: Arc::new(key_workspaces),
-        provider,
-        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+    let state = match build_state(resolved, &data_dir, provider) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
     };
 
     let app = build_app(state);
@@ -889,44 +1227,43 @@ mod tests {
         keys: &[(&str, &str)],
         provider: Option<ServerProvider>,
     ) -> AppState {
-        // keys: (api_key, workspace_id)
-        let ws_a = Workspace::new("a", vec![root.join("a")]);
-        let ws_b = Workspace::new("b", vec![root.join("b")]);
+        // keys: (api_key, workspace_id) — all granted `admin` (legacy behavior).
+        let with_roles: Vec<(&str, &str, Role)> =
+            keys.iter().map(|(k, w)| (*k, *w, Role::Admin)).collect();
+        test_state_with_roles(root, &with_roles, provider)
+    }
+
+    /// Build state via the real `build_state` path (loads persisted memory, opens audit).
+    /// `keys`: (api_key, workspace_id, role). ws-a → root/a, ws-b → root/b.
+    fn test_state_with_roles(
+        root: PathBuf,
+        keys: &[(&str, &str, Role)],
+        provider: Option<ServerProvider>,
+    ) -> AppState {
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(root.join("b")).unwrap();
         fs::write(root.join("a/secret-a.md"), "alpha only data\n").unwrap();
         fs::write(root.join("b/secret-b.md"), "beta only data\n").unwrap();
-        let mut workspaces = HashMap::new();
-        workspaces.insert(
-            "ws-a".into(),
-            WorkspaceData {
-                index: KeywordIndex::build(&ws_a).unwrap(),
-                workspace: ws_a,
-                memory: vec![],
-            },
-        );
-        workspaces.insert(
-            "ws-b".into(),
-            WorkspaceData {
-                index: KeywordIndex::build(&ws_b).unwrap(),
-                workspace: ws_b,
-                memory: vec![],
-            },
-        );
-        let mut key_hashes = Vec::new();
-        let mut key_workspaces = HashMap::new();
-        for (key, ws) in keys {
-            let h = hash_key(key);
-            key_hashes.push(h);
-            key_workspaces.insert(h, vec![(*ws).into()]);
+        let mut ws_keys: HashMap<String, Vec<([u8; 32], Role)>> = HashMap::new();
+        for (key, ws, role) in keys {
+            ws_keys
+                .entry((*ws).into())
+                .or_default()
+                .push((hash_key(key), *role));
         }
-        AppState {
-            key_hashes: Arc::new(key_hashes),
-            workspaces: Arc::new(Mutex::new(workspaces)),
-            key_workspaces: Arc::new(key_workspaces),
-            provider,
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        }
+        let resolved = vec![
+            ResolvedWorkspace {
+                id: "ws-a".into(),
+                roots: vec![root.join("a")],
+                keys: ws_keys.remove("ws-a").unwrap_or_default(),
+            },
+            ResolvedWorkspace {
+                id: "ws-b".into(),
+                roots: vec![root.join("b")],
+                keys: ws_keys.remove("ws-b").unwrap_or_default(),
+            },
+        ];
+        build_state(resolved, &root.join(".server-data"), provider).unwrap()
     }
 
     #[tokio::test]
@@ -959,6 +1296,251 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // ---------------------------------------------------------------------
+    // #167 — roles, persistent shared memory, audit.
+    // ---------------------------------------------------------------------
+
+    fn publish_req(key: &str, ws: &str, title: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/memory/publish")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"{ws}","title":"{title}","body":"{body}"}}"#
+            )))
+            .unwrap()
+    }
+
+    async fn json_body(res: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn resolve_key_hash_variants() {
+        // Raw dev token → hashed (matches hash_key).
+        let e = KeyEntry {
+            key: Some("admin-token".into()),
+            key_hash: None,
+            role: Role::Admin,
+        };
+        assert_eq!(resolve_key_hash(&e).unwrap(), hash_key("admin-token"));
+
+        // Precomputed key_hash (no secret in file) → decoded bytes.
+        let hex_hash = hex::encode(hash_key("strong-secret"));
+        let e = KeyEntry {
+            key: None,
+            key_hash: Some(hex_hash),
+            role: Role::Member,
+        };
+        assert_eq!(resolve_key_hash(&e).unwrap(), hash_key("strong-secret"));
+
+        // Provider-style raw secret in `key` → refused (guard).
+        let e = KeyEntry {
+            key: Some("sk-proj-abcdef0123456789abcdef".into()),
+            key_hash: None,
+            role: Role::Admin,
+        };
+        assert!(resolve_key_hash(&e).is_err());
+
+        // Neither field → error.
+        let e = KeyEntry {
+            key: None,
+            key_hash: None,
+            role: Role::Member,
+        };
+        assert!(resolve_key_hash(&e).is_err());
+    }
+
+    #[test]
+    fn server_config_parses_workspaces_and_roles() {
+        let toml_src = r#"
+            data_dir = "/tmp/cd-server-x"
+            [[workspaces]]
+            id = "team-a"
+            roots = ["/tmp/team-a"]
+            keys = [
+              { key = "admin-token", role = "admin" },
+              { key = "member-token", role = "member" },
+            ]
+        "#;
+        let cfg: ServerConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workspaces.len(), 1);
+        let resolved = resolve_config_workspaces(&cfg).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].keys.len(), 2);
+        assert_eq!(resolved[0].keys[0].1, Role::Admin);
+        assert_eq!(resolved[0].keys[1].1, Role::Member);
+    }
+
+    #[tokio::test]
+    async fn admin_can_publish() {
+        let dir = tempdir().unwrap();
+        let state = test_state_with_roles(
+            dir.path().to_path_buf(),
+            &[("admin-k", "ws-a", Role::Admin)],
+            None,
+        );
+        let audit_path = state.audit.path().to_path_buf();
+        let app = build_app(state);
+
+        // Publish succeeds for admin.
+        let res = app
+            .clone()
+            .oneshot(publish_req("admin-k", "ws-a", "Arch", "we use jwt"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_body(res).await;
+        assert!(v["id"].as_str().is_some(), "{v}");
+
+        // list returns the published note.
+        let list = Request::builder()
+            .method("POST")
+            .uri("/v1/memory/list")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-a"}"#))
+            .unwrap();
+        let res = app.oneshot(list).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_body(res).await;
+        let notes = v["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "{v}");
+        assert_eq!(notes[0]["title"], "Arch");
+
+        // Audit recorded the allowed write.
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("memory_publish"), "{audit}");
+        assert!(audit.contains("allowed"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn member_cannot_publish() {
+        let dir = tempdir().unwrap();
+        let state = test_state_with_roles(
+            dir.path().to_path_buf(),
+            &[
+                ("admin-k", "ws-a", Role::Admin),
+                ("member-k", "ws-a", Role::Member),
+            ],
+            None,
+        );
+        let audit_path = state.audit.path().to_path_buf();
+        let app = build_app(state);
+
+        // Member is denied the admin-only publish (403).
+        let res = app
+            .clone()
+            .oneshot(publish_req(
+                "member-k",
+                "ws-a",
+                "Nope",
+                "should not persist",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // Member may still read (search) — scoped read is allowed.
+        let search = Request::builder()
+            .method("POST")
+            .uri("/v1/search")
+            .header("authorization", "Bearer member-k")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-a","query":"alpha"}"#))
+            .unwrap();
+        let res = app.clone().oneshot(search).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Nothing was persisted by the denied write.
+        let list = Request::builder()
+            .method("POST")
+            .uri("/v1/memory/list")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-a"}"#))
+            .unwrap();
+        let res = app.oneshot(list).await.unwrap();
+        let v = json_body(res).await;
+        assert!(v["notes"].as_array().unwrap().is_empty(), "{v}");
+
+        // The denial produced an audit entry.
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("memory_publish"), "{audit}");
+        assert!(audit.contains("denied"), "{audit}");
+        // Chain integrity holds.
+        AuditLog::new(&audit_path).verify_chain().unwrap();
+    }
+
+    #[tokio::test]
+    async fn memory_persists_across_reload() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        // First "boot": publish a note as admin.
+        let state1 = test_state_with_roles(root.clone(), &[("admin-k", "ws-a", Role::Admin)], None);
+        let app1 = build_app(state1);
+        let res = app1
+            .oneshot(publish_req(
+                "admin-k",
+                "ws-a",
+                "Persisted",
+                "survives restart",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Second "boot": rebuild state from the same data dir (simulated restart).
+        let state2 = test_state_with_roles(root.clone(), &[("admin-k", "ws-a", Role::Admin)], None);
+        let app2 = build_app(state2);
+        let list = Request::builder()
+            .method("POST")
+            .uri("/v1/memory/list")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"workspace_id":"ws-a"}"#))
+            .unwrap();
+        let res = app2.oneshot(list).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_body(res).await;
+        let notes = v["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "note lost across reload: {v}");
+        assert_eq!(notes[0]["title"], "Persisted");
+        assert_eq!(notes[0]["body"], "survives restart");
+    }
+
+    #[test]
+    fn memory_jsonl_roundtrip_on_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("workspaces/team-a/memory.jsonl");
+        let note = MemoryNote {
+            id: "n1".into(),
+            title: "T".into(),
+            body: "B".into(),
+        };
+        append_memory_jsonl(&path, &note).unwrap();
+        append_memory_jsonl(
+            &path,
+            &MemoryNote {
+                id: "n2".into(),
+                title: "T2".into(),
+                body: "B2".into(),
+            },
+        )
+        .unwrap();
+        let loaded = load_memory_jsonl(&path);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "n1");
+        assert_eq!(loaded[1].title, "T2");
+        // Missing file → empty, not an error.
+        assert!(load_memory_jsonl(&dir.path().join("nope.jsonl")).is_empty());
     }
 
     #[tokio::test]
