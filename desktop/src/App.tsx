@@ -400,6 +400,12 @@ export function App() {
 
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
+  const [sidebarW, setSidebarW] = useState(() => {
+    const n = Number(localStorage.getItem("cd-sidebar-w"));
+    if (Number.isFinite(n) && n >= 140 && n <= 420) return n;
+    return 200;
+  });
+  const sidebarDragging = useRef(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -711,6 +717,31 @@ export function App() {
     document.documentElement.setAttribute("data-ui-scale", uiScale);
     localStorage.setItem("cd-ui-scale", uiScale);
   }, [uiScale]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--sidebar-w", `${sidebarW}px`);
+    localStorage.setItem("cd-sidebar-w", String(sidebarW));
+  }, [sidebarW]);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!sidebarDragging.current) return;
+      const next = Math.min(420, Math.max(140, e.clientX));
+      setSidebarW(next);
+    };
+    const onUp = () => {
+      if (!sidebarDragging.current) return;
+      sidebarDragging.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
 
   useEffect(() => {
     void hostGetBranding().then((b) => {
@@ -1543,6 +1574,31 @@ export function App() {
       <div className="app-body">
       <div className="main">
         <aside className="sidebar">
+          <div
+            className="sidebar-resize"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuenow={sidebarW}
+            aria-valuemin={140}
+            aria-valuemax={420}
+            tabIndex={0}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              sidebarDragging.current = true;
+              document.body.style.cursor = "col-resize";
+              document.body.style.userSelect = "none";
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowLeft") {
+                e.preventDefault();
+                setSidebarW((w) => Math.max(140, w - 16));
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                setSidebarW((w) => Math.min(420, w + 16));
+              }
+            }}
+          />
           <div className="row--between">
             <div className="sidebar__label">Chats</div>
             <button
@@ -2020,6 +2076,7 @@ export function App() {
                 docs={memoryDocs}
                 activePath={memoryPath}
                 onSelect={setMemoryPath}
+                onCreateHint={() => void refreshMemory()}
                 onSave={(path, body) => {
                   const title =
                     memoryDocs.find((d) => d.path === path)?.title ?? "Note";
