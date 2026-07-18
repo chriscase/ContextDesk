@@ -7,7 +7,9 @@ title = "ContextDesk"
 # Use default gitleaks rules; this file documents local policy + optional path allowlists.
 useDefault = true
 
-# Example allowlist shape (keep empty unless a documented false positive needs it):
-# [[allowlists]]
-# description = "why this path is safe"
-# paths = ['''docs/examples/fake-token\.txt''']
+# Documented false positives: synthetic tokens used only to unit-test the
+# redaction pipeline (MEMORY.md §5 / #272). Fixtures are built at runtime from
+# string fragments; residual matches on marker strings are not live secrets.
+[[allowlists]]
+description = "Offline redaction unit-test fixtures (not live credentials)"
+paths = ['''crates/cd-core/src/redact\.rs''']
