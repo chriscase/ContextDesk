@@ -20,6 +20,10 @@ type Props = {
     onSelect: (p: string) => void;
     onCreateHint: () => void;
     onSave: (path: string, body: string) => void;
+    onFilterChange?: (opts: {
+      kind: string | null;
+      includeSuperseded: boolean;
+    }) => void;
   } | null;
   source: { path: string | null; content: string } | null;
   todosKey: string | null;

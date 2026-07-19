@@ -2518,10 +2518,111 @@ fn read_memory_file(state: State<'_, AppState>, relative: String) -> Result<Stri
     read_workspace_file_cmd(state, relative)
 }
 
+/// Durable memory row for UI (content already redacted at write time — no raw secrets).
+#[derive(Debug, Clone, Serialize)]
+struct DurableMemoryDto {
+    id: String,
+    kind: String,
+    title: String,
+    content: String,
+    status: String,
+    scope: String,
+    updated_at: i64,
+    rev: i64,
+    /// Citation / selection key: `memory:{id}`
+    source_id: String,
+}
+
+impl From<&cd_core::memory::MemoryRecord> for DurableMemoryDto {
+    fn from(r: &cd_core::memory::MemoryRecord) -> Self {
+        Self {
+            id: r.id.to_string(),
+            kind: r.kind.as_str().to_string(),
+            title: r.title.clone(),
+            content: r.content.clone(),
+            status: r.status.as_str().to_string(),
+            scope: r.scope.as_str().to_string(),
+            updated_at: r.updated_at,
+            rev: r.rev,
+            source_id: format!("memory:{}", r.id),
+        }
+    }
+}
+
+/// List durable memories from the Phase-1 store (#274).
+#[tauri::command]
+fn list_durable_memories(
+    state: State<'_, AppState>,
+    kind: Option<String>,
+    include_superseded: Option<bool>,
+    include_retracted: Option<bool>,
+    limit: Option<u32>,
+) -> Result<Vec<DurableMemoryDto>, String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let store = host
+        .durable_memory_store()
+        .ok_or_else(|| "durable memory not attached".to_string())?;
+    let kinds_owned = kind.map(|k| vec![cd_core::memory::Kind::parse(&k)]);
+    let kinds_ref = kinds_owned.as_deref();
+    let list = store
+        .list(
+            kinds_ref,
+            include_superseded.unwrap_or(false),
+            include_retracted.unwrap_or(false),
+            cd_core::embed::now_unix_secs(),
+            limit.unwrap_or(100) as usize,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(list.iter().map(DurableMemoryDto::from).collect())
+}
+
+/// Fetch one durable memory by UUID (citation open).
+#[tauri::command]
+fn get_durable_memory(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<DurableMemoryDto>, String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let store = host
+        .durable_memory_store()
+        .ok_or_else(|| "durable memory not attached".to_string())?;
+    let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
+    let rec = store.get(&uuid).map_err(|e| e.to_string())?;
+    Ok(rec.as_ref().map(DurableMemoryDto::from))
+}
+
 #[tauri::command]
 fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+    // Prefer durable store when attached (#274); fall back to memory_fs .md notes.
+    if let Ok(host_g) = state.host.lock() {
+        if let Some(h) = host_g.as_ref() {
+            if let Some(store) = h.durable_memory_store() {
+                if let Ok(list) =
+                    store.list(None, false, false, cd_core::embed::now_unix_secs(), 200)
+                {
+                    if !list.is_empty() || h.durable_memory_active() {
+                        return Ok(list
+                            .iter()
+                            .map(|r| MemoryFile {
+                                path: std::path::PathBuf::from(format!("memory:{}", r.id)),
+                                relative: format!("memory:{}", r.id),
+                                title: if r.title.is_empty() {
+                                    r.kind.as_str().to_string()
+                                } else {
+                                    r.title.clone()
+                                },
+                                body: r.content.clone(),
+                            })
+                            .collect());
+                    }
+                }
+            }
+        }
+    }
     list_memory_files(&ws).map_err(|e| e.to_string())
 }
 
@@ -2640,6 +2741,8 @@ pub fn run() {
             read_memory_file,
             read_workspace_file_cmd,
             list_memory_notes,
+            list_durable_memories,
+            get_durable_memory,
             write_memory_note,
             sql_ro_query,
             get_confluence_settings,

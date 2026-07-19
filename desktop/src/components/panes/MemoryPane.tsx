@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export type MemoryDoc = {
   path: string;
@@ -23,7 +23,24 @@ type Props = {
   onSave: (path: string, body: string) => void;
   /** Optional: start a new note from empty state. */
   onCreateHint?: () => void;
+  /** Request include_superseded listing from host (durable store). */
+  onFilterChange?: (opts: {
+    kind: string | null;
+    includeSuperseded: boolean;
+  }) => void;
 };
+
+const KIND_OPTIONS = [
+  { value: "", label: "All kinds" },
+  { value: "fact", label: "Fact" },
+  { value: "decision", label: "Decision" },
+  { value: "bookmark", label: "Bookmark" },
+  { value: "preference", label: "Preference" },
+  { value: "project_note", label: "Project note" },
+  { value: "contact", label: "Contact" },
+  { value: "term", label: "Term" },
+  { value: "task", label: "Task" },
+];
 
 export function MemoryPane({
   docs,
@@ -31,13 +48,46 @@ export function MemoryPane({
   onSelect,
   onSave,
   onCreateHint,
+  onFilterChange,
 }: Props) {
-  const active = docs.find((d) => d.path === activePath) ?? docs[0] ?? null;
+  const [kindFilter, setKindFilter] = useState("");
+  const [includeSuperseded, setIncludeSuperseded] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    let list = docs;
+    if (kindFilter) {
+      list = list.filter((d) => (d.kind ?? "") === kindFilter);
+    }
+    if (!includeSuperseded) {
+      list = list.filter(
+        (d) => !d.status || d.status === "active" || d.status === undefined,
+      );
+    }
+    const q = query.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (d) =>
+          d.title.toLowerCase().includes(q) ||
+          d.body.toLowerCase().includes(q) ||
+          (d.kind ?? "").includes(q),
+      );
+    }
+    return list;
+  }, [docs, kindFilter, includeSuperseded, query]);
+
+  const active =
+    filtered.find((d) => d.path === activePath) ??
+    docs.find((d) => d.path === activePath) ??
+    filtered[0] ??
+    null;
   const [draft, setDraft] = useState(active?.body ?? "");
   const [dirty, setDirty] = useState(false);
   const [syncedPath, setSyncedPath] = useState<string | null>(
     active?.path ?? null,
   );
+
+  const isDurable = Boolean(active?.id || active?.path.startsWith("memory:"));
 
   // Re-sync draft when active doc path/body changes externally, unless dirty (#157).
   useEffect(() => {
@@ -55,17 +105,22 @@ export function MemoryPane({
       setSyncedPath(active.path);
       return;
     }
-    // Same path, body updated externally (e.g. agent save_memory refresh)
     if (!dirty && draft !== active.body) {
       setDraft(active.body);
     }
   }, [active?.path, active?.body, active, dirty, draft, syncedPath]);
 
-  const canSave = Boolean(active) && dirty;
+  useEffect(() => {
+    onFilterChange?.({
+      kind: kindFilter || null,
+      includeSuperseded,
+    });
+  }, [kindFilter, includeSuperseded, onFilterChange]);
+
+  const canSave = Boolean(active) && dirty && !isDurable;
 
   const handleSave = () => {
-    if (!active) return;
-    // Never overwrite a non-empty loaded note with empty stale draft (#157).
+    if (!active || isDurable) return;
     if (!dirty && !draft.trim() && active.body.trim()) {
       return;
     }
@@ -77,14 +132,45 @@ export function MemoryPane({
   return (
     <div className="pane">
       <div className="pane__header">Memory</div>
+      <div className="pane__toolbar" style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", padding: "0.5rem" }}>
+        <input
+          className="field__control"
+          style={{ flex: "1 1 8rem", minWidth: "6rem" }}
+          placeholder="Search…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search memories"
+        />
+        <select
+          className="field__control"
+          value={kindFilter}
+          onChange={(e) => setKindFilter(e.target.value)}
+          aria-label="Filter by kind"
+        >
+          {KIND_OPTIONS.map((o) => (
+            <option key={o.value || "all"} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+        <label className="field__label" style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+          <input
+            type="checkbox"
+            checked={includeSuperseded}
+            onChange={(e) => setIncludeSuperseded(e.target.checked)}
+          />
+          Include superseded
+        </label>
+      </div>
       <div className="pane__split">
         <ul className="session-list">
-          {docs.length === 0 ? (
+          {filtered.length === 0 ? (
             <li className="empty-state empty-state--inline">
-              <div className="empty-state__title">No memory notes yet</div>
+              <div className="empty-state__title">No memories yet</div>
               <p className="empty-state__body">
-                Project notes live here. Ask the agent to{" "}
-                <code>save_memory</code>, or open Settings → Workspace first.
+                Durable memories appear here after{" "}
+                <code>save_memory</code> (Accept). Ask the agent to remember a
+                fact, or refresh after a save.
               </p>
               {onCreateHint ? (
                 <button
@@ -97,7 +183,7 @@ export function MemoryPane({
               ) : null}
             </li>
           ) : (
-            docs.map((d) => (
+            filtered.map((d) => (
               <li key={d.path}>
                 <button
                   type="button"
@@ -112,9 +198,12 @@ export function MemoryPane({
                     setSyncedPath(d.path);
                   }}
                 >
-                  <span>{d.title}</span>
+                  <span>{d.title || d.kind || "Memory"}</span>
                   {d.kind ? (
                     <span className="badge badge--muted"> {d.kind}</span>
+                  ) : null}
+                  {d.scope ? (
+                    <span className="badge badge--muted"> {d.scope}</span>
                   ) : null}
                   {d.status && d.status !== "active" ? (
                     <span className="badge"> {d.status}</span>
@@ -130,7 +219,14 @@ export function MemoryPane({
               {active.path}
               {active.scope ? ` · ${active.scope}` : ""}
               {active.id ? ` · ${active.id.slice(0, 8)}…` : ""}
+              {active.status ? ` · ${active.status}` : ""}
             </div>
+            {active.status === "retracted" ? (
+              <div className="callout callout--warn" role="status">
+                Retracted (soft tombstone) — hidden from default recall; reversible.
+                Permanent purge is a separate type-to-confirm operation.
+              </div>
+            ) : null}
             {active.redactionPreview && active.redactionPreview.length > 0 ? (
               <div className="callout callout--warn" role="status">
                 Secrets redacted before save:{" "}
@@ -141,26 +237,36 @@ export function MemoryPane({
               className="field__control"
               rows={16}
               value={draft}
+              readOnly={isDurable}
               onChange={(e) => {
+                if (isDurable) return;
                 setDraft(e.target.value);
                 setDirty(true);
               }}
             />
-            <button
-              type="button"
-              className="btn btn--primary"
-              disabled={!canSave}
-              onClick={handleSave}
-            >
-              Save note
-            </button>
+            {isDurable ? (
+              <p className="section-lead">
+                Store-backed memory (read-only here). Corrections: ask the agent
+                to <code>supersede_memory</code>; forget:{" "}
+                <code>retract_memory</code> (Accept — reversible).
+              </p>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={!canSave}
+                onClick={handleSave}
+              >
+                Save note
+              </button>
+            )}
           </div>
-        ) : docs.length > 0 ? null : (
+        ) : filtered.length > 0 ? null : (
           <div className="empty-state pane__editor">
             <div className="empty-state__title">Nothing selected</div>
             <p className="empty-state__body">
-              Memory notes appear after the agent saves one, or when the host
-              lists existing files under the workspace memory folder.
+              Memories appear after the agent saves one with Accept, or when the
+              host lists the durable store.
             </p>
           </div>
         )}

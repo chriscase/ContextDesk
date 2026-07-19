@@ -10,10 +10,12 @@ import {
   hostGetConfig,
   hostGetDefaultChatModel,
   hostListChatModels,
+  hostListDurableMemories,
   hostListMemory,
   hostPreflight,
   hostSetWorkspace,
   type BrandingDto,
+  type MemoryFileDto,
   type ModelOptionDto,
 } from "../lib/host";
 import {
@@ -160,23 +162,66 @@ export function useShellState() {
     }
   }, [setup.baseUrl, setup.providerKind]);
 
-  const refreshMemory = useCallback(async () => {
-    try {
-      const files = await hostListMemory();
-      setMemoryDocs(
-        files.map((f) => ({
-          path: f.path,
-          title: f.title,
-          body: f.body,
-        })),
-      );
-      if (files.length && !memoryPath) {
-        setMemoryPath(files[0].path);
+  const refreshMemory = useCallback(
+    async (opts?: { kind?: string | null; includeSuperseded?: boolean }) => {
+      try {
+        // Prefer filtered durable list when filters requested
+        if (opts?.includeSuperseded || opts?.kind) {
+          try {
+            const durable = await hostListDurableMemories({
+              kind: opts.kind ?? null,
+              includeSuperseded: opts.includeSuperseded ?? false,
+              includeRetracted: false,
+              limit: 200,
+            });
+            setMemoryDocs(
+              durable.map((d) => ({
+                path: d.source_id,
+                title: d.title || d.kind,
+                body: d.content,
+                id: d.id,
+                kind: d.kind,
+                status: d.status,
+                scope: d.scope,
+              })),
+            );
+            if (durable.length && !memoryPath) {
+              setMemoryPath(durable[0].source_id);
+            }
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        const files = await hostListMemory();
+        setMemoryDocs(
+          files.map((f) => {
+            const ext = f as MemoryFileDto & {
+              id?: string;
+              kind?: string;
+              status?: string;
+              scope?: string;
+            };
+            return {
+              path: f.path,
+              title: f.title,
+              body: f.body,
+              id: ext.id,
+              kind: ext.kind,
+              status: ext.status,
+              scope: ext.scope,
+            };
+          }),
+        );
+        if (files.length && !memoryPath) {
+          setMemoryPath(files[0].path);
+        }
+      } catch {
+        /* browser */
       }
-    } catch {
-      /* browser */
-    }
-  }, [memoryPath]);
+    },
+    [memoryPath],
+  );
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
