@@ -6,7 +6,13 @@ import type { MessageMetaDto } from "../host";
 export type { ChatMsg as Msg };
 export type { MessageMetaDto };
 
-export type PaneId = "chat" | "archive" | "memory" | "source" | "todos";
+export type PaneId =
+  | "chat"
+  | "archive"
+  | "memory"
+  | "compose"
+  | "source"
+  | "todos";
 
 export type ChatSession = {
   id: string;

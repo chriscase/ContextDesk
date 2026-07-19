@@ -1,9 +1,9 @@
 # ADR 0007: Composition preview pane
 
-**Status:** Accepted (design only)  
+**Status:** Accepted — implemented (Compose tab, 2026-07-19)  
 **Date:** 2026-07-18  
 **Issue:** #282 (epic #276)  
-**Implementation epic:** #293 (spawned)
+**Implementation epic:** #293
 
 ## Context
 

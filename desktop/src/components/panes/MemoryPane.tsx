@@ -28,6 +28,8 @@ type Props = {
     kind: string | null;
     includeSuperseded: boolean;
   }) => void;
+  /** Open selected memory in Composition pane (#293). */
+  onCompose?: (doc: MemoryDoc) => void;
 };
 
 const KIND_OPTIONS = [
@@ -49,6 +51,7 @@ export function MemoryPane({
   onSave,
   onCreateHint,
   onFilterChange,
+  onCompose,
 }: Props) {
   const [kindFilter, setKindFilter] = useState("");
   const [includeSuperseded, setIncludeSuperseded] = useState(false);
@@ -245,11 +248,21 @@ export function MemoryPane({
               }}
             />
             {isDurable ? (
-              <p className="section-lead">
-                Store-backed memory (read-only here). Corrections: ask the agent
-                to <code>supersede_memory</code>; forget:{" "}
-                <code>retract_memory</code> (Accept — reversible).
-              </p>
+              <>
+                <p className="section-lead">
+                  Store-backed memory. Hand-edit in Compose, or ask the agent to{" "}
+                  <code>supersede_memory</code> / <code>retract_memory</code>.
+                </p>
+                {onCompose ? (
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => onCompose(active)}
+                  >
+                    Compose / edit
+                  </button>
+                ) : null}
+              </>
             ) : (
               <button
                 type="button"

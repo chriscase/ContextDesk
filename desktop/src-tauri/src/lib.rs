@@ -2748,6 +2748,56 @@ fn get_durable_memory(
     Ok(rec.as_ref().map(DurableMemoryDto::from))
 }
 
+/// User-initiated composition save (#293): insert or supersede after redaction.
+///
+/// UI-originated — no model SoftWrite round-trip; the human already clicked Save.
+#[tauri::command]
+fn save_composition_draft(
+    state: State<'_, AppState>,
+    content: String,
+    title: String,
+    kind: Option<String>,
+    scope: Option<String>,
+    supersede_id: Option<String>,
+) -> Result<DurableMemoryDto, String> {
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let store = host
+        .durable_memory_store()
+        .ok_or_else(|| "durable memory not attached".to_string())?;
+
+    // Redact before any persist (same path as tools).
+    let redaction = cd_core::redact::redact_candidate(&content);
+    if redaction.blocked {
+        return Err(redaction
+            .block_reason
+            .unwrap_or_else(|| "credential-dominant content blocked".into()));
+    }
+    let safe = redaction.text;
+    let mem_kind = kind
+        .as_deref()
+        .map(cd_core::memory::Kind::parse)
+        .unwrap_or(cd_core::memory::Kind::ProjectNote);
+    let mut draft = cd_core::memory::MemoryDraft::new(mem_kind, safe);
+    draft.title = title;
+    draft.source = cd_core::memory::MemorySource::User;
+    draft.created_by = "user".into();
+    draft.origin_tool = Some("composition_pane".into());
+    if let Some(sc) = scope.as_deref().and_then(cd_core::memory::Scope::parse) {
+        draft.scope = sc;
+    }
+    let now = cd_core::embed::now_unix_secs();
+    let op = if let Some(ref sid) = supersede_id {
+        let old = cd_core::memory::parse_memory_id(sid).map_err(|e| e.to_string())?;
+        cd_core::memory::MemoryWriteOp::Supersede { old, new: draft }
+    } else {
+        cd_core::memory::MemoryWriteOp::Insert(draft)
+    };
+    let rec = store.put(op, now).map_err(|e| e.to_string())?;
+    Ok(DurableMemoryDto::from(&rec))
+}
+
 #[tauri::command]
 fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
     let cfg = state.config.lock().expect("config").clone();
@@ -2904,6 +2954,7 @@ pub fn run() {
             list_memory_notes,
             list_durable_memories,
             get_durable_memory,
+            save_composition_draft,
             write_memory_note,
             sql_ro_query,
             get_confluence_settings,

@@ -5,6 +5,7 @@ const PANES: { id: PaneId; label: string }[] = [
   { id: "chat", label: "Chat" },
   { id: "archive", label: "Archive" },
   { id: "memory", label: "Memory" },
+  { id: "compose", label: "Compose" },
   { id: "source", label: "Source" },
   { id: "todos", label: "Todos" },
 ];

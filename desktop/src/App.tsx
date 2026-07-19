@@ -25,11 +25,14 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
+  hostGetDurableMemory,
+  hostSaveCompositionDraft,
   hostSetDefaultChatModel,
   hostWriteMemory,
   modelSelectionKey,
   parseModelSelectionKey,
 } from "./lib/host";
+import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview } from "./lib/session";
 
@@ -411,6 +414,26 @@ export function App() {
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
                   setMemoryPath: shell.setMemoryPath,
+                  openCompositionFromMemoryId: (sourceId) => {
+                    const id = sourceId.replace(/^memory:/, "");
+                    void hostGetDurableMemory(id).then((m) => {
+                      if (!m) {
+                        shell.setMemoryPath(sourceId);
+                        shell.setPane("memory");
+                        return;
+                      }
+                      shell.openComposition({
+                        kind: "memory",
+                        id: m.id,
+                        sourceId: m.source_id,
+                        title: m.title,
+                        body: m.content,
+                        memKind: m.kind,
+                        scope: m.scope,
+                        status: m.status,
+                      });
+                    });
+                  },
                 }}
                 memory={{
                   docs: shell.memoryDocs,
@@ -422,6 +445,7 @@ export function App() {
                       kind: opts.kind,
                       includeSuperseded: opts.includeSuperseded,
                     }),
+                  onCompose: (doc) => shell.openCompositionFromMemoryDoc(doc),
                   onSave: (path, body) => {
                     if (path.startsWith("memory:")) {
                       return;
@@ -439,6 +463,61 @@ export function App() {
                           err instanceof Error ? err.message : String(err),
                         ),
                       );
+                  },
+                }}
+                compose={{
+                  target: shell.composition,
+                  onChangeTarget: shell.setComposition,
+                  busy: shell.composeBusy,
+                  note: shell.composeNote,
+                  onOpenMemory: (sourceId) => {
+                    shell.setMemoryPath(sourceId);
+                    shell.setPane("memory");
+                  },
+                  onSave: async (t: CompositionTarget) => {
+                    shell.setComposeBusy(true);
+                    shell.setComposeNote(null);
+                    try {
+                      if (t.kind === "file") {
+                        const base =
+                          t.path.split(/[/\\]/).pop()?.replace(/\.md$/i, "") ??
+                          "note";
+                        await hostWriteMemory(base, t.title, t.body);
+                        shell.setComposeNote("Saved workspace file.");
+                        void shell.refreshMemory();
+                        return;
+                      }
+                      const saved = await hostSaveCompositionDraft({
+                        content: t.body,
+                        title: t.title,
+                        kind: t.kind === "memory" ? t.memKind : "project_note",
+                        scope: t.kind === "memory" ? t.scope : "workspace",
+                        supersedeId: t.kind === "memory" ? t.id : null,
+                      });
+                      shell.setComposition({
+                        kind: "memory",
+                        id: saved.id,
+                        sourceId: saved.source_id,
+                        title: saved.title,
+                        body: saved.content,
+                        memKind: saved.kind,
+                        scope: saved.scope,
+                        status: saved.status,
+                      });
+                      shell.setComposeNote(
+                        t.kind === "scratch"
+                          ? "Saved as durable memory."
+                          : "Saved (superseded prior revision).",
+                      );
+                      void shell.refreshMemory();
+                    } catch (err) {
+                      shell.setComposeNote(
+                        err instanceof Error ? err.message : String(err),
+                      );
+                      throw err;
+                    } finally {
+                      shell.setComposeBusy(false);
+                    }
                   },
                 }}
                 source={{
