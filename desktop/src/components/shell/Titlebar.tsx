@@ -1,4 +1,5 @@
 import { IconMoon, IconSettings, IconSpark, IconSun } from "../icons";
+import { nextSkinId, skinMeta, type SkinId } from "../../lib/skins";
 
 type Props = {
   productName: string;
@@ -6,7 +7,7 @@ type Props = {
   egressLabel: string;
   localOnly: boolean;
   hasWorkspace: boolean;
-  theme: "dark" | "light";
+  theme: SkinId;
   onOpenWorkspace: () => void;
   onOpenAi: () => void;
   onOpenSettings: () => void;
@@ -73,10 +74,11 @@ export function Titlebar({
         <button
           type="button"
           className="icon-btn titlebar__no-drag"
-          title={theme === "dark" ? "Light mode" : "Dark mode"}
+          title={`Skin: ${skinMeta(theme).label} → ${skinMeta(nextSkinId(theme)).label}`}
+          aria-label={`Cycle skin (current ${skinMeta(theme).label})`}
           onClick={onToggleTheme}
         >
-          {theme === "dark" ? <IconSun /> : <IconMoon />}
+          {skinMeta(theme).colorScheme === "dark" ? <IconSun /> : <IconMoon />}
         </button>
       </div>
     </header>

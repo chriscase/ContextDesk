@@ -4,6 +4,7 @@
  */
 import type { ReactNode } from "react";
 import type { AppSetupState, PreflightReport } from "../lib/preflight";
+import type { SkinId } from "../lib/skins";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { AiSection } from "./settings/AiSection";
 import { ConnectorsSection } from "./settings/ConnectorsSection";
@@ -32,8 +33,8 @@ type Props = {
   open: boolean;
   initialSection?: SettingsSection;
   setup: AppSetupState;
-  theme: "dark" | "light";
-  onThemeChange: (t: "dark" | "light") => void;
+  theme: SkinId;
+  onThemeChange: (t: SkinId) => void;
   /** Type scale multiplier (#151). */
   uiScale?: "90" | "100" | "110";
   onUiScaleChange?: (s: "90" | "100" | "110") => void;

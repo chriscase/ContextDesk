@@ -35,6 +35,7 @@ import {
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview } from "./lib/session";
+import { nextSkinId } from "./lib/skins";
 
 export function App() {
   const shell = useShellState();
@@ -310,9 +311,7 @@ export function App() {
             onOpenSettings={() =>
               shell.openSettings("preflight", chatScrollRef.current)
             }
-            onToggleTheme={() =>
-              shell.setTheme((t) => (t === "dark" ? "light" : "dark"))
-            }
+            onToggleTheme={() => shell.setTheme((t) => nextSkinId(t))}
           />
           <Banners
             setupIncomplete={shell.preflight.hasBlocking}

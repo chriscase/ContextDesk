@@ -1,12 +1,14 @@
 /**
- * Pre-paint theme (#152). CSP-safe external script from 'self'.
- * Mirrors loadTheme() key `cd-theme` in useShellState; default dark when unset.
- * Must run before the module bundle so light users never flash dark.
+ * Pre-paint theme (#152 / #300). CSP-safe external script from 'self'.
+ * Mirrors `cd-theme` localStorage + skin registry ids in `src/lib/skins.ts`.
+ * Default dark when unset or unknown. Keep the allow-list in sync with SKINS.
  */
 (function () {
+  // Allow-list must match SkinId in desktop/src/lib/skins.ts
+  var KNOWN = { dark: 1, light: 1, slate: 1 };
   try {
     var t = localStorage.getItem("cd-theme");
-    if (t !== "light" && t !== "dark") {
+    if (!t || !KNOWN[t]) {
       t = "dark";
     }
     document.documentElement.setAttribute("data-theme", t);
