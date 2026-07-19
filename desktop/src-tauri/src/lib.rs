@@ -725,6 +725,29 @@ fn set_hybrid_retrieval(state: State<'_, AppState>, enabled: bool) -> Result<boo
     Ok(enabled)
 }
 
+/// Ambient memory injection each turn (MEMORY.md §10.1 / #271). Default ON.
+#[tauri::command]
+fn get_ambient_recall_enabled(state: State<'_, AppState>) -> bool {
+    state
+        .config
+        .lock()
+        .expect("config")
+        .memory
+        .ambient_recall_enabled
+}
+
+#[tauri::command]
+fn set_ambient_recall_enabled(state: State<'_, AppState>, enabled: bool) -> Result<bool, String> {
+    let mut cfg = state.config.lock().expect("config");
+    cfg.memory.ambient_recall_enabled = enabled;
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    // Rebuild host so attach_durable_memory picks up ambient flag.
+    let _ = ensure_host(&state);
+    Ok(enabled)
+}
+
 #[tauri::command]
 fn get_router_budget(state: State<'_, AppState>) -> cd_core::router::RouterBudget {
     state.config.lock().expect("config").router.clone()
@@ -2757,6 +2780,8 @@ pub fn run() {
             set_web_research_enabled,
             get_hybrid_retrieval,
             set_hybrid_retrieval,
+            get_ambient_recall_enabled,
+            set_ambient_recall_enabled,
             get_router_budget,
             set_router_budget,
             list_web_research_sources,

@@ -893,6 +893,21 @@ export async function hostSetHybridRetrieval(enabled: boolean): Promise<boolean>
   return invoke<boolean>("set_hybrid_retrieval", { enabled });
 }
 
+/** Ambient durable-memory injection each turn (#271). Default ON. */
+export async function hostGetAmbientRecallEnabled(): Promise<boolean | null> {
+  if (!isTauri()) return null;
+  return invoke<boolean>("get_ambient_recall_enabled");
+}
+
+export async function hostSetAmbientRecallEnabled(
+  enabled: boolean,
+): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Ambient recall settings require Tauri host");
+  }
+  return invoke<boolean>("set_ambient_recall_enabled", { enabled });
+}
+
 /** External module DTO (#136). No secrets. */
 export type ModuleDto = {
   id: string;

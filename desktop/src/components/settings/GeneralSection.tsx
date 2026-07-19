@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   hostCheckForUpdates,
+  hostGetAmbientRecallEnabled,
   hostGetHybridRetrieval,
   hostInstallUpdate,
+  hostSetAmbientRecallEnabled,
   hostSetHybridRetrieval,
   type RouterBudgetDto,
 } from "../../lib/host";
@@ -26,10 +28,15 @@ export function GeneralSection({
   const [updateBusy, setUpdateBusy] = useState(false);
   const [hybridOn, setHybridOn] = useState(false);
   const [hybridNote, setHybridNote] = useState<string | null>(null);
+  const [ambientOn, setAmbientOn] = useState(true);
+  const [ambientNote, setAmbientNote] = useState<string | null>(null);
 
   useEffect(() => {
     void hostGetHybridRetrieval().then((v) => {
       if (v !== null) setHybridOn(v);
+    });
+    void hostGetAmbientRecallEnabled().then((v) => {
+      if (v !== null) setAmbientOn(v);
     });
   }, []);
 
@@ -127,6 +134,42 @@ export function GeneralSection({
         <span>Enable hybrid retrieval (search_kb)</span>
       </label>
       {hybridNote ? <p className="field__hint">{hybridNote}</p> : null}
+      <h3 className="settings-connector-block__title">Ambient memory recall</h3>
+      <p className="field__hint">
+        When on, each chat turn injects a tight set of durable memories (≤~1,500
+        chars, ≤5 hits, min score ~0.35) so the agent &quot;just knows&quot;
+        without an explicit <code>recall_memory</code> call. Secrets are
+        redacted at write time. Default <strong>on</strong> (MEMORY.md §10.1 /
+        #271). Explicit <code>recall_memory</code> always works either way.
+      </p>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={ambientOn}
+          onChange={(e) => {
+            const next = e.target.checked;
+            setAmbientOn(next);
+            void hostSetAmbientRecallEnabled(next)
+              .then((v) => {
+                setAmbientOn(v);
+                setAmbientNote(
+                  v
+                    ? "Ambient recall on — memories may inject each turn."
+                    : "Ambient recall off — only explicit recall_memory fetches memory.",
+                );
+              })
+              .catch((err) =>
+                setAmbientNote(
+                  err instanceof Error
+                    ? err.message
+                    : "Could not save ambient recall setting",
+                ),
+              );
+          }}
+        />
+        <span>Enable ambient memory recall</span>
+      </label>
+      {ambientNote ? <p className="field__hint">{ambientNote}</p> : null}
       <h3 className="settings-connector-block__title">Retrieval budgets</h3>
       <p className="field__hint">
         Enforced on the agent loop and search_kb. Reflected in the search trail

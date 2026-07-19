@@ -440,6 +440,29 @@ mod tests {
         };
         attach_durable_memory_to_host(&mut host, &branding, &off).unwrap();
         assert!(!host.durable_memory_enabled());
+
+        // Ambient flag from config (#271)
+        let mut host2 = crate::tool_host::ToolHost::new(
+            crate::workspace::Workspace {
+                id: "attach-ws2".into(),
+                name: "a".into(),
+                roots: vec![root.to_path_buf()],
+            },
+            crate::index::KeywordIndex::build(&crate::workspace::Workspace {
+                id: "attach-ws2".into(),
+                name: "a".into(),
+                roots: vec![root.to_path_buf()],
+            })
+            .unwrap(),
+            None,
+        );
+        let ambient_off = MemoryConfig {
+            ambient_recall_enabled: false,
+            ..MemoryConfig::default()
+        };
+        attach_durable_memory_to_host(&mut host2, &branding, &ambient_off).unwrap();
+        assert!(host2.durable_memory_active());
+        assert!(!host2.ambient_recall_enabled());
     }
 
     #[test]
