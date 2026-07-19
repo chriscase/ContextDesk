@@ -66,6 +66,9 @@ Every skin must define:
 | `--overlay-scrim` | Modal scrim |
 | `--overlay-soft` / `--overlay-faint` | Soft overlays |
 | `--focus-ring` | `:focus-visible` ring (box-shadow) |
+| `--shadow-sm` / `--shadow-md` / `--shadow-inset` | Elevation (re-tint on light skins) |
+| `--composer-shadow` / `--composer-shadow-focus` | Composer shell elevation |
+| `--btn-inset` | Primary button top highlight |
 
 Optional component-local vars (e.g. `--src-hue` on citations) are set in TSX and
 are not part of the skin file.

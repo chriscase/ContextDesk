@@ -61,7 +61,10 @@ export function Titlebar({
           title="Command palette"
           aria-hidden
         >
-          ⌘K
+          {typeof navigator !== "undefined" &&
+          /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+            ? "⌘K"
+            : "Ctrl+K"}
         </span>
         <button
           type="button"

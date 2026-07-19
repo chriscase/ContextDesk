@@ -1,5 +1,6 @@
 import type { ChatSession } from "../../lib/session";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { IconPin } from "../icons";
 
 type Props = {
   sessionsReady: boolean;
@@ -73,8 +74,8 @@ export function SessionSidebar({
                 onContextMenu={(e) => onContextMenu(e, s.id)}
               >
                 {s.pinned ? (
-                  <span className="session-tab__pin" aria-hidden>
-                    📌
+                  <span className="session-tab__pin" aria-hidden title="Pinned">
+                    <IconPin />
                   </span>
                 ) : null}
                 {s.title}

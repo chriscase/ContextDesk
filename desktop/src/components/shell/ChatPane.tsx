@@ -4,6 +4,7 @@ import { nextRovingIndex } from "../../lib/a11y";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import type { ChatSession, Msg } from "../../lib/session";
 import type { BrandingDto, ModelOptionDto } from "../../lib/host";
+import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
 
 export type ChatPaneProps = {
@@ -132,8 +133,8 @@ export function ChatPane(props: ChatPaneProps) {
                       onContextMenu={(e) => openChatCtxMenu(e, s.id)}
                     >
                       {s.pinned ? (
-                        <span className="session-tab__pin" aria-hidden>
-                          📌
+                        <span className="session-tab__pin" aria-hidden title="Pinned">
+                          <IconPin />
                         </span>
                       ) : null}
                       <span className="session-tab__title">{s.title}</span>
