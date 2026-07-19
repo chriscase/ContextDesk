@@ -880,6 +880,23 @@ export async function hostSetWebResearchEnabled(
   return invoke<boolean>("set_web_research_enabled", { enabled });
 }
 
+/** Index lifecycle for UI (#117). Search works while phase is `indexing`. */
+export type IndexStatusDto = {
+  phase: "idle" | "indexing" | "ready" | "error";
+  scanned: number;
+  added: number;
+  max_files: number;
+  truncated: boolean;
+  bytes_capped: boolean;
+  resident_chunks: number;
+  message: string;
+};
+
+export async function hostGetIndexStatus(): Promise<IndexStatusDto | null> {
+  if (!isTauri()) return null;
+  return invoke<IndexStatusDto>("get_index_status");
+}
+
 /** Hybrid search_kb opt-in (#119). Default off = keyword-only. */
 export async function hostGetHybridRetrieval(): Promise<boolean | null> {
   if (!isTauri()) return null;

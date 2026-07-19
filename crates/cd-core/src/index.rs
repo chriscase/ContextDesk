@@ -44,6 +44,42 @@ pub struct Chunk {
     pub mtime_secs: i64,
 }
 
+/// Live index lifecycle for UI / agent turns (#117).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexPhase {
+    /// No host / not started.
+    #[default]
+    Idle,
+    /// Background full/incremental walk running; search uses whatever is loaded.
+    Indexing,
+    /// Last background walk finished (may still be bytes-capped).
+    Ready,
+    /// Last background walk failed.
+    Error,
+}
+
+/// Snapshot of index progress for the desktop host (#117).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexStatus {
+    /// Lifecycle phase.
+    pub phase: IndexPhase,
+    /// Files scanned in the last completed (or in-progress) walk.
+    pub scanned: u32,
+    /// Files added in last walk.
+    pub added: u32,
+    /// Soft max files cap in effect.
+    pub max_files: u32,
+    /// True when last walk hit the soft file cap.
+    pub truncated: bool,
+    /// True when resident set is bytes-capped.
+    pub bytes_capped: bool,
+    /// Chunks currently resident in RAM.
+    pub resident_chunks: u32,
+    /// Short human message (no secrets).
+    pub message: String,
+}
+
 /// Counts from an incremental refresh (for tests and tracing).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReindexStats {
@@ -147,6 +183,30 @@ impl KeywordIndex {
         max_files: Option<usize>,
         max_index_bytes: Option<usize>,
     ) -> CoreResult<Self> {
+        Self::open_or_build_bounded_ex(workspace, cache_dir, max_files, max_index_bytes, false)
+    }
+
+    /// Open/load the index without a full walk refresh (#117).
+    ///
+    /// Warm store: load resident set from SQLite only (search works immediately).
+    /// Cold store: create empty SQLite; search is empty until the host runs
+    /// [`Self::refresh`] in the background. Full walk never blocks the open path.
+    pub fn open_shell_bounded(
+        workspace: &Workspace,
+        cache_dir: Option<&Path>,
+        max_files: Option<usize>,
+        max_index_bytes: Option<usize>,
+    ) -> CoreResult<Self> {
+        Self::open_or_build_bounded_ex(workspace, cache_dir, max_files, max_index_bytes, true)
+    }
+
+    fn open_or_build_bounded_ex(
+        workspace: &Workspace,
+        cache_dir: Option<&Path>,
+        max_files: Option<usize>,
+        max_index_bytes: Option<usize>,
+        defer_refresh: bool,
+    ) -> CoreResult<Self> {
         let store_path = cache_dir.map(|d| {
             let _ = fs::create_dir_all(d);
             d.join(format!("{}.sqlite", sanitize_ws_id(&workspace.id)))
@@ -165,11 +225,17 @@ impl KeywordIndex {
         if let Some(ref path) = store_path {
             if path.exists() {
                 idx.load_from_store(path)?;
-                // Cheap refresh to pick up disk changes without full re-read of unchanged.
-                let _ = idx.refresh()?;
+                if !defer_refresh {
+                    // Cheap refresh to pick up disk changes without full re-read of unchanged.
+                    let _ = idx.refresh()?;
+                }
                 return Ok(idx);
             }
             idx.init_store(path)?;
+            if defer_refresh {
+                tracing::debug!("index shell opened cold — host should background refresh");
+                return Ok(idx);
+            }
         }
 
         let stats = idx.refresh()?;
@@ -1112,6 +1178,34 @@ mod tests {
     /// returns hits. The two-phase check exercises both the "everything fits under
     /// the default budget" path and a deliberately small budget that clips the
     /// resident set while the store keeps every chunk.
+    #[test]
+    fn open_shell_does_not_walk_cold_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..40 {
+            std::fs::write(
+                root.join(format!("f{i}.txt")),
+                format!("content {i} unique-{i}"),
+            )
+            .unwrap();
+        }
+        let ws = Workspace {
+            id: "shell-test".into(),
+            name: "s".into(),
+            roots: vec![root],
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let idx = KeywordIndex::open_shell_bounded(&ws, Some(cache.path()), None, None).unwrap();
+        assert!(
+            idx.is_empty(),
+            "cold open_shell must not have walked yet, chunks={}",
+            idx.len()
+        );
+        let full = KeywordIndex::open_or_build(&ws, Some(cache.path()), None).unwrap();
+        assert!(!full.is_empty(), "full open must index files");
+    }
+
     #[test]
     #[ignore = "slow synthetic 50k-file tree; run with --ignored"]
     fn index_50k_soft_cap_allows_large_tree() {
