@@ -417,6 +417,11 @@ export function App() {
                   activePath: shell.memoryPath,
                   onSelect: shell.setMemoryPath,
                   onCreateHint: () => void shell.refreshMemory(),
+                  onFilterChange: (opts) =>
+                    void shell.refreshMemory({
+                      kind: opts.kind,
+                      includeSuperseded: opts.includeSuperseded,
+                    }),
                   onSave: (path, body) => {
                     if (path.startsWith("memory:")) {
                       return;
