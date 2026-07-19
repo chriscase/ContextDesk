@@ -474,6 +474,9 @@ export function App() {
                     shell.setMemoryPath(sourceId);
                     shell.setPane("memory");
                   },
+                  onBrowseMemory: () => {
+                    shell.setPane("memory");
+                  },
                   onSave: async (t: CompositionTarget) => {
                     shell.setComposeBusy(true);
                     shell.setComposeNote(null);
@@ -490,7 +493,10 @@ export function App() {
                       const saved = await hostSaveCompositionDraft({
                         content: t.body,
                         title: t.title,
-                        kind: t.kind === "memory" ? t.memKind : "project_note",
+                        kind:
+                          t.kind === "memory"
+                            ? t.memKind
+                            : (t.memKind ?? "project_note"),
                         scope: t.kind === "memory" ? t.scope : "workspace",
                         supersedeId: t.kind === "memory" ? t.id : null,
                       });
