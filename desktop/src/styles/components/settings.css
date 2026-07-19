@@ -273,6 +273,151 @@
   max-width: 40rem;
 }
 
+/* Appearance skin card grid (#300) */
+.skin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.skin-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.skin-card:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.skin-card[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--bg-elevated));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.skin-card:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.skin-card__preview {
+  height: 52px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.skin-card__chrome {
+  height: 8px;
+  flex-shrink: 0;
+}
+
+.skin-card__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.skin-card__rail {
+  width: 14px;
+  flex-shrink: 0;
+  opacity: 0.92;
+}
+
+.skin-card__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 6px;
+  min-width: 0;
+}
+
+.skin-card__bubble {
+  height: 10px;
+  border-radius: 3px;
+  width: 72%;
+  opacity: 0.9;
+}
+
+.skin-card__accent {
+  height: 6px;
+  border-radius: 3px;
+  width: 36%;
+  margin-top: auto;
+}
+
+.skin-card__label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.skin-card__desc {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Installed modules / skills (not preflight 3-col grid) */
+.settings-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-list-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+}
+
+.settings-list-row__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.settings-list-row__detail {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.settings-list-row__detail code {
+  font-size: var(--text-2xs);
+}
+
 .preflight-lead {
   align-items: flex-start;
   gap: var(--space-3);

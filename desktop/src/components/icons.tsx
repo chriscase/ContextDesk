@@ -230,6 +230,28 @@ export function IconSliders({ className }: IconProps) {
   );
 }
 
+/** Modules — puzzle piece. */
+export function IconModules({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M12 2v4M8 6h8" />
+      <path d="M6 10h4v4H6zM14 10h4v4h-4zM10 14h4v4h-4z" />
+      <path d="M8 18H6a2 2 0 0 1-2-2v-2M16 18h2a2 2 0 0 0 2-2v-2M8 6H6a2 2 0 0 0-2 2v2M16 6h2a2 2 0 0 1 2 2v2" />
+    </Svg>
+  );
+}
+
+/** Skills — book / recipe. */
+export function IconSkills({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      <path d="M8 7h8M8 11h6" />
+    </Svg>
+  );
+}
+
 /** External link (corner arrow). */
 export function IconLink({ className }: IconProps) {
   return (

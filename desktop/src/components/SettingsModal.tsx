@@ -22,7 +22,9 @@ import {
   IconAppearance,
   IconClose,
   IconConnectors,
+  IconModules,
   IconPreflight,
+  IconSkills,
   IconSliders,
   IconWorkspace,
 } from "./icons";
@@ -49,8 +51,8 @@ const NAV: { id: SettingsSection; label: string; icon: ReactNode }[] = [
   { id: "workspace", label: "Workspace", icon: <IconWorkspace /> },
   { id: "ai", label: "AI / Models", icon: <IconAi /> },
   { id: "connectors", label: "Connectors", icon: <IconConnectors /> },
-  { id: "modules", label: "Modules", icon: <IconConnectors /> },
-  { id: "skills", label: "Skills", icon: <IconSliders /> },
+  { id: "modules", label: "Modules", icon: <IconModules /> },
+  { id: "skills", label: "Skills", icon: <IconSkills /> },
   { id: "appearance", label: "Appearance", icon: <IconAppearance /> },
   { id: "general", label: "General", icon: <IconSliders /> },
 ];

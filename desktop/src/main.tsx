@@ -7,6 +7,8 @@ import "./styles/base.css";
 import "./styles/themes/dark.css";
 import "./styles/themes/light.css";
 import "./styles/themes/slate.css";
+import "./styles/themes/sand.css";
+import "./styles/themes/forest.css";
 import "./styles/layout.css";
 import "./styles/components/composer.css";
 import "./styles/components/tools.css";

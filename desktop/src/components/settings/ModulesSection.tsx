@@ -288,17 +288,17 @@ export function ModulesSection({ baseId }: ModulesSectionProps) {
       {modules.length === 0 ? (
         <p className="field__hint">No modules installed yet.</p>
       ) : (
-        <ul className="preflight-list">
+        <ul className="settings-list">
           {modules.map((m) => (
-            <li key={m.id} className="preflight-row">
+            <li key={m.id} className="settings-list-row">
               <div>
-                <div className="preflight-row__title">
+                <div className="settings-list-row__title">
                   {m.name}{" "}
                   <span className="field__hint">
                     ({m.id} v{m.version})
                   </span>
                 </div>
-                <div className="preflight-row__detail">
+                <div className="settings-list-row__detail">
                   entrypoint: <code>{m.entrypoint}</code>
                   <br />
                   tools: {m.provided_tools.join(", ") || "—"}
@@ -394,17 +394,17 @@ export function ModulesSection({ baseId }: ModulesSectionProps) {
         </button>
       </div>
       {regEntries.length > 0 ? (
-        <ul className="preflight-list" aria-label="Registry entries">
+        <ul className="settings-list" aria-label="Registry entries">
           {regEntries.map((e) => (
-            <li key={`${e.id}@${e.version}`} className="preflight-row">
+            <li key={`${e.id}@${e.version}`} className="settings-list-row">
               <div>
-                <div className="preflight-row__title">
+                <div className="settings-list-row__title">
                   {e.name}{" "}
                   <span className="field__hint">
                     ({e.id} v{e.version})
                   </span>
                 </div>
-                <div className="preflight-row__detail">
+                <div className="settings-list-row__detail">
                   {e.description || "—"}
                 </div>
                 <div className="workspace-root-actions">

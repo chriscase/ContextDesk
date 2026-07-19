@@ -176,11 +176,11 @@ export function SkillsSection({ baseId }: SkillsSectionProps) {
           <code>SKILL.md</code> under the workspace skills directory.
         </p>
       ) : (
-        <ul className="preflight-list" aria-label="Skills">
+        <ul className="settings-list" aria-label="Skills">
           {skills.map((s) => (
-            <li key={s.id} className="preflight-row">
+            <li key={s.id} className="settings-list-row">
               <div>
-                <div className="preflight-row__title">
+                <div className="settings-list-row__title">
                   {s.name}{" "}
                   <span className="field__hint">
                     ({s.id}
@@ -191,7 +191,7 @@ export function SkillsSection({ baseId }: SkillsSectionProps) {
                     )
                   </span>
                 </div>
-                <div className="preflight-row__detail">
+                <div className="settings-list-row__detail">
                   {s.description || "—"}
                   <br />
                   {s.disabled ? "disabled" : "enabled"} ·{" "}
