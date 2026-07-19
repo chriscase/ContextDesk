@@ -2784,10 +2784,7 @@ fn save_composition_draft(
     draft.source = cd_core::memory::MemorySource::User;
     draft.created_by = "user".into();
     draft.origin_tool = Some("composition_pane".into());
-    if let Some(sc) = scope
-        .as_deref()
-        .and_then(cd_core::memory::Scope::parse)
-    {
+    if let Some(sc) = scope.as_deref().and_then(cd_core::memory::Scope::parse) {
         draft.scope = sc;
     }
     let now = cd_core::embed::now_unix_secs();
