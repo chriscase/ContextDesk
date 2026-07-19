@@ -35,6 +35,7 @@ type Props = {
     onChangeTarget: (t: CompositionTarget) => void;
     onSave: (t: CompositionTarget) => Promise<void>;
     onOpenMemory?: (sourceId: string) => void;
+    onBrowseMemory?: () => void;
     busy?: boolean;
     note?: string | null;
   } | null;
