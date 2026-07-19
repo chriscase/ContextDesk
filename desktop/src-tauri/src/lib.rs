@@ -2601,13 +2601,9 @@ fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, Stri
     if let Ok(host_g) = state.host.lock() {
         if let Some(h) = host_g.as_ref() {
             if let Some(store) = h.durable_memory_store() {
-                if let Ok(list) = store.list(
-                    None,
-                    false,
-                    false,
-                    cd_core::embed::now_unix_secs(),
-                    200,
-                ) {
+                if let Ok(list) =
+                    store.list(None, false, false, cd_core::embed::now_unix_secs(), 200)
+                {
                     if !list.is_empty() || h.durable_memory_active() {
                         return Ok(list
                             .iter()

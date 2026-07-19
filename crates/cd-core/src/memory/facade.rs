@@ -344,7 +344,7 @@ impl MemoryStore for TwoScopeMemory {
             limit.max(half),
         )?;
         ws.append(&mut pers);
-        ws.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        ws.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         ws.truncate(limit.max(1));
         Ok(ws)
     }
