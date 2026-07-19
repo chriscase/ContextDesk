@@ -690,9 +690,68 @@ export type MemoryFileDto = {
   body: string;
 };
 
+/** Durable store row (Phase 1 / #274). */
+export type DurableMemoryDto = {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  status: string;
+  scope: string;
+  updated_at: number;
+  rev: number;
+  source_id: string;
+};
+
 export async function hostListMemory(): Promise<MemoryFileDto[]> {
   if (!isTauri()) return [];
+  // Prefer durable store listing when available.
+  try {
+    const durable = await invoke<DurableMemoryDto[]>("list_durable_memories", {
+      kind: null,
+      includeSuperseded: false,
+      includeRetracted: false,
+      limit: 200,
+    });
+    if (Array.isArray(durable)) {
+      return durable.map((d) => ({
+        path: d.source_id,
+        relative: d.source_id,
+        title: d.title || d.kind,
+        body: d.content,
+        // Extended fields carried via type assertion in shell mapping
+        id: d.id,
+        kind: d.kind,
+        status: d.status,
+        scope: d.scope,
+      })) as MemoryFileDto[];
+    }
+  } catch {
+    /* fall through to memory_fs */
+  }
   return invoke<MemoryFileDto[]>("list_memory_notes");
+}
+
+export async function hostListDurableMemories(opts?: {
+  kind?: string | null;
+  includeSuperseded?: boolean;
+  includeRetracted?: boolean;
+  limit?: number;
+}): Promise<DurableMemoryDto[]> {
+  if (!isTauri()) return [];
+  return invoke<DurableMemoryDto[]>("list_durable_memories", {
+    kind: opts?.kind ?? null,
+    includeSuperseded: opts?.includeSuperseded ?? false,
+    includeRetracted: opts?.includeRetracted ?? false,
+    limit: opts?.limit ?? 100,
+  });
+}
+
+export async function hostGetDurableMemory(
+  id: string,
+): Promise<DurableMemoryDto | null> {
+  if (!isTauri()) return null;
+  return invoke<DurableMemoryDto | null>("get_durable_memory", { id });
 }
 
 export async function hostWriteMemory(

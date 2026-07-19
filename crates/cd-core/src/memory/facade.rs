@@ -319,6 +319,35 @@ impl MemoryStore for TwoScopeMemory {
         // Personal is structurally barred from sync cursors.
         self.workspace.changes_since(cursor)
     }
+
+    fn list(
+        &self,
+        kinds: Option<&[Kind]>,
+        include_superseded: bool,
+        include_retracted: bool,
+        now_secs: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<MemoryRecord>> {
+        let half = (limit.max(1) / 2).max(1);
+        let mut ws = self.workspace.list_records(
+            kinds,
+            include_superseded,
+            include_retracted,
+            now_secs,
+            limit.max(half),
+        )?;
+        let mut pers = self.personal.list_records(
+            kinds,
+            include_superseded,
+            include_retracted,
+            now_secs,
+            limit.max(half),
+        )?;
+        ws.append(&mut pers);
+        ws.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        ws.truncate(limit.max(1));
+        Ok(ws)
+    }
 }
 
 #[cfg(test)]

@@ -1745,6 +1745,8 @@ fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
     match side {
         ToolSideEffect::Read => "local",
         ToolSideEffect::SoftWrite if name == names::SAVE_MEMORY => "local",
+        ToolSideEffect::SoftWrite if name == names::SUPERSEDE_MEMORY => "local",
+        ToolSideEffect::SoftWrite if name == names::RETRACT_MEMORY => "local",
         ToolSideEffect::SoftWrite if name == names::SAVE_SKILL => "local",
         ToolSideEffect::SoftWrite => "local",
         ToolSideEffect::HardWrite => "destructive",
@@ -1868,11 +1870,88 @@ fn preview_args(args: &Value) -> String {
         }
         return draft;
     }
+    // Durable memory SoftWrite: kind / content / scope + redaction classes (#274).
+    if args.get("content").is_some()
+        || args.get("kind").is_some()
+        || (args.get("body_markdown").is_some() && args.get("title").is_some())
+    {
+        return memory_write_preview(args);
+    }
+    if args.get("old_id").is_some() && args.get("content").is_some() {
+        return memory_write_preview(args);
+    }
+    if args.get("id").is_some()
+        && args.get("content").is_none()
+        && args.get("body_markdown").is_none()
+        && args.get("old_id").is_none()
+    {
+        // retract_memory { id }
+        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        return format!(
+            "--- retract memory (reversible) ---\nid: {id}\n\
+             This sets status=retracted (soft tombstone). The row is kept and can be restored later.\n\
+             Permanent purge is a separate HardWrite operation (not this tool)."
+        );
+    }
     let s = args.to_string();
     if s.len() > 500 {
         format!("{}…", crate::text::truncate_bytes(&s, 500))
     } else {
         s
+    }
+}
+
+/// Accept-modal preview for save_memory / supersede_memory (redaction shown).
+fn memory_write_preview(args: &Value) -> String {
+    let kind = args
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project_note");
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("workspace");
+    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let content = args
+        .get("content")
+        .or_else(|| args.get("body_markdown"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let old_id = args.get("old_id").and_then(|v| v.as_str());
+    let redaction = crate::redact::redact_candidate(content);
+    let mut out = String::from("--- memory draft (Accept commits) ---\n");
+    if let Some(oid) = old_id {
+        out.push_str(&format!("op: supersede\nold_id: {oid}\n"));
+    } else if args.get("id").and_then(|v| v.as_str()).is_some() {
+        out.push_str("op: update_meta\n");
+    } else {
+        out.push_str("op: insert\n");
+    }
+    out.push_str(&format!("kind: {kind}\nscope: {scope}\n"));
+    if !title.is_empty() {
+        out.push_str(&format!("title: {title}\n"));
+    }
+    if redaction.blocked {
+        out.push_str("BLOCKED: credential-dominant content will be refused on Accept.\n");
+        if let Some(r) = &redaction.block_reason {
+            out.push_str(r);
+            out.push('\n');
+        }
+    } else if redaction.redacted {
+        out.push_str(&format!(
+            "redactions: {}\n(content below is after secret scrub — secrets never enter the store)\n",
+            redaction.classes.join(", ")
+        ));
+        out.push_str("--- content ---\n");
+        out.push_str(&redaction.text);
+    } else {
+        out.push_str("redactions: (none)\n--- content ---\n");
+        out.push_str(content);
+    }
+    if out.len() > 4000 {
+        format!("{}…", crate::text::truncate_bytes(&out, 4000))
+    } else {
+        out
     }
 }
 
@@ -2268,6 +2347,49 @@ mod tests {
         assert!(dir.path().join(".contextdesk/memory/arch.md").exists());
     }
 
+    #[tokio::test]
+    async fn memory_softwrite_preview_shows_redaction() {
+        use crate::memory::TwoScopeMemory;
+        use crate::permissions::PermissionDecision;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = crate::workspace::Workspace {
+            id: "prev".into(),
+            name: "p".into(),
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_durable_memory(
+            std::sync::Arc::new(TwoScopeMemory::open_in_memory("prev").unwrap()),
+            true,
+        );
+        let args = serde_json::json!({
+            "kind": "fact",
+            "content": "bot uses sk-abcdefghijklmnop for staging",
+            "scope": "workspace",
+            "title": "Bot key note"
+        });
+        let r = host.execute("save_memory", &args, None).await.unwrap();
+        let preview = r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { preview, .. } => Some(preview.clone()),
+                _ => None,
+            })
+            .expect("permission preview");
+        assert!(preview.contains("kind: fact"), "{preview}");
+        assert!(preview.contains("scope: workspace"), "{preview}");
+        assert!(
+            preview.contains("redactions:") && preview.contains("sk-***"),
+            "should show redaction: {preview}"
+        );
+        assert!(!preview.contains("abcdefghijklmnop"), "{preview}");
+        let _ = PermissionDecision::AllowOnce;
+    }
+
+    /// Product path: durable store → save (Accept) → recall → supersede → retract.
     /// Product path: durable store → save (Accept) → recall → supersede → retract.
     /// Proves Phase-1 tools reachable through ToolHost::execute (host-wiring skeptic fix).
     #[tokio::test]

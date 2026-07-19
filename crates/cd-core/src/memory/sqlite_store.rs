@@ -94,6 +94,58 @@ impl SqliteMemoryStore {
         Ok(row.map(|(m, b)| (m, bytes_to_f32_vec(&b))))
     }
 
+    /// List records for UI (newest first). Filters status by flags.
+    pub fn list_records(
+        &self,
+        kinds: Option<&[Kind]>,
+        include_superseded: bool,
+        include_retracted: bool,
+        now_secs: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<MemoryRecord>> {
+        let conn = self.conn.lock().map_err(|_| lock_err())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM memory ORDER BY updated_at DESC LIMIT ?1")
+            .map_err(sqlite_err)?;
+        let cap = limit.clamp(1, 500) as i64;
+        let ids: Vec<String> = stmt
+            .query_map(params![cap * 3], |r| r.get(0))
+            .map_err(sqlite_err)?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut out = Vec::new();
+        for id_s in ids {
+            let Ok(id) = Uuid::parse_str(&id_s) else {
+                continue;
+            };
+            let Some(rec) = load_record(&conn, &id)? else {
+                continue;
+            };
+            match rec.status {
+                Status::Active => {
+                    if !is_valid_now(rec.valid_from, rec.valid_to, now_secs) && !include_superseded
+                    {
+                        continue;
+                    }
+                }
+                Status::Superseded if include_superseded => {}
+                Status::Retracted if include_retracted => {}
+                Status::Expired if include_superseded => {}
+                _ => continue,
+            }
+            if let Some(ks) = kinds {
+                if !ks.iter().any(|k| k == &rec.kind) {
+                    continue;
+                }
+            }
+            out.push(rec);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Insert with a predetermined id (idempotent import). No-op if id exists.
     pub fn put_imported(
         &self,
@@ -487,6 +539,23 @@ impl MemoryStore for SqliteMemoryStore {
             }
         }
         Ok(out)
+    }
+
+    fn list(
+        &self,
+        kinds: Option<&[Kind]>,
+        include_superseded: bool,
+        include_retracted: bool,
+        now_secs: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<MemoryRecord>> {
+        self.list_records(
+            kinds,
+            include_superseded,
+            include_retracted,
+            now_secs,
+            limit,
+        )
     }
 }
 
@@ -931,6 +1000,30 @@ mod tests {
             .unwrap();
         assert!(!rec.content.contains("abcdefghijklmnop"));
         assert!(rec.content.contains("sk-***"));
+    }
+
+    #[test]
+    fn list_records_filters_status() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        store
+            .put(MemoryWriteOp::Insert(draft("active note alpha")), 10)
+            .unwrap();
+        let old = store
+            .put(MemoryWriteOp::Insert(draft("will supersede")), 20)
+            .unwrap();
+        store
+            .put(
+                MemoryWriteOp::Supersede {
+                    old: old.id,
+                    new: draft("replacement beta"),
+                },
+                30,
+            )
+            .unwrap();
+        let active = store.list_records(None, false, false, 40, 50).unwrap();
+        assert!(active.iter().all(|r| r.status == Status::Active));
+        let with_sup = store.list_records(None, true, false, 40, 50).unwrap();
+        assert!(with_sup.iter().any(|r| r.status == Status::Superseded));
     }
 
     #[test]

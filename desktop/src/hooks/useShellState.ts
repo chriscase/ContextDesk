@@ -14,6 +14,7 @@ import {
   hostPreflight,
   hostSetWorkspace,
   type BrandingDto,
+  type MemoryFileDto,
   type ModelOptionDto,
 } from "../lib/host";
 import {
@@ -164,11 +165,23 @@ export function useShellState() {
     try {
       const files = await hostListMemory();
       setMemoryDocs(
-        files.map((f) => ({
-          path: f.path,
-          title: f.title,
-          body: f.body,
-        })),
+        files.map((f) => {
+          const ext = f as MemoryFileDto & {
+            id?: string;
+            kind?: string;
+            status?: string;
+            scope?: string;
+          };
+          return {
+            path: f.path,
+            title: f.title,
+            body: f.body,
+            id: ext.id,
+            kind: ext.kind,
+            status: ext.status,
+            scope: ext.scope,
+          };
+        }),
       );
       if (files.length && !memoryPath) {
         setMemoryPath(files[0].path);

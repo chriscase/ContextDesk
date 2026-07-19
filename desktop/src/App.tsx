@@ -410,6 +410,7 @@ export function App() {
                     shell.openSettings(s ?? "preflight", chatScrollRef.current),
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
+                  setMemoryPath: shell.setMemoryPath,
                 }}
                 memory={{
                   docs: shell.memoryDocs,
@@ -417,6 +418,9 @@ export function App() {
                   onSelect: shell.setMemoryPath,
                   onCreateHint: () => void shell.refreshMemory(),
                   onSave: (path, body) => {
+                    if (path.startsWith("memory:")) {
+                      return;
+                    }
                     const title =
                       shell.memoryDocs.find((d) => d.path === path)?.title ??
                       "Note";

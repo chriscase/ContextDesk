@@ -102,6 +102,25 @@ pub trait MemoryStore: Send + Sync {
     /// Sync-reserved: records with `updated_at > cursor` (personal scope must
     /// never surface here — enforced by facade, not this trait alone).
     fn changes_since(&self, cursor: i64) -> CoreResult<Vec<MemoryRecord>>;
+
+    /// List records for UI (newest first). Default empty for stub backends.
+    fn list(
+        &self,
+        kinds: Option<&[Kind]>,
+        include_superseded: bool,
+        include_retracted: bool,
+        now_secs: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<MemoryRecord>> {
+        let _ = (
+            kinds,
+            include_superseded,
+            include_retracted,
+            now_secs,
+            limit,
+        );
+        Ok(vec![])
+    }
 }
 
 /// Build the frozen audit `target` string for a memory op.

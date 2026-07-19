@@ -213,7 +213,13 @@ export function useTurnController(args: Args) {
                     });
                 }
                 if (
-                  merged.tools?.some((t) => t.name === "save_memory" && t.ok)
+                  merged.tools?.some(
+                    (t) =>
+                      t.ok &&
+                      (t.name === "save_memory" ||
+                        t.name === "supersede_memory" ||
+                        t.name === "retract_memory"),
+                  )
                 ) {
                   void refreshMemory();
                 }

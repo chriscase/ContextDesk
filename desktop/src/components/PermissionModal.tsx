@@ -113,9 +113,39 @@ function PermissionModalBody({
               <p className="field__label">
                 Skill draft preview (Accept writes this file)
               </p>
+            ) : prompt.toolName === "save_memory" ||
+              prompt.toolName === "supersede_memory" ? (
+              <p className="field__label">
+                Memory draft (kind, scope, content; redactions applied before
+                store)
+              </p>
+            ) : prompt.toolName === "retract_memory" ? (
+              <p className="field__label">
+                Retract (reversible soft tombstone — not permanent delete)
+              </p>
             ) : (
               <p className="field__label">Preview</p>
             )}
+            {prompt.toolName === "retract_memory" ? (
+              <div className="callout callout--warn" role="status">
+                This hides the memory from recall but keeps the row. You can
+                restore later. Permanent purge is a separate type-to-confirm
+                step.
+              </div>
+            ) : null}
+            {prompt.preview.includes("redactions:") &&
+            !prompt.preview.includes("redactions: (none)") ? (
+              <div className="callout callout--warn" role="status">
+                Secrets will be scrubbed before the memory is stored. Review the
+                redacted content below.
+              </div>
+            ) : null}
+            {prompt.preview.includes("BLOCKED:") ? (
+              <div className="callout callout--warn" role="alert">
+                This content looks credential-dominant and will be refused on
+                Accept.
+              </div>
+            ) : null}
             <pre className="tool-row__detail tool-row__detail--tall">
               {prompt.preview}
             </pre>

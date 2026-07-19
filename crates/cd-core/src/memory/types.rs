@@ -418,6 +418,12 @@ pub fn new_memory_id() -> Uuid {
     Uuid::now_v7()
 }
 
+/// Parse a memory id string (host IPC / tools).
+pub fn parse_memory_id(s: &str) -> crate::error::CoreResult<Uuid> {
+    Uuid::parse_str(s.trim())
+        .map_err(|e| crate::error::CoreError::Message(format!("invalid memory id: {e}")))
+}
+
 /// Content hash = [`crate::embed::chunk_content_key`] (dedupe + embed cache key).
 pub fn content_hash_for(content: &str) -> String {
     crate::embed::chunk_content_key(content)
