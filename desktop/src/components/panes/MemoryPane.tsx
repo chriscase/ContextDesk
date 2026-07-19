@@ -44,6 +44,16 @@ const KIND_OPTIONS = [
   { value: "task", label: "Task" },
 ];
 
+function kindLabel(kind: string): string {
+  return KIND_OPTIONS.find((o) => o.value === kind)?.label ?? kind;
+}
+
+function snippet(body: string, max = 90): string {
+  const t = body.replace(/\s+/g, " ").trim();
+  if (!t) return "Empty body";
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
+
 export function MemoryPane({
   docs,
   activePath,
@@ -91,6 +101,7 @@ export function MemoryPane({
   );
 
   const isDurable = Boolean(active?.id || active?.path.startsWith("memory:"));
+  const hasFilters = Boolean(kindFilter || query.trim() || includeSuperseded);
 
   // Re-sync draft when active doc path/body changes externally, unless dirty (#157).
   useEffect(() => {
@@ -132,20 +143,63 @@ export function MemoryPane({
     setDirty(false);
   };
 
+  const emptyStore = docs.length === 0;
+  const emptyFilter = !emptyStore && filtered.length === 0;
+
   return (
-    <div className="pane">
-      <div className="pane__header">Memory</div>
-      <div className="pane__toolbar" style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", padding: "0.5rem" }}>
+    <div className="pane pane--fill">
+      <header className="pane-chrome">
+        <h2 className="pane-chrome__title">Memory</h2>
+        <div className="pane-chrome__meta" aria-live="polite">
+          <span className="chip chip--static">
+            {filtered.length}
+            {filtered.length !== docs.length ? ` / ${docs.length}` : ""}{" "}
+            {filtered.length === 1 ? "item" : "items"}
+          </span>
+          {dirty ? (
+            <span className="chip" data-tone="warn">
+              Unsaved
+            </span>
+          ) : null}
+        </div>
+        <div className="pane-chrome__actions">
+          {onCreateHint ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={onCreateHint}
+            >
+              Refresh
+            </button>
+          ) : null}
+          {onCompose ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() =>
+                onCompose({
+                  path: "",
+                  title: "Untitled draft",
+                  body: "",
+                })
+              }
+            >
+              New draft
+            </button>
+          ) : null}
+        </div>
+      </header>
+
+      <div className="pane__toolbar">
         <input
           className="field__control"
-          style={{ flex: "1 1 8rem", minWidth: "6rem" }}
-          placeholder="Search…"
+          placeholder="Search memories…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search memories"
         />
         <select
-          className="field__control"
+          className="field__control field__control--select"
           value={kindFilter}
           onChange={(e) => setKindFilter(e.target.value)}
           aria-label="Filter by kind"
@@ -156,134 +210,214 @@ export function MemoryPane({
             </option>
           ))}
         </select>
-        <label className="field__label" style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
+        <label className="pane__toolbar-toggle">
           <input
             type="checkbox"
             checked={includeSuperseded}
             onChange={(e) => setIncludeSuperseded(e.target.checked)}
           />
-          Include superseded
+          Superseded
         </label>
       </div>
-      <div className="pane__split">
-        <ul className="session-list">
-          {filtered.length === 0 ? (
-            <li className="empty-state empty-state--inline">
-              <div className="empty-state__title">No memories yet</div>
-              <p className="empty-state__body">
-                Durable memories appear here after{" "}
-                <code>save_memory</code> (Accept). Ask the agent to remember a
-                fact, or refresh after a save.
-              </p>
-              {onCreateHint ? (
-                <button
-                  type="button"
-                  className="btn btn--primary btn--sm"
-                  onClick={onCreateHint}
-                >
-                  Refresh memory
-                </button>
-              ) : null}
-            </li>
-          ) : (
-            filtered.map((d) => (
-              <li key={d.path}>
-                <button
-                  type="button"
-                  className="session-list__item"
-                  data-active={
-                    d.path === (active?.path ?? "") ? "true" : "false"
-                  }
-                  onClick={() => {
-                    onSelect(d.path);
-                    setDraft(d.body);
-                    setDirty(false);
-                    setSyncedPath(d.path);
-                  }}
-                >
-                  <span>{d.title || d.kind || "Memory"}</span>
-                  {d.kind ? (
-                    <span className="badge badge--muted"> {d.kind}</span>
-                  ) : null}
-                  {d.scope ? (
-                    <span className="badge badge--muted"> {d.scope}</span>
-                  ) : null}
-                  {d.status && d.status !== "active" ? (
-                    <span className="badge"> {d.status}</span>
-                  ) : null}
-                </button>
-              </li>
-            ))
-          )}
-        </ul>
-        {active ? (
-          <div className="pane__editor">
-            <div className="field__label">
-              {active.path}
-              {active.scope ? ` · ${active.scope}` : ""}
-              {active.id ? ` · ${active.id.slice(0, 8)}…` : ""}
-              {active.status ? ` · ${active.status}` : ""}
-            </div>
-            {active.status === "retracted" ? (
-              <div className="callout callout--warn" role="status">
-                Retracted (soft tombstone) — hidden from default recall; reversible.
-                Permanent purge is a separate type-to-confirm operation.
-              </div>
-            ) : null}
-            {active.redactionPreview && active.redactionPreview.length > 0 ? (
-              <div className="callout callout--warn" role="status">
-                Secrets redacted before save:{" "}
-                {active.redactionPreview.join(", ")}
-              </div>
-            ) : null}
-            <textarea
-              className="field__control"
-              rows={16}
-              value={draft}
-              readOnly={isDurable}
-              onChange={(e) => {
-                if (isDurable) return;
-                setDraft(e.target.value);
-                setDirty(true);
-              }}
-            />
-            {isDurable ? (
-              <>
-                <p className="section-lead">
-                  Store-backed memory. Hand-edit in Compose, or ask the agent to{" "}
-                  <code>supersede_memory</code> / <code>retract_memory</code>.
-                </p>
-                {onCompose ? (
-                  <button
-                    type="button"
-                    className="btn btn--primary"
-                    onClick={() => onCompose(active)}
-                  >
-                    Compose / edit
-                  </button>
-                ) : null}
-              </>
-            ) : (
+
+      {emptyStore ? (
+        <div className="pane-empty">
+          <div className="pane-empty__glyph pane-empty__glyph--memory" aria-hidden />
+          <h3 className="pane-empty__title">No memories yet</h3>
+          <p className="pane-empty__lead">
+            Durable memories appear after the agent saves one with Accept, or
+            when you draft in Compose.
+          </p>
+          <div className="pane-empty__actions">
+            {onCompose ? (
               <button
                 type="button"
                 className="btn btn--primary"
-                disabled={!canSave}
-                onClick={handleSave}
+                onClick={() =>
+                  onCompose({
+                    path: "",
+                    title: "Untitled draft",
+                    body: "",
+                  })
+                }
               >
-                Save note
+                Open Compose
               </button>
+            ) : null}
+            {onCreateHint ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={onCreateHint}
+              >
+                Refresh store
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className="pane__split pane__split--memory">
+          <ul className="mem-list" aria-label="Memory list">
+            {emptyFilter ? (
+              <li className="mem-list__empty">
+                <div className="empty-state__title">No matches</div>
+                <p className="empty-state__body">
+                  {hasFilters
+                    ? "Try clearing search or filters."
+                    : "Nothing to show."}
+                </p>
+              </li>
+            ) : (
+              filtered.map((d) => (
+                <li key={d.path}>
+                  <button
+                    type="button"
+                    className="mem-list__item"
+                    data-active={
+                      d.path === (active?.path ?? "") ? "true" : "false"
+                    }
+                    onClick={() => {
+                      onSelect(d.path);
+                      setDraft(d.body);
+                      setDirty(false);
+                      setSyncedPath(d.path);
+                    }}
+                  >
+                    <span className="mem-list__title">
+                      {d.title || d.kind || "Memory"}
+                    </span>
+                    <span className="mem-list__snippet">{snippet(d.body)}</span>
+                    <span className="mem-list__meta">
+                      {d.kind ? (
+                        <span className="chip chip--kind chip--static">
+                          {kindLabel(d.kind)}
+                        </span>
+                      ) : null}
+                      {d.scope ? (
+                        <span className="chip chip--static">{d.scope}</span>
+                      ) : null}
+                      {d.status && d.status !== "active" ? (
+                        <span className="chip chip--static" data-tone="warn">
+                          {d.status}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                </li>
+              ))
             )}
-          </div>
-        ) : filtered.length > 0 ? null : (
-          <div className="empty-state pane__editor">
-            <div className="empty-state__title">Nothing selected</div>
-            <p className="empty-state__body">
-              Memories appear after the agent saves one with Accept, or when the
-              host lists the durable store.
-            </p>
-          </div>
-        )}
-      </div>
+          </ul>
+
+          {active ? (
+            <div className="mem-detail">
+              <div className="mem-detail__head">
+                <h3 className="mem-detail__title">
+                  {active.title || active.kind || "Memory"}
+                </h3>
+                {active.kind ? (
+                  <span className="chip chip--kind chip--static">
+                    {kindLabel(active.kind)}
+                  </span>
+                ) : null}
+                {active.scope ? (
+                  <span className="chip chip--static">{active.scope}</span>
+                ) : null}
+                {active.id ? (
+                  <span className="chip chip--mono chip--static" title={active.id}>
+                    {active.id.slice(0, 8)}…
+                  </span>
+                ) : (
+                  <span className="chip chip--mono chip--static" title={active.path}>
+                    file
+                  </span>
+                )}
+                {active.status && active.status !== "active" ? (
+                  <span className="chip chip--static" data-tone="warn">
+                    {active.status}
+                  </span>
+                ) : null}
+                {dirty ? (
+                  <span className="chip" data-tone="warn">
+                    Unsaved
+                  </span>
+                ) : null}
+              </div>
+              {active.status === "retracted" ? (
+                <div className="callout callout--warn" role="status">
+                  Retracted (soft tombstone) — hidden from default recall;
+                  reversible. Permanent purge is a separate type-to-confirm
+                  operation.
+                </div>
+              ) : null}
+              {active.redactionPreview && active.redactionPreview.length > 0 ? (
+                <div className="callout callout--warn" role="status">
+                  Secrets redacted before save:{" "}
+                  {active.redactionPreview.join(", ")}
+                </div>
+              ) : null}
+              <label className="sr-only" htmlFor="memory-body">
+                Memory body
+              </label>
+              <textarea
+                id="memory-body"
+                className="mem-detail__body"
+                value={draft}
+                readOnly={isDurable}
+                onChange={(e) => {
+                  if (isDurable) return;
+                  setDraft(e.target.value);
+                  setDirty(true);
+                }}
+              />
+              <footer className="mem-detail__footer">
+                {isDurable ? (
+                  <>
+                    <p className="mem-detail__hint">
+                      Store-backed — hand-edit in Compose, or ask the agent to
+                      supersede / retract.
+                    </p>
+                    {onCompose ? (
+                      <button
+                        type="button"
+                        className="btn btn--primary"
+                        onClick={() => onCompose(active)}
+                      >
+                        Compose / edit
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <p className="mem-detail__hint">
+                      Workspace file note — Save writes the markdown file.
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn--primary"
+                      disabled={!canSave}
+                      onClick={handleSave}
+                    >
+                      Save note
+                    </button>
+                  </>
+                )}
+              </footer>
+            </div>
+          ) : (
+            <div className="pane-empty">
+              <div
+                className="pane-empty__glyph pane-empty__glyph--memory"
+                aria-hidden
+              />
+              <h3 className="pane-empty__title">Nothing selected</h3>
+              <p className="pane-empty__lead">
+                Pick a memory from the list to inspect, or open Compose to draft
+                a new one.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -390,6 +390,15 @@ export function useShellState() {
 
   const openCompositionFromMemoryDoc = useCallback(
     (doc: MemoryDoc) => {
+      // Empty path + no id → new scratch draft (Memory "New draft" CTA).
+      if (!doc.id && !doc.path) {
+        openComposition({
+          kind: "scratch",
+          title: doc.title || "Untitled draft",
+          body: doc.body || "",
+        });
+        return;
+      }
       if (doc.id || doc.path.startsWith("memory:")) {
         const id =
           doc.id ?? doc.path.replace(/^memory:/, "");
