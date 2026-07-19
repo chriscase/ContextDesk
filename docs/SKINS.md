@@ -13,6 +13,8 @@ Parent epic: **#300**. Registry issue: **#54**.
 | `dark` | Dark | dark | `desktop/src/styles/themes/dark.css` |
 | `light` | Light | light | `desktop/src/styles/themes/light.css` |
 | `slate` | Slate | dark | `desktop/src/styles/themes/slate.css` |
+| `sand` | Sand | light | `desktop/src/styles/themes/sand.css` |
+| `forest` | Forest | dark | `desktop/src/styles/themes/forest.css` |
 
 Structure (radii, type scale, space) lives in `desktop/src/styles/tokens.css` and
 is shared by every skin.

@@ -5,12 +5,21 @@
  * 1. Add `desktop/src/styles/themes/<id>.css` with `html[data-theme="<id>"] { … }`
  *    defining every semantic token (see docs/SKINS.md).
  * 2. Import the CSS from `src/main.tsx`.
- * 3. Append an entry here.
+ * 3. Append an entry here (include swatches for the Appearance picker).
  * 4. Append the id to the allow-list in `public/theme-init.js` (pre-paint).
  * 5. Add/extend an AA contrast test for text tokens on --bg-app / --bg-panel.
  */
 
-export type SkinId = "dark" | "light" | "slate";
+export type SkinId = "dark" | "light" | "slate" | "sand" | "forest";
+
+/** Mini-preview swatches for the Appearance card grid (mirror theme CSS). */
+export type SkinSwatches = {
+  app: string;
+  panel: string;
+  elevated: string;
+  accent: string;
+  text: string;
+};
 
 export type SkinMeta = {
   id: SkinId;
@@ -20,6 +29,8 @@ export type SkinMeta = {
   description: string;
   /** OS form controls / scrollbars */
   colorScheme: "dark" | "light";
+  /** Card preview colors (hex) — not applied to the live document */
+  swatches: SkinSwatches;
 };
 
 /** Canonical registry — order is Appearance select + titlebar cycle order. */
@@ -29,18 +40,65 @@ export const SKINS: readonly SkinMeta[] = [
     label: "Dark",
     description: "Default dense dark chrome",
     colorScheme: "dark",
+    swatches: {
+      app: "#0b0c0e",
+      panel: "#12141a",
+      elevated: "#181b22",
+      accent: "#6ea8fe",
+      text: "#e8eaed",
+    },
   },
   {
     id: "light",
     label: "Light",
-    description: "Light panels for bright rooms",
+    description: "Cool light panels for bright rooms",
     colorScheme: "light",
+    swatches: {
+      app: "#f4f5f7",
+      panel: "#ffffff",
+      elevated: "#eef0f4",
+      accent: "#2f6fed",
+      text: "#1a1d24",
+    },
   },
   {
     id: "slate",
     label: "Slate",
     description: "GitHub-adjacent dark blue-gray",
     colorScheme: "dark",
+    swatches: {
+      app: "#0f1419",
+      panel: "#161b22",
+      elevated: "#1c232d",
+      accent: "#58a6ff",
+      text: "#e6edf3",
+    },
+  },
+  {
+    id: "sand",
+    label: "Sand",
+    description: "Warm paper light for long reading",
+    colorScheme: "light",
+    swatches: {
+      app: "#f6f1e8",
+      panel: "#fffaf3",
+      elevated: "#efe6d8",
+      accent: "#a34a08",
+      text: "#2a241c",
+    },
+  },
+  {
+    id: "forest",
+    label: "Forest",
+    description: "Verdant dark coding chrome",
+    colorScheme: "dark",
+    swatches: {
+      app: "#0c1210",
+      panel: "#121a17",
+      elevated: "#18221e",
+      accent: "#3ecf8e",
+      text: "#e4ebe7",
+    },
   },
 ] as const;
 

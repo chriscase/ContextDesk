@@ -5,7 +5,7 @@
  */
 (function () {
   // Allow-list must match SkinId in desktop/src/lib/skins.ts
-  var KNOWN = { dark: 1, light: 1, slate: 1 };
+  var KNOWN = { dark: 1, light: 1, slate: 1, sand: 1, forest: 1 };
   try {
     var t = localStorage.getItem("cd-theme");
     if (!t || !KNOWN[t]) {

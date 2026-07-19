@@ -1,0 +1,44 @@
+/* Warm paper light skin (#300). */
+html[data-theme="sand"] {
+  color-scheme: light;
+  --bg-app: #f6f1e8;
+  --bg-panel: #fffaf3;
+  --bg-elevated: #efe6d8;
+  --bg-input: #fffdf9;
+  --bg-hover: #e6dccb;
+  --border: #d4c4a8;
+  --border-soft: #e8dcc8;
+  --border-strong: #b8a48a;
+  --text: #2a241c;
+  --text-muted: #5c5348;
+  /* ≥4.5:1 on app/panel */
+  --text-faint: #6a6156;
+  --accent: #a34a08;
+  --accent-strong: #853c06;
+  --accent-soft: rgb(163 74 8 / 0.12);
+  --accent-on: #fffaf3;
+  /* Body links darker than accent for AA on paper bg */
+  --link: #8a3409;
+  --success: #166534;
+  --warning: #854d0e;
+  --danger: #b91c1c;
+  --tool-bg: #efe6d8;
+  --chat-user-bg: #ebe1d2;
+  --chat-assistant-bg: transparent;
+  --surface-deep: #e8dfd0;
+  --surface-chrome: #f3ebe0;
+  --surface-chip: #ebe1d2;
+  --status-bar-bg: #ebe1d2;
+  --overlay-scrim: rgb(40 30 20 / 0.4);
+  --overlay-soft: rgb(40 30 20 / 0.06);
+  --overlay-faint: rgb(40 30 20 / 0.04);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+  --shadow-sm: 0 1px 2px rgb(40 30 20 / 0.08);
+  --shadow-md: 0 12px 28px rgb(40 30 20 / 0.12);
+  --shadow-inset: 0 1px 0 rgb(255 255 255 / 0.45) inset;
+  --composer-shadow: 0 1px 2px rgb(40 30 20 / 0.06), 0 8px 24px rgb(40 30 20 / 0.08);
+  --composer-shadow-focus:
+    0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 10px 28px rgb(40 30 20 / 0.1);
+  --btn-inset: 0 1px 0 rgb(255 255 255 / 0.35) inset;
+}
