@@ -35,9 +35,11 @@ export type MessageRowProps = {
   effectiveChatModel: string | null | undefined;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
-  setPane: (p: "archive" | "source" | "chat" | "memory") => void;
+  setPane: (p: "archive" | "source" | "chat" | "memory" | "compose") => void;
   /** Open a durable memory citation in the Memory pane. */
   setMemoryPath?: (p: string | null) => void;
+  /** Open composition for a memory citation (#293). */
+  openCompositionFromMemoryId?: (sourceId: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
 };
@@ -85,6 +87,7 @@ function MessageRowImpl({
   setSourceContent,
   setPane,
   setMemoryPath,
+  openCompositionFromMemoryId,
   onHeightChange,
 }: MessageRowProps) {
   const rootRef = useRef<HTMLElement | null>(null);
@@ -129,10 +132,14 @@ function MessageRowImpl({
             title: c.title,
           }))}
           onOpenFile={(path) => {
-            // Durable memory citations: `memory:{uuid}` → Memory pane
+            // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
             if (path.startsWith("memory:")) {
-              setPane("memory");
-              setMemoryPath?.(path);
+              if (openCompositionFromMemoryId) {
+                openCompositionFromMemoryId(path);
+              } else {
+                setPane("memory");
+                setMemoryPath?.(path);
+              }
               return;
             }
             setSourcePath(path);

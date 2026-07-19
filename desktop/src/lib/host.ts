@@ -754,6 +754,26 @@ export async function hostGetDurableMemory(
   return invoke<DurableMemoryDto | null>("get_durable_memory", { id });
 }
 
+/** User-initiated composition save (insert or supersede) after redaction (#293). */
+export async function hostSaveCompositionDraft(args: {
+  content: string;
+  title: string;
+  kind?: string;
+  scope?: string;
+  supersedeId?: string | null;
+}): Promise<DurableMemoryDto> {
+  if (!isTauri()) {
+    throw new Error("Composition save requires Tauri host");
+  }
+  return invoke<DurableMemoryDto>("save_composition_draft", {
+    content: args.content,
+    title: args.title,
+    kind: args.kind ?? null,
+    scope: args.scope ?? null,
+    supersede_id: args.supersedeId ?? null,
+  });
+}
+
 export async function hostWriteMemory(
   filename: string,
   title: string,

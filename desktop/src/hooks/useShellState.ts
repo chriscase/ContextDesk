@@ -23,6 +23,7 @@ import {
   type AppSetupState,
   type PreflightReport,
 } from "../lib/preflight";
+import type { CompositionTarget } from "../components/panes/CompositionPane";
 import type { MemoryDoc } from "../components/panes/MemoryPane";
 import type { PaneId, UiScale } from "../lib/session";
 
@@ -112,6 +113,7 @@ export function useShellState() {
     const p = localStorage.getItem("cd-pane");
     if (
       p === "memory" ||
+      p === "compose" ||
       p === "source" ||
       p === "todos" ||
       p === "chat" ||
@@ -125,6 +127,9 @@ export function useShellState() {
   const [defaultModelKey, setDefaultModelKey] = useState("");
   const [memoryDocs, setMemoryDocs] = useState<MemoryDoc[]>([]);
   const [memoryPath, setMemoryPath] = useState<string | null>(null);
+  const [composition, setComposition] = useState<CompositionTarget | null>(null);
+  const [composeNote, setComposeNote] = useState<string | null>(null);
+  const [composeBusy, setComposeBusy] = useState(false);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [sourceContent, setSourceContent] = useState("");
   const [hostPreflightReport, setHostPreflightReport] =
@@ -374,6 +379,44 @@ export function useShellState() {
         ? "Remote AI"
         : "Local";
 
+  const openComposition = useCallback(
+    (target: CompositionTarget) => {
+      setComposition(target);
+      setComposeNote(null);
+      setPane("compose");
+    },
+    [],
+  );
+
+  const openCompositionFromMemoryDoc = useCallback(
+    (doc: MemoryDoc) => {
+      if (doc.id || doc.path.startsWith("memory:")) {
+        const id =
+          doc.id ?? doc.path.replace(/^memory:/, "");
+        openComposition({
+          kind: "memory",
+          id,
+          sourceId: doc.path.startsWith("memory:")
+            ? doc.path
+            : `memory:${id}`,
+          title: doc.title,
+          body: doc.body,
+          memKind: doc.kind ?? "project_note",
+          scope: doc.scope ?? "workspace",
+          status: doc.status,
+        });
+      } else {
+        openComposition({
+          kind: "file",
+          path: doc.path,
+          title: doc.title,
+          body: doc.body,
+        });
+      }
+    },
+    [openComposition],
+  );
+
   return {
     branding,
     theme,
@@ -395,6 +438,14 @@ export function useShellState() {
     memoryDocs,
     memoryPath,
     setMemoryPath,
+    composition,
+    setComposition,
+    composeNote,
+    setComposeNote,
+    composeBusy,
+    setComposeBusy,
+    openComposition,
+    openCompositionFromMemoryDoc,
     sourcePath,
     setSourcePath,
     sourceContent,

@@ -21,8 +21,9 @@ export type ChatPaneProps = {
   setActiveSessionId: (id: string) => void;
   openChatCtxMenu: (e: ReactMouseEvent, id: string) => void;
   createSession: () => void;
-  setPane: (p: "archive" | "source" | "chat" | "memory") => void;
+  setPane: (p: "archive" | "source" | "chat" | "memory" | "compose") => void;
   setMemoryPath?: (p: string | null) => void;
+  openCompositionFromMemoryId?: (sourceId: string) => void;
   chatScrollRef: RefObject<HTMLDivElement | null>;
   onChatScroll: () => void;
   unreadBelow: number;
@@ -78,6 +79,7 @@ export function ChatPane(props: ChatPaneProps) {
     setSourcePath,
     setSourceContent,
     setMemoryPath,
+    openCompositionFromMemoryId,
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
@@ -268,6 +270,9 @@ export function ChatPane(props: ChatPaneProps) {
                           setSourceContent={setSourceContent}
                           setPane={setPane}
                           setMemoryPath={setMemoryPath}
+                          openCompositionFromMemoryId={
+                            openCompositionFromMemoryId
+                          }
                           onHeightChange={
                             windowed.virtualized
                               ? windowed.onHeightChange

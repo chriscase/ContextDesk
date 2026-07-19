@@ -1,5 +1,9 @@
 import type { ComponentProps } from "react";
 import { ChatArchivePane } from "../panes/ChatArchivePane";
+import {
+  CompositionPane,
+  type CompositionTarget,
+} from "../panes/CompositionPane";
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
 import { TodoPane } from "../panes/TodoPane";
@@ -24,6 +28,15 @@ type Props = {
       kind: string | null;
       includeSuperseded: boolean;
     }) => void;
+    onCompose?: (doc: MemoryDoc) => void;
+  } | null;
+  compose: {
+    target: CompositionTarget | null;
+    onChangeTarget: (t: CompositionTarget) => void;
+    onSave: (t: CompositionTarget) => Promise<void>;
+    onOpenMemory?: (sourceId: string) => void;
+    busy?: boolean;
+    note?: string | null;
   } | null;
   source: { path: string | null; content: string } | null;
   todosKey: string | null;
@@ -36,6 +49,7 @@ export function Workspace({
   archive,
   chat,
   memory,
+  compose,
   source,
   todosKey,
 }: Props) {
@@ -61,6 +75,16 @@ export function Workspace({
           className="pane-panel"
         >
           <MemoryPane {...memory} />
+        </div>
+      ) : null}
+      {pane === "compose" && compose ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-compose"
+          aria-labelledby="pane-tab-compose"
+          className="pane-panel"
+        >
+          <CompositionPane {...compose} />
         </div>
       ) : null}
       {pane === "source" && source ? (
