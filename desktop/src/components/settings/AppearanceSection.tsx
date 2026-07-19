@@ -1,9 +1,10 @@
 import { SelectField } from "../forms";
+import { SKINS, type SkinId } from "../../lib/skins";
 
 export type AppearanceSectionProps = {
   baseId: string;
-  theme: "dark" | "light";
-  onThemeChange: (t: "dark" | "light") => void;
+  theme: SkinId;
+  onThemeChange: (t: SkinId) => void;
   uiScale: "90" | "100" | "110";
   onUiScaleChange?: (s: "90" | "100" | "110") => void;
 };
@@ -15,19 +16,26 @@ export function AppearanceSection({
   uiScale,
   onUiScaleChange,
 }: AppearanceSectionProps) {
+  const active = SKINS.find((s) => s.id === theme);
   return (
     <div>
-      <p className="section-lead">Dark is default. Light is available; more skins later.</p>
+      <p className="section-lead">
+        Skins recolor the whole shell via design tokens (
+        <code>docs/SKINS.md</code>). Default is Dark; Light and Slate ship
+        built-in — add more by registering a theme CSS file.
+      </p>
       <SelectField
         id={`${baseId}-theme`}
-        label="Theme"
+        label="Skin"
+        hint={active?.description}
         value={theme}
-        onChange={(e) =>
-          onThemeChange(e.target.value === "light" ? "light" : "dark")
-        }
+        onChange={(e) => onThemeChange(e.target.value as SkinId)}
       >
-        <option value="dark">Dark</option>
-        <option value="light">Light</option>
+        {SKINS.map((s) => (
+          <option key={s.id} value={s.id}>
+            {s.label}
+          </option>
+        ))}
       </SelectField>
       <SelectField
         id={`${baseId}-ui-scale`}

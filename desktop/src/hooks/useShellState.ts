@@ -26,10 +26,10 @@ import {
 import type { CompositionTarget } from "../components/panes/CompositionPane";
 import type { MemoryDoc } from "../components/panes/MemoryPane";
 import type { PaneId, UiScale } from "../lib/session";
+import { parseSkinId, type SkinId } from "../lib/skins";
 
-function loadTheme(): "dark" | "light" {
-  const t = localStorage.getItem("cd-theme");
-  return t === "light" ? "light" : "dark";
+function loadTheme(): SkinId {
+  return parseSkinId(localStorage.getItem("cd-theme"));
 }
 
 function loadUiScale(): UiScale {
@@ -93,7 +93,7 @@ export function useShellState() {
     version: "0.1.0",
     protocol: "cd.v1",
   });
-  const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
+  const [theme, setTheme] = useState<SkinId>(loadTheme);
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);
   const [sidebarW, setSidebarW] = useState(() => {
     const n = Number(localStorage.getItem("cd-sidebar-w"));

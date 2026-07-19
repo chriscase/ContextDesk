@@ -22,4 +22,4 @@ workspace_dir_name = ".contextdesk"
 [themes]
 default = "dark"
 # Future skins register by id; UI loads CSS variables from themes/<id>.css
-available = ["dark", "light"]
+available = ["dark", "light", "slate"]
