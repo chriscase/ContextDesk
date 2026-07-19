@@ -515,9 +515,13 @@ html[data-platform="macos"] .titlebar {
   height: 22px;
   margin-left: -4px;
   border-radius: 999px;
-  border: 1.5px solid var(--bg, var(--chat-assistant-bg, #1a1a1e));
-  background: hsl(var(--src-hue) 42% 42% / 0.92);
-  color: #fff;
+  border: 1.5px solid var(--bg-app);
+  background: color-mix(
+    in srgb,
+    hsl(var(--src-hue) 48% 46%) 70%,
+    var(--accent) 30%
+  );
+  color: var(--accent-on);
   flex-shrink: 0;
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--border-soft) 50%, transparent);
 }
@@ -762,21 +766,4 @@ button.citation-chip:hover {
   max-height: 60vh;
 }
 
-.todo-item {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-}
 
-.todo-item__text {
-  flex: 1;
-}
-
-.todo-item__text[data-done="true"] {
-  text-decoration: line-through;
-  color: var(--text-muted);
-}
-
-.source-line[data-hi="true"] {
-  background: var(--accent-soft);
-}
