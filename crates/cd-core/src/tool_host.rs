@@ -724,19 +724,34 @@ impl ToolHost {
     }
 
     /// Incremental index refresh (skips unchanged files when a store is present).
-    pub fn reindex(&mut self) -> CoreResult<()> {
+    pub fn reindex(&mut self) -> CoreResult<crate::index::ReindexStats> {
         let cache = self.index.cache_dir();
         // Prefer refresh on the existing Arc if we are the sole owner.
         if let Some(idx) = Arc::get_mut(&mut self.index) {
             let stats = idx.refresh()?;
             tracing::debug!(?stats, "tool host reindex (in-place)");
-            return Ok(());
+            return Ok(stats);
         }
         let mut idx = KeywordIndex::open_or_build(&self.workspace, cache.as_deref(), None)?;
         let stats = idx.refresh()?;
         tracing::debug!(?stats, "tool host reindex (rebuild arc)");
         self.index = Arc::new(idx);
-        Ok(())
+        Ok(stats)
+    }
+
+    /// Replace the keyword index (background full build swap, #117).
+    pub fn replace_index(&mut self, index: KeywordIndex) {
+        self.index = Arc::new(index);
+    }
+
+    /// Resident chunk count (for index status UI).
+    pub fn index_resident_chunks(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Whether the resident set was bytes-capped.
+    pub fn index_bytes_capped(&self) -> bool {
+        self.index.is_bytes_capped()
     }
 
     /// Execute a tool by name with JSON arguments.
@@ -978,8 +993,15 @@ impl ToolHost {
                 p, chunk.start_line, chunk.end_line, excerpt
             ));
         }
+        // Partial results are valid while a background walk continues (#117).
         let raw = if lines.is_empty() {
-            format!("No hits for `{query}`.")
+            if self.index.is_empty() {
+                format!(
+                    "No hits for `{query}`. The knowledge index is empty or still building in the background — search will improve as files are indexed."
+                )
+            } else {
+                format!("No hits for `{query}`.")
+            }
         } else {
             lines.join("\n")
         };

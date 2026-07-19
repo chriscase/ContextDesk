@@ -6,6 +6,10 @@
 - Node.js 20+  
 - Platform dependencies for [Tauri 2](https://v2.tauri.app/start/prerequisites/)  
 
+## Background index (#117)
+
+Desktop `rebuild_host` opens the keyword index via `KeywordIndex::open_shell_bounded` (load store / empty shell, **no blocking full walk**), then spawns a background thread for `refresh()`. `search_kb` uses whatever is already loaded; when empty it reports that indexing may still be running. Poll status with Tauri `get_index_status`.
+
 ## Workspace commands
 
 ```sh

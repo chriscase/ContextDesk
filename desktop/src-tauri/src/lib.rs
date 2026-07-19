@@ -43,6 +43,8 @@ struct AppState {
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// Debounced FS watcher for incremental index refresh (#116).
     index_watch: Mutex<Option<cd_core::index_watch::IndexWatchHandle>>,
+    /// Background index lifecycle (#117) — search works while Indexing.
+    index_status: Arc<Mutex<cd_core::index::IndexStatus>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -75,13 +77,13 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
 
     let mut host_guard = state.host.lock().expect("host");
     if let Some(host) = host_guard.as_mut() {
-        // Long-lived host (#110): keep permissions; incremental reindex only.
+        // Long-lived host (#110): keep permissions. Do **not** reindex on every
+        // ensure (#117) — full walks run in the background / FS watcher only.
         if host.workspace.roots != ws.roots || host.workspace.id != ws.id {
             // Workspace changed — rebuild.
             drop(host_guard);
             return rebuild_host(state, cfg, ws);
         }
-        let _ = host.reindex();
         apply_host_connectors(host, &cfg, state);
         return Ok(());
     }
@@ -101,15 +103,20 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
         .ok()
         .map(|d| d.join("index"));
     let roots = ws.roots.clone();
-    let mut host = cd_core::research::build_host_with_options(
-        ws,
-        audit,
-        index_cache,
+
+    // #117: open shell without blocking full walk — search uses loaded store
+    // (or empty cold) immediately; full refresh runs in a background thread.
+    let index = cd_core::index::KeywordIndex::open_shell_bounded(
+        &ws,
+        index_cache.as_deref(),
         Some(cfg.index_max_files),
         Some(cfg.index_max_bytes),
-        Some(cfg.router.clone()),
     )
     .map_err(|e| e.to_string())?;
+    let audit_log = audit.map(cd_core::audit::AuditLog::new);
+    let mut host = ToolHost::new(ws, index, audit_log);
+    host.set_router_budget(cfg.router.clone());
+    host.attach_connectors(&cfg.connectors);
     apply_host_connectors(&mut host, &cfg, state);
     // Durable memory (MEMORY.md Phase 1) — product seam; without this, tools stay
     // on legacy memory_fs and ambient/recall never run.
@@ -118,15 +125,110 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     {
         tracing::warn!(error = %e, "durable memory attach failed; using memory_fs fallback");
     }
+
+    {
+        let mut st = state.index_status.lock().expect("index_status");
+        *st = cd_core::index::IndexStatus {
+            phase: cd_core::index::IndexPhase::Indexing,
+            scanned: 0,
+            added: 0,
+            max_files: cfg.index_max_files as u32,
+            truncated: false,
+            bytes_capped: host.index_bytes_capped(),
+            resident_chunks: host.index_resident_chunks() as u32,
+            message: "Background index starting — search uses whatever is already loaded."
+                .into(),
+        };
+    }
+
     *state.host.lock().expect("host") = Some(host);
+
+    // Background full/incremental refresh off the UI / turn critical path (#117).
+    let host_arc = Arc::clone(&state.host);
+    let status_arc = Arc::clone(&state.index_status);
+    let _ = std::thread::Builder::new()
+        .name("cd-index-bg".into())
+        .spawn(move || {
+            {
+                let mut st = status_arc.lock().expect("index_status");
+                st.phase = cd_core::index::IndexPhase::Indexing;
+                st.message = "Indexing workspace in background…".into();
+            }
+            let result = {
+                let mut g = host_arc.lock().expect("host");
+                match g.as_mut() {
+                    Some(h) => h.reindex(),
+                    None => {
+                        return;
+                    }
+                }
+            };
+            let mut st = status_arc.lock().expect("index_status");
+            match result {
+                Ok(stats) => {
+                    let capped = host_arc
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|h| h.index_bytes_capped()))
+                        .unwrap_or(false);
+                    let chunks = host_arc
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|h| h.index_resident_chunks()))
+                        .unwrap_or(0);
+                    st.phase = cd_core::index::IndexPhase::Ready;
+                    st.scanned = stats.scanned;
+                    st.added = stats.added;
+                    st.max_files = stats.max_files;
+                    st.truncated = stats.truncated;
+                    st.bytes_capped = capped;
+                    st.resident_chunks = chunks as u32;
+                    st.message = if stats.truncated {
+                        format!(
+                            "Index ready (walk hit soft cap {} files; truncated).",
+                            stats.max_files
+                        )
+                    } else if capped {
+                        "Index ready (resident set bytes-capped; search covers recent subset)."
+                            .into()
+                    } else {
+                        format!(
+                            "Index ready — scanned {} files, {} added.",
+                            stats.scanned, stats.added
+                        )
+                    };
+                    tracing::info!(?stats, "background index complete");
+                }
+                Err(e) => {
+                    st.phase = cd_core::index::IndexPhase::Error;
+                    st.message = format!("Background index failed: {e}");
+                    tracing::warn!(error = %e, "background index failed");
+                }
+            }
+        });
 
     // Start debounced FS watcher → incremental reindex (host-agnostic API).
     let host_arc = Arc::clone(&state.host);
+    let status_arc = Arc::clone(&state.index_status);
     let on_refresh = Arc::new(move || {
         if let Ok(mut g) = host_arc.lock() {
             if let Some(h) = g.as_mut() {
-                if let Err(e) = h.reindex() {
-                    tracing::warn!(error = %e, "index watcher refresh failed");
+                match h.reindex() {
+                    Ok(stats) => {
+                        if let Ok(mut st) = status_arc.lock() {
+                            st.phase = cd_core::index::IndexPhase::Ready;
+                            st.scanned = stats.scanned;
+                            st.added = stats.added;
+                            st.truncated = stats.truncated;
+                            st.message = format!(
+                                "Index refreshed — scanned {}, +{}.",
+                                stats.scanned, stats.added
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "index watcher refresh failed");
+                    }
                 }
             }
         }
@@ -2521,11 +2623,42 @@ async fn complete_permission_cmd(
 }
 
 #[tauri::command]
-fn reindex(state: State<'_, AppState>) -> Result<(), String> {
+fn reindex(state: State<'_, AppState>) -> Result<cd_core::index::IndexStatus, String> {
     ensure_host(&state)?;
+    {
+        let mut st = state.index_status.lock().expect("index_status");
+        st.phase = cd_core::index::IndexPhase::Indexing;
+        st.message = "Manual reindex…".into();
+    }
     let mut host_guard = state.host.lock().expect("host");
     let host = host_guard.as_mut().ok_or("host missing")?;
-    host.reindex().map_err(|e| e.to_string())
+    let stats = host.reindex().map_err(|e| e.to_string())?;
+    let mut st = state.index_status.lock().expect("index_status");
+    st.phase = cd_core::index::IndexPhase::Ready;
+    st.scanned = stats.scanned;
+    st.added = stats.added;
+    st.max_files = stats.max_files;
+    st.truncated = stats.truncated;
+    st.bytes_capped = host.index_bytes_capped();
+    st.resident_chunks = host.index_resident_chunks() as u32;
+    st.message = format!(
+        "Reindex complete — scanned {}, +{}.",
+        stats.scanned, stats.added
+    );
+    Ok(st.clone())
+}
+
+/// Background index status (#117). Search works while phase is `indexing`.
+#[tauri::command]
+fn get_index_status(state: State<'_, AppState>) -> cd_core::index::IndexStatus {
+    let mut st = state.index_status.lock().expect("index_status").clone();
+    if let Ok(g) = state.host.lock() {
+        if let Some(h) = g.as_ref() {
+            st.bytes_capped = h.index_bytes_capped();
+            st.resident_chunks = h.index_resident_chunks() as u32;
+        }
+    }
+    st
 }
 
 #[tauri::command]
@@ -2701,6 +2834,11 @@ pub fn run() {
         host: Arc::new(Mutex::new(None)),
         cancels: Mutex::new(HashMap::new()),
         index_watch: Mutex::new(None),
+        index_status: Arc::new(Mutex::new(cd_core::index::IndexStatus {
+            phase: cd_core::index::IndexPhase::Idle,
+            message: "Index not started".into(),
+            ..Default::default()
+        })),
     };
     let _ = ensure_host(&state);
 
@@ -2761,6 +2899,7 @@ pub fn run() {
             browse_module_registry,
             update_module,
             reindex,
+            get_index_status,
             read_memory_file,
             read_workspace_file_cmd,
             list_memory_notes,
