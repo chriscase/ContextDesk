@@ -410,18 +410,22 @@ html[data-platform="macos"] .titlebar {
   flex: 0 0 auto;
   display: flex;
   gap: 2px;
-  padding: 4px var(--space-3);
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg-panel);
 }
 
 .pane-tabs button {
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
+  position: relative;
+  padding: 7px 11px 6px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   font-size: var(--text-xs);
   color: var(--text-muted);
   font-weight: 500;
   letter-spacing: 0.01em;
+  transition:
+    color var(--motion-fast),
+    background var(--motion-fast);
 }
 
 .pane-tabs button:hover {
@@ -430,8 +434,27 @@ html[data-platform="macos"] .titlebar {
 }
 
 .pane-tabs button[data-active="true"] {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--bg-app));
   color: var(--text);
+  font-weight: 600;
+}
+
+/* Active underline hairline — clearer than fill alone (#300). */
+.pane-tabs button[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+
+.pane-tabs button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  z-index: 1;
 }
 
 .pane {
