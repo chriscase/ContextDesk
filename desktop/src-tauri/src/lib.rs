@@ -136,8 +136,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
             truncated: false,
             bytes_capped: host.index_bytes_capped(),
             resident_chunks: host.index_resident_chunks() as u32,
-            message: "Background index starting — search uses whatever is already loaded."
-                .into(),
+            message: "Background index starting — search uses whatever is already loaded.".into(),
         };
     }
 
