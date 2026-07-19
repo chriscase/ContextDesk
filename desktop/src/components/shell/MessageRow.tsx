@@ -113,7 +113,15 @@ function MessageRowImpl({
       data-msg-id={m.id}
       data-streaming={m.streaming ? "true" : "false"}
     >
-      <div className="msg__role">{m.role}</div>
+      <div className="msg__role">
+        {m.role === "user"
+          ? "You"
+          : m.role === "assistant"
+            ? "Assistant"
+            : m.role === "system"
+              ? "System"
+              : m.role}
+      </div>
       {m.tools ? <ToolCallList tools={m.tools} /> : null}
       {m.trail?.length ? (
         <div className="search-trail" aria-label="Search trail">

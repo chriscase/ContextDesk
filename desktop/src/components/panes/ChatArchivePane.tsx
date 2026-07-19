@@ -8,6 +8,7 @@ import {
   hostTrashChatSession,
   type SessionSearchHitDto,
 } from "../../lib/host";
+import { IconPin } from "../icons";
 
 type Props = {
   /** Bump to force a refresh after external session changes. */
@@ -211,7 +212,7 @@ export function ChatArchivePane({
                   <span className="archive-row__title">
                     {m.pinned ? (
                       <span className="archive-row__pin" title="Pinned" aria-hidden>
-                        📌
+                        <IconPin />
                       </span>
                     ) : null}
                     {m.title}

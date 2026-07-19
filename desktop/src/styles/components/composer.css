@@ -6,9 +6,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 14px;
-  box-shadow:
-    0 1px 0 rgb(255 255 255 / 0.04) inset,
-    0 10px 28px rgb(0 0 0 / 0.22);
+  box-shadow: var(--composer-shadow);
   overflow: hidden;
   transition:
     border-color var(--motion-fast),
@@ -18,9 +16,7 @@
 
 .composer:focus-within {
   border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent),
-    0 12px 32px rgb(0 0 0 / 0.28);
+  box-shadow: var(--composer-shadow-focus);
 }
 
 .composer[data-busy="true"] {
@@ -122,9 +118,16 @@
   appearance: none;
   -webkit-appearance: none;
   border: none;
-  background: transparent
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%238b919c' d='M1 1l4 4 4-4'/%3E%3C/svg%3E")
-    no-repeat right 0.2rem center;
+  /* Skin-aware chevron via CSS triangles (no hard-coded hex in SVG) (#300). */
+  background-color: transparent;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-faint) 50%),
+    linear-gradient(135deg, var(--text-faint) 50%, transparent 50%);
+  background-position:
+    calc(100% - 11px) calc(50% - 1px),
+    calc(100% - 7px) calc(50% - 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
   color: var(--text);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -246,8 +249,8 @@
   border-radius: 50%;
   border: 1px solid transparent;
   background: var(--accent);
-  color: var(--accent-on, #0b1020);
-  box-shadow: 0 1px 0 rgb(255 255 255 / 0.16) inset;
+  color: var(--accent-on);
+  box-shadow: var(--btn-inset);
   transition:
     transform var(--motion-fast),
     opacity var(--motion-fast),
@@ -265,7 +268,7 @@
   background: var(--accent-strong);
   transform: translateY(-1px);
   box-shadow:
-    0 1px 0 rgb(255 255 255 / 0.2) inset,
+    var(--btn-inset),
     0 4px 12px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
@@ -311,7 +314,7 @@
 
 .btn--primary {
   background: var(--accent);
-  color: var(--accent-on, #0b1020);
+  color: var(--accent-on);
   border: 1px solid transparent;
 }
 

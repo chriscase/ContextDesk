@@ -150,8 +150,8 @@
 
 .md-beam-buffer {
   display: inline;
-  color: var(--text-muted);
-  opacity: 0.72;
+  /* AA: use faint token alone — no opacity compounding (#150 / #300). */
+  color: var(--text-faint);
 }
 
 .md-block-enter {
@@ -492,9 +492,16 @@
 }
 
 .session-tab__pin {
-  font-size: var(--text-xs);
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-faint);
   flex-shrink: 0;
+  line-height: 1;
+}
+
+.session-tab__pin svg {
+  width: 12px;
+  height: 12px;
 }
 
 .session-tab[data-active="true"] {
@@ -712,8 +719,8 @@
 }
 
 .archive-row__badge--trash {
-  color: var(--danger, #c55);
-  border-color: color-mix(in srgb, var(--danger, #c55) 35%, var(--border-soft));
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border-soft));
 }
 
 .archive-row__main {
@@ -737,8 +744,17 @@
 }
 
 .archive-row__pin {
-  font-size: var(--text-sm);
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-faint);
   line-height: 1;
+  margin-right: 2px;
+  vertical-align: middle;
+}
+
+.archive-row__pin svg {
+  width: 12px;
+  height: 12px;
 }
 
 .archive-row__badge {

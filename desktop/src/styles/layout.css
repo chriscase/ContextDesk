@@ -365,7 +365,7 @@ html[data-platform="macos"] .titlebar {
   padding: 0 5px;
   border-radius: 999px;
   background: var(--accent);
-  color: var(--accent-on, #0b1020);
+  color: var(--accent-on);
   font-size: var(--text-xs);
   font-weight: 700;
   font-variant-numeric: tabular-nums;

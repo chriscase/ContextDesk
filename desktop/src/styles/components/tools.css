@@ -51,15 +51,15 @@
 }
 
 .tool-row[data-ok="false"] {
-  background: color-mix(in srgb, var(--danger, #c44) 8%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
 .tool-row[data-ok="true"] .tool-row__status {
-  color: var(--success, #3a9);
+  color: var(--success);
 }
 
 .tool-row[data-ok="false"] .tool-row__status {
-  color: var(--danger, #c55);
+  color: var(--danger);
 }
 
 .tool-row__main {

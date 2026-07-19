@@ -32,4 +32,13 @@ html[data-theme="light"] {
   --overlay-soft: rgb(0 0 0 / 0.06);
   --overlay-faint: rgb(0 0 0 / 0.03);
   --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+  /* Softer elevation — no white “dark-chrome” insets on light (#300). */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
+  --shadow-md: 0 12px 28px rgb(0 0 0 / 0.12);
+  --shadow-inset: 0 1px 0 rgb(0 0 0 / 0.04) inset;
+  --composer-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);
+  --composer-shadow-focus:
+    0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 10px 28px rgb(0 0 0 / 0.1);
+  --btn-inset: 0 1px 0 rgb(255 255 255 / 0.35) inset;
 }

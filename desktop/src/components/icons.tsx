@@ -63,6 +63,16 @@ export function IconMoon({ className }: IconProps) {
   );
 }
 
+/** Pinned session / archive row. */
+export function IconPin({ className, title }: IconProps) {
+  return (
+    <Svg className={className} title={title}>
+      <path d="M12 17v5" />
+      <path d="M9 3h6l1 7h2l-3 4H9l-3-4h2L9 3z" />
+    </Svg>
+  );
+}
+
 export function IconSend({ className }: IconProps) {
   return (
     <Svg className={className}>
