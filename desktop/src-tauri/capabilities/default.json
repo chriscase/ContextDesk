@@ -1,9 +1,17 @@
 {
   "identifier": "default",
-  "description": "Default capabilities — no shell. dialog:allow-open for workspace folder picker; dialog:allow-confirm and dialog:allow-message for WKWebView-safe confirms/alerts (rename uses in-app modal, not a save dialog). Window chrome uses Overlay titleBarStyle in tauri.conf only — no extra permissions. updater:default grants check/download/install for the opt-in signed updater channel only (#173); UI must confirm before install.",
+  "description": "Default capabilities — no shell. dialog for workspace picker and confirms. start-dragging for overlay titlebar (Magic Trackpad). updater opt-in only.",
   "windows": ["main"],
+  "local": true,
+  "remote": {
+    "urls": [
+      "http://localhost:*",
+      "http://127.0.0.1:*"
+    ]
+  },
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-confirm",
     "dialog:allow-message",

@@ -54,6 +54,12 @@ function main() {
     conf.app.windows = [{ title: name, width: 1100, height: 760, resizable: true }];
   } else {
     conf.app.windows[0].title = name;
+    // Keep capability window match stable (#drag / ACL).
+    if (!conf.app.windows[0].label) conf.app.windows[0].label = "main";
+  }
+  if (!conf.app.security) conf.app.security = {};
+  if (!Array.isArray(conf.app.security.capabilities)) {
+    conf.app.security.capabilities = ["default"];
   }
   const out = JSON.stringify(conf, null, 2) + "\n";
   fs.writeFileSync(confPath, out, "utf8");
