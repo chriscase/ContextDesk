@@ -1,4 +1,8 @@
-import { type MouseEvent as ReactMouseEvent, type RefObject } from "react";
+import {
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+} from "react";
 import { Composer } from "../Composer";
 import { nextRovingIndex } from "../../lib/a11y";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
@@ -6,6 +10,24 @@ import type { ChatSession, Msg } from "../../lib/session";
 import type { BrandingDto, ModelOptionDto } from "../../lib/host";
 import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
+
+/** Empty-chat starter prompts — fill composer so the user can edit before send. */
+const STARTERS: { label: string; prompt: string }[] = [
+  {
+    label: "How auth works",
+    prompt: "How does authentication work in this workspace?",
+  },
+  {
+    label: "Summarize files",
+    prompt:
+      "Summarize the main topics in my allowlisted workspace files and cite sources.",
+  },
+  {
+    label: "Remember this project",
+    prompt:
+      "What durable facts should I remember about this project? Suggest notes I could save to memory.",
+  },
+];
 
 export type ChatPaneProps = {
   branding: BrandingDto;
@@ -84,6 +106,20 @@ export function ChatPane(props: ChatPaneProps) {
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
+  const [seedRequest, setSeedRequest] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
+
+  const fillStarter = (prompt: string) => {
+    setSeedRequest({ id: Date.now(), text: prompt });
+  };
+
+  const kbdMod =
+    typeof navigator !== "undefined" &&
+    /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+      ? "⌘"
+      : "Ctrl+";
 
   return (
             <div
@@ -218,12 +254,36 @@ export function ChatPane(props: ChatPaneProps) {
                   </div>
                 ) : null}
                 {messages.length === 0 ? (
-                  <div className="empty-state">
+                  <div className="empty-state empty-state--chat">
                     <div className="empty-state__title">{branding.name}</div>
                     <p className="empty-state__body">{branding.tagline}</p>
                     <p className="empty-state__body">
-                      Ask about your workspace, code, or notes. Choose a model
-                      in the composer if you want to switch.
+                      Ask about your workspace, code, or notes. Starters fill
+                      the composer — edit, then send.
+                    </p>
+                    <div
+                      className="chat-starters"
+                      role="group"
+                      aria-label="Starter prompts"
+                    >
+                      {STARTERS.map((s) => (
+                        <button
+                          key={s.label}
+                          type="button"
+                          className="chat-starter"
+                          disabled={busy || preflightBlocking}
+                          title={s.prompt}
+                          onClick={() => fillStarter(s.prompt)}
+                        >
+                          <span className="chat-starter__label">{s.label}</span>
+                          <span className="chat-starter__hint">{s.prompt}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <p className="empty-state__meta">
+                      Command palette{" "}
+                      <kbd className="empty-state__kbd">{kbdMod}K</kbd>
+                      {preflightBlocking ? " · setup incomplete" : null}
                     </p>
                     {preflightBlocking ? (
                       <button
@@ -313,6 +373,7 @@ export function ChatPane(props: ChatPaneProps) {
                   onModelChange={setSessionModel}
                   onSetDefaultModel={(key) => void setAppDefaultModel(key)}
                   onStop={onStop}
+                  seedRequest={seedRequest}
                 />
               </div>
             </div>

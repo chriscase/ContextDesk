@@ -1,4 +1,11 @@
-import { useCallback, useId, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { IconClose, IconExpand, IconSend } from "./icons";
 import type { ModelOptionDto } from "../lib/host";
 
@@ -12,6 +19,11 @@ type Props = {
   selectedModelKey?: string;
   onModelChange?: (selectionKey: string) => void;
   onSetDefaultModel?: (selectionKey: string) => void;
+  /**
+   * When `id` changes, replace the draft with `text` and focus
+   * (empty-state starter chips — #300 residual).
+   */
+  seedRequest?: { id: number; text: string } | null;
 };
 
 export function Composer({
@@ -23,11 +35,25 @@ export function Composer({
   selectedModelKey,
   onModelChange,
   onSetDefaultModel,
+  seedRequest,
 }: Props) {
   const [value, setValue] = useState("");
   const [expanded, setExpanded] = useState(false);
   const id = useId();
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!seedRequest?.text) return;
+    setValue(seedRequest.text);
+    setExpanded(seedRequest.text.length > 80);
+    requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      el.focus();
+      const n = el.value.length;
+      el.setSelectionRange(n, n);
+    });
+  }, [seedRequest?.id, seedRequest?.text]);
 
   const submit = useCallback(async () => {
     const t = value.trim();
