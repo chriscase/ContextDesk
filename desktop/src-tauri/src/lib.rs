@@ -329,16 +329,29 @@ struct BrandingDto {
     tagline: String,
     version: String,
     protocol: String,
+    /// `dev` | `installed` (#338).
+    channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_describe: Option<String>,
+    /// Compact identity line for About / diagnostics.
+    identity_line: String,
 }
 
 #[tauri::command]
 fn get_branding(state: State<'_, AppState>) -> BrandingDto {
+    let id = cd_core::build_identity::current();
     BrandingDto {
         name: state.branding.name.clone(),
         slug: state.branding.slug.clone(),
         tagline: state.branding.tagline.clone(),
-        version: cd_core::VERSION.to_string(),
-        protocol: cd_core::PROTOCOL_VERSION.to_string(),
+        version: id.version.clone(),
+        protocol: id.protocol.clone(),
+        channel: id.channel.as_str().to_string(),
+        git_sha: id.git_sha.clone(),
+        git_describe: id.git_describe.clone(),
+        identity_line: id.display_line(),
     }
 }
 

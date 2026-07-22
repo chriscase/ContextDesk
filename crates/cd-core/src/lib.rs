@@ -13,6 +13,7 @@ pub mod agent;
 pub mod ai_probe;
 pub mod audit;
 pub mod branding;
+pub mod build_identity;
 pub mod chat;
 pub mod config;
 pub mod confluence_ro;
@@ -58,6 +59,7 @@ pub mod workspace;
 pub mod x_search;
 
 pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
+pub use build_identity::{BuildChannel, BuildIdentity};
 pub use error::{CoreError, CoreResult};
 pub use events::{StreamEvent, ToolPhase};
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
