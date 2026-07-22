@@ -144,17 +144,19 @@ pub async fn cql_search_with_policy(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| CoreError::Message(format!("confluence: {e}")))?;
+        .map_err(|e| CoreError::Message(format_confluence_transport_error(&e)))?;
     if !resp.status().is_success() {
-        return Err(CoreError::Message(format!(
-            "confluence HTTP {}",
-            resp.status()
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CoreError::Message(format_confluence_http_error(
+            status.as_u16(),
+            &body,
         )));
     }
     let v: Value = resp
         .json()
         .await
-        .map_err(|e| CoreError::Message(format!("json: {e}")))?;
+        .map_err(|e| CoreError::Message(format!("confluence json: {e}")))?;
     Ok(parse_search_hits(cfg, &v))
 }
 
@@ -189,18 +191,67 @@ pub async fn fetch_page_with_policy(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| CoreError::Message(format!("confluence: {e}")))?;
+        .map_err(|e| CoreError::Message(format_confluence_transport_error(&e)))?;
     if !resp.status().is_success() {
-        return Err(CoreError::Message(format!(
-            "confluence HTTP {}",
-            resp.status()
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CoreError::Message(format_confluence_http_error(
+            status.as_u16(),
+            &body,
         )));
     }
     let v: Value = resp
         .json()
         .await
-        .map_err(|e| CoreError::Message(format!("json: {e}")))?;
+        .map_err(|e| CoreError::Message(format!("confluence json: {e}")))?;
     parse_page_body(cfg, &v)
+}
+
+/// Classify connect/TLS failures (never include PAT). Used by search/fetch.
+fn format_confluence_transport_error(err: &reqwest::Error) -> String {
+    let mut parts = vec!["confluence transport error".to_string()];
+    if err.is_timeout() {
+        parts.push("timeout".into());
+    }
+    if err.is_connect() {
+        parts.push("connect failed (VPN/proxy/DNS?)".into());
+    }
+    if err.is_request() {
+        parts.push("request build/send".into());
+    }
+    // Surface nested cause chain (TLS cert, etc.) without URL query secrets when possible.
+    let full = err.to_string();
+    let lower = full.to_ascii_lowercase();
+    if lower.contains("certificate")
+        || lower.contains("cert")
+        || lower.contains("tls")
+        || lower.contains("ssl")
+        || lower.contains("handshake")
+    {
+        parts.push("TLS/certificate — corp CA may need to be in the OS trust store".into());
+    }
+    // Avoid echoing long CQL query strings from the URL in the primary message.
+    let safe = full
+        .split('?')
+        .next()
+        .unwrap_or(&full)
+        .chars()
+        .take(180)
+        .collect::<String>();
+    parts.push(safe);
+    parts.join(": ")
+}
+
+/// Map HTTP failures to actionable messages (no PAT; body truncated).
+fn format_confluence_http_error(status: u16, body: &str) -> String {
+    let snippet: String = body.chars().take(160).collect();
+    match status {
+        401 | 403 => format!(
+            "confluence HTTP {status} (auth) — check PAT in keychain; Server/DC PATs use Authorization: Bearer <token>"
+        ),
+        404 => format!("confluence HTTP 404 — base URL or path wrong (expect …/rest/api/…): {snippet}"),
+        _ => format!("confluence HTTP {status}: {snippet}"),
+    }
 }
 
 /// Public for tests and skill-tool descriptions.
@@ -248,6 +299,21 @@ mod tests {
     #[test]
     fn strip_basic_html() {
         assert_eq!(strip_tags("<p>Hello</p>"), "Hello");
+    }
+
+    #[test]
+    fn http_error_auth_is_actionable() {
+        let msg = format_confluence_http_error(401, "Unauthorized");
+        assert!(msg.contains("401"));
+        assert!(msg.to_ascii_lowercase().contains("auth") || msg.contains("PAT"));
+    }
+
+    #[test]
+    fn http_error_truncates_body() {
+        let long = "x".repeat(500);
+        let msg = format_confluence_http_error(500, &long);
+        assert!(msg.len() < 400);
+        assert!(msg.contains("500"));
     }
 
     #[test]
