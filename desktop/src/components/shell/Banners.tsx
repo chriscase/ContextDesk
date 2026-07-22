@@ -1,7 +1,11 @@
+import { useEffect, useMemo, useState } from "react";
+import { buildErrorReport } from "../../lib/errorReport";
+
 type Props = {
   setupIncomplete: boolean;
   dismissedBanner: boolean;
   agentError: string | null;
+  appVersion?: string;
   onOpenPreflight: () => void;
   onDismissSetup: () => void;
   onDismissError: () => void;
@@ -11,10 +15,45 @@ export function Banners({
   setupIncomplete,
   dismissedBanner,
   agentError,
+  appVersion,
   onOpenPreflight,
   onDismissSetup,
   onDismissError,
 }: Props) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [copyNote, setCopyNote] = useState<string | null>(null);
+
+  const report = useMemo(() => {
+    if (!agentError) return null;
+    return buildErrorReport({
+      raw: agentError,
+      appVersion,
+    });
+  }, [agentError, appVersion]);
+
+  // Collapse details when error changes/clears
+  useEffect(() => {
+    setDetailsOpen(false);
+    setCopyNote(null);
+  }, [agentError]);
+
+  const copyReport = async () => {
+    if (!report) return;
+    try {
+      await navigator.clipboard.writeText(report.reportMarkdown);
+      setCopyNote("Copied redacted report");
+      window.setTimeout(() => setCopyNote(null), 2000);
+    } catch {
+      setCopyNote("Clipboard unavailable");
+      window.setTimeout(() => setCopyNote(null), 2000);
+    }
+  };
+
+  const openGitHubIssue = () => {
+    if (!report) return;
+    window.open(report.githubNewIssueUrl, "_blank", "noopener,noreferrer");
+  };
+
   return (
     <>
       {setupIncomplete && !dismissedBanner ? (
@@ -41,13 +80,47 @@ export function Banners({
           </span>
         </div>
       ) : null}
-      {agentError ? (
-        <div className="banner" data-tone="danger" role="alert">
-          <span className="banner__msg">
-            <strong>Error</strong>
-            {agentError}
-          </span>
-          <span className="banner__actions">
+      {agentError && report ? (
+        <div className="banner banner--error-detail" data-tone="danger" role="alert">
+          <div className="banner__error-col">
+            <span className="banner__msg">
+              <strong>Error</strong>
+              {report.summary}
+            </span>
+            {detailsOpen ? (
+              <pre className="banner__tech" tabIndex={0}>
+                {report.technical}
+              </pre>
+            ) : null}
+            <p className="banner__hint">
+              If this keeps happening, please report it — secrets and private
+              hosts are stripped automatically.
+              {copyNote ? ` · ${copyNote}` : null}
+            </p>
+          </div>
+          <span className="banner__actions banner__actions--stack">
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => setDetailsOpen((o) => !o)}
+              aria-expanded={detailsOpen}
+            >
+              {detailsOpen ? "Hide details" : "Show technical details"}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void copyReport()}
+            >
+              Copy report
+            </button>
+            <button
+              type="button"
+              className="btn btn--primary btn--sm"
+              onClick={openGitHubIssue}
+            >
+              Report on GitHub
+            </button>
             <button
               type="button"
               className="btn btn--ghost btn--sm"
