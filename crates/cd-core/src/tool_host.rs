@@ -110,6 +110,10 @@ pub struct ToolHost {
     durable_memory: Option<std::sync::Arc<dyn crate::memory::MemoryStore>>,
     /// Path to workspace memory SQLite (for co-located harvest table). #326
     harvest_db_path: Option<PathBuf>,
+    /// Base dir for session context packs (`…/.contextdesk`). #341
+    session_context_base: Option<PathBuf>,
+    /// Active chat session id for session-scoped context search/read. #341
+    active_session_id: Option<String>,
     /// When true, register durable memory tool specs (recall/supersede/retract).
     durable_memory_enabled: bool,
     /// Ambient recall injection each turn (MEMORY.md §10.1; host-wired from config).
@@ -169,6 +173,8 @@ impl ToolHost {
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
             harvest_db_path: None,
+            session_context_base: None,
+            active_session_id: None,
             durable_memory_enabled: false,
             ambient_recall_enabled: true,
             router_budget: crate::router::RouterBudget::default(),
@@ -558,6 +564,38 @@ impl ToolHost {
     /// Set SQLite path for harvest rows co-located with workspace memory (#326).
     pub fn set_harvest_db_path(&mut self, path: Option<PathBuf>) {
         self.harvest_db_path = path;
+    }
+
+    /// Configure session context base directory (usually workspace root + branding dir). #341
+    pub fn set_session_context_base(&mut self, base: Option<PathBuf>) {
+        self.session_context_base = base;
+    }
+
+    /// Bind the active chat session so `search_kb` / `read_file_slice` see its context pack. #341
+    pub fn set_active_session_id(&mut self, session_id: Option<String>) {
+        self.active_session_id = session_id.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+    }
+
+    /// Open session context store for the active session, if configured.
+    pub fn active_session_context(
+        &self,
+    ) -> CoreResult<Option<crate::session_context::SessionContextStore>> {
+        let (Some(base), Some(sid)) = (&self.session_context_base, &self.active_session_id) else {
+            return Ok(None);
+        };
+        let store = crate::session_context::SessionContextStore::open(
+            base,
+            sid,
+            crate::session_context::SessionContextCaps::default(),
+        )?;
+        Ok(Some(store))
     }
 
     /// Enable/disable durable memory tools without replacing the store.
@@ -1024,11 +1062,32 @@ impl ToolHost {
                 p, chunk.start_line, chunk.end_line, excerpt
             ));
         }
+        // Session context pack overlay (#341) — newly dropped files without reindex.
+        let mut session_hits = 0usize;
+        if let Ok(Some(store)) = self.active_session_context() {
+            let remain = limit.saturating_sub(hits.len()).max(4);
+            if let Ok(shits) =
+                crate::session_context::search_session_context(store.root(), query, remain)
+            {
+                for h in shits {
+                    session_hits += 1;
+                    let p = h.path.display().to_string();
+                    if first_path.is_none() {
+                        first_path = Some(p.clone());
+                    }
+                    lines.push(format!(
+                        "- score=session {}#L{}\n  {}  [session context: {}]",
+                        p, h.line, h.excerpt, h.rel_path
+                    ));
+                }
+            }
+        }
         // Partial results are valid while a background walk continues (#117).
+        let total = hits.len() + session_hits;
         let raw = if lines.is_empty() {
-            if self.index.is_empty() {
+            if self.index.is_empty() && session_hits == 0 {
                 format!(
-                    "No hits for `{query}`. The knowledge index is empty or still building in the background — search will improve as files are indexed."
+                    "No hits for `{query}`. The knowledge index is empty or still building in the background — search will improve as files are indexed. Session context packs (if any) also returned no matches."
                 )
             } else {
                 format!("No hits for `{query}`.")
@@ -1041,9 +1100,14 @@ impl ToolHost {
         } else {
             "keyword"
         };
+        let sess = if session_hits > 0 {
+            format!("+{session_hits} session")
+        } else {
+            String::new()
+        };
         Ok((
             true,
-            format!("{} hit(s) for `{query}` ({mode})", hits.len()),
+            format!("{total} hit(s) for `{query}` ({mode}{sess})"),
             raw,
             first_path,
         ))
@@ -1054,7 +1118,22 @@ impl ToolHost {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| CoreError::Message("read_file_slice requires path".into()))?;
-        let resolved = resolve_allowed_path(&self.workspace, path, false)?;
+        // Prefer active session context pack when set (#341), then workspace allowlist.
+        let resolved = {
+            let mut session_hit = None;
+            if let Ok(Some(store)) = self.active_session_context() {
+                if let Ok(Some(p)) =
+                    crate::session_context::resolve_in_session_context(store.root(), path)
+                {
+                    session_hit = Some(p);
+                }
+            }
+            if let Some(p) = session_hit {
+                p
+            } else {
+                resolve_allowed_path(&self.workspace, path, false)?
+            }
+        };
         let start = args
             .get("start_line")
             .and_then(|v| v.as_u64())
@@ -2378,6 +2457,75 @@ mod tests {
         assert!(r.ok);
         assert!(r.detail_raw.contains("JWT") || r.summary.contains("hit"));
         assert!(r.detail_for_model.contains("UNTRUSTED_DATA"));
+    }
+
+    #[tokio::test]
+    async fn search_kb_and_read_session_context_pack() {
+        // #341: agent tools must search/read session-scoped drop files via real ToolHost path.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("readme.md"), "workspace only\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let base = dir.path().join(".contextdesk");
+        host.set_session_context_base(Some(base.clone()));
+        host.set_active_session_id(Some("chat-sess-1".into()));
+        let store = crate::session_context::SessionContextStore::open(
+            &base,
+            "chat-sess-1",
+            crate::session_context::SessionContextCaps::default(),
+        )
+        .unwrap();
+        store
+            .import_bytes(
+                "incident.log",
+                b"ERROR unique_token_xyz failed authentication cascade\n",
+            )
+            .unwrap();
+
+        let r = host
+            .execute("search_kb", &json!({"query": "unique_token_xyz"}), None)
+            .await
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+        assert!(
+            r.detail_raw.contains("unique_token_xyz") || r.detail_raw.contains("session context"),
+            "search must surface session pack: {}",
+            r.detail_raw
+        );
+        assert!(r.summary.contains("session") || r.detail_raw.contains("incident.log"));
+
+        let abs = store.root().join("incident.log");
+        let read = host
+            .execute(
+                "read_file_slice",
+                &json!({
+                    "path": abs.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 5
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(read.ok, "{}", read.summary);
+        assert!(
+            read.detail_raw.contains("unique_token_xyz"),
+            "read must open session file: {}",
+            read.detail_raw
+        );
+
+        // Relative path under session context
+        let read_rel = host
+            .execute(
+                "read_file_slice",
+                &json!({"path": "incident.log", "start_line": 1, "end_line": 3}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(read_rel.ok, "{}", read_rel.summary);
+        assert!(read_rel.detail_raw.contains("unique_token_xyz"));
     }
 
     #[tokio::test]

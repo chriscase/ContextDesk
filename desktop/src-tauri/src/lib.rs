@@ -2106,6 +2106,11 @@ async fn agent_turn(
         let mut host_guard = state.host.lock().expect("host");
         host_guard.take().ok_or("host missing")?
     };
+    // Bind session context pack for this turn (#341): search_kb / read_file_slice.
+    if let Ok(base) = session_context_base(&state) {
+        host.set_session_context_base(Some(base));
+    }
+    host.set_active_session_id(Some(req.session_id.clone()));
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -2249,8 +2254,13 @@ fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Sessio
 }
 
 /// Permanently delete session file and drop in-memory history.
+/// Also purges session-scoped context pack files (#341).
 #[tauri::command]
 fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // Best-effort purge of session context pack before removing session metadata (#341).
+    if let Ok(base) = session_context_base(&state) {
+        let _ = cd_core::session_context::purge_session_at(&base, &id);
+    }
     session_store(&state)?
         .delete(&id)
         .map_err(|e| e.to_string())?;
