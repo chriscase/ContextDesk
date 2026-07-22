@@ -35,6 +35,8 @@ webpki-roots = "1.0.9"
 tokio-postgres-rustls = "0.14.0"
 # Session context zip ingest (#342)
 zip = "2"
+# Log event store — embedded DuckDB (MIT; LOG_ANALYSIS.md §10 / #358)
+duckdb = { version = "1.10505.0", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
