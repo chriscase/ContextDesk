@@ -1,10 +1,11 @@
 /**
  * parseBlocks completeness (#156): ordered lists, blockquotes, fences.
+ * Table cells / inline: safe <br> restore (model HTML).
  */
 import { describe, expect, it } from "vitest";
 import { __mdTest } from "./MarkdownBody";
 
-const { parseBlocks } = __mdTest;
+const { parseBlocks, renderInline } = __mdTest;
 
 describe("parseBlocks markdown completeness (#156)", () => {
   it("parses ordered lists as ol blocks", () => {
@@ -45,5 +46,39 @@ describe("parseBlocks markdown completeness (#156)", () => {
     expect(blocks.some((b) => b.kind === "h")).toBe(true);
     const p = blocks.find((b) => b.kind === "p" && "text" in b);
     expect(p && p.kind === "p" ? p.text : "").toContain("<script>");
+  });
+});
+
+describe("renderInline safe HTML in table cells", () => {
+  it("turns model <br> into real breaks, not visible tags", () => {
+    const html = renderInline("Line one<br>Line two<br/>Line three");
+    expect(html).toContain("Line one<br />Line two<br />Line three");
+    expect(html).not.toContain("&lt;br");
+    expect(html).not.toMatch(/<script/i);
+  });
+
+  it("keeps dangerous tags escaped", () => {
+    const html = renderInline('ok <script>alert(1)</script> <img src=x onerror=1>');
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("&lt;img");
+    expect(html).not.toMatch(/<script>/i);
+    expect(html).not.toMatch(/<img/i);
+  });
+
+  it("renders table cell content with br via parseBlocks path", () => {
+    const md = [
+      "| Story | Notes |",
+      "| --- | --- |",
+      "| Alpha <br> Beta | more |",
+    ].join("\n");
+    const blocks = parseBlocks(md);
+    const table = blocks.find((b) => b.kind === "table");
+    expect(table?.kind).toBe("table");
+    if (table?.kind !== "table") return;
+    const cell = table.rows[0]?.[0] ?? "";
+    expect(cell).toMatch(/br/i);
+    const html = renderInline(cell);
+    expect(html).toContain("<br />");
+    expect(html).not.toContain("&lt;br");
   });
 });

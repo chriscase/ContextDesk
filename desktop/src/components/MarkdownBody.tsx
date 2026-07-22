@@ -51,8 +51,28 @@ function shortHostFromUrl(raw: string): string {
   }
 }
 
+/**
+ * After escapeHtml, restore a tiny allowlist of tags models often put in
+ * table cells / prose (otherwise users see literal "&lt;br&gt;").
+ * Never restore script/style/iframe or attributes.
+ */
+function restoreSafeHtmlTags(escaped: string): string {
+  let s = escaped;
+  // <br>, <br/>, <br />, <BR>
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, "<br />");
+  // Occasional model garbage: <br></br>
+  s = s.replace(/&lt;br\s*&gt;\s*&lt;\/br\s*&gt;/gi, "<br />");
+  // Soft line breaks that survived as real newlines inside a cell/paragraph
+  // (table cells often have \n from multi-line model output).
+  s = s.replace(/\n/g, "<br />");
+  return s;
+}
+
 function renderInline(src: string): string {
+  // Escape first so raw HTML from the model cannot inject markup.
   let s = escapeHtml(src);
+  // Then re-allow only safe structural breaks (common in GFM tables).
+  s = restoreSafeHtmlTags(s);
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
@@ -601,4 +621,11 @@ export function MarkdownBody({ text, streaming }: Props) {
 }
 
 /** Exported for unit-style checks in the browser console / tests. */
-export const __mdTest = { parseBlocks, isTableSep, isTableRow, parseTableRow };
+export const __mdTest = {
+  parseBlocks,
+  isTableSep,
+  isTableRow,
+  parseTableRow,
+  renderInline,
+  restoreSafeHtmlTags,
+};
