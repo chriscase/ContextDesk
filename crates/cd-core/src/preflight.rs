@@ -68,6 +68,8 @@ pub struct PreflightInput<'a> {
     pub ollama_reachable: Option<bool>,
     /// Host-reported: active provider probe ok (optional).
     pub provider_reachable: Option<bool>,
+    /// Optional short reason from the host live probe (no secrets).
+    pub provider_probe_detail: Option<String>,
     /// Host-reported: keychain has key for active profile when required.
     pub active_key_present: Option<bool>,
     /// Confluence settings (optional connector).
@@ -240,19 +242,32 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
                 ProviderKind::OpenAiCompatible | ProviderKind::Anthropic
             );
             if remote_probe_kinds {
+                let host_detail = input
+                    .provider_probe_detail
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
                 match input.provider_reachable {
                     Some(true) => items.push(PreflightItem {
                         id: "provider.remote".into(),
                         title: "Provider endpoint".into(),
                         level: PreflightLevel::Pass,
-                        detail: "Live probe succeeded (models/health HTTP ok).".into(),
+                        detail: host_detail
+                            .map(|d| format!("Live probe succeeded — {d}"))
+                            .unwrap_or_else(|| {
+                                "Live probe succeeded (models/health HTTP ok).".into()
+                            }),
                         fix_action: Some("ai".into()),
                     }),
                     Some(false) => items.push(PreflightItem {
                         id: "provider.remote".into(),
                         title: "Provider endpoint".into(),
                         level: PreflightLevel::Fail,
-                        detail: "Live probe failed — check URL, key, and network.".into(),
+                        detail: host_detail
+                            .map(|d| format!("Live probe failed — {d}"))
+                            .unwrap_or_else(|| {
+                                "Live probe failed — check URL, key, and network.".into()
+                            }),
                         fix_action: Some("ai".into()),
                     }),
                     None => items.push(PreflightItem {
@@ -400,6 +415,7 @@ mod tests {
             data_dir_writable: true,
             ollama_reachable: Some(true),
             provider_reachable: None,
+            provider_probe_detail: None,
             active_key_present: None,
             confluence: None,
             confluence_pat_present: None,
@@ -423,6 +439,7 @@ mod tests {
             data_dir_writable: true,
             ollama_reachable: Some(true),
             provider_reachable: None,
+            provider_probe_detail: None,
             active_key_present: None,
             confluence: None,
             confluence_pat_present: None,
@@ -453,6 +470,7 @@ mod tests {
             data_dir_writable: true,
             ollama_reachable: Some(true),
             provider_reachable: None,
+            provider_probe_detail: None,
             active_key_present: None,
             confluence: Some(&cf),
             confluence_pat_present: Some(false),
@@ -463,6 +481,51 @@ mod tests {
             .items
             .iter()
             .any(|i| { i.id == "confluence.pat" && i.level == PreflightLevel::Warn }));
+    }
+
+    #[test]
+    fn remote_probe_fail_includes_host_detail() {
+        use crate::providers::{ProviderKind, ProviderProfile};
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let mut providers = ProviderConfig::default();
+        providers.profiles.push(ProviderProfile {
+            id: "openai".into(),
+            label: "Gateway".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://gw.example.com/v1".into(),
+            api_key_ref: Some("k".into()),
+            chat_model: "gpt-4o".into(),
+            embedding_model: None,
+            embedding_base_url: None,
+            local_only: false,
+            capabilities: Default::default(),
+        });
+        providers.active_id = Some("openai".into());
+        let report = run_preflight(PreflightInput {
+            workspace: Some(&ws),
+            providers: &providers,
+            data_dir_writable: true,
+            ollama_reachable: None,
+            provider_reachable: Some(false),
+            provider_probe_detail: Some("blocked private IP".into()),
+            active_key_present: Some(true),
+            confluence: None,
+            confluence_pat_present: None,
+            grok_session_present: None,
+        });
+        assert!(report.has_blocking);
+        let remote = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.remote")
+            .expect("remote row");
+        assert_eq!(remote.level, PreflightLevel::Fail);
+        assert!(
+            remote.detail.contains("blocked private IP"),
+            "{}",
+            remote.detail
+        );
     }
 
     #[test]
@@ -478,6 +541,7 @@ mod tests {
             data_dir_writable: true,
             ollama_reachable: Some(true),
             provider_reachable: None,
+            provider_probe_detail: None,
             active_key_present: None,
             confluence: None,
             confluence_pat_present: None,

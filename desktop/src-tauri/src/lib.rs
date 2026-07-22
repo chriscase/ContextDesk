@@ -748,6 +748,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     let active = cfg.providers.active().cloned();
     let mut ollama_ok = None;
     let mut provider_ok = None;
+    let mut provider_probe_detail = None;
     let mut key_present = None;
     if let Some(p) = &active {
         let desc = cd_core::providers::descriptor_for(p.kind);
@@ -758,6 +759,11 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             // #126: real probe (session + models list), not structural URL only.
             let outcome = cd_core::discovery::probe_provider(p, None).await;
             provider_ok = Some(outcome.is_reachable());
+            provider_probe_detail = Some(match &outcome {
+                cd_core::discovery::ProbeOutcome::Reachable { reason }
+                | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
+                | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
+            });
         } else if desc.needs_api_key {
             let ref_id = p
                 .api_key_ref
@@ -765,7 +771,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
                 .unwrap_or_else(|| key_ref_for_profile(&p.id));
             let has = state.secrets.has(&ref_id).unwrap_or(false);
             key_present = Some(has);
-            // #126: live HTTP probe (models list); never structural-only "responded".
+            // #126: live HTTP probe — same TriageTool-parity path as Discover (corp private OK).
             let api_key = if has {
                 state.secrets.get(&ref_id).ok().flatten()
             } else {
@@ -773,6 +779,11 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
             };
             let outcome = cd_core::discovery::probe_provider(p, api_key).await;
             provider_ok = Some(outcome.is_reachable());
+            provider_probe_detail = Some(match &outcome {
+                cd_core::discovery::ProbeOutcome::Reachable { reason }
+                | cd_core::discovery::ProbeOutcome::KeyRejected { reason }
+                | cd_core::discovery::ProbeOutcome::Unreachable { reason } => reason.clone(),
+            });
         }
     }
     let data_ok = ensure_config_dir(&state.branding).is_ok();
@@ -793,6 +804,7 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         data_dir_writable: data_ok,
         ollama_reachable: ollama_ok,
         provider_reachable: provider_ok,
+        provider_probe_detail,
         active_key_present: key_present,
         confluence: Some(&cfg.confluence),
         confluence_pat_present: confluence_pat,
