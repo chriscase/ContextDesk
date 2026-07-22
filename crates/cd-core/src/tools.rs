@@ -54,6 +54,8 @@ pub mod names {
     pub const CONFLUENCE_GET_ANCESTORS: &str = "confluence_get_ancestors";
     /// Confluence attachment metadata (read-only). #326
     pub const CONFLUENCE_LIST_ATTACHMENTS: &str = "confluence_list_attachments";
+    /// Harvest Confluence page(s) into durable memory (SoftWrite). #326 PR3
+    pub const HARVEST_FROM_SOURCE: &str = "harvest_from_source";
     /// Open-web search (opt-in; DuckDuckGo HTML lite by default).
     pub const WEB_SEARCH: &str = "web_search";
     /// Open-web page fetch (opt-in; SSRF-safe text extract).
@@ -196,6 +198,27 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "page_id": { "type": "string" }
                 },
                 "required": ["page_id"]
+            }),
+        },
+        ToolSpec {
+            name: names::HARVEST_FROM_SOURCE.into(),
+            description: "Harvest Confluence page(s) into durable memory with provenance (SoftWrite; requires Accept). Needs non-empty space allowlist. transform: plain_strip|raw_storage|structured_fields|summary|cleaned_markdown."
+                .into(),
+            side_effect: ToolSideEffect::SoftWrite,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "system": { "type": "string", "description": "Only confluence in v1" },
+                    "page_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Confluence page ids (1..=batch max)"
+                    },
+                    "page_id": { "type": "string", "description": "Single page id alternative" },
+                    "transform": { "type": "string" },
+                    "destination": { "type": "string", "description": "memory only in PR3" },
+                    "scope": { "type": "string", "description": "workspace|personal" }
+                }
             }),
         },
         ToolSpec {

@@ -199,6 +199,7 @@ pub fn attach_durable_memory_to_host(
         Err(e) => tracing::warn!(error = %e, "memory_fs import skipped"),
     }
     host.set_durable_memory(std::sync::Arc::new(store), true);
+    host.set_harvest_db_path(Some(ws_path));
     host.set_ambient_recall_enabled(memory_cfg.ambient_recall_enabled);
     Ok(())
 }
