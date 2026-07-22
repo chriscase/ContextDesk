@@ -22,7 +22,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 tracing = "0.1"
 toml = "0.8"
 semver = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# native-roots: trust OS/corp CAs (macOS keychain) for Confluence/gateways.
+# macos-system-configuration: system HTTP proxy (corp VPN).
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls-native-roots",
+  "stream",
+  "macos-system-configuration",
+] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
