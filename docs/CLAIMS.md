@@ -38,6 +38,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |
 | VectorIndex Exact + Hnsw | Shipped | crates/cd-core/src/vector_index.rs:ExactIndex | #354 |
 | Durable memory hybrid recall (embed-on-write) | Shipped | crates/cd-core/src/memory/sqlite_store.rs:MEMORY_EMBED_TIMEOUT_MS | #346 |
+| Log analysis Phase-1 pipeline | Shipped | crates/cd-core/src/log_analysis/mod.rs:ingest_path | #355–#362 |
 
 ## Human checklist
 

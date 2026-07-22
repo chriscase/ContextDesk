@@ -247,6 +247,12 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     }
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
+    // Log Phase-1: disposable corpora under app cache (LOG_ANALYSIS.md §10 keep-until-discarded).
+    if let Ok(config_dir) = ensure_config_dir(&state.branding) {
+        let log_cache = config_dir.join("cache");
+        let _ = std::fs::create_dir_all(&log_cache);
+        host.set_log_analysis(true, Some(log_cache));
+    }
     // #119 hybrid search_kb opt-in; #346 memory embed-on-write needs the same backend
     // whenever durable memory is on (not only when hybrid_retrieval is toggled).
     host.set_hybrid_retrieval(cfg.hybrid_retrieval);
