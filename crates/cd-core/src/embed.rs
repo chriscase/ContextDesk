@@ -38,6 +38,9 @@ pub struct HybridWeights {
 }
 
 impl Default for HybridWeights {
+    /// Defaults revisited with live semantic recall (#346 / #347):
+    /// keep keyword slightly ahead so exact terms still win; semantic at 0.35
+    /// is now a real signal (embed-on-write + 5s query budget); recency soft.
     fn default() -> Self {
         Self {
             keyword: 0.55,
