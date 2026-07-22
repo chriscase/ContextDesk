@@ -32,6 +32,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Provider tools capability detect + persist | Shipped | crates/cd-core/src/providers.rs:set_profile_tools_enabled | #327 |
 | Expandable diagnostics + redacted GitHub report | Shipped | desktop/src/lib/errorReport.ts:buildErrorReport | #325 P0–P1 |
 | Build identity (version, channel, git) | Shipped | crates/cd-core/src/build_identity.rs:current | #338 |
+| Confluence SoftWrite harvest → memory | Shipped | crates/cd-core/src/harvest/apply.rs:harvest_page_to_memory | #326 PR3 |
 
 ## Human checklist
 

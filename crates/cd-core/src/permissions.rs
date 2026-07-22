@@ -149,6 +149,11 @@ impl PermissionState {
         if is_destructive_memory_target(target) {
             return false;
         }
+        // Harvest SoftWrite: AllowOnce only — never session path grants (#326 K15).
+        // Exact-match would still be wrong for prefix `harvest://confluence` vs page targets.
+        if crate::harvest::is_harvest_target(target) {
+            return false;
+        }
         match side_effect {
             ToolSideEffect::Read => true,
             ToolSideEffect::SoftWrite => self.session_path_allowed(target),
@@ -219,6 +224,18 @@ mod tests {
         let st = PermissionState::default();
         assert!(st.may_execute_without_prompt(ToolSideEffect::Read, "/x"));
         assert!(!st.may_execute_without_prompt(ToolSideEffect::HardWrite, "/x"));
+    }
+
+    #[test]
+    fn harvest_targets_never_session_auto() {
+        let mut st = PermissionState::default();
+        st.allow_session_path("harvest://confluence");
+        st.allow_session_path("harvest://confluence/_/42");
+        assert!(
+            !st.may_execute_without_prompt(ToolSideEffect::SoftWrite, "harvest://confluence/_/42")
+        );
+        assert!(!st
+            .may_execute_without_prompt(ToolSideEffect::SoftWrite, "harvest://confluence/batch/3"));
     }
 
     #[test]

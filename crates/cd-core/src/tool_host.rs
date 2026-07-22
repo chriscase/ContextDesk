@@ -29,6 +29,7 @@ fn confluence_tool_name(name: &str) -> bool {
             | names::CONFLUENCE_LIST_CHILDREN
             | names::CONFLUENCE_GET_ANCESTORS
             | names::CONFLUENCE_LIST_ATTACHMENTS
+            | names::HARVEST_FROM_SOURCE
     )
 }
 
@@ -107,6 +108,8 @@ pub struct ToolHost {
     hybrid_weights: crate::embed::HybridWeights,
     /// Durable memory store (Phase 1); when set, memory tools write here.
     durable_memory: Option<std::sync::Arc<dyn crate::memory::MemoryStore>>,
+    /// Path to workspace memory SQLite (for co-located harvest table). #326
+    harvest_db_path: Option<PathBuf>,
     /// When true, register durable memory tool specs (recall/supersede/retract).
     durable_memory_enabled: bool,
     /// Ambient recall injection each turn (MEMORY.md §10.1; host-wired from config).
@@ -165,6 +168,7 @@ impl ToolHost {
             embed_backend: None,
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
+            harvest_db_path: None,
             durable_memory_enabled: false,
             ambient_recall_enabled: true,
             router_budget: crate::router::RouterBudget::default(),
@@ -551,6 +555,11 @@ impl ToolHost {
         self.durable_memory_enabled = enabled;
     }
 
+    /// Set SQLite path for harvest rows co-located with workspace memory (#326).
+    pub fn set_harvest_db_path(&mut self, path: Option<PathBuf>) {
+        self.harvest_db_path = path;
+    }
+
     /// Enable/disable durable memory tools without replacing the store.
     pub fn set_durable_memory_enabled(&mut self, enabled: bool) {
         self.durable_memory_enabled = enabled;
@@ -633,6 +642,9 @@ impl ToolHost {
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
             specs.retain(|t| !confluence_tool_name(&t.name));
+        }
+        if !self.durable_memory_active() {
+            specs.retain(|t| t.name != names::HARVEST_FROM_SOURCE);
         }
         if !self.web_research_enabled {
             specs.retain(|t| t.name != names::WEB_SEARCH && t.name != names::WEB_FETCH);
@@ -892,6 +904,7 @@ impl ToolHost {
             names::CONFLUENCE_LIST_ATTACHMENTS => {
                 self.tool_confluence_list_attachments(arguments).await?
             }
+            names::HARVEST_FROM_SOURCE => self.tool_harvest_from_source(arguments).await?,
             names::WEB_SEARCH => {
                 let (ok, summary, raw, cites) = self.tool_web_search(arguments).await?;
                 let first = cites.first().map(|(u, _, _)| u.clone());
@@ -1535,6 +1548,125 @@ impl ToolHost {
         ))
     }
 
+    /// SoftWrite harvest Confluence → durable memory + harvest row (#326 PR3).
+    async fn tool_harvest_from_source(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let harvest_args = crate::harvest::parse_harvest_args(args)?;
+        if !self.durable_memory_active() {
+            return Err(CoreError::Policy(
+                "durable memory required for harvest_from_source".into(),
+            ));
+        }
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        if cfg.spaces.is_empty() {
+            return Err(CoreError::Policy(
+                "spaces allowlist required for harvest (add space keys in Settings)".into(),
+            ));
+        }
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let store = self
+            .durable_memory
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?
+            .clone();
+        let harvest_path = self.harvest_db_path.clone().ok_or_else(|| {
+            CoreError::Policy(
+                "harvest database path not configured (rebuild host with durable memory)".into(),
+            )
+        })?;
+        let harvest_store = crate::harvest::HarvestStore::open(&harvest_path)?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let now = crate::embed::now_unix_secs();
+        let mut results = Vec::new();
+        let mut first_cite = None;
+        for page_id in &harvest_args.page_ids {
+            self.throttle_confluence().await?;
+            let page_result =
+                match confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, true).await
+                {
+                    Ok(body) => {
+                        match crate::harvest::harvest_page_to_memory(
+                            &cfg,
+                            store.as_ref(),
+                            &harvest_store,
+                            &body,
+                            &harvest_args.transform,
+                            harvest_args.scope,
+                            now,
+                        ) {
+                            Ok((rec, hr)) => {
+                                if first_cite.is_none() {
+                                    first_cite = Some(format!("memory:{}", rec.id));
+                                }
+                                crate::harvest::HarvestPageResult {
+                                    page_id: page_id.clone(),
+                                    ok: true,
+                                    harvest_id: Some(hr.id),
+                                    memory_id: Some(rec.id),
+                                    error: None,
+                                }
+                            }
+                            Err(e) => crate::harvest::HarvestPageResult {
+                                page_id: page_id.clone(),
+                                ok: false,
+                                harvest_id: None,
+                                memory_id: None,
+                                error: Some(e.to_string()),
+                            },
+                        }
+                    }
+                    Err(e) => crate::harvest::HarvestPageResult {
+                        page_id: page_id.clone(),
+                        ok: false,
+                        harvest_id: None,
+                        memory_id: None,
+                        error: Some(e.to_string()),
+                    },
+                };
+            results.push(page_result);
+        }
+        let ok_n = results.iter().filter(|r| r.ok).count();
+        let raw = serde_json::to_string_pretty(&serde_json::json!({
+            "results": results.iter().map(|r| serde_json::json!({
+                "page_id": r.page_id,
+                "ok": r.ok,
+                "harvest_id": r.harvest_id.map(|u| u.to_string()),
+                "memory_id": r.memory_id.map(|u| u.to_string()),
+                "error": r.error,
+            })).collect::<Vec<_>>(),
+            "transform": harvest_args.transform,
+            "scope": harvest_args.scope.as_str(),
+        }))
+        .unwrap_or_else(|_| "{}".into());
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                names::HARVEST_FROM_SOURCE,
+                ToolSideEffect::SoftWrite,
+                &crate::harvest::harvest_permission_target(&harvest_args),
+                crate::audit::outcomes::ALLOWED,
+                &format!("harvested {ok_n}/{}", results.len()),
+                raw.len() as u64,
+            );
+        }
+        Ok((
+            ok_n > 0,
+            format!("harvested {ok_n}/{} page(s)", results.len()),
+            raw,
+            first_cite,
+        ))
+    }
+
     async fn throttle_web(&mut self) -> CoreResult<()> {
         if let Some(last) = self.last_web_call {
             let elapsed = last.elapsed();
@@ -1971,6 +2103,7 @@ fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
         ToolSideEffect::SoftWrite if name == names::SUPERSEDE_MEMORY => "local",
         ToolSideEffect::SoftWrite if name == names::RETRACT_MEMORY => "local",
         ToolSideEffect::SoftWrite if name == names::SAVE_SKILL => "local",
+        ToolSideEffect::SoftWrite if name == names::HARVEST_FROM_SOURCE => "local",
         ToolSideEffect::SoftWrite => "local",
         ToolSideEffect::HardWrite => "destructive",
     }
@@ -2029,6 +2162,10 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             .and_then(|v| v.as_str())
             .unwrap_or("recall")
             .into(),
+        names::HARVEST_FROM_SOURCE => match crate::harvest::parse_harvest_args(args) {
+            Ok(a) => crate::harvest::harvest_permission_target(&a),
+            Err(_) => "harvest://confluence/invalid".into(),
+        },
         names::SAVE_SKILL => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
             let safe: String = id
