@@ -62,6 +62,19 @@ function main() {
     conf.app.security.capabilities = ["default"];
   }
   const out = JSON.stringify(conf, null, 2) + "\n";
+  // Avoid dirtying the worktree on every tauri dev when conf already matches.
+  let prev = "";
+  try {
+    prev = fs.readFileSync(confPath, "utf8");
+  } catch {
+    /* missing → write */
+  }
+  if (prev === out) {
+    console.log(
+      `[gen-tauri-conf] unchanged productName=${name} identifier=${conf.identifier}`,
+    );
+    return;
+  }
   fs.writeFileSync(confPath, out, "utf8");
   console.log(
     `[gen-tauri-conf] productName=${name} identifier=${conf.identifier} window.title=${name}`,
