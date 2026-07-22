@@ -10,6 +10,7 @@
 #![warn(clippy::string_slice)]
 
 pub mod agent;
+pub mod ai_probe;
 pub mod audit;
 pub mod branding;
 pub mod chat;

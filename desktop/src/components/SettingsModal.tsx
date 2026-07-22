@@ -157,6 +157,7 @@ export function SettingsModal({
                 urlError={c.urlError}
                 recheck={c.recheck}
                 checking={c.checking}
+                onApplyAndSave={c.applyAndSaveAi}
               />
             ) : null}
 

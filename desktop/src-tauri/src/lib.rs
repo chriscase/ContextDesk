@@ -2235,20 +2235,79 @@ async fn models_for_profile(
 }
 
 /// List chat models for the **Settings draft** (not only the saved profile).
-///
-/// Used when the user pastes a base URL / key so the model field can become a
-/// select (TriageTool-style discover-on-URL), before Save.
 #[derive(Debug, Deserialize)]
 struct ListModelsDraftReq {
     kind: String,
     base_url: String,
-    /// Optional not-yet-saved key (never logged). Empty → try keychain for kind.
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
     local_only: Option<bool>,
     #[serde(default)]
     chat_model: Option<String>,
+}
+
+/// Resolve draft/keychain key for a provider kind (never logs).
+fn resolve_draft_api_key(
+    state: &AppState,
+    kind: ProviderKind,
+    draft_key: Option<&str>,
+) -> Option<String> {
+    if matches!(kind, ProviderKind::XaiGrokBuild | ProviderKind::Ollama) {
+        return None;
+    }
+    let draft = draft_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'))
+        .map(|s| s.to_string());
+    if draft.is_some() {
+        return draft;
+    }
+    let desc = cd_core::providers::descriptor_for(kind);
+    let id = desc.profile_id_slug;
+    let r = key_ref_for_profile(id);
+    if let Ok(Some(k)) = state.secrets.get(&r) {
+        return Some(k);
+    }
+    let cfg = state.config.lock().expect("config");
+    cfg.providers
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .and_then(|p| p.api_key_ref.as_ref())
+        .and_then(|r| state.secrets.get(r).ok().flatten())
+}
+
+/// TriageTool-parity gateway probe (plain HTTP, multi-path, Bearer + x-api-key).
+#[derive(Debug, Deserialize)]
+struct ProbeAiGatewayReq {
+    base_url: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    /// When true (default), also probe local Ollama.
+    #[serde(default)]
+    probe_local: Option<bool>,
+}
+
+#[tauri::command]
+async fn probe_ai_gateway_cmd(
+    state: State<'_, AppState>,
+    req: ProbeAiGatewayReq,
+) -> Result<cd_core::ai_probe::AiProbeResult, String> {
+    let draft = req
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'));
+    // Prefer draft key; else try keychain for either remote flavor.
+    let key = if let Some(k) = draft {
+        Some(k.to_string())
+    } else {
+        resolve_draft_api_key(&state, ProviderKind::OpenAiCompatible, None)
+            .or_else(|| resolve_draft_api_key(&state, ProviderKind::Anthropic, None))
+    };
+    let probe_local = req.probe_local.unwrap_or(true);
+    Ok(cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await)
 }
 
 #[tauri::command]
@@ -2263,6 +2322,49 @@ async fn list_models_for_draft(
         "xai_grok_build" => ProviderKind::XaiGrokBuild,
         other => return Err(format!("unsupported provider kind: {other}")),
     };
+
+    // Remote gateway / Ollama list: use TriageTool-parity probe (no SSRF pin).
+    if matches!(
+        kind,
+        ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::Ollama
+    ) {
+        let key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
+        let probe_local = matches!(kind, ProviderKind::Ollama)
+            || req.base_url.contains("127.0.0.1")
+            || req.base_url.to_lowercase().contains("localhost");
+        let result =
+            cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
+        // Prefer chat candidates; fall back to full model list.
+        let mut ids: Vec<String> = if !result.chat_candidates.is_empty() {
+            result.chat_candidates.into_iter().map(|m| m.id).collect()
+        } else {
+            result
+                .models
+                .into_iter()
+                .filter(|m| m.kind != "embedding")
+                .map(|m| m.id)
+                .collect()
+        };
+        // If user forced a flavor that didn't match probe, still return what we got.
+        if matches!(kind, ProviderKind::Ollama) && result.flavor.as_deref() != Some("ollama") {
+            // Probe may have hit remote — still return ids if any.
+        }
+        if let Some(cm) = req
+            .chat_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !ids.iter().any(|x| x == cm) {
+                ids.insert(0, cm.to_string());
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        return Ok(ids);
+    }
+
+    // Grok / other: keep profile path with allow_private for remote.
     let desc = cd_core::providers::descriptor_for(kind);
     let id = desc.profile_id_slug.to_string();
     let mut base_url = req.base_url.trim().trim_end_matches('/').to_string();
@@ -2271,52 +2373,15 @@ async fn list_models_for_draft(
             base_url = def.to_string();
         }
     }
-    // Normalize gateway paste (…/v1/models → …/v1) like probe_url.
-    if matches!(
-        kind,
-        ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::XaiGrokBuild
-    ) {
-        base_url = normalize_gateway_input(&base_url);
-    }
-
     let local_only = req.local_only.unwrap_or(desc.is_local);
     let chat_model = req
         .chat_model
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("mistral")
+        .unwrap_or("grok-3")
         .to_string();
-
-    // Prefer draft paste; else keychain for this profile slug.
-    let draft_key = req
-        .api_key
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'));
-    let api_key = if matches!(kind, ProviderKind::XaiGrokBuild) {
-        None
-    } else if let Some(k) = draft_key {
-        Some(k)
-    } else {
-        let r = key_ref_for_profile(&id);
-        state.secrets.get(&r).ok().flatten()
-    };
-
-    // Also reuse saved profile ref if config has a different key ref for this id.
-    let api_key = if api_key.is_none() && !matches!(kind, ProviderKind::XaiGrokBuild) {
-        let cfg = state.config.lock().expect("config");
-        if let Some(p) = cfg.providers.profiles.iter().find(|p| p.id == id) {
-            p.api_key_ref
-                .as_ref()
-                .and_then(|r| state.secrets.get(r).ok().flatten())
-        } else {
-            None
-        }
-    } else {
-        api_key
-    };
-
+    let api_key = resolve_draft_api_key(&state, kind, req.api_key.as_deref());
     let profile = ProviderProfile {
         id: id.clone(),
         label: desc.default_label.to_string(),
@@ -2329,14 +2394,40 @@ async fn list_models_for_draft(
         local_only,
         capabilities: desc.default_capabilities,
     };
+    Ok(models_for_profile_with_key(&profile, api_key.as_deref()).await)
+}
 
-    // models_for_profile expects key from secrets path for OpenAI — pass via temporary:
-    // we already resolved api_key above; inject by calling logic with a one-off.
-    // Reuse models_for_profile by temporarily using secrets is awkward; call with
-    // a thin duplicate that accepts Option key — here we shadow secrets via profile
-    // path only when key is in keychain. So push key into a local list helper.
-    let ids = models_for_profile_with_key(&profile, api_key.as_deref()).await;
-    Ok(ids)
+/// Active provider for Settings hydrate (no secrets).
+#[tauri::command]
+fn get_active_provider(state: State<'_, AppState>) -> Option<ProviderDto> {
+    let cfg = state.config.lock().expect("config").clone();
+    let p = cfg.providers.active()?;
+    let has_key = if p.kind == ProviderKind::XaiGrokBuild {
+        cd_core::grok_auth::detect_grok_session().is_some()
+    } else {
+        p.api_key_ref
+            .as_ref()
+            .map(|r| state.secrets.has(r).unwrap_or(false))
+            .unwrap_or(false)
+            || state
+                .secrets
+                .has(&key_ref_for_profile(&p.id))
+                .unwrap_or(false)
+    };
+    Some(ProviderDto {
+        id: p.id.clone(),
+        kind: match p.kind {
+            ProviderKind::Ollama => "ollama".into(),
+            ProviderKind::OpenAiCompatible => "openai_compatible".into(),
+            ProviderKind::Anthropic => "anthropic".into(),
+            ProviderKind::XaiGrokBuild => "xai_grok_build".into(),
+        },
+        base_url: p.base_url.clone(),
+        chat_model: p.chat_model.clone(),
+        label: p.label.clone(),
+        api_key_ref: p.api_key_ref.clone(),
+        has_key,
+    })
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
@@ -2359,10 +2450,11 @@ async fn models_for_profile_with_key(
             }
         }
         ProviderKind::OpenAiCompatible => {
+            // User-configured remote bases may be corporate private DNS — allow private.
             let policy = if profile.local_only {
                 SsrfPolicy::local_only()
             } else {
-                SsrfPolicy::default()
+                SsrfPolicy::allow_private_networks()
             };
             let candidates = expand_base_candidates(&profile.base_url);
             let mut best: Vec<String> = Vec::new();
@@ -2421,7 +2513,7 @@ async fn models_for_profile_with_key(
             let policy = if profile.local_only {
                 SsrfPolicy::local_only()
             } else {
-                SsrfPolicy::default()
+                SsrfPolicy::allow_private_networks()
             };
             let candidates = expand_base_candidates(&profile.base_url);
             let mut best: Vec<String> = Vec::new();
@@ -2620,7 +2712,8 @@ async fn llm_title_for_prompt(state: &AppState, prompt: &str) -> String {
             let policy = if profile.local_only {
                 SsrfPolicy::local_only()
             } else {
-                SsrfPolicy::default()
+                // User-configured corporate gateways often resolve to private IPs.
+                SsrfPolicy::allow_private_networks()
             };
             let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
                 &profile.base_url,
@@ -3071,6 +3164,8 @@ pub fn run() {
             search_chat_sessions,
             list_chat_models,
             list_models_for_draft,
+            probe_ai_gateway_cmd,
+            get_active_provider,
             set_default_chat_model,
             get_default_chat_model,
             suggest_chat_title,
