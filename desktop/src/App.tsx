@@ -53,6 +53,7 @@ export function App() {
     persistSession,
     upgradeTitleWithLlm,
     createSession,
+    ensureActiveSession,
     applyRename,
     togglePinById,
     trashSessionById,
@@ -95,6 +96,7 @@ export function App() {
     resolvedSessionId,
     sessions,
     setSessions,
+    ensureActiveSession,
     setup: shell.setup,
     modelOptions: shell.modelOptions,
     defaultModelKey: shell.defaultModelKey,
@@ -137,13 +139,27 @@ export function App() {
 
   const setSessionModel = (key: string) => {
     const { providerId, modelId } = parseModelSelectionKey(key);
-    setSessions((all) =>
-      all.map((s) =>
-        s.id === resolvedSessionId
+    // Ensure a chat exists so model selection sticks before first message.
+    const target = ensureActiveSession();
+    const sid = target.id;
+    setSessions((all) => {
+      const exists = all.some((s) => s.id === sid);
+      if (!exists) {
+        return [
+          {
+            ...target,
+            chatModel: modelId,
+            providerProfileId: providerId,
+          },
+          ...all,
+        ];
+      }
+      return all.map((s) =>
+        s.id === sid
           ? { ...s, chatModel: modelId, providerProfileId: providerId }
           : s,
-      ),
-    );
+      );
+    });
   };
 
   const openChatCtxMenu = (e: ReactMouseEvent, id: string) => {
