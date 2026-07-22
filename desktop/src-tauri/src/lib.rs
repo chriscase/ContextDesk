@@ -3291,10 +3291,10 @@ fn log_cluster_problems(
     max_clusters: Option<u32>,
 ) -> Result<Vec<LogClusterDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let clusters =
-        cd_core::log_analysis::cluster_problems(&c, max_clusters.unwrap_or(10) as usize)
-            .map_err(|e| e.to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let clusters = cd_core::log_analysis::cluster_problems(&c, max_clusters.unwrap_or(10) as usize)
+        .map_err(|e| e.to_string())?;
     Ok(clusters
         .into_iter()
         .map(|cl| LogClusterDto {
@@ -3317,7 +3317,8 @@ fn log_timeline(
     width_secs: Option<i64>,
 ) -> Result<Vec<LogTimelineBucketDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     let buckets = cd_core::log_analysis::timeline(&c, width_secs.unwrap_or(60), None, None)
         .map_err(|e| e.to_string())?;
     Ok(buckets
@@ -3342,7 +3343,8 @@ fn log_search(
     let cache = log_cache_dir(&state)?;
     let host = state.host.lock().expect("host");
     let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     let q = cd_core::log_analysis::SearchLogsQuery {
         query: Some(query),
         semantic: true,
