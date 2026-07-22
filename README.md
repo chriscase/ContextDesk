@@ -4,7 +4,7 @@
 
 **ContextDesk is a local-first knowledge workbench that answers questions about your own files, memory, and connected sources — with citations — and confirms every write before it happens.**
 
-Point it at folders you allowlist and at markdown project memory, ask how a subsystem works, and get streaming answers with file citations and a visible search trail. It runs happily against a local model (Ollama) with **no account and no API key**. It is a *research & synthesis* tool, not a code-editing agent — pair it with your coding agent when you need edits. The name is a working title; the whole product is rename-friendly via [`branding.toml`](branding.toml).
+Point it at folders you allowlist and at markdown project memory, ask how a subsystem works, and get streaming answers with file citations and a visible search trail. Run it **fully local** with [Ollama](https://ollama.com) (no product account, no API key), **or** connect an optional **Grok Build** session you already use on this machine (Settings → AI, explicit opt-in — credentials stay in the OS host, never the webview). It is a *research & synthesis* tool, not a code-editing agent — pair it with your coding agent when you need edits. The name is a working title; the whole product is rename-friendly via [`branding.toml`](branding.toml).
 
 | | |
 |--|--|
@@ -47,7 +47,7 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - Allowlisted workspace files + markdown memory search, with **citations** and a **search trail** (`index.rs:KeywordIndex`, incremental SQLite)
 - Streaming agent turns with cancel and live event sink (`agent.rs:run_agent_turn_with_sink`)
 - Permission-gated soft/hard writes to memory and skills (`tool_host.rs:ToolHost`)
-- Providers: **Ollama**, OpenAI-compatible, Anthropic Messages, optional Grok Build session; multi-model selection in the composer
+- Providers: **Ollama** (local), **Grok Build session** (opt-in reuse of `~/.grok/auth.json`), OpenAI-compatible, Anthropic Messages; multi-model selection in the composer
 - Opt-in web research (`web_search` / `web_fetch`) behind SSRF gates
 - Read-only connectors: SQLite, Postgres, Confluence, X search
 - MCP stdio tools and HTTP/OpenAPI presets wired as agent tools (`tool_host.rs:attach_mcp_connector`, `http_preset.rs`)
@@ -61,14 +61,15 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - Stable third-party **embed / host-adapter protocol** (#94) — `cd-core` is embeddable today, but the public adapter contract is early (see [`docs/examples/host-adapter.md`](docs/examples/host-adapter.md))
 - **External module sandbox** hardening (#94)
 - **Semantic** chat-archive search (#79) — archive search today is keyword-based
-- Theme/skin registry beyond dark/light/slate (#99)
 - Proven multi-OS release installers (#172)
 
 ---
 
-## Ollama-only quickstart (no API key)
+## Quickstart
 
-An end-to-end path for a machine with **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](https://v2.tauri.app/start/prerequisites/). No OpenAI/Anthropic/Grok key is needed.
+Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](https://v2.tauri.app/start/prerequisites/).
+
+### Option A — Ollama only (no account, no API key)
 
 1. **Install [Ollama](https://ollama.com), then pull a small chat model** and health-check the local daemon:
    ```sh
@@ -87,7 +88,18 @@ An end-to-end path for a machine with **Rust (stable)**, **Node 20+**, and [Taur
    - Provider **Ollama (local)**, base `http://127.0.0.1:11434`, model `mistral` → Save.
 4. **Ask a question** grounded in that folder, e.g. *"How does authentication work in this codebase?"* Expect streaming markdown, a **search trail** showing where it looked, and **citations** back to `fixtures/kb/auth.md` / `auth_gateway.md` when retrieval hits.
 
-Remote providers stay optional and are added later in Settings → AI. Their keys go straight to the OS keychain — never into the repo or the webview.
+### Option B — Grok Build session (opt-in)
+
+If you already use **Grok Build** / the Grok CLI on this machine, ContextDesk can talk to xAI models using that session — **without pasting an API key into the UI**.
+
+1. Sign in on the machine: run `grok login` (or use Grok Build) so `~/.grok/auth.json` exists.
+2. Launch ContextDesk (`cd desktop && npm run tauri:dev` as above).
+3. **Settings → AI** → provider **Grok Build session** → confirm the opt-in dialog → pick a chat model (e.g. `grok-3`) → **Save**.
+4. Allowlist a workspace folder and ask a grounded question the same way as Option A.
+
+**How it stays safe:** the host loads `~/.grok/auth.json` **in Rust only** after explicit opt-in; the webview never sees tokens; outbound chat is pinned to `api.x.ai`. Details and ToS note: [`docs/DEV.md`](docs/DEV.md#grok-build-session-opt-in).
+
+You can also add **OpenAI-compatible** or **Anthropic** providers in Settings → AI. API keys go to the OS keychain — never into the repo or the webview.
 
 ---
 
