@@ -447,10 +447,7 @@ fn session_context_remove(
 }
 
 #[tauri::command]
-fn session_context_purge(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
+fn session_context_purge(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let base = session_context_base(&state)?;
     let store = cd_core::session_context::SessionContextStore::open(
         &base,
@@ -475,10 +472,7 @@ fn session_context_import_zip(
     )
     .map_err(|e| e.to_string())?;
     store
-        .import_zip_bytes(
-            &data,
-            cd_core::session_context::DEFAULT_MAX_ZIP_NEST,
-        )
+        .import_zip_bytes(&data, cd_core::session_context::DEFAULT_MAX_ZIP_NEST)
         .map_err(|e| e.to_string())
 }
 
