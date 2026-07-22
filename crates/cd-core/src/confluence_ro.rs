@@ -103,14 +103,18 @@ pub fn parse_page_body(cfg: &ConfluenceRoConfig, v: &Value) -> CoreResult<String
     Ok(strip_tags(storage))
 }
 
-/// CQL search (read-only). Production uses default SSRF policy.
+/// CQL search (read-only).
+///
+/// User-configured wiki bases may resolve to private/CGNAT IPs (corp VPN).
+/// Trust the Settings base URL the same way we trust AI gateway bases —
+/// still pins DNS and blocks metadata (169.254.169.254).
 pub async fn cql_search(
     cfg: &ConfluenceRoConfig,
     cql: &str,
     pat: &str,
     limit: usize,
 ) -> CoreResult<Vec<ConfluenceHit>> {
-    cql_search_with_policy(cfg, cql, pat, limit, &SsrfPolicy::default()).await
+    cql_search_with_policy(cfg, cql, pat, limit, &SsrfPolicy::allow_private_networks()).await
 }
 
 /// CQL search with injectable SSRF policy (tests may allow loopback mock).
@@ -155,8 +159,10 @@ pub async fn cql_search_with_policy(
 }
 
 /// Fetch page body as plain-ish text (storage format stripped lightly).
+///
+/// Same private-network policy as [`cql_search`] (user-configured base).
 pub async fn fetch_page(cfg: &ConfluenceRoConfig, page_id: &str, pat: &str) -> CoreResult<String> {
-    fetch_page_with_policy(cfg, page_id, pat, &SsrfPolicy::default()).await
+    fetch_page_with_policy(cfg, page_id, pat, &SsrfPolicy::allow_private_networks()).await
 }
 
 /// Fetch page with injectable SSRF policy (loopback mock in tests).

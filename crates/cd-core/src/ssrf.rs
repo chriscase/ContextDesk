@@ -350,6 +350,16 @@ mod tests {
     }
 
     #[test]
+    fn private_override_allows_cgnat_corp() {
+        // 100.64/10 often used by corp VPN / shared address space (Confluence hosts).
+        let p = SsrfPolicy::allow_private_networks();
+        assert!(check_v4(Ipv4Addr::new(100, 64, 1, 30), &p).is_ok());
+        assert!(check_v4(Ipv4Addr::new(100, 64, 1, 30), &SsrfPolicy::default()).is_err());
+        // Metadata stays blocked even with private override.
+        assert!(check_v4(Ipv4Addr::new(169, 254, 169, 254), &p).is_err());
+    }
+
+    #[test]
     fn rejects_file_scheme() {
         assert!(validate_provider_url("file:///etc/passwd", &SsrfPolicy::default()).is_err());
     }
