@@ -335,6 +335,32 @@
 .md-ul {
   margin: 0 0 var(--space-2);
   padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.md-ul li,
+.md-ol li {
+  margin: 0.2em 0;
+  /* Real list markers come from list-style — don't double with pre-wrap + br. */
+  white-space: normal;
+}
+
+/* Nested lists inside table cells / prose blobs ("• a<br>• b" from models). */
+ul.md-inline-list {
+  margin: 0.15em 0;
+  padding-left: 1.15rem;
+  list-style: disc;
+}
+
+ol.md-inline-list {
+  margin: 0.15em 0;
+  padding-left: 1.15rem;
+  list-style: decimal;
+}
+
+.md-inline-list li {
+  margin: 0.12em 0;
+  white-space: normal;
 }
 
 .md-pre {
@@ -388,6 +414,15 @@
   border-right: 1px solid color-mix(in srgb, var(--border-soft) 70%, transparent);
   vertical-align: top;
   word-break: break-word;
+}
+
+/* Soft multi-line cells (prose). Nested .md-inline-list overrides to normal. */
+.md-table td {
+  white-space: pre-wrap;
+}
+
+.md-table td .md-inline-list {
+  white-space: normal;
 }
 
 .md-table th:last-child,
