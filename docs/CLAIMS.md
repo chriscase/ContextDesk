@@ -36,6 +36,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |
+| VectorIndex Exact + Hnsw | Shipped | crates/cd-core/src/vector_index.rs:ExactIndex | #354 |
 
 ## Human checklist
 

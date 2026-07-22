@@ -55,6 +55,7 @@ pub mod ssrf;
 pub mod text;
 pub mod tool_host;
 pub mod tools;
+pub mod vector_index;
 pub mod web_research;
 pub mod workspace;
 pub mod x_search;
