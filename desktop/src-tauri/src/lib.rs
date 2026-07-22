@@ -2014,10 +2014,7 @@ async fn agent_turn(
             && profile.capabilities.tools
         {
             let mut cfg = state.config.lock().expect("config").clone();
-            if cfg
-                .providers
-                .set_profile_tools_enabled(&profile.id, false)
-            {
+            if cfg.providers.set_profile_tools_enabled(&profile.id, false) {
                 if let Ok(path) = config_path(&state.branding) {
                     let _ = save_config(&path, &cfg);
                     *state.config.lock().expect("config") = cfg;
