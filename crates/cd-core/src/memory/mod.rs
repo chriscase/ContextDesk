@@ -24,7 +24,9 @@ pub mod sqlite_store;
 pub mod tools;
 pub mod types;
 
-pub use ambient::{inject_memory_context, AmbientBudget, AmbientInjection};
+pub use ambient::{
+    inject_memory_context, inject_memory_context_with_embed, AmbientBudget, AmbientInjection,
+};
 pub use facade::{
     attach_durable_memory_to_host, ensure_workspace_memory_gitignored, personal_memory_db_path,
     workspace_memory_db_path, workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory,
@@ -34,7 +36,7 @@ pub use import::{
     import_memory_fs_sqlite, import_memory_jsonl_sqlite, is_migrated_memory_fs_path,
     stable_import_id, ImportReport,
 };
-pub use sqlite_store::SqliteMemoryStore;
+pub use sqlite_store::{embed_blocking, SqliteMemoryStore, MEMORY_EMBED_TIMEOUT_MS};
 pub use tools::{
     format_recall_hits, is_destructive_memory_tool, memory_tool_specs, permission_target_for_write,
     write_op_from_retract_args, write_op_from_save_args, write_op_from_supersede_args,
@@ -98,6 +100,9 @@ pub trait MemoryStore: Send + Sync {
         w: HybridWeights,
         now_secs: i64,
     ) -> CoreResult<Vec<RecallHit>>;
+
+    /// Attach embed backend for embed-on-write (#346). Default: no-op.
+    fn set_embed_backend(&self, _backend: Option<std::sync::Arc<dyn EmbedBackend>>, _model: &str) {}
 
     /// Sync-reserved: records with `updated_at > cursor` (personal scope must
     /// never surface here — enforced by facade, not this trait alone).

@@ -202,6 +202,103 @@ impl EmbedBackend for MockHashEmbedBackend {
     }
 }
 
+/// Deterministic **async-friendly** embedder with genuine concept geometry (#346).
+///
+/// Unlike [`MockHashEmbedBackend`] (character/token bags that collapse without
+/// shared keywords), this maps synonym groups onto shared basis directions so a
+/// **paraphrase with zero keyword overlap** still scores high. The `embed` path
+/// is genuinely async (`yield_now`) so it exercises the same budgeted
+/// `block_on` path product Ollama uses — not a sync mock disguise.
+pub struct ConceptEmbedBackend {
+    /// Vector dimension (default 64; enough room for concept groups).
+    pub dims: usize,
+}
+
+impl Default for ConceptEmbedBackend {
+    fn default() -> Self {
+        Self { dims: 64 }
+    }
+}
+
+impl ConceptEmbedBackend {
+    /// Create with dimension (clamped).
+    pub fn new(dims: usize) -> Self {
+        Self {
+            dims: dims.clamp(16, 256),
+        }
+    }
+
+    /// Synonym groups → shared basis index. Order matters for tests.
+    fn concept_groups() -> &'static [&'static [&'static str]] {
+        &[
+            // 0 — relational DB choice (paraphrase test target)
+            &[
+                "postgres",
+                "postgresql",
+                "relational database",
+                "sql database",
+                "rdbms",
+                "durable datastore",
+            ],
+            // 1 — auth
+            &[
+                "authentication",
+                "login credentials",
+                "sign-in",
+                "authn",
+                "passwordless sso",
+            ],
+            // 2 — billing
+            &["invoice", "billing cycle", "payment refund", "chargeback"],
+            // 3 — logging / ops (log-analysis reuse)
+            &[
+                "connection refused",
+                "socket closed",
+                "upstream unavailable",
+                "econnrefused",
+            ],
+        ]
+    }
+
+    fn embed_one(&self, text: &str) -> Vec<f32> {
+        let lower = text.to_lowercase();
+        let mut v = vec![0.0f32; self.dims];
+        let groups = Self::concept_groups();
+        for (gi, phrases) in groups.iter().enumerate() {
+            if gi >= self.dims {
+                break;
+            }
+            for p in *phrases {
+                if lower.contains(p) {
+                    v[gi] += 1.0;
+                }
+            }
+        }
+        // Mild residual so empty concept texts are not zero-vectors (unique id)
+        let mut h = DefaultHasher::new();
+        lower.hash(&mut h);
+        let residual = (h.finish() as usize) % self.dims;
+        v[residual] += 0.05;
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n > f32::EPSILON {
+            for x in &mut v {
+                *x /= n;
+            }
+        }
+        v
+    }
+}
+
+#[async_trait]
+impl EmbedBackend for ConceptEmbedBackend {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        // Prove async path: yield so a 50ms throwaway runtime would flake under load;
+        // product budget is seconds — this still finishes instantly offline.
+        tokio::task::yield_now().await;
+        Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+    }
+}
+
 /// Current unix seconds for recency.
 pub fn now_unix_secs() -> i64 {
     SystemTime::now()

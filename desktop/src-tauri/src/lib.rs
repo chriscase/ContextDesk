@@ -247,9 +247,11 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     }
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
-    // #119: hybrid search_kb when opt-in; optional Ollama embeddings (no network in tests).
+    // #119 hybrid search_kb opt-in; #346 memory embed-on-write needs the same backend
+    // whenever durable memory is on (not only when hybrid_retrieval is toggled).
     host.set_hybrid_retrieval(cfg.hybrid_retrieval);
-    if cfg.hybrid_retrieval {
+    let want_embed = cfg.hybrid_retrieval || cfg.memory.durable_memory_enabled;
+    if want_embed {
         if let Some(profile) = cfg.providers.active() {
             if profile.kind == cd_core::providers::ProviderKind::Ollama {
                 match cd_core::chat::OllamaClient::new(
@@ -259,17 +261,20 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
                     "nomic-embed-text",
                 ) {
                     Ok(client) => {
-                        host.set_embed_backend(Some(std::sync::Arc::new(
-                            cd_core::embed::OllamaEmbedBackend::new(client),
-                        )));
+                        host.set_embed_backend_with_model(
+                            Some(std::sync::Arc::new(
+                                cd_core::embed::OllamaEmbedBackend::new(client),
+                            )),
+                            "nomic-embed-text",
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "hybrid retrieval on but Ollama embed client failed");
+                        tracing::warn!(error = %e, "embed backend requested but Ollama client failed");
                         host.set_embed_backend(None);
                     }
                 }
             } else {
-                // Keyword + recency hybrid without semantic when no local embed model.
+                // Keyword + recency without semantic when no local embed model.
                 host.set_embed_backend(None);
             }
         } else {
