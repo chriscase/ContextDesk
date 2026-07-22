@@ -915,13 +915,13 @@ mod tests {
         let path = dir.path().join("memory.sqlite");
         {
             let s = SqliteMemoryStore::open(&path).unwrap();
-            assert_eq!(s.schema_version().unwrap(), 1);
+            assert_eq!(s.schema_version().unwrap(), migrate::MEMORY_SCHEMA_VERSION);
             s.put(MemoryWriteOp::Insert(draft("persist me")), 1)
                 .unwrap();
         }
         {
             let s = SqliteMemoryStore::open(&path).unwrap();
-            assert_eq!(s.schema_version().unwrap(), 1);
+            assert_eq!(s.schema_version().unwrap(), migrate::MEMORY_SCHEMA_VERSION);
             // re-open re-migrates as no-op; data intact
             let all = s.changes_since(0).unwrap();
             assert_eq!(all.len(), 1);

@@ -22,6 +22,7 @@ pub mod embed;
 pub mod error;
 pub mod events;
 pub mod grok_auth;
+pub mod harvest;
 pub mod home_source;
 pub mod http_preset;
 pub mod index;
