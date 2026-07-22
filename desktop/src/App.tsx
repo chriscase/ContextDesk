@@ -333,6 +333,7 @@ export function App() {
             setupIncomplete={shell.preflight.hasBlocking}
             dismissedBanner={shell.dismissedBanner}
             agentError={turn.agentError}
+            appVersion={shell.branding.version}
             onOpenPreflight={() =>
               shell.openSettings("preflight", chatScrollRef.current)
             }

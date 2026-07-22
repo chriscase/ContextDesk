@@ -29,6 +29,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | External module sandbox | Roadmap | docs/ | #94 |
 | README product screenshot in docs/assets | Roadmap | docs/examples/host-adapter.md | #176 residual |
 | Proven multi-OS release installers (tag run) | Roadmap | .github/workflows/release.yml | #172 residual |
+| Provider tools capability detect + persist | Shipped | crates/cd-core/src/providers.rs:set_profile_tools_enabled | #327 |
+| Expandable diagnostics + redacted GitHub report | Shipped | desktop/src/lib/errorReport.ts:buildErrorReport | #325 P0–P1 |
 
 ## Human checklist
 

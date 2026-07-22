@@ -142,6 +142,57 @@ html[data-platform="macos"] .titlebar {
   flex-shrink: 0;
 }
 
+/* Expandable error diagnostics (#325 P0–P1) */
+.banner--error-detail {
+  align-items: flex-start;
+  min-height: auto;
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-2);
+}
+
+.banner__error-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.banner--error-detail .banner__msg {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+.banner__tech {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: var(--space-2);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--border-soft));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.banner__hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.banner__actions--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
 .banner .btn {
   padding: 3px 8px;
   font-size: var(--text-xs);
