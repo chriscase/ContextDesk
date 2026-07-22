@@ -1,6 +1,9 @@
 # OS
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+Desktop.ini
 
 # Secrets — never commit
 .env
@@ -17,17 +20,28 @@ auth.json
 **/*secret.json
 .env.secret
 
-# Node
+# Node / frontend tool caches
 node_modules/
 dist/
 *.tsbuildinfo
 .npm
 .vite/
+**/.vite/
+.eslintcache
+*.eslintcache
+.turbo/
+.parcel-cache/
+.cache/
+playwright-report/
+test-results/
+vitest.config.ts.timestamp-*
 
 # Rust
 target/
 **/*.rs.bk
 Cargo.lock.bak
+# Do NOT ignore Cargo.lock — apps commit both:
+#   /Cargo.lock  and  desktop/src-tauri/Cargo.lock
 
 # Workspace durable memory DBs (in-repo location; personal is OS app-data)
 **/.contextdesk/memory/
@@ -38,19 +52,23 @@ Cargo.lock.bak
 # Tauri / desktop
 desktop/src-tauri/target/
 desktop/dist/
+# Tauri may write WIX/NSIS intermediates outside target/
+desktop/src-tauri/WixTools/
 *.app
 *.dmg
 *.AppImage
 *.exe
 *.msi
 
-# IDE
+# IDE / editor
 .idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json.example
 *.swp
 *.swo
+*~
+.history/
 
 # Local app data (if generated in-repo by mistake)
 .contextdesk/
@@ -58,10 +76,17 @@ desktop/dist/
 *.sqlite
 *.sqlite3
 
+# Agent / local lock scratch (machine-level agent-locks live outside this repo)
+.agent-locks/
+*.orig
+*.rej
+
 # Coverage / reports
 coverage/
 lcov.info
 tarpaulin-report.html
+**/profraw
+**/profdata
 
 # Logs
 *.log

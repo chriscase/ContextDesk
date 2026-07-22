@@ -6,6 +6,41 @@
 - Node.js 20+  
 - Platform dependencies for [Tauri 2](https://v2.tauri.app/start/prerequisites/)  
 
+## Clean working tree / what is *not* gitignored
+
+Build outputs (`target/`, `node_modules/`, `dist/`, `*.tsbuildinfo`, Vite/ESLint caches) are ignored. **Do not** expect these tracked files to be ignored — tooling rewrites them on purpose:
+
+| Path | Why it changes | What to do |
+|------|----------------|------------|
+| `Cargo.lock` (repo root) | `cargo build` / `cargo test` for `cd-core` / `cd-server` | Commit with the dep change that caused it |
+| `desktop/src-tauri/Cargo.lock` | Nested Tauri workspace; path-deps `cd-core` | **Also** update when `cd-core` deps change (easy to forget) |
+| `desktop/package-lock.json` | `npm install` / package bumps | Commit with package.json changes; prefer `npm ci` day-to-day |
+| `desktop/src-tauri/tauri.conf.json` | `gen-tauri-conf.mjs` on every `tauri dev`/`build` | Should be **idempotent** (no diff if branding unchanged). If dirty, commit intentional branding/CSP changes only |
+| `desktop/src-tauri/gen/schemas/*` | Tauri CLI schema dump | Tracked for offline/CI; only commit when Tauri version bumps intentionally |
+
+If `git pull` fails with local modifications, check `git status` first:
+
+```sh
+# Accidental lock noise after a local cargo experiment (discard):
+git restore Cargo.lock desktop/src-tauri/Cargo.lock
+
+# Intentional dep work still in progress:
+git stash push -u -m 'wip locks'   # or commit on a branch
+
+git pull --ff-only
+```
+
+When you change `crates/cd-core` dependencies, refresh **both** locks before push:
+
+```sh
+cargo generate-lockfile   # or: cargo update -p <crate>
+( cd desktop/src-tauri && cargo generate-lockfile )
+# Prefer minimal updates when possible; avoid bare `cargo update` (unbounded bumps).
+git add Cargo.lock desktop/src-tauri/Cargo.lock
+```
+
+Secrets, OS app data, and SQLite DBs remain gitignored (see root `.gitignore`).
+
 ## Background index (#117)
 
 Desktop `rebuild_host` opens the keyword index via `KeywordIndex::open_shell_bounded` (load store / empty shell, **no blocking full walk**), then spawns a background thread for `refresh()`. `search_kb` uses whatever is already loaded; when empty it reports that indexing may still be running. Poll status with Tauri `get_index_status`.

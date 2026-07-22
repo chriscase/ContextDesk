@@ -74,6 +74,8 @@ cargo run -p cd-server -- --print-branding
 
 On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` job).
 
+**Two Cargo.lock files:** root workspace and `desktop/src-tauri/` (nested, not a root member). If you change `cd-core` crate deps, update **both** locks in the same PR so local `cargo check` / `tauri dev` does not leave a dirty tree that blocks `git pull`. See [`docs/DEV.md`](docs/DEV.md) § Clean working tree.
+
 ## Definition of done (before push / close)
 
 - [ ] Commands above all exit 0 (or equivalent CI green on your PR).
