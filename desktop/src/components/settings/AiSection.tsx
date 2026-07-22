@@ -41,9 +41,13 @@ export function AiSection({
   recheck,
   checking,
 }: AiSectionProps) {
-  /** Wizard first when no provider yet; advanced when already configured. */
+  /** Wizard when unset; prefer wizard for gateways so Discover is one click. */
   const [mode, setMode] = useState<"wizard" | "advanced">(() =>
-    draft.providerKind === "none" ? "wizard" : "advanced",
+    draft.providerKind === "none" ||
+    draft.providerKind === "openai_compatible" ||
+    draft.providerKind === "anthropic"
+      ? "wizard"
+      : "advanced",
   );
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);

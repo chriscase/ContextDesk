@@ -586,6 +586,51 @@ export async function hostListModelsForDraft(args: {
   }
 }
 
+/** TriageTool-parity native gateway probe (plain HTTP, multi-path). */
+export type AiProbeResultDto = {
+  ok: boolean;
+  flavor: string | null;
+  base_url: string;
+  effective_base_url: string;
+  models: { id: string; kind: string; source: string }[];
+  chat_candidates: { id: string; kind: string; source: string }[];
+  embed_candidates: { id: string; kind: string; source: string }[];
+  notes: string[];
+  errors: string[];
+  local_ollama_reachable: boolean;
+  local_ollama_models: { id: string; kind: string; source: string }[];
+};
+
+export async function hostProbeAiGateway(args: {
+  baseUrl: string;
+  apiKey?: string | null;
+  /** Default true — also probe local Ollama. */
+  probeLocal?: boolean;
+}): Promise<AiProbeResultDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<AiProbeResultDto>("probe_ai_gateway_cmd", {
+      req: {
+        base_url: args.baseUrl,
+        api_key: args.apiKey ?? null,
+        probe_local: args.probeLocal ?? true,
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Saved active provider (URL + model + key presence; no secret). */
+export async function hostGetActiveProvider(): Promise<ProviderDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<ProviderDto | null>("get_active_provider");
+  } catch {
+    return null;
+  }
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");

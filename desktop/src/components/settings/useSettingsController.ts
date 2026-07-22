@@ -15,6 +15,7 @@ import {
   hostListConnectors,
   hostListConnectorKinds,
   hostSetConnectorSecret,
+  hostGetActiveProvider,
   hostListLocalCandidates,
   hostListWebResearchSources,
   hostSaveConnectors,
@@ -168,7 +169,28 @@ export function useSettingsController({
           : d.x ?? { enabled: false, hasToken: false },
         webResearchEnabled: webOn ?? d.webResearchEnabled ?? false,
       }));
-      if (setup.providerKind !== "none") {
+      // Hydrate AI fields from host config (truth), not only localStorage defaults.
+      const active = await hostGetActiveProvider();
+      if (!stillOpen()) return;
+      if (active) {
+        const kind = active.kind as AppSetupState["providerKind"];
+        if (
+          kind === "ollama" ||
+          kind === "openai_compatible" ||
+          kind === "anthropic" ||
+          kind === "xai_grok_build"
+        ) {
+          setDraft((d) => ({
+            ...d,
+            providerKind: kind,
+            providerLabel: active.label || d.providerLabel,
+            baseUrl: active.base_url || d.baseUrl,
+            chatModel: active.chat_model || d.chatModel,
+            hasApiKey: active.has_key,
+            localOnly: kind === "ollama",
+          }));
+        }
+      } else if (setup.providerKind !== "none") {
         const pid = profileIdForKind(setup.providerKind);
         const keyOk = await hostProviderHasSecret(pid);
         if (!stillOpen()) return;

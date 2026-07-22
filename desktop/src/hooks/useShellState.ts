@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SettingsSection } from "../components/SettingsModal";
 import {
   hostCheckOllama,
+  hostGetActiveProvider,
   hostGetBranding,
   hostGetConfig,
   hostGetDefaultChatModel,
@@ -278,6 +279,28 @@ export function useShellState() {
         ...s,
         workspaceName: cfg.workspace?.name ?? s.workspaceName,
         workspaceRoots: roots.length ? roots : s.workspaceRoots,
+      }));
+    });
+    // Prefer host-saved AI profile over localStorage ollama/mistral defaults.
+    void hostGetActiveProvider().then((p) => {
+      if (!p) return;
+      const kind = p.kind as AppSetupState["providerKind"];
+      if (
+        kind !== "ollama" &&
+        kind !== "openai_compatible" &&
+        kind !== "anthropic" &&
+        kind !== "xai_grok_build"
+      ) {
+        return;
+      }
+      setSetup((s) => ({
+        ...s,
+        providerKind: kind,
+        providerLabel: p.label || s.providerLabel,
+        baseUrl: p.base_url || s.baseUrl,
+        chatModel: p.chat_model || s.chatModel,
+        hasApiKey: p.has_key,
+        localOnly: kind === "ollama",
       }));
     });
     void (async () => {

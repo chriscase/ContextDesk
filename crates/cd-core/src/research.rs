@@ -546,10 +546,12 @@ pub async fn backend_for(
     profile: &ProviderProfile,
     api_key: Option<String>,
 ) -> CoreResult<Box<dyn ChatBackend>> {
+    // Remote profiles may use corporate private DNS (TriageTool-style gateways).
+    // SSRF still applies to model-driven tools; the user-configured base is trusted.
     let policy = if profile.local_only {
         SsrfPolicy::local_only()
     } else {
-        SsrfPolicy::default()
+        SsrfPolicy::allow_private_networks()
     };
 
     match profile.kind {
