@@ -37,6 +37,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |
 | VectorIndex Exact + Hnsw | Shipped | crates/cd-core/src/vector_index.rs:ExactIndex | #354 |
+| Durable memory hybrid recall (embed-on-write) | Shipped | crates/cd-core/src/memory/sqlite_store.rs:MEMORY_EMBED_TIMEOUT_MS | #346 |
 
 ## Human checklist
 

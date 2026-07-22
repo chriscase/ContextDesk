@@ -5,17 +5,22 @@
 use super::migrate::{self, migrate};
 use super::types::*;
 use super::MemoryStore;
-use crate::embed::{recency_boost, HybridWeights};
+use crate::embed::{recency_boost, EmbedBackend, HybridWeights};
 use crate::error::{CoreError, CoreResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+/// Timeout for write-time / query embeds (realistic budget; not 50ms throwaway). #346
+pub const MEMORY_EMBED_TIMEOUT_MS: u64 = 5_000;
 
 /// SQLite-backed memory store (default embedded backend).
 pub struct SqliteMemoryStore {
     path: Option<PathBuf>,
     conn: Mutex<Connection>,
+    /// Optional embed backend for embed-on-write (#346).
+    embed: Mutex<Option<(Arc<dyn EmbedBackend>, String)>>,
 }
 
 impl SqliteMemoryStore {
@@ -31,6 +36,7 @@ impl SqliteMemoryStore {
         Ok(Self {
             path: Some(path.to_path_buf()),
             conn: Mutex::new(conn),
+            embed: Mutex::new(None),
         })
     }
 
@@ -42,7 +48,18 @@ impl SqliteMemoryStore {
         Ok(Self {
             path: None,
             conn: Mutex::new(conn),
+            embed: Mutex::new(None),
         })
+    }
+
+    /// Attach embed backend for embed-on-write (model id e.g. provider profile / nomic-embed-text).
+    pub fn set_embed_backend_model(
+        &self,
+        backend: Option<Arc<dyn EmbedBackend>>,
+        model: impl Into<String>,
+    ) {
+        let mut g = self.embed.lock().unwrap_or_else(|e| e.into_inner());
+        *g = backend.map(|b| (b, model.into()));
     }
 
     /// Filesystem path when file-backed.
@@ -92,6 +109,79 @@ impl SqliteMemoryStore {
             .optional()
             .map_err(sqlite_err)?;
         Ok(row.map(|(m, b)| (m, bytes_to_f32_vec(&b))))
+    }
+
+    /// All stored embeddings as `(memory_id, model, vector)` for semantic candidate gather (#346).
+    pub fn list_embeddings(&self) -> CoreResult<Vec<(Uuid, String, Vec<f32>)>> {
+        let conn = self.conn.lock().map_err(|_| lock_err())?;
+        let mut stmt = conn
+            .prepare("SELECT memory_id, model, vector FROM memory_embeddings")
+            .map_err(sqlite_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let id: String = r.get(0)?;
+                let model: String = r.get(1)?;
+                let blob: Vec<u8> = r.get(2)?;
+                Ok((id, model, blob))
+            })
+            .map_err(sqlite_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id_s, model, blob) = row.map_err(sqlite_err)?;
+            let id = Uuid::parse_str(&id_s)
+                .map_err(|e| CoreError::Message(format!("bad memory_id in embeddings: {e}")))?;
+            out.push((id, model, bytes_to_f32_vec(&blob)));
+        }
+        Ok(out)
+    }
+
+    /// Embed active records that lack a vector (legacy/import/migrated) — offline-safe lazy path.
+    ///
+    /// Not called on the recall hot path; host may invoke after import or on idle.
+    pub fn backfill_missing_embeddings(&self, limit: usize) -> CoreResult<usize> {
+        let guard = self.embed.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((backend, model)) = guard.as_ref() else {
+            return Ok(0);
+        };
+        let backend = Arc::clone(backend);
+        let model = model.clone();
+        drop(guard);
+
+        let rows: Vec<(String, String)> = {
+            let conn = self.conn.lock().map_err(|_| lock_err())?;
+            let mut stmt = conn
+                .prepare(
+                    r#"SELECT m.id, m.content FROM memory m
+                       LEFT JOIN memory_embeddings e ON e.memory_id = m.id
+                       WHERE m.status = 'active' AND e.memory_id IS NULL
+                       LIMIT ?1"#,
+                )
+                .map_err(sqlite_err)?;
+            let mapped = stmt
+                .query_map(params![limit.clamp(1, 500) as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(sqlite_err)?;
+            let collected: Vec<(String, String)> = mapped.filter_map(|r| r.ok()).collect();
+            collected
+        };
+
+        let mut n = 0usize;
+        for (id_s, content) in rows {
+            let Ok(id) = Uuid::parse_str(&id_s) else {
+                continue;
+            };
+            let redacted = match crate::memory::recall::redact_for_embed(&content) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if let Some(vec) = embed_blocking(backend.as_ref(), &redacted, MEMORY_EMBED_TIMEOUT_MS)
+            {
+                self.put_embedding(&id, &model, &vec)?;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// List records for UI (newest first). Filters status by flags.
@@ -263,10 +353,52 @@ impl SqliteMemoryStore {
 
         load_record(conn, &id)?.ok_or_else(|| CoreError::Message("insert vanished".into()))
     }
+
+    /// Embed redacted content and store in `memory_embeddings` when a backend is attached (#346).
+    fn maybe_embed_content(&self, memory_id: &Uuid, content: &str) {
+        let guard = self.embed.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((backend, model)) = guard.as_ref() else {
+            return;
+        };
+        let redacted = match crate::memory::recall::redact_for_embed(content) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        if let Some(vec) = embed_blocking(backend.as_ref(), &redacted, MEMORY_EMBED_TIMEOUT_MS) {
+            let _ = self.put_embedding(memory_id, model, &vec);
+        }
+    }
+}
+
+/// Block on embed with a realistic timeout (write + query path). #346
+pub fn embed_blocking(backend: &dyn EmbedBackend, text: &str, timeout_ms: u64) -> Option<Vec<f32>> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let texts = vec![text.to_string()];
+    match rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            backend.embed(&texts),
+        )
+        .await
+    }) {
+        Ok(Ok(mut v)) if !v.is_empty() => v.pop(),
+        _ => None,
+    }
 }
 
 impl MemoryStore for SqliteMemoryStore {
+    fn set_embed_backend(&self, backend: Option<std::sync::Arc<dyn EmbedBackend>>, model: &str) {
+        self.set_embed_backend_model(backend, model);
+    }
+
     fn put(&self, op: MemoryWriteOp, now_secs: i64) -> CoreResult<MemoryRecord> {
+        let embed_after = matches!(
+            op,
+            MemoryWriteOp::Insert(_) | MemoryWriteOp::Supersede { .. }
+        );
         let conn = self.conn.lock().map_err(|_| lock_err())?;
         conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
         let result = (|| -> CoreResult<MemoryRecord> {
@@ -365,6 +497,11 @@ impl MemoryStore for SqliteMemoryStore {
         match result {
             Ok(r) => {
                 conn.execute("COMMIT", []).map_err(sqlite_err)?;
+                // Embed-on-write after commit so harvest/import/tools share this path (#346).
+                drop(conn);
+                if embed_after {
+                    self.maybe_embed_content(&r.id, &r.content);
+                }
                 Ok(r)
             }
             Err(e) => {

@@ -8,8 +8,7 @@ use super::sqlite_store::SqliteMemoryStore;
 use super::types::*;
 use super::MemoryStore;
 use crate::embed::{
-    cosine_similarity, hybrid_score, recency_boost, EmbedBackend, HybridWeights,
-    MockHashEmbedBackend,
+    hybrid_score, recency_boost, EmbedBackend, HybridWeights, MockHashEmbedBackend,
 };
 use crate::error::CoreResult;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,31 +99,97 @@ fn pool_recall(
     now_secs: i64,
     pool_name: &str,
 ) -> CoreResult<Vec<RecallHit>> {
-    // Keyword path always (store.recall)
+    // Keyword path always (store.recall → FTS / LIKE).
     let mut hits = store.recall(q, None, w, now_secs)?;
 
-    // Semantic enrichment when embed present and we can run it offline-sync via
-    // MockHash or a pre-resolved backend. Async backends are degraded.
+    // MEMORY.md §4: candidate gather = keyword ∪ semantic. Cosine-on-read over
+    // *stored* vectors only (#346) — no per-hit 50ms network embed on the hot path.
     if let Some(backend) = embed {
         match try_query_embed(backend, &q.query) {
             Some(qvec) => {
-                for h in hits.iter_mut() {
-                    if let Ok(Some((_model, vec))) = store.get_embedding(&h.record.id) {
-                        h.semantic_score = cosine_similarity(&qvec, &vec);
-                    } else if let Some(doc_vec) = try_query_embed(backend, &h.record.content) {
-                        // On-the-fly embed for ranking; host may persist later
-                        h.semantic_score = cosine_similarity(&qvec, &doc_vec);
-                        let _ = store.put_embedding(&h.record.id, "runtime", &doc_vec);
+                use crate::vector_index::{ExactIndex, VectorIndex};
+                use std::collections::HashMap;
+                use uuid::Uuid;
+
+                let embeddings = store.list_embeddings().unwrap_or_default();
+                let idx = ExactIndex::new();
+                let mut uid_to_id: HashMap<u64, Uuid> = HashMap::new();
+                for (i, (mid, _model, vec)) in embeddings.iter().enumerate() {
+                    let uid = i as u64;
+                    let _ = idx.upsert(uid, vec);
+                    uid_to_id.insert(uid, *mid);
+                }
+
+                let mut by_id: HashMap<Uuid, usize> = HashMap::new();
+                for (i, h) in hits.iter().enumerate() {
+                    by_id.insert(h.record.id, i);
+                }
+
+                if idx.len() > 0 {
+                    let k_sem = q.k.saturating_mul(3).max(q.k).max(8);
+                    if let Ok(ranked) = idx.search(&qvec, k_sem, None) {
+                        for (uid, score) in ranked {
+                            let Some(&mid) = uid_to_id.get(&uid) else {
+                                continue;
+                            };
+                            if let Some(&i) = by_id.get(&mid) {
+                                hits[i].semantic_score = score;
+                            } else {
+                                // Semantic-only candidate (paraphrase with no keyword overlap).
+                                let Ok(Some(rec)) = store.get(&mid) else {
+                                    continue;
+                                };
+                                if rec.status != Status::Active {
+                                    continue;
+                                }
+                                if !is_valid_now(rec.valid_from, rec.valid_to, now_secs) {
+                                    continue;
+                                }
+                                if let Some(ref kinds) = q.kinds {
+                                    if !kinds.iter().any(|k| k == &rec.kind) {
+                                        continue;
+                                    }
+                                }
+                                if let Some(scope) = q.scope {
+                                    if rec.scope != scope {
+                                        continue;
+                                    }
+                                }
+                                let recency = recency_boost(rec.updated_at, now_secs);
+                                let snippet = snippet_of(&rec.content, 160);
+                                let source_id = RecallHit::memory_source_id(&rec.id);
+                                let i = hits.len();
+                                by_id.insert(rec.id, i);
+                                hits.push(RecallHit {
+                                    record: rec,
+                                    score: 0.0,
+                                    keyword_score: 0.0,
+                                    semantic_score: score,
+                                    recency_score: recency,
+                                    source_id,
+                                    snippet,
+                                });
+                            }
+                        }
                     }
                 }
                 rescore_hits(&mut hits, w, now_secs);
+                hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                if let Some(min) = q.min_score {
+                    hits.retain(|h| h.score >= min);
+                }
+                hits.truncate(q.k.max(1));
             }
             None => {
                 // Graceful degrade: keyword + recency only; warn once
                 if !EMBED_DEGRADED_WARNED.swap(true, Ordering::SeqCst) {
                     tracing::warn!(
                         pool = pool_name,
-                        "memory recall: embed backend unavailable/async; degrading to keyword+recency"
+                        "memory recall: embed backend unavailable; degrading to keyword+recency"
                     );
                 }
             }
@@ -133,7 +198,15 @@ fn pool_recall(
     Ok(hits)
 }
 
-/// Try to embed synchronously when the backend is the offline mock; otherwise degrade.
+fn snippet_of(content: &str, max: usize) -> String {
+    let t = content.trim();
+    if t.chars().count() <= max {
+        return t.to_string();
+    }
+    t.chars().take(max).collect::<String>() + "…"
+}
+
+/// Embed query text with a realistic async budget (#346; not 50ms throwaway).
 ///
 /// **Always redacts before embed** (MEMORY.md §5) so a secret never reaches the
 /// embedding provider even if content slipped past persist.
@@ -143,21 +216,11 @@ fn try_query_embed(backend: &dyn EmbedBackend, text: &str) -> Option<Vec<f32>> {
         tracing::warn!("memory embed blocked: credential-dominant content");
         return None;
     }
-    let safe = redacted.text;
-    // Use a blocking single-thread runtime for hermetic backends that complete instantly.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    let texts = vec![safe];
-    // Bound latency: the mock is instant; real network backends should be called
-    // by the host with a timeout — here we only attempt a short block.
-    match rt.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_millis(50), backend.embed(&texts)).await
-    }) {
-        Ok(Ok(mut v)) if !v.is_empty() => v.pop(),
-        _ => None,
-    }
+    super::sqlite_store::embed_blocking(
+        backend,
+        &redacted.text,
+        super::sqlite_store::MEMORY_EMBED_TIMEOUT_MS,
+    )
 }
 
 /// Redact text before embedding (public for tests / host pre-embed).
@@ -350,33 +413,225 @@ mod tests {
     #[test]
     fn embed_degrade_when_backend_times_out() {
         reset_embed_degrade_warning();
-        // Use a backend that sleeps longer than 50ms
-        struct Slow;
+        // Backend that never completes — short budget proves graceful degrade (#346).
+        struct Never;
         #[async_trait::async_trait]
-        impl EmbedBackend for Slow {
+        impl EmbedBackend for Never {
             async fn embed(&self, texts: &[String]) -> crate::error::CoreResult<Vec<Vec<f32>>> {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                Ok(texts.iter().map(|_| vec![0.1, 0.2]).collect())
+                let _ = texts;
+                std::future::pending().await
             }
         }
-        let facade = TwoScopeMemory::open_in_memory("ws").unwrap();
+        // Direct budgeted call stays fast offline (not 5s product budget).
+        let v = super::super::sqlite_store::embed_blocking(&Never, "zebra", 30);
+        assert!(v.is_none(), "pending backend must time out");
+
+        // product path: 200ms used to blow a 50ms cap; with realistic budget it succeeds.
+        struct Slow200;
+        #[async_trait::async_trait]
+        impl EmbedBackend for Slow200 {
+            async fn embed(&self, texts: &[String]) -> crate::error::CoreResult<Vec<Vec<f32>>> {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+            }
+        }
+        let got = super::super::sqlite_store::embed_blocking(&Slow200, "zebra", 5_000);
+        assert!(got.is_some(), "200ms backend must succeed under 5s budget");
+    }
+
+    /// #346 mandate: realistic async embedder + paraphrase with **zero** keyword
+    /// overlap still surfaces the target via stored vector (`semantic_score > 0`).
+    #[test]
+    fn paraphrase_recall_via_embed_on_write_concept_backend() {
+        reset_embed_degrade_warning();
+        use crate::embed::ConceptEmbedBackend;
+        use std::sync::Arc;
+
+        let facade = TwoScopeMemory::open_in_memory("ws-paraphrase").unwrap();
+        let backend = Arc::new(ConceptEmbedBackend::new(64));
+        facade.set_embed_backend(Some(backend.clone()), "concept-v1");
+
+        // Content: no shared tokens with the query below (except stopwords).
+        let content = "Chose Postgres as the durable brain backend";
+        let rec = facade
+            .put(
+                MemoryWriteOp::Insert(MemoryDraft::new(Kind::Decision, content)),
+                1_000,
+            )
+            .unwrap();
+        // Embed-on-write must have stored a vector.
+        let emb = facade
+            .workspace()
+            .get_embedding(&rec.id)
+            .unwrap()
+            .expect("embed-on-write stores vector");
+        assert_eq!(emb.0, "concept-v1");
+        assert!(!emb.1.is_empty());
+
+        // Decoy with different concept geometry
         facade
             .put(
-                MemoryWriteOp::Insert(MemoryDraft::new(Kind::Fact, "note about zebra")),
-                1,
+                MemoryWriteOp::Insert(MemoryDraft::new(
+                    Kind::Fact,
+                    "invoice billing cycle payment refund schedule",
+                )),
+                1_001,
             )
             .unwrap();
+
+        // Paraphrase: zero content-token overlap with stored decision text.
+        let query = "which relational database engine was selected";
+        let content_l = content.to_lowercase();
+        let query_l = query.to_lowercase();
+        let content_tokens: std::collections::HashSet<&str> = content_l
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 2)
+            .collect();
+        let query_tokens: std::collections::HashSet<&str> = query_l
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 2)
+            .collect();
+        let shared: Vec<_> = content_tokens.intersection(&query_tokens).collect();
+        assert!(
+            shared.is_empty(),
+            "test must use zero keyword overlap; shared={shared:?}"
+        );
+
         let hits = facade
             .recall(
-                &RecallQuery::new("zebra"),
-                Some(&Slow),
-                HybridWeights::default(),
-                1,
+                &RecallQuery::new(query),
+                Some(backend.as_ref()),
+                HybridWeights {
+                    keyword: 0.15,
+                    semantic: 0.75,
+                    recency: 0.10,
+                },
+                2_000,
             )
             .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].semantic_score, 0.0);
-        assert!(embed_degrade_warned());
+        assert!(
+            !hits.is_empty(),
+            "paraphrase must surface at least one hit via semantic candidates"
+        );
+        let target = hits
+            .iter()
+            .find(|h| h.record.id == rec.id)
+            .expect("target decision must appear in hybrid recall");
+        assert!(
+            target.semantic_score > 0.0,
+            "semantic_score must be > 0 on hot path; got {:?}",
+            hits.iter()
+                .map(|h| (&h.record.content, h.semantic_score, h.score))
+                .collect::<Vec<_>>()
+        );
+        // Target should beat the billing decoy on semantic.
+        if let Some(decoy) = hits.iter().find(|h| h.record.content.contains("invoice")) {
+            assert!(
+                target.semantic_score >= decoy.semantic_score,
+                "postgres concept should outrank billing: target={} decoy={}",
+                target.semantic_score,
+                decoy.semantic_score
+            );
+        }
+    }
+
+    /// Live Ollama + nomic-embed-text paraphrase (opt-in; needs network). Not default suite.
+    #[test]
+    #[ignore = "requires local Ollama with nomic-embed-text"]
+    fn ollama_live_paraphrase_recall() {
+        reset_embed_degrade_warning();
+        use std::sync::Arc;
+        let client = crate::chat::OllamaClient::new("http://127.0.0.1:11434", "nomic-embed-text")
+            .expect("ollama client");
+        let backend = Arc::new(crate::embed::OllamaEmbedBackend::new(client));
+        let facade = TwoScopeMemory::open_in_memory("ws-ollama").unwrap();
+        facade.set_embed_backend(Some(backend.clone()), "nomic-embed-text");
+        let content = "Chose Postgres as the durable brain backend";
+        let rec = facade
+            .put(
+                MemoryWriteOp::Insert(MemoryDraft::new(Kind::Decision, content)),
+                1_000,
+            )
+            .unwrap();
+        assert!(
+            facade.workspace().get_embedding(&rec.id).unwrap().is_some(),
+            "live embed-on-write"
+        );
+        let query = "which relational database engine was selected";
+        let hits = facade
+            .recall(
+                &RecallQuery::new(query),
+                Some(backend.as_ref()),
+                HybridWeights {
+                    keyword: 0.15,
+                    semantic: 0.75,
+                    recency: 0.10,
+                },
+                2_000,
+            )
+            .unwrap();
+        let target = hits
+            .iter()
+            .find(|h| h.record.id == rec.id)
+            .expect("ollama paraphrase must surface target");
+        assert!(
+            target.semantic_score > 0.0,
+            "semantic_score>0 with live Ollama; hits={:?}",
+            hits.iter()
+                .map(|h| (h.record.content.clone(), h.semantic_score))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "ollama_live_paraphrase_ok semantic_score={}",
+            target.semantic_score
+        );
+    }
+
+    /// Harvest (#326) and import (#273) both call `MemoryStore::put` — same embed-on-write.
+    #[test]
+    fn harvest_origin_put_is_paraphrase_recallable() {
+        reset_embed_degrade_warning();
+        use crate::embed::ConceptEmbedBackend;
+        use crate::memory::{MemoryDraft, MemorySource};
+        use std::sync::Arc;
+
+        let facade = TwoScopeMemory::open_in_memory("ws-harvest").unwrap();
+        let backend = Arc::new(ConceptEmbedBackend::new(64));
+        facade.set_embed_backend(Some(backend.clone()), "concept-v1");
+
+        let mut draft = MemoryDraft::new(
+            Kind::ProjectNote,
+            "Chose Postgres as the durable brain backend",
+        );
+        draft.title = "DB choice".into();
+        draft.source = MemorySource::Connector;
+        draft.origin_tool = Some("harvest_from_source".into());
+        let rec = facade
+            .put(MemoryWriteOp::Insert(draft), 5_000)
+            .expect("harvest-style put");
+        assert!(
+            facade.workspace().get_embedding(&rec.id).unwrap().is_some(),
+            "harvest put must embed-on-write"
+        );
+
+        let query = "which relational database engine was selected";
+        let hits = facade
+            .recall(
+                &RecallQuery::new(query),
+                Some(backend.as_ref()),
+                HybridWeights {
+                    keyword: 0.15,
+                    semantic: 0.75,
+                    recency: 0.10,
+                },
+                6_000,
+            )
+            .unwrap();
+        let hit = hits
+            .iter()
+            .find(|h| h.record.id == rec.id)
+            .expect("harvested content must be paraphrase-recallable");
+        assert!(hit.semantic_score > 0.0);
     }
 
     #[test]

@@ -104,6 +104,8 @@ pub struct ToolHost {
     hybrid_retrieval: bool,
     /// Optional embed backend for hybrid semantic scores (never in default tests).
     embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    /// Model id keyed into `memory_embeddings` on embed-on-write (#346).
+    embed_model: String,
     /// Hybrid weight knobs (documented in `embed` module).
     hybrid_weights: crate::embed::HybridWeights,
     /// Durable memory store (Phase 1); when set, memory tools write here.
@@ -170,6 +172,7 @@ impl ToolHost {
             max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
             hybrid_retrieval: false,
             embed_backend: None,
+            embed_model: "default".into(),
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
             harvest_db_path: None,
@@ -557,6 +560,10 @@ impl ToolHost {
         store: std::sync::Arc<dyn crate::memory::MemoryStore>,
         enabled: bool,
     ) {
+        // Propagate any already-configured embed backend for embed-on-write (#346).
+        if let Some(ref emb) = self.embed_backend {
+            store.set_embed_backend(Some(std::sync::Arc::clone(emb)), self.embed_model.as_str());
+        }
         self.durable_memory = Some(store);
         self.durable_memory_enabled = enabled;
     }
@@ -639,11 +646,37 @@ impl ToolHost {
     }
 
     /// Attach an optional embed backend for semantic hybrid scores (host-owned).
+    ///
+    /// Also wires embed-on-write on the durable memory store when present (#346).
+    /// Model id defaults to `"default"`; use [`Self::set_embed_backend_with_model`] for
+    /// provider-profile / `nomic-embed-text` keys in `memory_embeddings`.
     pub fn set_embed_backend(
         &mut self,
         backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
     ) {
+        self.set_embed_backend_with_model(backend, "default");
+    }
+
+    /// Attach embed backend + model id for memory embed-on-write (#346).
+    pub fn set_embed_backend_with_model(
+        &mut self,
+        backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+        model: &str,
+    ) {
+        self.embed_model = if model.trim().is_empty() {
+            "default".into()
+        } else {
+            model.to_string()
+        };
+        if let Some(store) = &self.durable_memory {
+            store.set_embed_backend(backend.clone(), self.embed_model.as_str());
+        }
         self.embed_backend = backend;
+    }
+
+    /// Borrow the host embed backend (ambient hybrid recall / tools). #346
+    pub fn embed_backend(&self) -> Option<std::sync::Arc<dyn crate::embed::EmbedBackend>> {
+        self.embed_backend.clone()
     }
 
     /// Override hybrid weights (tests / advanced config).
@@ -1267,7 +1300,8 @@ impl ToolHost {
             );
         }
         let now = crate::embed::now_unix_secs();
-        let hits = store.recall(&q, None, self.hybrid_weights, now)?;
+        let embed = self.embed_backend.as_deref();
+        let hits = store.recall(&q, embed, self.hybrid_weights, now)?;
         let raw = crate::memory::format_recall_hits(&hits);
         let summary = format!("recalled {} memories", hits.len());
         Ok((

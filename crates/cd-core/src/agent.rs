@@ -357,7 +357,7 @@ pub async fn run_agent_turn_with_sink(
                     .collect::<Vec<_>>()
                     .join("\n");
                 let budget = crate::memory::AmbientBudget::default();
-                if let Ok(inj) = crate::memory::inject_memory_context(
+                if let Ok(inj) = crate::memory::inject_memory_context_with_embed(
                     store.as_ref(),
                     user_text,
                     &hist_text,
@@ -365,6 +365,7 @@ pub async fn run_agent_turn_with_sink(
                     budget,
                     crate::embed::HybridWeights::default(),
                     crate::embed::now_unix_secs(),
+                    host.embed_backend().as_deref(),
                 ) {
                     if !inj.context_block.is_empty() {
                         // First-party context — not wrap_untrusted (write-time redaction).

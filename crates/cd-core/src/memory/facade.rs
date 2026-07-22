@@ -260,6 +260,12 @@ impl TwoScopeMemory {
 }
 
 impl MemoryStore for TwoScopeMemory {
+    fn set_embed_backend(&self, backend: Option<std::sync::Arc<dyn EmbedBackend>>, model: &str) {
+        self.personal
+            .set_embed_backend_model(backend.clone(), model);
+        self.workspace.set_embed_backend_model(backend, model);
+    }
+
     fn put(&self, op: MemoryWriteOp, now_secs: i64) -> CoreResult<MemoryRecord> {
         match op {
             MemoryWriteOp::Insert(mut draft) => {

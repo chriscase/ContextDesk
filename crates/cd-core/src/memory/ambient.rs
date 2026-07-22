@@ -2,7 +2,7 @@
 
 use super::types::{RecallHit, RecallQuery};
 use super::MemoryStore;
-use crate::embed::HybridWeights;
+use crate::embed::{EmbedBackend, HybridWeights};
 use crate::error::CoreResult;
 
 /// Ambient injection budget (owner default ON + tight).
@@ -55,6 +55,8 @@ pub struct AmbientInjection {
 /// - Filters by `min_score`, budget, and echo-suppression (skip content already
 ///   present in `visible_history_text`).
 /// - When `enabled` is false, returns empty (explicit `recall_memory` only).
+/// - Pass `embed` when the host has an [`EmbedBackend`] so ambient is hybrid
+///   (cosine over stored vectors), not keyword-only (#346).
 pub fn inject_memory_context(
     store: &dyn MemoryStore,
     query: &str,
@@ -63,6 +65,30 @@ pub fn inject_memory_context(
     budget: AmbientBudget,
     weights: HybridWeights,
     now_secs: i64,
+) -> CoreResult<AmbientInjection> {
+    inject_memory_context_with_embed(
+        store,
+        query,
+        visible_history_text,
+        enabled,
+        budget,
+        weights,
+        now_secs,
+        None,
+    )
+}
+
+/// Ambient injection with an optional embed backend for semantic ranking (#346).
+#[allow(clippy::too_many_arguments)]
+pub fn inject_memory_context_with_embed(
+    store: &dyn MemoryStore,
+    query: &str,
+    visible_history_text: &str,
+    enabled: bool,
+    budget: AmbientBudget,
+    weights: HybridWeights,
+    now_secs: i64,
+    embed: Option<&dyn EmbedBackend>,
 ) -> CoreResult<AmbientInjection> {
     if !enabled || query.trim().is_empty() {
         return Ok(AmbientInjection::default());
@@ -73,7 +99,7 @@ pub fn inject_memory_context(
         .saturating_mul(3)
         .max(budget.max_memories);
     q.min_score = Some(budget.min_score);
-    let hits = store.recall(&q, None, weights, now_secs)?;
+    let hits = store.recall(&q, embed, weights, now_secs)?;
     select_ambient(&hits, visible_history_text, budget)
 }
 
