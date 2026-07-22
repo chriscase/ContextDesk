@@ -37,6 +37,8 @@ export type AppSetupState = {
   chatModel: string;
   baseUrl: string;
   hasApiKey: boolean;
+  /** Native tool calling; false after gateway rejection (#327). Default true. */
+  toolsEnabled?: boolean;
   /** Refuse non-loopback bases (local-only profile). */
   localOnly?: boolean;
   /** Simulated / later real probes */

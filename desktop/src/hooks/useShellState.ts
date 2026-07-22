@@ -73,6 +73,7 @@ function loadSetup(): AppSetupState {
     chatModel: "mistral",
     baseUrl: "http://127.0.0.1:11434",
     hasApiKey: false,
+    toolsEnabled: true,
     localOnly: true,
     ollamaReachable: null,
     remoteReachable: null,
@@ -321,6 +322,7 @@ export function useShellState() {
         baseUrl: p.base_url || s.baseUrl,
         chatModel: p.chat_model || s.chatModel,
         hasApiKey: p.has_key,
+        toolsEnabled: p.tools_enabled ?? true,
         localOnly: kind === "ollama",
       }));
     });

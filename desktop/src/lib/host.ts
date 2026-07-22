@@ -367,6 +367,8 @@ export type ProviderDto = {
   label: string;
   api_key_ref: string | null;
   has_key: boolean;
+  /** Native tool calling; false after gateway rejection (#327). */
+  tools_enabled?: boolean;
 };
 
 /** Persist active provider profile (refs only) + optional API key to OS keychain. */
@@ -434,6 +436,8 @@ export async function hostSaveActiveProvider(args: {
   /** Raw key once; never stored in React setup / localStorage after save. */
   apiKey?: string;
   localOnly?: boolean;
+  /** When set, updates native tools capability (#327). */
+  toolsEnabled?: boolean;
 }): Promise<ProviderDto | null> {
   if (!isTauri()) return null;
   return invoke<ProviderDto>("save_active_provider", {
@@ -444,6 +448,7 @@ export async function hostSaveActiveProvider(args: {
       label: args.label ?? null,
       api_key: args.apiKey ?? null,
       local_only: args.localOnly ?? null,
+      tools_enabled: args.toolsEnabled ?? null,
     },
   });
 }
@@ -626,6 +631,22 @@ export async function hostGetActiveProvider(): Promise<ProviderDto | null> {
   if (!isTauri()) return null;
   try {
     return await invoke<ProviderDto | null>("get_active_provider");
+  } catch {
+    return null;
+  }
+}
+
+/** Re-enable or force-disable native tools on a provider profile (#327). */
+export async function hostSetProviderToolsEnabled(
+  toolsEnabled: boolean,
+  profileId?: string | null,
+): Promise<ProviderDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<ProviderDto>("set_provider_tools_enabled", {
+      profileId: profileId ?? null,
+      toolsEnabled,
+    });
   } catch {
     return null;
   }

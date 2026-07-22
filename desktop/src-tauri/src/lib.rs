@@ -553,6 +553,9 @@ struct SaveProviderReq {
     /// When true, refuse non-loopback remote bases (local-only profile).
     #[serde(default)]
     local_only: Option<bool>,
+    /// Optional override for native tool calling (#327). `None` preserves existing.
+    #[serde(default)]
+    tools_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,6 +568,26 @@ struct ProviderDto {
     /// Keychain ref id only — never the secret.
     api_key_ref: Option<String>,
     has_key: bool,
+    /// Native tool calling enabled for this profile (#327).
+    tools_enabled: bool,
+}
+
+fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
+    ProviderDto {
+        id: p.id.clone(),
+        kind: match p.kind {
+            ProviderKind::Ollama => "ollama".into(),
+            ProviderKind::OpenAiCompatible => "openai_compatible".into(),
+            ProviderKind::Anthropic => "anthropic".into(),
+            ProviderKind::XaiGrokBuild => "xai_grok_build".into(),
+        },
+        base_url: p.base_url.clone(),
+        chat_model: p.chat_model.clone(),
+        label: p.label.clone(),
+        api_key_ref: p.api_key_ref.clone(),
+        has_key,
+        tools_enabled: p.capabilities.tools,
+    }
 }
 
 /// Persist active provider profile (refs only) and optionally store API key in keychain.
@@ -642,8 +665,19 @@ fn save_active_provider(
         }
     }
 
-    // #125: seed per-kind defaults from descriptor (never all-false Default).
-    let capabilities = desc.default_capabilities;
+    // #125: seed per-kind defaults; preserve discovered capabilities.tools (#327).
+    let mut capabilities = desc.default_capabilities;
+    if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
+        capabilities.tools = existing.capabilities.tools;
+        capabilities.stream = existing.capabilities.stream;
+        // embeddings from descriptor when kind changes still uses default above
+        if existing.kind == kind {
+            capabilities.embeddings = existing.capabilities.embeddings;
+        }
+    }
+    if let Some(te) = req.tools_enabled {
+        capabilities.tools = te;
+    }
     let profile = ProviderProfile {
         id: id.clone(),
         label: label.clone(),
@@ -681,15 +715,7 @@ fn save_active_provider(
             .unwrap_or(false)
     };
 
-    Ok(ProviderDto {
-        id,
-        kind: req.kind,
-        base_url,
-        chat_model,
-        label,
-        api_key_ref,
-        has_key,
-    })
+    Ok(provider_to_dto(&profile, has_key))
 }
 
 #[tauri::command]
@@ -1982,6 +2008,21 @@ async fn agent_turn(
         *host_guard = Some(host);
     }
 
+    // #327: gateway rejected tools — persist chat-only so next turns skip tools.
+    if let Ok(ref events) = result {
+        if cd_core::providers::events_indicate_tools_unsupported(events)
+            && profile.capabilities.tools
+        {
+            let mut cfg = state.config.lock().expect("config").clone();
+            if cfg.providers.set_profile_tools_enabled(&profile.id, false) {
+                if let Ok(path) = config_path(&state.branding) {
+                    let _ = save_config(&path, &cfg);
+                    *state.config.lock().expect("config") = cfg;
+                }
+            }
+        }
+    }
+
     {
         let mut cancels = state.cancels.lock().expect("cancels");
         cancels.remove(&req.session_id);
@@ -2426,20 +2467,49 @@ fn get_active_provider(state: State<'_, AppState>) -> Option<ProviderDto> {
                 .has(&key_ref_for_profile(&p.id))
                 .unwrap_or(false)
     };
-    Some(ProviderDto {
-        id: p.id.clone(),
-        kind: match p.kind {
-            ProviderKind::Ollama => "ollama".into(),
-            ProviderKind::OpenAiCompatible => "openai_compatible".into(),
-            ProviderKind::Anthropic => "anthropic".into(),
-            ProviderKind::XaiGrokBuild => "xai_grok_build".into(),
-        },
-        base_url: p.base_url.clone(),
-        chat_model: p.chat_model.clone(),
-        label: p.label.clone(),
-        api_key_ref: p.api_key_ref.clone(),
-        has_key,
-    })
+    Some(provider_to_dto(p, has_key))
+}
+
+/// Enable or disable native tool calling on the active (or named) profile (#327).
+#[tauri::command]
+fn set_provider_tools_enabled(
+    state: State<'_, AppState>,
+    profile_id: Option<String>,
+    tools_enabled: bool,
+) -> Result<ProviderDto, String> {
+    let mut cfg = state.config.lock().expect("config").clone();
+    let id = profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| cfg.providers.active_id.clone())
+        .ok_or_else(|| "no active provider".to_string())?;
+    if !cfg.providers.set_profile_tools_enabled(&id, tools_enabled) {
+        return Err(format!("unknown provider profile: {id}"));
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config") = cfg.clone();
+    let p = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "profile missing after update".to_string())?;
+    let has_key = if p.kind == ProviderKind::XaiGrokBuild {
+        cd_core::grok_auth::detect_grok_session().is_some()
+    } else {
+        p.api_key_ref
+            .as_ref()
+            .map(|r| state.secrets.has(r).unwrap_or(false))
+            .unwrap_or(false)
+            || state
+                .secrets
+                .has(&key_ref_for_profile(&p.id))
+                .unwrap_or(false)
+    };
+    Ok(provider_to_dto(p, has_key))
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
@@ -3178,6 +3248,7 @@ pub fn run() {
             list_models_for_draft,
             probe_ai_gateway_cmd,
             get_active_provider,
+            set_provider_tools_enabled,
             set_default_chat_model,
             get_default_chat_model,
             suggest_chat_title,
