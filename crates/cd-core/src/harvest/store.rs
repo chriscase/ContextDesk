@@ -113,28 +113,19 @@ INSERT INTO harvest (
         )? {
             let mut updated = record.clone();
             updated.id = existing.id;
+            // Keep lineage root from the original harvest row.
             if let (
-                HarvestDestination::Memory {
-                    memory_lineage_root: _,
-                    ..
-                },
+                HarvestDestination::Memory { memory_id, .. },
                 HarvestDestination::Memory {
                     memory_lineage_root: old_root,
                     ..
                 },
             ) = (&record.destination, &existing.destination)
             {
-                // Keep lineage from original harvest
-                if let HarvestDestination::Memory {
-                    memory_id,
-                    memory_lineage_root: _,
-                } = &mut updated.destination
-                {
-                    updated.destination = HarvestDestination::Memory {
-                        memory_id: *memory_id,
-                        memory_lineage_root: *old_root,
-                    };
-                }
+                updated.destination = HarvestDestination::Memory {
+                    memory_id: *memory_id,
+                    memory_lineage_root: *old_root,
+                };
             }
             updated.created_at = existing.created_at;
             self.update(&updated)?;
