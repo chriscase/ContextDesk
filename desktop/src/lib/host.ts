@@ -101,6 +101,20 @@ export async function hostSessionContextImportBytes(
   });
 }
 
+export async function hostSessionContextImportZip(
+  sessionId: string,
+  data: number[] | Uint8Array,
+): Promise<SessionContextEntryDto[]> {
+  if (!isTauri()) {
+    throw new Error("Session context requires the desktop app");
+  }
+  const bytes = Array.from(data instanceof Uint8Array ? data : data);
+  return invoke<SessionContextEntryDto[]>("session_context_import_zip", {
+    sessionId,
+    data: bytes,
+  });
+}
+
 export async function hostSessionContextRemove(
   sessionId: string,
   relPath: string,

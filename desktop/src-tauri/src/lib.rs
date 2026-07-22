@@ -462,6 +462,27 @@ fn session_context_purge(
 }
 
 #[tauri::command]
+fn session_context_import_zip(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<Vec<cd_core::session_context::SessionContextEntry>, String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store
+        .import_zip_bytes(
+            &data,
+            cd_core::session_context::DEFAULT_MAX_ZIP_NEST,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
 }
@@ -3335,6 +3356,7 @@ pub fn run() {
             session_context_list,
             session_context_import_path,
             session_context_import_bytes,
+            session_context_import_zip,
             session_context_remove,
             session_context_purge,
             get_config,

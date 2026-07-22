@@ -275,6 +275,17 @@ impl SessionContextStore {
         Ok(())
     }
 
+    /// Expand a zip archive into the session context (#342). Nested zips up to `max_nest`.
+    ///
+    /// Rejects path escape (zip-slip), enforces entry/byte caps. Does not execute content.
+    pub fn import_zip_bytes(
+        &self,
+        zip_bytes: &[u8],
+        max_nest: u32,
+    ) -> CoreResult<Vec<SessionContextEntry>> {
+        import_zip_into_store(self, zip_bytes, max_nest, 0)
+    }
+
     /// Whether `abs_path` is under this session root (for tool path policy).
     pub fn contains_path(&self, abs_path: &Path) -> bool {
         let Ok(root) = self.root.canonicalize() else {
@@ -285,6 +296,66 @@ impl SessionContextStore {
         };
         p.starts_with(root)
     }
+}
+
+/// Default max nested zip depth.
+pub const DEFAULT_MAX_ZIP_NEST: u32 = 2;
+/// Max entries per zip expansion (including nested).
+pub const DEFAULT_MAX_ZIP_ENTRIES: usize = 500;
+
+fn import_zip_into_store(
+    store: &SessionContextStore,
+    zip_bytes: &[u8],
+    max_nest: u32,
+    depth: u32,
+) -> CoreResult<Vec<SessionContextEntry>> {
+    use std::io::{Cursor, Read};
+    let cursor = Cursor::new(zip_bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+    if archive.len() > DEFAULT_MAX_ZIP_ENTRIES {
+        return Err(CoreError::Policy(format!(
+            "zip has too many entries (max {DEFAULT_MAX_ZIP_ENTRIES})"
+        )));
+    }
+    let mut imported = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
+        let name = file.name().to_string();
+        if name.ends_with('/') {
+            continue;
+        }
+        // Zip-slip: reject absolute and `..` components
+        let rel = name.trim_start_matches('/');
+        if rel.is_empty()
+            || Path::new(rel)
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(CoreError::Policy(format!("zip-slip rejected: `{name}`")));
+        }
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)
+            .map_err(|e| CoreError::Message(format!("zip read: {e}")))?;
+        // Nested zip
+        if depth < max_nest && rel.to_ascii_lowercase().ends_with(".zip") {
+            let nested = import_zip_into_store(store, &data, max_nest, depth + 1)?;
+            imported.extend(nested);
+            continue;
+        }
+        match store.import_bytes(rel, &data) {
+            Ok(e) => imported.push(e),
+            Err(e) => {
+                if e.to_string().contains("max_") {
+                    return Err(e);
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(imported)
 }
 
 #[cfg(test)]
@@ -347,5 +418,46 @@ mod tests {
         store.import_bytes("f.txt", b"x").unwrap();
         store.purge().unwrap();
         assert!(!store.root().exists());
+    }
+
+    #[test]
+    fn zip_slip_rejected() {
+        use std::io::{Cursor, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SessionContextStore::open(dir.path(), "z1", SessionContextCaps::default()).unwrap();
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("../evil.txt", opts).unwrap();
+            w.write_all(b"nope").unwrap();
+            w.finish().unwrap();
+        }
+        let err = store.import_zip_bytes(&buf.into_inner(), 1).unwrap_err();
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("slip")
+                || err.to_string().contains("rejected"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn zip_import_ok() {
+        use std::io::{Cursor, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SessionContextStore::open(dir.path(), "z2", SessionContextCaps::default()).unwrap();
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("nested/log.txt", opts).unwrap();
+            w.write_all(b"hello zip").unwrap();
+            w.finish().unwrap();
+        }
+        let entries = store.import_zip_bytes(&buf.into_inner(), 1).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].rel_path, "nested/log.txt");
     }
 }

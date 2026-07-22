@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   hostSessionContextImportBytes,
+  hostSessionContextImportZip,
   hostSessionContextList,
   hostSessionContextRemove,
   type SessionContextEntryDto,
@@ -44,7 +45,11 @@ export function SessionContextBar({ sessionId, disabled }: Props) {
     for (const f of list) {
       try {
         const buf = new Uint8Array(await f.arrayBuffer());
-        await hostSessionContextImportBytes(sessionId, f.name, buf);
+        if (f.name.toLowerCase().endsWith(".zip")) {
+          await hostSessionContextImportZip(sessionId, buf);
+        } else {
+          await hostSessionContextImportBytes(sessionId, f.name, buf);
+        }
       } catch (e) {
         setNote(e instanceof Error ? e.message : `Failed: ${f.name}`);
       }
