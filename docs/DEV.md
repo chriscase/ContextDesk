@@ -260,9 +260,19 @@ keys = [ { key_hash = "…", role = "admin" } ]
   `api_key_ref` guard. Generate a hash the same way `hash_key` does:
   `printf %s 'YOUR_TOKEN' | shasum -a 256`. Treat any file that does hold raw tokens as an
   operational secret (chmod 600, never commit) — same as `--api-keys-file`.
-- **Persistent shared memory.** `/v1/memory/publish` appends to
-  `<data_dir>/workspaces/<id>/memory.jsonl` **before** acknowledging; the server reloads it
-  into RAM on boot, so a publish → restart → list round-trip returns the note.
+- **Persistent shared memory.** The source of truth is
+  `<data_dir>/workspaces/<id>/memory.sqlite`. `/v1/memory/publish`, sync writes, and
+  permission-approved server memory tools all use that store. The older
+  `<data_dir>/workspaces/<id>/memory.jsonl` remains a compatibility mirror for the
+  original publish/list wire and is imported idempotently at startup.
+- **Sync durability.** `/v1/sync/apply` writes a pending record to
+  `<data_dir>/workspaces/<id>/sync-mutations.jsonl` and fsyncs it before mutating SQLite,
+  then fsyncs the applied result. Reusing a completed `mutation_id` returns the original
+  result after restart; an interrupted pending mutation returns `indeterminate` so the
+  client pulls before retrying. Admin is required for pushes; members may pull.
+- **Privacy boundary.** Server stores and sync endpoints accept workspace scope only.
+  Personal memory remains device-local. The desktop sync/cache worker is still pending
+  under #287; these endpoints do not imply automatic desktop sync yet.
 - **Audit trail.** Writes and denials append a hash-chained `cd_core::audit::AuditEntry`
   to `<data_dir>/audit.jsonl` (`AuditLog` scrubs secrets). Research/session tool writes are
   audited too (the audit path is passed into `build_host`). Verify integrity with
@@ -282,6 +292,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -XPOST localhost:8799/v1/memory/publish
 # restart the process, then list — the note persists:
 curl -s -XPOST localhost:8799/v1/memory/list -H 'authorization: Bearer <member>' \
   -H 'content-type: application/json' -d '{"workspace_id":"team-a"}'
+# discover the bearer role and pull authoritative workspace records:
+curl -s localhost:8799/v1/sync/membership -H 'authorization: Bearer <member>'
+curl -s -XPOST localhost:8799/v1/sync/changes_since \
+  -H 'authorization: Bearer <member>' -H 'content-type: application/json' \
+  -d '{"workspace_id":"team-a","limit":200}'
 ```
 
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
@@ -340,4 +355,3 @@ Config knobs on `AppConfig.memory` (`MemoryConfig`):
 - `ambient_recall_enabled` (default **true**), `ambient_max_chars` (~1500), `ambient_max_memories` (≤5), `ambient_min_score` (~0.35)
 
 Timestamps are unix **seconds**; ids are UUIDv7. Secrets are redacted via `cd_core::redact` before persist and before embed.
-
