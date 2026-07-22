@@ -119,15 +119,17 @@
   -webkit-appearance: none;
   border: none;
   /* Skin-aware chevron via CSS triangles (no hard-coded hex in SVG) (#300). */
-  background-color: transparent;
+  /* Keep a solid fill so the open list inherits a dark base (not transparent). */
+  background-color: var(--bg-input);
   background-image:
-    linear-gradient(45deg, transparent 50%, var(--text-faint) 50%),
-    linear-gradient(135deg, var(--text-faint) 50%, transparent 50%);
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
   background-position:
     calc(100% - 11px) calc(50% - 1px),
     calc(100% - 7px) calc(50% - 1px);
   background-size: 4px 4px, 4px 4px;
   background-repeat: no-repeat;
+  /* Primary text (not muted) — open dropdown options inherit this on WebKit. */
   color: var(--text);
   font-size: var(--text-sm);
   font-family: inherit;
@@ -136,6 +138,20 @@
   min-width: 0;
   cursor: pointer;
   text-overflow: ellipsis;
+  color-scheme: inherit;
+}
+
+/* Open list: dark elevated surface + high-contrast labels */
+.composer__pill-select option,
+.composer__pill-select optgroup {
+  background-color: var(--bg-elevated);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.composer__pill-select optgroup {
+  font-weight: 700;
+  color: var(--text-muted);
 }
 
 .composer__pill-select:focus {

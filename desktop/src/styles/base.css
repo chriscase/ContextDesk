@@ -58,6 +58,56 @@ select {
   color: inherit;
 }
 
+/*
+ * Native <select> open menus are OS/WebKit-drawn. Without explicit option colors
+ * they often paint light-grey text on a lighter grey popup (especially when the
+ * app is dark but the closed control only set `color`). Theme tokens + color-scheme
+ * keep closed and open states readable (#model dropdown dark mode).
+ */
+select {
+  /* Match the active skin so the OS popup isn't light while labels stay light. */
+  color-scheme: inherit;
+  background-color: var(--bg-input);
+  color: var(--text);
+}
+
+select option,
+select optgroup {
+  background-color: var(--bg-elevated);
+  color: var(--text);
+}
+
+/* Explicit color-scheme on the control (html alone is not always enough in WKWebView). */
+html[data-theme="dark"] select,
+html[data-theme="slate"] select,
+html[data-theme="forest"] select {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] select,
+html[data-theme="sand"] select {
+  color-scheme: light;
+}
+
+/* Stronger separation for open list rows in dark skins */
+html[data-theme="dark"] select option,
+html[data-theme="slate"] select option,
+html[data-theme="forest"] select option,
+html[data-theme="dark"] select optgroup,
+html[data-theme="slate"] select optgroup,
+html[data-theme="forest"] select optgroup {
+  background-color: var(--bg-elevated);
+  color: var(--text);
+}
+
+html[data-theme="light"] select option,
+html[data-theme="sand"] select option,
+html[data-theme="light"] select optgroup,
+html[data-theme="sand"] select optgroup {
+  background-color: var(--bg-panel);
+  color: var(--text);
+}
+
 button {
   cursor: pointer;
   border: none;
