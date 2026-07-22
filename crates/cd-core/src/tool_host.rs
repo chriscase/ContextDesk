@@ -696,6 +696,11 @@ impl ToolHost {
         self.embed_backend.clone()
     }
 
+    /// Model id used for `memory_embeddings` / template cache keys. #346
+    pub fn embed_model(&self) -> &str {
+        &self.embed_model
+    }
+
     /// Override hybrid weights (tests / advanced config).
     pub fn set_hybrid_weights(&mut self, weights: crate::embed::HybridWeights) {
         self.hybrid_weights = weights;

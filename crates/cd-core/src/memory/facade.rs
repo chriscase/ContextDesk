@@ -185,6 +185,11 @@ pub fn attach_durable_memory_to_host(
         &host.workspace.id,
     )?;
     let store = TwoScopeMemory::open(&personal, &ws_path, host.workspace.id.clone())?;
+    // Wire embed BEFORE import so put_imported can embed-on-write (#346 skeptic).
+    // set_durable_memory also propagates embed, but that runs after import.
+    if let Some(emb) = host.embed_backend() {
+        store.set_embed_backend(Some(emb), host.embed_model());
+    }
     // One-shot import of legacy memory_fs notes (idempotent).
     let now = crate::embed::now_unix_secs();
     match super::import::import_memory_fs_sqlite(store.workspace(), &host.workspace, now) {
@@ -197,6 +202,25 @@ pub fn attach_durable_memory_to_host(
         }
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "memory_fs import skipped"),
+    }
+    // Lazy backfill for rows imported earlier without vectors (legacy / attach race).
+    if host.embed_backend().is_some() {
+        for (label, n) in [
+            (
+                "workspace",
+                store.workspace().backfill_missing_embeddings(500),
+            ),
+            (
+                "personal",
+                store.personal().backfill_missing_embeddings(500),
+            ),
+        ] {
+            match n {
+                Ok(c) if c > 0 => tracing::info!(count = c, pool = label, "memory embed backfill"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, pool = label, "memory embed backfill failed"),
+            }
+        }
     }
     host.set_durable_memory(std::sync::Arc::new(store), true);
     host.set_harvest_db_path(Some(ws_path));
@@ -470,6 +494,60 @@ mod tests {
         attach_durable_memory_to_host(&mut host2, &branding, &ambient_off).unwrap();
         assert!(host2.durable_memory_active());
         assert!(!host2.ambient_recall_enabled());
+    }
+
+    /// #346: attach must wire embed before memory_fs import so imported notes get vectors.
+    #[test]
+    fn attach_imports_with_embed_backend_before_migration() {
+        use crate::embed::ConceptEmbedBackend;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        let mem = root.join(&branding.workspace_dir_name).join("memory");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::write(
+            mem.join("pg.md"),
+            "# Decision\n\nChose Postgres as the durable brain backend\n",
+        )
+        .unwrap();
+        let ws = crate::workspace::Workspace {
+            id: format!("attach-embed-{}", uuid::Uuid::now_v7()),
+            name: "a".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = crate::tool_host::ToolHost::new(ws, idx, None);
+        host.set_embed_backend_with_model(
+            Some(Arc::new(ConceptEmbedBackend::new(64))),
+            "concept-v1",
+        );
+        attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+        let store = host.durable_memory_store().expect("store attached");
+        let hits = store
+            .recall(
+                &crate::memory::RecallQuery::new("which relational database engine was selected"),
+                host.embed_backend().as_deref(),
+                crate::embed::HybridWeights {
+                    keyword: 0.15,
+                    semantic: 0.75,
+                    recency: 0.10,
+                },
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+        let hit = hits
+            .iter()
+            .find(|h| h.record.content.contains("Postgres") || h.record.content.contains("durable"))
+            .expect("attach-time import must be paraphrase-recallable");
+        assert!(
+            hit.semantic_score > 0.0,
+            "imported note must have stored vector: {:?}",
+            hits.iter()
+                .map(|h| (h.record.content.clone(), h.semantic_score))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
