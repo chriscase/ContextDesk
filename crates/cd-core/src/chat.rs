@@ -595,38 +595,87 @@ impl OpenAiCompatibleClient {
         Ok(acc.into_completion())
     }
 
-    /// List models via GET /v1/models.
+    /// List models via GET …/models (tries several path shapes like TriageTool).
     pub async fn list_models(&self) -> CoreResult<Vec<String>> {
-        let url = if self.base_url.ends_with("/v1") {
-            format!("{}/models", self.base_url)
+        let base = self.base_url.trim_end_matches('/');
+        // Prefer longest successful list across path variants.
+        let mut urls: Vec<String> = Vec::new();
+        if base.ends_with("/v1") {
+            urls.push(format!("{base}/models"));
         } else {
-            format!("{}/v1/models", self.base_url)
-        };
-        let mut req = self.http.get(url);
-        req = self.apply_auth(req);
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| CoreError::Message(format!("models: {e}")))?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| CoreError::Message(format!("models body: {e}")))?;
-        if !status.is_success() {
-            return Err(CoreError::Message(format!("models HTTP {status}")));
+            urls.push(format!("{base}/v1/models"));
+            urls.push(format!("{base}/models"));
         }
-        let v: Value = serde_json::from_str(&text)?;
-        let mut ids = Vec::new();
-        if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
-            for m in arr {
-                if let Some(id) = m.get("id").and_then(|x| x.as_str()) {
+        let mut last_err = CoreError::Message("models: no URL attempted".into());
+        let mut best: Vec<String> = Vec::new();
+        for url in urls {
+            let mut req = self.http.get(&url);
+            req = self.apply_auth(req);
+            match req.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp
+                        .text()
+                        .await
+                        .map_err(|e| CoreError::Message(format!("models body: {e}")))?;
+                    if !status.is_success() {
+                        last_err = CoreError::Message(format!("models HTTP {status}"));
+                        continue;
+                    }
+                    match parse_openai_style_models_list(&text) {
+                        Ok(ids) if !ids.is_empty() => {
+                            if ids.len() > best.len() {
+                                best = ids;
+                            }
+                        }
+                        Ok(_) => { /* empty */ }
+                        Err(e) => last_err = e,
+                    }
+                }
+                Err(e) => last_err = CoreError::Message(format!("models: {e}")),
+            }
+        }
+        if !best.is_empty() {
+            return Ok(best);
+        }
+        Err(last_err)
+    }
+}
+
+/// Parse OpenAI-style model catalogs (`data[]`, `models[]`, or top-level array).
+/// Accepts `id` or `name` fields (enterprise gateways vary).
+pub fn parse_openai_style_models_list(text: &str) -> CoreResult<Vec<String>> {
+    let v: Value =
+        serde_json::from_str(text).map_err(|e| CoreError::Message(format!("models json: {e}")))?;
+    let mut ids = Vec::new();
+    let mut push_arr = |arr: &Vec<Value>| {
+        for m in arr {
+            if let Some(id) = m
+                .get("id")
+                .and_then(|x| x.as_str())
+                .or_else(|| m.get("name").and_then(|x| x.as_str()))
+                .or_else(|| m.get("model").and_then(|x| x.as_str()))
+            {
+                if !id.is_empty() && !ids.iter().any(|x| x == id) {
                     ids.push(id.to_string());
+                }
+            } else if let Some(s) = m.as_str() {
+                if !s.is_empty() && !ids.iter().any(|x| x == s) {
+                    ids.push(s.to_string());
                 }
             }
         }
-        Ok(ids)
+    };
+    if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+        push_arr(arr);
     }
+    if let Some(arr) = v.get("models").and_then(|d| d.as_array()) {
+        push_arr(arr);
+    }
+    if let Some(arr) = v.as_array() {
+        push_arr(arr);
+    }
+    Ok(ids)
 }
 
 /// Parse OpenAI chat completion JSON (also used in tests with fixtures).
@@ -730,7 +779,11 @@ impl OllamaClient {
         let mut out = Vec::new();
         if let Some(models) = v.get("models").and_then(|m| m.as_array()) {
             for m in models {
-                if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
+                if let Some(name) = m
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .or_else(|| m.get("model").and_then(|n| n.as_str()))
+                {
                     out.push(name.to_string());
                 }
             }
@@ -1074,19 +1127,9 @@ pub fn anthropic_request_body(
     body
 }
 
-/// Parse Anthropic `GET /v1/models` JSON (`{ "data": [ { "id": … } ] }`).
+/// Parse Anthropic `GET /v1/models` JSON (same flexible shapes as OpenAI-style).
 pub fn parse_anthropic_models_list(text: &str) -> CoreResult<Vec<String>> {
-    let v: Value = serde_json::from_str(text)
-        .map_err(|e| CoreError::Message(format!("anthropic models json: {e}")))?;
-    let mut ids = Vec::new();
-    if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
-        for m in arr {
-            if let Some(id) = m.get("id").and_then(|x| x.as_str()) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    Ok(ids)
+    parse_openai_style_models_list(text)
 }
 
 /// Parse non-stream Anthropic Messages JSON into [`ChatCompletion`].
@@ -1618,6 +1661,19 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(parse_anthropic_models_list("not-json").is_err());
+    }
+
+    #[test]
+    fn parse_openai_style_models_accepts_name_and_models_array() {
+        let fixture = r#"{
+          "models": [
+            {"name": "corp/chat-large"},
+            {"id": "corp/chat-small"}
+          ]
+        }"#;
+        let ids = parse_openai_style_models_list(fixture).unwrap();
+        assert!(ids.contains(&"corp/chat-large".into()));
+        assert!(ids.contains(&"corp/chat-small".into()));
     }
 
     #[test]

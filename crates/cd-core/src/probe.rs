@@ -3,6 +3,7 @@
 //! Network probe lives in a later issue; pure functions here keep CI offline.
 
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Classification of a discovered model id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ pub fn expand_base_candidates(raw: &str) -> Vec<String> {
     if !lower.ends_with("/v1") {
         add(format!("{base}/v1"));
     }
+    // Enterprise / TriageTool-compatible path shapes
     if !lower.contains("/llm") {
         add(format!("{base}/llm/v1"));
         add(format!("{base}/llm"));
@@ -94,10 +96,27 @@ pub fn expand_base_candidates(raw: &str) -> Vec<String> {
         add(format!("{base}/openai/v1"));
         add(format!("{base}/openai"));
     }
+    if !lower.contains("/anthropic") {
+        add(format!("{base}/anthropic/v1"));
+        add(format!("{base}/anthropic"));
+    }
     if !lower.contains("/api") {
         add(format!("{base}/api"));
+        add(format!("{base}/api/v1"));
     }
-    out.truncate(12);
+    // Parent of …/v1 (some docs paste host+path with trailing /v1 only)
+    if lower.ends_with("/v1") {
+        if let Ok(mut url) = Url::parse(&base) {
+            let path = url.path().trim_end_matches('/').to_string();
+            if let Some(parent) = path.strip_suffix("/v1") {
+                url.set_path(if parent.is_empty() { "/" } else { parent });
+                add(url.to_string().trim_end_matches('/').to_string());
+            }
+        } else if let Some(parent) = base.strip_suffix("/v1") {
+            add(parent.to_string());
+        }
+    }
+    out.truncate(16);
     out
 }
 
@@ -127,7 +146,8 @@ mod tests {
     fn expands_v1_candidate() {
         let c = expand_base_candidates("https://gateway.example.com");
         assert!(c.iter().any(|u| u.ends_with("/v1")));
-        assert!(c.len() <= 12);
+        assert!(c.iter().any(|u| u.contains("/llm/v1")));
+        assert!(c.len() <= 16);
     }
 
     #[test]
