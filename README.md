@@ -14,11 +14,9 @@ Point it at folders you allowlist and at markdown project memory, ask how a subs
 | **Identity** | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179)) |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md) |
 
-> **Screenshot:** a captured shot of the desktop app (a chat answer with inline file
-> citations and a search trail beside an allowlisted workspace) is pending a live
-> `npm run tauri:dev` run against a populated workspace — capture steps are in
-> [`docs/media/README.md`](docs/media/README.md), tracked in
-> [#176](https://github.com/chriscase/ContextDesk/issues/176). No asset is fabricated.
+![ContextDesk desktop — empty chat with starter prompts, session sidebar, and composer](docs/media/screenshot.png)
+
+<p align="center"><sub>Desktop host (macOS): allowlisted workspace chip, local/remote egress chip, pane tabs, empty-chat starters that fill the composer, model picker. Capture notes in <a href="docs/media/README.md"><code>docs/media/README.md</code></a>.</sub></p>
 
 ---
 
