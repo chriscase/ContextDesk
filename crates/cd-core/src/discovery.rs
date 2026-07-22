@@ -154,6 +154,9 @@ pub fn classify_probe_http_status(status: u16) -> ProbeOutcome {
 /// Live probe for a profile (host-invoked only — not called from default unit tests).
 ///
 /// Uses models-list / health endpoints with bounded timeouts via existing clients.
+///
+/// Policy matches [`crate::research::backend_for`]: user-configured remote bases may
+/// resolve to private/corp DNS (same trust as chat). Model-driven tools stay SSRF-pinned.
 pub async fn probe_provider(
     profile: &crate::providers::ProviderProfile,
     api_key: Option<String>,
@@ -161,7 +164,7 @@ pub async fn probe_provider(
     let policy = if profile.local_only {
         crate::ssrf::SsrfPolicy::local_only()
     } else {
-        crate::ssrf::SsrfPolicy::default()
+        crate::ssrf::SsrfPolicy::allow_private_networks()
     };
 
     match profile.kind {
@@ -176,40 +179,47 @@ pub async fn probe_provider(
                 }
             }
         }
-        ProviderKind::OpenAiCompatible => {
-            match crate::chat::OpenAiCompatibleClient::new(
-                &profile.base_url,
-                api_key,
-                &profile.chat_model,
-                &policy,
-            ) {
-                Ok(client) => match client.list_models().await {
-                    Ok(_) => ProbeOutcome::Reachable {
-                        reason: "models list ok".into(),
-                    },
-                    Err(e) => classify_list_err(&e.to_string()),
-                },
-                Err(e) => ProbeOutcome::Unreachable {
-                    reason: e.to_string(),
-                },
+        // Prefer TriageTool-parity multi-path probe (plain HTTP, no SSRF pin) so preflight
+        // matches Discover / list_models_for_draft for corporate gateways.
+        ProviderKind::OpenAiCompatible | ProviderKind::Anthropic => {
+            let result =
+                crate::ai_probe::probe_ai_gateway(&profile.base_url, api_key.as_deref(), false)
+                    .await;
+            if result.ok {
+                let n = result.models.len();
+                let path = if result.effective_base_url.is_empty() {
+                    profile.base_url.clone()
+                } else {
+                    result.effective_base_url
+                };
+                return ProbeOutcome::Reachable {
+                    reason: format!("models list ok ({n} model(s) via {path})"),
+                };
             }
-        }
-        ProviderKind::Anthropic => {
-            match crate::chat::AnthropicClient::new(
-                &profile.base_url,
-                api_key,
-                &profile.chat_model,
-                &policy,
-            ) {
-                Ok(client) => match client.list_models().await {
-                    Ok(_) => ProbeOutcome::Reachable {
-                        reason: "Anthropic models list ok".into(),
+            let err_blob = result.errors.join("; ");
+            let note_blob = result.notes.join(" ");
+            let combined = format!("{err_blob} {note_blob}").to_lowercase();
+            if combined.contains("401")
+                || combined.contains("403")
+                || combined.contains("auth failed")
+                || combined.contains("no api key")
+            {
+                ProbeOutcome::KeyRejected {
+                    reason: if err_blob.is_empty() {
+                        "credentials rejected or missing".into()
+                    } else {
+                        err_blob.chars().take(180).collect()
                     },
-                    Err(e) => classify_list_err(&e.to_string()),
-                },
-                Err(e) => ProbeOutcome::Unreachable {
-                    reason: e.to_string(),
-                },
+                }
+            } else {
+                let reason = if !err_blob.is_empty() {
+                    err_blob.chars().take(180).collect()
+                } else if !note_blob.is_empty() {
+                    note_blob.chars().take(180).collect()
+                } else {
+                    "gateway probe failed".into()
+                };
+                ProbeOutcome::Unreachable { reason }
             }
         }
         ProviderKind::XaiGrokBuild => {
@@ -236,7 +246,7 @@ pub async fn probe_provider(
                         base,
                         None,
                         &profile.chat_model,
-                        &crate::ssrf::SsrfPolicy::default(),
+                        &policy,
                     ) {
                         Ok(client) => {
                             let client = client.with_extra_headers(headers);
