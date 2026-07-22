@@ -1,5 +1,7 @@
 //! ContextDesk headless server — localhost by default, API key auth, research + SSE.
 
+mod telegram;
+
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -39,6 +41,11 @@ use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::EnvFilter;
+
+use telegram::{
+    ChatPermissionProposal, TelegramBridge, TelegramConfig, TelegramIdentity, TelegramMessage,
+    TelegramUpdate,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "cd-server", version, about = "ContextDesk headless server")]
@@ -111,12 +118,22 @@ struct AppState {
     /// Eviction: process lifetime only for now (document in PROTOCOL); no TTL yet.
     /// `tokio::sync::Mutex` so we can await tool execute while holding the session.
     sessions: Arc<tokio::sync::Mutex<HashMap<String, SessionHost>>>,
+    /// Optional Telegram input/notification bridge (#289). Secrets remain inside
+    /// the Rust process; webhook clients never receive them.
+    telegram: Option<Arc<TelegramBridge>>,
 }
 
 /// Session-scoped host retained between prompt and permission.respond (#168).
 struct SessionHost {
     host: ToolHost,
     workspace_id: String,
+    origin: SessionOrigin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOrigin {
+    TrustedClient,
+    Telegram,
 }
 
 /// Load generic provider profile + keychain secret for server research (#165).
@@ -130,6 +147,52 @@ fn load_server_provider(branding: &cd_core::Branding) -> Option<ServerProvider> 
         store.get(r).ok().flatten()
     });
     Some(ServerProvider { profile, api_key })
+}
+
+/// Resolve Telegram secret references from the OS keychain and build the
+/// SSRF-pinned Bot API transport. Raw secret material never enters config or HTTP DTOs.
+fn load_telegram_bridge(
+    config: Option<&TelegramConfig>,
+) -> Result<Option<Arc<TelegramBridge>>, String> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    telegram::validate_secret_ref("bot_token_ref", &config.bot_token_ref)?;
+    telegram::validate_secret_ref("webhook_secret_ref", &config.webhook_secret_ref)?;
+    let store = KeychainSecretStore::new();
+    let bot_token = store
+        .get(&config.bot_token_ref)
+        .map_err(|_| {
+            format!(
+                "failed to read Telegram bot token keychain ref `{}`",
+                config.bot_token_ref
+            )
+        })?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "missing Telegram bot token keychain ref `{}`",
+                config.bot_token_ref
+            )
+        })?;
+    let webhook_secret = store
+        .get(&config.webhook_secret_ref)
+        .map_err(|_| {
+            format!(
+                "failed to read Telegram webhook secret keychain ref `{}`",
+                config.webhook_secret_ref
+            )
+        })?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "missing Telegram webhook secret keychain ref `{}`",
+                config.webhook_secret_ref
+            )
+        })?;
+    TelegramBridge::new_http(config, bot_token, webhook_secret)
+        .map(Arc::new)
+        .map(Some)
 }
 
 /// Run research via `research_turn` when a provider is configured; honor `force_local`.
@@ -364,6 +427,8 @@ struct ServerConfig {
     /// Team workspaces, each with its own roots + admin/member key set.
     #[serde(default)]
     workspaces: Vec<WsConfig>,
+    /// Optional Telegram bridge. Contains keychain reference ids, never raw secrets.
+    telegram: Option<TelegramConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -661,6 +726,7 @@ fn build_state(
         audit: Arc::new(audit),
         provider,
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        telegram: None,
     })
 }
 
@@ -1142,10 +1208,11 @@ async fn ensure_session_host(
     state: &AppState,
     workspace_id: &str,
     session_id: &str,
+    origin: SessionOrigin,
 ) -> Result<(), StatusCode> {
     let mut sessions = state.sessions.lock().await;
     if let Some(s) = sessions.get(session_id) {
-        if s.workspace_id != workspace_id {
+        if s.workspace_id != workspace_id || s.origin != origin {
             return Err(StatusCode::FORBIDDEN);
         }
         return Ok(());
@@ -1173,6 +1240,7 @@ async fn ensure_session_host(
         SessionHost {
             host,
             workspace_id: workspace_id.to_string(),
+            origin,
         },
     );
     Ok(())
@@ -1187,7 +1255,13 @@ async fn session_prompt(
     if body.session_id.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    ensure_session_host(&state, &body.workspace_id, &body.session_id).await?;
+    ensure_session_host(
+        &state,
+        &body.workspace_id,
+        &body.session_id,
+        SessionOrigin::TrustedClient,
+    )
+    .await?;
 
     let mut sessions = state.sessions.lock().await;
     let session = sessions
@@ -1237,6 +1311,19 @@ async fn permission_respond(
         .get_mut(&body.session_id)
         .ok_or(StatusCode::NOT_FOUND)?;
     if session.workspace_id != body.workspace_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Chat-originated pending writes are only actionable through the paired-
+    // desktop chat approval endpoint. Knowing/guessing a request id is not enough.
+    if session.origin == SessionOrigin::Telegram {
+        let _ = state.audit.log(
+            "chat_permission_respond",
+            ToolSideEffect::HardWrite,
+            &body.session_id,
+            outcomes::DENIED,
+            "generic permission endpoint refused Telegram-originated session",
+            0,
+        );
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1685,6 +1772,612 @@ async fn sync_apply(
     })))
 }
 
+// Telegram chat bridge (#289).
+// ---------------------------------------------------------------------------
+
+enum TelegramAction {
+    Research(String),
+    InvokeTool {
+        name: String,
+        arguments: serde_json::Value,
+    },
+}
+
+fn telegram_action(text: &str) -> Result<TelegramAction, String> {
+    let trimmed = text.trim();
+    if trimmed == "/save" {
+        return Err("Use /save <title> followed by an optional newline and note body.".into());
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("/save ")
+        .or_else(|| trimmed.strip_prefix("/save\n"))
+    {
+        let rest = rest.trim();
+        let (title, body) = rest.split_once('\n').unwrap_or((rest, rest));
+        return Ok(TelegramAction::InvokeTool {
+            name: cd_core::tools::names::SAVE_MEMORY.into(),
+            arguments: serde_json::json!({
+                "title": title.trim(),
+                "body_markdown": body.trim(),
+                "content": body.trim(),
+                "kind": "project_note",
+                "scope": "workspace",
+            }),
+        });
+    }
+    Ok(TelegramAction::Research(trimmed.to_string()))
+}
+
+fn telegram_reply_text(
+    events: &[StreamEvent],
+    permission_sides: &HashMap<String, ToolSideEffect>,
+    identity: &TelegramIdentity,
+) -> String {
+    let mut out = String::new();
+    for event in events {
+        match event {
+            StreamEvent::TextDelta { text } => out.push_str(text),
+            StreamEvent::Citation { label, locator, .. } => {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("Source: ");
+                out.push_str(label);
+                if let Some(locator) = locator {
+                    out.push_str(" — ");
+                    out.push_str(locator);
+                }
+                out.push('\n');
+            }
+            StreamEvent::PermissionRequired {
+                request_id,
+                tool_name,
+                target,
+                preview,
+                ..
+            } => {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                match permission_sides
+                    .get(request_id)
+                    .copied()
+                    .unwrap_or(ToolSideEffect::HardWrite)
+                {
+                    ToolSideEffect::SoftWrite
+                        if identity.role.is_admin() && identity.allow_soft_write =>
+                    {
+                        out.push_str(&format!(
+                            "SoftWrite proposal from {tool_name} for {target}:\n{preview}\n\
+                             Confirm with /approve_soft {request_id} WRITE"
+                        ));
+                    }
+                    ToolSideEffect::SoftWrite => out.push_str(&format!(
+                        "SoftWrite proposal from {tool_name} for {target} was queued for a trusted desktop."
+                    )),
+                    ToolSideEffect::HardWrite | ToolSideEffect::Read => out.push_str(&format!(
+                        "HardWrite proposal from {tool_name} for {target} was queued for a trusted desktop. Chat cannot approve it."
+                    )),
+                }
+                out.push('\n');
+            }
+            StreamEvent::Error { message, .. } => {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("Request failed: ");
+                out.push_str(message);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    if out.trim().is_empty() {
+        "Request completed.".into()
+    } else {
+        out.trim().to_string()
+    }
+}
+
+async fn run_telegram_action(
+    state: &AppState,
+    bridge: &TelegramBridge,
+    identity: &TelegramIdentity,
+    message: &TelegramMessage,
+    session_id: &str,
+    action: TelegramAction,
+) -> Result<Vec<StreamEvent>, String> {
+    ensure_session_host(
+        state,
+        &identity.workspace_id,
+        session_id,
+        SessionOrigin::Telegram,
+    )
+    .await
+    .map_err(|status| format!("session host failed: {status}"))?;
+
+    let (events, permission_sides) = {
+        let mut sessions = state.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "Telegram session disappeared".to_string())?;
+        let events = match action {
+            TelegramAction::Research(query) => {
+                let query = if query.is_empty() {
+                    "search workspace"
+                } else {
+                    query.as_str()
+                };
+                run_research_turn(
+                    &mut session.host,
+                    state.provider.as_ref(),
+                    query,
+                    session_id,
+                    false,
+                )
+                .await
+                .map_err(|status| format!("research turn failed: {status}"))?
+                .0
+            }
+            TelegramAction::InvokeTool { name, arguments } => {
+                session
+                    .host
+                    .execute(&name, &arguments, None)
+                    .await
+                    .map_err(|_| "Telegram tool invocation failed".to_string())?
+                    .events
+            }
+        };
+        let permission_sides = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::PermissionRequired {
+                    request_id,
+                    tool_name,
+                    ..
+                } => Some((request_id.clone(), session.host.side_effect_for(tool_name))),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        (events, permission_sides)
+    };
+
+    for event in &events {
+        if let StreamEvent::PermissionRequired {
+            request_id,
+            tool_name,
+            target,
+            reason,
+            preview,
+            risk,
+            ..
+        } = event
+        {
+            let side_effect = permission_sides
+                .get(request_id)
+                .copied()
+                .unwrap_or(ToolSideEffect::HardWrite);
+            bridge.queue_proposal(ChatPermissionProposal {
+                request_id: request_id.clone(),
+                workspace_id: identity.workspace_id.clone(),
+                session_id: session_id.to_string(),
+                user_id: identity.user_id,
+                chat_id: message.chat.id,
+                message_thread_id: message.message_thread_id,
+                tool_name: tool_name.clone(),
+                target: target.clone(),
+                reason: reason.clone(),
+                preview: preview.clone(),
+                risk: risk.clone(),
+                side_effect,
+                trusted_desktop_connected: false,
+            })?;
+            let _ = state.audit.log(
+                "telegram_permission_proposal",
+                side_effect,
+                target,
+                outcomes::PENDING,
+                &format!(
+                    "origin=telegram user_id={} workspace_id={}",
+                    identity.user_id, identity.workspace_id
+                ),
+                preview.len() as u64,
+            );
+        }
+    }
+
+    let reply = telegram_reply_text(&events, &permission_sides, identity);
+    bridge
+        .send_text(
+            message.chat.id,
+            message.message_thread_id,
+            Some(message.message_id),
+            &reply,
+        )
+        .await?;
+    Ok(events)
+}
+
+async fn execute_chat_permission(
+    state: &AppState,
+    proposal: &ChatPermissionProposal,
+    decision: PermissionDecision,
+    typed: Option<&str>,
+) -> Result<Vec<StreamEvent>, StatusCode> {
+    let mut sessions = state.sessions.lock().await;
+    let session = sessions
+        .get_mut(&proposal.session_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if session.workspace_id != proposal.workspace_id || session.origin != SessionOrigin::Telegram {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    grant_and_execute(
+        &mut session.host,
+        &proposal.request_id,
+        decision,
+        typed,
+        "",
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn telegram_soft_approval(
+    state: &AppState,
+    bridge: &TelegramBridge,
+    identity: &TelegramIdentity,
+    message: &TelegramMessage,
+    text: &str,
+) -> Result<bool, String> {
+    let mut parts = text.split_whitespace();
+    if parts.next() != Some("/approve_soft") {
+        return Ok(false);
+    }
+    let Some(request_id) = parts.next() else {
+        bridge
+            .send_text(
+                message.chat.id,
+                message.message_thread_id,
+                Some(message.message_id),
+                "Use /approve_soft <request-id> WRITE",
+            )
+            .await?;
+        return Ok(true);
+    };
+    let typed = parts.next().unwrap_or("");
+    let proposal = bridge
+        .proposal(request_id)?
+        .ok_or_else(|| "Unknown or expired SoftWrite proposal.".to_string())?;
+    let allowed_identity = identity.user_id == proposal.user_id
+        && identity.workspace_id == proposal.workspace_id
+        && identity.role.is_admin()
+        && identity.allow_soft_write;
+    if !allowed_identity || proposal.side_effect != ToolSideEffect::SoftWrite || typed != "WRITE" {
+        let _ = state.audit.log(
+            "telegram_softwrite_approval",
+            proposal.side_effect,
+            &proposal.target,
+            outcomes::DENIED,
+            "chat approval rejected: policy, side-effect, identity, or phrase mismatch",
+            0,
+        );
+        let notice = if proposal.side_effect == ToolSideEffect::HardWrite {
+            "HardWrite cannot be approved from Telegram; use the paired desktop."
+        } else {
+            "SoftWrite approval rejected. Check the configured admin policy and type WRITE exactly."
+        };
+        bridge
+            .send_text(
+                message.chat.id,
+                message.message_thread_id,
+                Some(message.message_id),
+                notice,
+            )
+            .await?;
+        return Ok(true);
+    }
+
+    let events = execute_chat_permission(
+        state,
+        &proposal,
+        PermissionDecision::AllowOnce,
+        Some("WRITE"),
+    )
+    .await
+    .map_err(|status| format!("SoftWrite approval failed: {status}"))?;
+    bridge.remove_proposal(request_id)?;
+    let reply = telegram_reply_text(&events, &HashMap::new(), identity);
+    bridge
+        .send_text(
+            proposal.chat_id,
+            proposal.message_thread_id,
+            Some(message.message_id),
+            &reply,
+        )
+        .await?;
+    let _ = state.audit.log(
+        "telegram_softwrite_approval",
+        ToolSideEffect::SoftWrite,
+        &proposal.target,
+        outcomes::ALLOWED,
+        &format!("origin=telegram configured_admin={}", identity.user_id),
+        0,
+    );
+    Ok(true)
+}
+
+async fn process_telegram_update(state: &AppState, update: TelegramUpdate) -> Result<(), String> {
+    let bridge = state
+        .telegram
+        .as_deref()
+        .ok_or_else(|| "Telegram bridge is not configured".to_string())?;
+    let Some(message) = update.message else {
+        return Ok(());
+    };
+    let Some(user) = &message.from_user else {
+        return Ok(());
+    };
+    let Some(text) = message.text.as_deref() else {
+        return Ok(());
+    };
+    let Some(identity) = bridge.identity(user.id) else {
+        let _ = state.audit.log(
+            "telegram_message",
+            ToolSideEffect::Read,
+            &format!("telegram:user:{}/chat:{}", user.id, message.chat.id),
+            outcomes::DENIED,
+            "unmapped Telegram user",
+            text.len() as u64,
+        );
+        bridge
+            .send_text(
+                message.chat.id,
+                message.message_thread_id,
+                Some(message.message_id),
+                "This Telegram account is not authorized for a workspace.",
+            )
+            .await?;
+        return Ok(());
+    };
+
+    if telegram_soft_approval(state, bridge, &identity, &message, text).await? {
+        return Ok(());
+    }
+
+    let session_id = bridge.session_id(message.chat.id, message.message_thread_id)?;
+    let _ = state.audit.log(
+        "telegram_message",
+        ToolSideEffect::Read,
+        &format!(
+            "telegram:user:{}/chat:{}/session:{}",
+            user.id, message.chat.id, session_id
+        ),
+        outcomes::ALLOWED,
+        &format!(
+            "origin=telegram workspace_id={} role={:?}",
+            identity.workspace_id, identity.role
+        ),
+        text.len() as u64,
+    );
+    let action = match telegram_action(text) {
+        Ok(action) => action,
+        Err(help) => {
+            bridge
+                .send_text(
+                    message.chat.id,
+                    message.message_thread_id,
+                    Some(message.message_id),
+                    &help,
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+    run_telegram_action(state, bridge, &identity, &message, &session_id, action).await?;
+    Ok(())
+}
+
+async fn telegram_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(update): Json<TelegramUpdate>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let bridge = state.telegram.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let secret = headers
+        .get("x-telegram-bot-api-secret-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !bridge.webhook_secret_matches(secret) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !bridge
+        .accept_update(update.update_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Ok(Json(serde_json::json!({ "ok": true, "duplicate": true })));
+    }
+    let failure_reply = update.message.as_ref().map(|message| {
+        (
+            message.chat.id,
+            message.message_thread_id,
+            message.message_id,
+        )
+    });
+    let failure_bridge = state.telegram.clone();
+    // Telegram expects a quick webhook acknowledgement; the turn and outbound
+    // replies continue on a detached task using the same process state.
+    tokio::spawn(async move {
+        if let Err(error) = process_telegram_update(&state, update).await {
+            tracing::warn!(error = %error, "Telegram update failed");
+            if let (Some(bridge), Some((chat_id, thread_id, message_id))) =
+                (failure_bridge, failure_reply)
+            {
+                let _ = bridge
+                    .send_text(
+                        chat_id,
+                        thread_id,
+                        Some(message_id),
+                        "The request failed safely. Try again or use the trusted desktop.",
+                    )
+                    .await;
+            }
+        }
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ChatPairBody {
+    workspace_id: String,
+    device_label: String,
+}
+
+async fn chat_pair(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChatPairBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &body.workspace_id,
+        "chat_pair",
+        &body.workspace_id,
+    )?;
+    let bridge = state.telegram.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let (pairing_id, created_at_unix) = bridge
+        .pair_desktop(&body.workspace_id, &body.device_label)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state.audit.log(
+        "chat_pair",
+        ToolSideEffect::SoftWrite,
+        &body.workspace_id,
+        outcomes::ALLOWED,
+        "trusted desktop paired for chat proposals",
+        0,
+    );
+    Ok(Json(serde_json::json!({
+        "pairing_id": pairing_id,
+        "workspace_id": body.workspace_id,
+        "created_at_unix": created_at_unix,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ChatApprovalsQuery {
+    workspace_id: String,
+    pairing_id: String,
+}
+
+async fn chat_approvals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChatApprovalsQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &query.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &query.workspace_id,
+        "chat_approvals",
+        &query.workspace_id,
+    )?;
+    let bridge = state.telegram.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    bridge
+        .validate_pairing(&query.pairing_id, &query.workspace_id)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let proposals = bridge
+        .proposals_for_workspace(&query.workspace_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "proposals": proposals })))
+}
+
+#[derive(Deserialize)]
+struct ChatApprovalRespondBody {
+    workspace_id: String,
+    pairing_id: String,
+    request_id: String,
+    /// Paired desktop supports only deny or allow_once for chat proposals.
+    decision: String,
+    typed: Option<String>,
+}
+
+async fn chat_approval_respond(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ChatApprovalRespondBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &body.workspace_id,
+        "chat_approval_respond",
+        &body.request_id,
+    )?;
+    let bridge = state.telegram.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    bridge
+        .validate_pairing(&body.pairing_id, &body.workspace_id)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let decision = match body.decision.trim() {
+        "deny" => PermissionDecision::Deny,
+        "allow_once" => PermissionDecision::AllowOnce,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    let proposal = bridge
+        .proposal(&body.request_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if proposal.workspace_id != body.workspace_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Preflight the current core type-to-confirm contract before consuming the
+    // pending request. A typo must fail closed while remaining retryable.
+    if matches!(decision, PermissionDecision::AllowOnce)
+        && matches!(proposal.risk.as_str(), "remote" | "destructive")
+        && body.typed.as_deref().map(str::trim) != Some("WRITE")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let events =
+        execute_chat_permission(&state, &proposal, decision, body.typed.as_deref()).await?;
+    bridge
+        .remove_proposal(&body.request_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let desktop_identity = TelegramIdentity {
+        user_id: proposal.user_id,
+        workspace_id: proposal.workspace_id.clone(),
+        role: Role::Admin,
+        allow_soft_write: false,
+    };
+    let reply = telegram_reply_text(&events, &HashMap::new(), &desktop_identity);
+    if let Err(error) = bridge
+        .send_text(proposal.chat_id, proposal.message_thread_id, None, &reply)
+        .await
+    {
+        tracing::warn!(error = %error, "approved chat proposal executed but Telegram notify failed");
+    }
+    let _ = state.audit.log(
+        "chat_approval_respond",
+        proposal.side_effect,
+        &proposal.target,
+        if matches!(decision, PermissionDecision::Deny) {
+            outcomes::DENIED
+        } else {
+            outcomes::ALLOWED
+        },
+        "origin=trusted_paired_desktop",
+        0,
+    );
+    Ok(Json(serde_json::json!({
+        "request_id": body.request_id,
+        "events": events_to_dto(&events),
+    })))
+}
+
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -1698,6 +2391,10 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/sync/membership", get(sync_membership))
         .route("/v1/sync/changes_since", post(sync_changes_since))
         .route("/v1/sync/apply", post(sync_apply))
+        .route("/v1/chat/telegram/webhook", post(telegram_webhook))
+        .route("/v1/chat/pair", post(chat_pair))
+        .route("/v1/chat/approvals", get(chat_approvals))
+        .route("/v1/chat/approvals/respond", post(chat_approval_respond))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state)
 }
@@ -1777,6 +2474,21 @@ async fn main() {
         all.len()
     };
 
+    if let Some(telegram) = server_config.as_ref().and_then(|c| c.telegram.as_ref()) {
+        for user in &telegram.users {
+            if !resolved
+                .iter()
+                .any(|workspace| workspace.id == user.workspace_id)
+            {
+                eprintln!(
+                    "Telegram user {} references unknown workspace `{}`",
+                    user.user_id, user.workspace_id
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+
     match guard_exposure(&addr, args.allow_lan, key_count) {
         Err(msg) => {
             eprintln!("{msg}");
@@ -1815,13 +2527,26 @@ async fn main() {
         tracing::info!("no provider configured — /v1/research will use local-retrieval (degraded)");
     }
 
-    let state = match build_state(resolved, &data_dir, provider) {
+    let telegram =
+        match load_telegram_bridge(server_config.as_ref().and_then(|c| c.telegram.as_ref())) {
+            Ok(bridge) => bridge,
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(2);
+            }
+        };
+    if telegram.is_some() {
+        tracing::info!("Telegram bridge configured (secrets resolved from keychain)");
+    }
+
+    let mut state = match build_state(resolved, &data_dir, provider) {
         Ok(s) => s,
         Err(msg) => {
             eprintln!("{msg}");
             std::process::exit(2);
         }
     };
+    state.telegram = telegram;
 
     let app = build_app(state);
     tracing::info!(%addr, "cd-server listening");
@@ -2054,6 +2779,47 @@ mod tests {
         build_state(resolved, &root.join(".server-data"), provider).unwrap()
     }
 
+    fn telegram_test_state(
+        root: PathBuf,
+        role: Role,
+        allow_soft_write: bool,
+    ) -> (AppState, telegram::CapturedMessages) {
+        let mut state = test_state_with_roles(
+            root,
+            &[
+                ("admin-k", "ws-a", Role::Admin),
+                ("member-k", "ws-a", Role::Member),
+            ],
+            None,
+        );
+        let config = TelegramConfig {
+            bot_token_ref: "telegram/default/bot_token".into(),
+            webhook_secret_ref: "telegram/default/webhook_secret".into(),
+            users: vec![telegram::TelegramUserConfig {
+                user_id: 42,
+                workspace_id: "ws-a".into(),
+                role,
+                allow_soft_write,
+            }],
+        };
+        let (bridge, sent) = TelegramBridge::new_capture(&config, "webhook-secret").unwrap();
+        state.telegram = Some(Arc::new(bridge));
+        (state, sent)
+    }
+
+    fn telegram_update(text: &str) -> TelegramUpdate {
+        TelegramUpdate {
+            update_id: 1,
+            message: Some(TelegramMessage {
+                message_id: 9,
+                chat: telegram::TelegramChat { id: -1001 },
+                from_user: Some(telegram::TelegramUser { id: 42 }),
+                message_thread_id: Some(7),
+                text: Some(text.into()),
+            }),
+        }
+    }
+
     #[tokio::test]
     async fn isolation_key_a_cannot_search_b() {
         let dir = tempdir().unwrap();
@@ -2214,6 +2980,12 @@ mod tests {
     fn server_config_parses_workspaces_and_roles() {
         let toml_src = r#"
             data_dir = "/tmp/cd-server-x"
+            [telegram]
+            bot_token_ref = "telegram/default/bot_token"
+            webhook_secret_ref = "telegram/default/webhook_secret"
+            users = [
+              { user_id = 42, workspace_id = "team-a", role = "admin", allow_soft_write = true },
+            ]
             [[workspaces]]
             id = "team-a"
             roots = ["/tmp/team-a"]
@@ -2229,6 +3001,9 @@ mod tests {
         assert_eq!(resolved[0].keys.len(), 2);
         assert_eq!(resolved[0].keys[0].1, Role::Admin);
         assert_eq!(resolved[0].keys[1].1, Role::Member);
+        let telegram = cfg.telegram.as_ref().unwrap();
+        assert_eq!(telegram.users.len(), 1);
+        assert!(telegram.users[0].allow_soft_write);
     }
 
     #[tokio::test]
@@ -3024,6 +3799,328 @@ mod tests {
         assert!(
             started.unwrap() < completed.unwrap(),
             "turn_started must precede turn_completed:\n{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_message_research_event_stream_reply_and_audit_round_trip() {
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Member, false);
+        let audit_path = state.audit.path().to_path_buf();
+
+        process_telegram_update(&state, telegram_update("alpha"))
+            .await
+            .unwrap();
+
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "one Telegram reply expected: {sent:?}");
+            assert_eq!(sent[0].chat_id, -1001);
+            assert_eq!(sent[0].message_thread_id, Some(7));
+            assert!(
+                sent[0].text.to_ascii_lowercase().contains("alpha"),
+                "cd.v1 research reply missing query hit: {sent:?}"
+            );
+        }
+
+        let sessions = state.sessions.lock().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions.values().next().unwrap().origin,
+            SessionOrigin::Telegram
+        );
+        drop(sessions);
+
+        let audit = fs::read_to_string(&audit_path).unwrap();
+        assert!(audit.contains("telegram_message"), "{audit}");
+        assert!(audit.contains("origin=telegram"), "{audit}");
+        assert!(
+            !audit.contains("\"detail\":\"alpha\""),
+            "message text leaked to audit: {audit}"
+        );
+        state.audit.verify_chain().unwrap();
+    }
+
+    #[tokio::test]
+    async fn telegram_softwrite_needs_explicit_configured_admin_phrase() {
+        use cd_core::memory::{MemoryStore, SqliteMemoryStore};
+
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Admin, true);
+        let bridge = state.telegram.as_deref().unwrap();
+        let store = {
+            let workspaces = state.workspaces.lock().unwrap();
+            workspaces.get("ws-a").unwrap().sync_memory.clone()
+        };
+
+        process_telegram_update(&state, telegram_update("/save Launch note\nShip Friday"))
+            .await
+            .unwrap();
+        let proposals = bridge.proposals_for_workspace("ws-a").unwrap();
+        assert_eq!(proposals.len(), 1);
+        let proposal = proposals[0].clone();
+        assert_eq!(proposal.side_effect, ToolSideEffect::SoftWrite);
+        assert_eq!(proposal.target, "mem://workspace/new");
+        assert!(
+            store.changes_since(0).unwrap().is_empty(),
+            "authoritative store must remain unchanged before explicit confirmation"
+        );
+        let legacy_store =
+            SqliteMemoryStore::open(dir.path().join("a/.contextdesk/memory/memory.sqlite"))
+                .unwrap();
+        assert!(
+            legacy_store.changes_since(0).unwrap().is_empty(),
+            "Telegram must not write to the replaced workspace-local store"
+        );
+        assert!(
+            sent.lock().unwrap()[0].text.contains("/approve_soft"),
+            "in-channel confirmation instruction missing"
+        );
+
+        // Arbitrary chat assent is model input, never a permission grant.
+        process_telegram_update(&state, telegram_update("yes"))
+            .await
+            .unwrap();
+        assert!(bridge.proposal(&proposal.request_id).unwrap().is_some());
+        assert!(store.changes_since(0).unwrap().is_empty());
+
+        process_telegram_update(
+            &state,
+            telegram_update(&format!("/approve_soft {} WRITE", proposal.request_id)),
+        )
+        .await
+        .unwrap();
+        assert!(bridge.proposal(&proposal.request_id).unwrap().is_none());
+        let records = store.changes_since(0).unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "SoftWrite missing from authoritative store: {records:?}"
+        );
+        assert_eq!(records[0].title, "Launch note");
+        assert_eq!(records[0].content, "Ship Friday");
+        assert_eq!(records[0].workspace_id.as_deref(), Some("ws-a"));
+        assert!(
+            legacy_store.changes_since(0).unwrap().is_empty(),
+            "approved SoftWrite must only land in the authoritative store"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_hardwrite_escalates_and_only_paired_desktop_can_confirm() {
+        use cd_core::connectors::{ConnectorExecutor, RegisteredTool};
+        use cd_core::tools::ToolSpec;
+
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Admin, true);
+        let bridge = state.telegram.as_deref().unwrap();
+        let identity = bridge.identity(42).unwrap();
+        let message = telegram_update("ignored").message.unwrap();
+        let session_id = bridge
+            .session_id(message.chat.id, message.message_thread_id)
+            .unwrap();
+        ensure_session_host(&state, "ws-a", &session_id, SessionOrigin::Telegram)
+            .await
+            .unwrap();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions
+                .get_mut(&session_id)
+                .unwrap()
+                .host
+                .register_tool(RegisteredTool {
+                    spec: ToolSpec {
+                        name: "remote_publish".into(),
+                        description: "test HardWrite".into(),
+                        side_effect: ToolSideEffect::HardWrite,
+                        parameters: serde_json::json!({"type":"object"}),
+                    },
+                    exec: ConnectorExecutor::Stub {
+                        detail: "remote publish executed".into(),
+                    },
+                });
+        }
+
+        let events = run_telegram_action(
+            &state,
+            bridge,
+            &identity,
+            &message,
+            &session_id,
+            TelegramAction::InvokeTool {
+                name: "remote_publish".into(),
+                arguments: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        let request_id = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("HardWrite must emit permission_required");
+        let proposal = bridge.proposal(&request_id).unwrap().unwrap();
+        assert_eq!(proposal.side_effect, ToolSideEffect::HardWrite);
+        assert!(!proposal.trusted_desktop_connected);
+        assert!(
+            sent.lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .text
+                .contains("Chat cannot approve"),
+            "HardWrite escalation notice missing"
+        );
+
+        // Even the configured chat admin + exact SoftWrite phrase cannot approve HardWrite.
+        process_telegram_update(
+            &state,
+            telegram_update(&format!("/approve_soft {request_id} WRITE")),
+        )
+        .await
+        .unwrap();
+        assert!(bridge.proposal(&request_id).unwrap().is_some());
+
+        let app = build_app(state.clone());
+        // The generic permission endpoint is also barred for Telegram sessions.
+        let generic = Request::builder()
+            .method("POST")
+            .uri("/v1/permission/respond")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","session_id":"{session_id}","request_id":"{request_id}","decision":"allow_once","typed":"WRITE"}}"#
+            )))
+            .unwrap();
+        let response = app.clone().oneshot(generic).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(bridge.proposal(&request_id).unwrap().is_some());
+
+        let member_pair = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/pair")
+            .header("authorization", "Bearer member-k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws-a","device_label":"Untrusted member"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(member_pair).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "member API key must not create a trusted desktop pairing"
+        );
+
+        let pair = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/pair")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"workspace_id":"ws-a","device_label":"Desktop test"}"#,
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(pair).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let paired = json_body(response).await;
+        let pairing_id = paired["pairing_id"].as_str().unwrap();
+
+        let wrong_phrase = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/approvals/respond")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","pairing_id":"{pairing_id}","request_id":"{request_id}","decision":"allow_once","typed":"NOPE"}}"#
+            )))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(wrong_phrase).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(
+            bridge.proposal(&request_id).unwrap().is_some(),
+            "wrong type-to-confirm must leave the HardWrite proposal retryable"
+        );
+
+        let approve = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/approvals/respond")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","pairing_id":"{pairing_id}","request_id":"{request_id}","decision":"allow_once","typed":"WRITE"}}"#
+            )))
+            .unwrap();
+        let response = app.oneshot(approve).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approved = json_body(response).await;
+        assert!(
+            approved["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "tool" && event["payload"]["ok"] == true),
+            "paired desktop did not execute HardWrite stub: {approved}"
+        );
+        assert!(bridge.proposal(&request_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_webhook_requires_telegram_secret_header() {
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Member, false);
+        let app = build_app(state);
+        let body = serde_json::to_vec(&telegram_update("alpha")).unwrap();
+
+        let missing = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/telegram/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(missing).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let valid = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/telegram/webhook")
+            .header("content-type", "application/json")
+            .header("x-telegram-bot-api-secret-token", "webhook-secret")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(valid).await.unwrap().status(),
+            StatusCode::OK
+        );
+        for _ in 0..100 {
+            if !sent.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sent.lock().unwrap().len(), 1, "webhook task did not reply");
+
+        // Telegram retry of the same update id is acknowledged but not re-run.
+        let duplicate = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/telegram/webhook")
+            .header("content-type", "application/json")
+            .header("x-telegram-bot-api-secret-token", "webhook-secret")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(duplicate).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            1,
+            "duplicate update was processed"
         );
     }
 

@@ -62,6 +62,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 - DNS resolve step still trusts the OS resolver (pinning limits rebinding after connect; does not replace a resolver that lies)  
 - MCP stdio servers remain untrusted once enabled; tools default HardWrite + first-use approval (#129); absolute command only; child `env_clear` |
 - Team server TLS is operator-owned (reverse proxy); **cd-server is HTTP-only by design** — `--allow-lan` requires TLS termination at a reverse proxy (#171)  
+- Telegram webhook input is authenticated by Telegram's secret-token header and then by an exact configured user→workspace role mapping. Chat-originated sessions cannot use the generic permission endpoint; HardWrite is only actionable by an authenticated paired workspace-admin client. Pairings/proposals are process-lifetime and are lost (not auto-approved) on restart (#289).
 
 
 ## Desktop updater trust boundary (#173)
