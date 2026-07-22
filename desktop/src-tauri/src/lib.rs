@@ -365,7 +365,7 @@ fn session_context_base(state: &AppState) -> Result<std::path::PathBuf, String> 
         .cloned()
         .ok_or_else(|| "No workspace root — open a workspace first".to_string())?;
     let dir_name = state.branding.workspace_dir_name.clone();
-    Ok(std::path::PathBuf::from(root).join(dir_name))
+    Ok(root.join(dir_name))
 }
 
 #[tauri::command]
