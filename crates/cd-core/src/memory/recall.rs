@@ -79,12 +79,26 @@ fn normalize_pool_keyword_scores(hits: &mut [RecallHit]) {
     }
 }
 
+/// Max additive score from `MemoryRecord.confidence` (0..1) after hybrid base (#347).
+///
+/// Design MEMORY.md §4 lists confidence as a real ranking signal. Previously
+/// `* 0.05` was a rounding error; 0.12 is enough for a high-confidence memory to
+/// outrank a near-tie low-confidence peer without drowning keyword/semantic.
+pub const CONFIDENCE_SCORE_WEIGHT: f32 = 0.12;
+
+/// Flat boost for pinned memories (never auto-expires).
+pub const PINNED_SCORE_BOOST: f32 = 0.15;
+
 fn rescore_hits(hits: &mut [RecallHit], w: HybridWeights, now_secs: i64) {
     for h in hits.iter_mut() {
         let recency = recency_boost(h.record.updated_at, now_secs);
         h.recency_score = recency;
-        let pinned_boost = if h.record.pinned { 0.15 } else { 0.0 };
-        let conf = h.record.confidence.unwrap_or(0.0) * 0.05;
+        let pinned_boost = if h.record.pinned {
+            PINNED_SCORE_BOOST
+        } else {
+            0.0
+        };
+        let conf = h.record.confidence.unwrap_or(0.0).clamp(0.0, 1.0) * CONFIDENCE_SCORE_WEIGHT;
         // keyword_score already normalized 0..1 in-pool → pass as raw with max=1
         h.score =
             hybrid_score(h.keyword_score, 1.0, h.semantic_score, recency, w) + pinned_boost + conf;
@@ -663,13 +677,60 @@ mod tests {
         assert!(active.iter().all(|h| h.record.status == Status::Active));
         let mut q = RecallQuery::new("postgres");
         q.include_superseded = true;
-        // "postgres" only in old content — expand from active chain may not FTS-hit.
-        // Query the new text and request chain:
+        // #347: term only in superseded content must surface when flag is set.
+        let only_old = store
+            .recall(&q, None, HybridWeights::default(), 200)
+            .unwrap();
+        assert!(
+            only_old.iter().any(|h| h.record.id == old.id),
+            "include_superseded must find term only in superseded content; got {:?}",
+            only_old
+                .iter()
+                .map(|h| (&h.record.content, h.record.status))
+                .collect::<Vec<_>>()
+        );
+        // Query the new text and request full chain:
         let mut q2 = RecallQuery::new("sqlite");
         q2.include_superseded = true;
         let chain = store
             .recall(&q2, None, HybridWeights::default(), 200)
             .unwrap();
         assert!(chain.iter().any(|h| h.record.id == old.id));
+    }
+
+    #[test]
+    fn confidence_breaks_near_ties() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let mut low = MemoryDraft::new(Kind::Fact, "shipping alpha release notes shared");
+        low.confidence = Some(0.1);
+        let mut high = MemoryDraft::new(Kind::Fact, "shipping alpha release notes shared");
+        high.confidence = Some(0.95);
+        // Distinct titles so both can rank; same body keyword surface.
+        low.title = "low-conf".into();
+        high.title = "high-conf".into();
+        let low_id = store.put(MemoryWriteOp::Insert(low), 100).unwrap().id;
+        let high_id = store.put(MemoryWriteOp::Insert(high), 100).unwrap().id;
+        let hits = store
+            .recall(
+                &RecallQuery::new("shipping alpha"),
+                None,
+                HybridWeights::default(),
+                100,
+            )
+            .unwrap();
+        assert!(hits.len() >= 2, "need both candidates: {hits:?}");
+        let high_hit = hits.iter().find(|h| h.record.id == high_id).unwrap();
+        let low_hit = hits.iter().find(|h| h.record.id == low_id).unwrap();
+        assert!(
+            high_hit.score > low_hit.score,
+            "high confidence must outrank near-tie low confidence: high={} low={} weight={}",
+            high_hit.score,
+            low_hit.score,
+            CONFIDENCE_SCORE_WEIGHT
+        );
+        assert!(
+            (high_hit.score - low_hit.score) >= CONFIDENCE_SCORE_WEIGHT * 0.5,
+            "confidence delta should be material, not a rounding error"
+        );
     }
 }

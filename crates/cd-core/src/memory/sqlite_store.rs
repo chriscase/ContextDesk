@@ -581,10 +581,42 @@ impl MemoryStore for SqliteMemoryStore {
             }
         }
 
-        // Default: active + valid-now only. Superseded/retracted stay out of FTS
-        // after write, so they never rank unless `include_superseded` expands chains.
+        // #347: terms that live only in superseded content are not in FTS (we
+        // remove superseded rows on write so active-only keyword collapse works).
+        // When include_superseded, scan superseded rows by content/title directly.
+        if q.include_superseded && !q.query.trim().is_empty() {
+            let like = format!("%{}%", q.query.trim());
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM memory WHERE status = 'superseded' AND (content LIKE ?1 OR title LIKE ?1) LIMIT 50",
+                )
+                .map_err(sqlite_err)?;
+            let ids: Vec<String> = stmt
+                .query_map(params![like], |r| r.get(0))
+                .map_err(sqlite_err)?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut seen: std::collections::HashSet<Uuid> =
+                candidates.iter().map(|(r, _)| r.id).collect();
+            for id_s in ids {
+                if let Ok(id) = Uuid::parse_str(&id_s) {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    if let Some(rec) = load_record(&conn, &id)? {
+                        candidates.push((rec, 0.85)); // slightly below pure FTS active hits
+                    }
+                }
+            }
+        }
+
+        // Default: active + valid-now only (unless include_superseded kept supersedes above).
         candidates.retain(|(rec, _)| {
-            rec.status == Status::Active && is_valid_now(rec.valid_from, rec.valid_to, now_secs)
+            if rec.status == Status::Active {
+                is_valid_now(rec.valid_from, rec.valid_to, now_secs)
+            } else {
+                q.include_superseded && rec.status == Status::Superseded
+            }
         });
 
         if let Some(ref kinds) = q.kinds {
@@ -595,21 +627,37 @@ impl MemoryStore for SqliteMemoryStore {
         }
 
         // Expand supersession chains (newest-first) when requested.
+        // Walk both directions: supersedes (older) and superseded_by (newer head).
         if q.include_superseded {
             let mut expanded: Vec<(MemoryRecord, f32)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for (rec, kw) in candidates {
-                let mut cursor = Some(rec);
+                // Climb to newest head first
+                let mut head = rec.clone();
+                while let Some(next_id) = head.superseded_by {
+                    if let Some(n) = load_record(&conn, &next_id)? {
+                        head = n;
+                    } else {
+                        break;
+                    }
+                }
+                // Walk chain oldest-ward from head via supersedes
+                let mut cursor = Some(head);
+                let mut chain_rev: Vec<MemoryRecord> = Vec::new();
                 while let Some(r) = cursor {
                     if !seen.insert(r.id) {
                         break;
                     }
                     let next = r.supersedes;
-                    expanded.push((r, kw));
+                    chain_rev.push(r);
                     cursor = match next {
                         Some(id) => load_record(&conn, &id)?,
                         None => None,
                     };
+                }
+                // newest-first
+                for r in chain_rev {
+                    expanded.push((r, kw));
                 }
             }
             candidates = expanded;
@@ -626,7 +674,8 @@ impl MemoryStore for SqliteMemoryStore {
             .map(|(rec, kw)| {
                 let recency = recency_boost(rec.updated_at, now_secs);
                 let pinned_boost = if rec.pinned { 0.15 } else { 0.0 };
-                let conf = rec.confidence.unwrap_or(0.0) * 0.05;
+                let conf = rec.confidence.unwrap_or(0.0).clamp(0.0, 1.0)
+                    * crate::memory::recall::CONFIDENCE_SCORE_WEIGHT;
                 let score =
                     crate::embed::hybrid_score(kw, kw_max, 0.0, recency, w) + pinned_boost + conf;
                 let snippet = snippet_of(&rec.content, 160);
