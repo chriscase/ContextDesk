@@ -494,12 +494,16 @@ impl ChatBackend for CapabilityAwareBackend {
         {
             Ok(c) => Ok(c),
             Err(e) => {
+                // Let agent classify tool_choice/vLLM rejections — do not re-wrap as stream errors.
+                if crate::agent::is_tools_unsupported_error(&e) {
+                    return Err(e);
+                }
                 // Surface stream rejection rather than silent success-with-empty.
                 let msg = e.to_string().to_lowercase();
                 if msg.contains("stream")
                     || msg.contains("sse")
-                    || msg.contains("not support")
-                    || msg.contains("unsupported")
+                    || (msg.contains("not support") && !msg.contains("tool"))
+                    || (msg.contains("unsupported") && !msg.contains("tool"))
                 {
                     return Err(CoreError::Message(format!(
                         "Streaming rejected by provider (capabilities.stream=true but request failed): {e}"
