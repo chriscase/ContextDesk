@@ -163,6 +163,42 @@ export function useChatSessions() {
     return s;
   }, [sessions.length]);
 
+  /**
+   * Guarantee a non-trashed active chat exists (first send / model pick before
+   * hydrate, or after the last open chat was trashed). Returns the session to
+   * use for the current action.
+   */
+  const ensureActiveSession = useCallback((): ChatSession => {
+    const open = sessions.filter((s) => !s.archived && !s.trashed);
+    const current =
+      (activeSessionId
+        ? open.find((s) => s.id === activeSessionId)
+        : undefined) ?? open[0];
+    if (current) {
+      if (activeSessionId !== current.id) {
+        setActiveSessionId(current.id);
+      }
+      return current;
+    }
+    const s = newSession(
+      sessions.length === 0 ? "Chat 1" : `Chat ${sessions.length + 1}`,
+      null,
+    );
+    setSessions((all) => [s, ...all.filter((x) => x.id !== s.id)]);
+    setActiveSessionId(s.id);
+    return s;
+  }, [sessions, activeSessionId]);
+
+  // After trash / host sync leaves zero open chats, seed one so the composer works.
+  useEffect(() => {
+    if (!sessionsReady) return;
+    const open = sessions.filter((s) => !s.archived && !s.trashed);
+    if (open.length > 0) return;
+    const s = newSession("Chat 1", null);
+    setSessions([s]);
+    setActiveSessionId(s.id);
+  }, [sessionsReady, sessions]);
+
   const renameSessionById = useCallback(async (id: string) => {
     const cur = sessions.find((s) => s.id === id);
     if (!cur) return null;
@@ -222,7 +258,13 @@ export function useChatSessions() {
       setSessions((all) => {
         const next = all.filter((s) => s.id !== id);
         if (activeSessionId === id) {
-          setActiveSessionId(next[0]?.id ?? null);
+          if (next.length === 0) {
+            // Keep composer usable — open a fresh empty chat.
+            const fresh = newSession("Chat 1", null);
+            setActiveSessionId(fresh.id);
+            return [fresh];
+          }
+          setActiveSessionId(next[0]!.id);
         }
         return next;
       });
@@ -339,6 +381,7 @@ export function useChatSessions() {
     persistSession,
     upgradeTitleWithLlm,
     createSession,
+    ensureActiveSession,
     renameSessionById,
     applyRename,
     togglePinById,

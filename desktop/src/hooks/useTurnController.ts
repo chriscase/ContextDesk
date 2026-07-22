@@ -34,6 +34,8 @@ type Args = {
   resolvedSessionId: string;
   sessions: ChatSession[];
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>;
+  /** Create/activate a chat when none is open (first send, post-trash, pre-hydrate). */
+  ensureActiveSession: () => ChatSession;
   setup: AppSetupState;
   modelOptions: ModelOptionDto[];
   defaultModelKey: string;
@@ -51,9 +53,9 @@ type Args = {
 export function useTurnController(args: Args) {
   const {
     sessionId,
-    resolvedSessionId,
     sessions,
     setSessions,
+    ensureActiveSession,
     setup,
     modelOptions,
     defaultModelKey,
@@ -83,6 +85,9 @@ export function useTurnController(args: Args) {
         onNeedPreflight();
         return false;
       }
+      // First send / empty list / post-trash: always have a real session id.
+      const target = ensureActiveSession();
+      const sid = target.id;
       stopRef.current = false;
       setAgentError(null);
       setBusy(true);
@@ -100,12 +105,12 @@ export function useTurnController(args: Args) {
         streaming: true,
       };
       const wasFirstUser =
-        (sessions.find((s) => s.id === resolvedSessionId)?.messages.filter(
+        (sessions.find((s) => s.id === sid)?.messages.filter(
           (m) => m.role === "user",
         ).length ?? 0) === 0;
-      setSessions((all) =>
-        all.map((s) => {
-          if (s.id !== resolvedSessionId) return s;
+      setSessions((all) => {
+        const exists = all.some((s) => s.id === sid);
+        const apply = (s: ChatSession): ChatSession => {
           let title = s.title;
           if (!s.titleLocked && isPlaceholderTitle(s.title)) {
             const auto = titleFromPrompt(text);
@@ -118,17 +123,22 @@ export function useTurnController(args: Args) {
             lastReadMessageId: assistantId,
             updatedAt: nowIso(),
           };
-        }),
-      );
+        };
+        if (!exists) {
+          // ensureActiveSession created it this tick — insert with first messages.
+          return [apply(target), ...all.filter((s) => s.id !== sid)];
+        }
+        return all.map((s) => (s.id === sid ? apply(s) : s));
+      });
       setPaneChat();
       pinScrollToEnd("auto");
       if (wasFirstUser) {
-        void upgradeTitleWithLlm(sessionId, text);
+        void upgradeTitleWithLlm(sid, text);
       }
 
       const forceLocal =
         setup.providerKind === "ollama" && setup.ollamaReachable === false;
-      const sess = sessions.find((s) => s.id === sessionId);
+      const sess = sessions.find((s) => s.id === sid) ?? target;
       const sessionModel = sess?.chatModel ?? null;
       const sessionProvider = sess?.providerProfileId ?? null;
       const metaAtSend: MessageMetaDto = snapshotMessageMeta({
@@ -141,7 +151,7 @@ export function useTurnController(args: Args) {
 
       try {
         await agentTurn(
-          sessionId,
+          sid,
           text,
           forceLocal,
           sessionModel,
@@ -174,7 +184,7 @@ export function useTurnController(args: Args) {
             }
 
             setSessions((all) => {
-              const cur = all.find((s) => s.id === sessionId);
+              const cur = all.find((s) => s.id === sid);
               if (!cur) return all;
               const m = cur.messages;
               const idx = m.findIndex((x) => x.id === assistantId);
@@ -238,7 +248,7 @@ export function useTurnController(args: Args) {
                   );
                 });
               }
-              return all.map((s) => (s.id === sessionId ? updated : s));
+              return all.map((s) => (s.id === sid ? updated : s));
             });
           },
         );
@@ -246,7 +256,7 @@ export function useTurnController(args: Args) {
         const err = e instanceof Error ? e.message : String(e);
         setAgentError(err);
         setSessions((all) => {
-          const cur = all.find((s) => s.id === sessionId);
+          const cur = all.find((s) => s.id === sid);
           if (!cur) return all;
           const updated: ChatSession = {
             ...cur,
@@ -267,7 +277,7 @@ export function useTurnController(args: Args) {
               prev.map((s) => (s.id === saved.id ? saved : s)),
             );
           });
-          return all.map((s) => (s.id === sessionId ? updated : s));
+          return all.map((s) => (s.id === sid ? updated : s));
         });
       } finally {
         setBusy(false);
@@ -278,8 +288,7 @@ export function useTurnController(args: Args) {
     [
       preflightBlocking,
       onNeedPreflight,
-      sessionId,
-      resolvedSessionId,
+      ensureActiveSession,
       sessions,
       setSessions,
       setup,

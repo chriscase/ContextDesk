@@ -169,6 +169,20 @@ export function useShellState() {
     }
   }, [setup.baseUrl, setup.providerKind]);
 
+  /** Re-list chat models for the composer picker (after AI setup save). */
+  const refreshChatModels = useCallback(async () => {
+    try {
+      const [listed, def] = await Promise.all([
+        hostListChatModels(),
+        hostGetDefaultChatModel(),
+      ]);
+      setModelOptions(listed);
+      if (def?.trim()) setDefaultModelKey(def.trim());
+    } catch {
+      /* browser / host unavailable */
+    }
+  }, []);
+
   const refreshMemory = useCallback(
     async (opts?: { kind?: string | null; includeSuperseded?: boolean }) => {
       try {
@@ -310,20 +324,20 @@ export function useShellState() {
         localOnly: kind === "ollama",
       }));
     });
-    void (async () => {
-      try {
-        const [listed, def] = await Promise.all([
-          hostListChatModels(),
-          hostGetDefaultChatModel(),
-        ]);
-        setModelOptions(listed);
-        if (def?.trim()) setDefaultModelKey(def.trim());
-      } catch {
-        /* browser */
-      }
-    })();
+    void refreshChatModels();
     void refreshHostPreflight();
-  }, [refreshHostPreflight]);
+  }, [refreshHostPreflight, refreshChatModels]);
+
+  // After AI setup save / provider change, re-list models so the composer picker works.
+  useEffect(() => {
+    void refreshChatModels();
+  }, [
+    setup.providerKind,
+    setup.chatModel,
+    setup.baseUrl,
+    setup.hasApiKey,
+    refreshChatModels,
+  ]);
 
   useEffect(() => {
     void refreshHostPreflight();
@@ -391,8 +405,9 @@ export function useShellState() {
         /* browser */
       }
       void refreshHostPreflight();
+      void refreshChatModels();
     },
-    [refreshHostPreflight],
+    [refreshHostPreflight, refreshChatModels],
   );
 
   const scopeLabel =
@@ -474,6 +489,7 @@ export function useShellState() {
     modelOptions,
     defaultModelKey,
     setDefaultModelKey,
+    refreshChatModels,
     memoryDocs,
     memoryPath,
     setMemoryPath,

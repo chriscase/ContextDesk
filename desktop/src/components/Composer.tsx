@@ -137,26 +137,32 @@ export function Composer({
 
       <div className="composer__bar">
         <div className="composer__bar-left">
-          {groups.length > 0 && onModelChange ? (
+          {onModelChange ? (
             <label className="composer__pill" title="Model for this chat">
               <span className="composer__pill-label">Model</span>
               <select
                 className="composer__pill-select"
                 value={selectValue}
-                disabled={busy}
+                disabled={busy || (groups.length === 0 && !selectValue)}
                 aria-label="Chat model by source"
                 onChange={(e) => onModelChange(e.target.value)}
               >
-                {groups.map(([group, opts]) => (
-                  <optgroup key={group} label={group}>
-                    {opts.map((m) => (
-                      <option key={m.selection_key} value={m.selection_key}>
-                        {m.label}
-                        {m.is_default ? " · default" : ""}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
+                {groups.length === 0 ? (
+                  <option value={selectValue || ""}>
+                    {selectValue || "No models listed — check AI settings"}
+                  </option>
+                ) : (
+                  groups.map(([group, opts]) => (
+                    <optgroup key={group} label={group}>
+                      {opts.map((m) => (
+                        <option key={m.selection_key} value={m.selection_key}>
+                          {m.label}
+                          {m.is_default ? " · default" : ""}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))
+                )}
               </select>
             </label>
           ) : null}
