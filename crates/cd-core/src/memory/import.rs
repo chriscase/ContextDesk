@@ -244,4 +244,104 @@ mod tests {
         assert!(is_migrated_memory_fs_path("memory/note.md"));
         assert!(!is_migrated_memory_fs_path("src/main.rs"));
     }
+
+    /// #346: import via put_imported must embed-on-write so paraphrases work.
+    #[test]
+    fn import_memory_fs_embed_on_write_paraphrase_recallable() {
+        use crate::embed::ConceptEmbedBackend;
+        use crate::memory::{RecallQuery, TwoScopeMemory};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let branding = crate::branding::Branding::embedded();
+        let mem = root.join(&branding.workspace_dir_name).join("memory");
+        fs::create_dir_all(&mem).unwrap();
+        // Zero keyword overlap with the paraphrase query below.
+        fs::write(
+            mem.join("db.md"),
+            "# Decision\n\nChose Postgres as the durable brain backend\n",
+        )
+        .unwrap();
+        let ws = Workspace {
+            id: "import-embed".into(),
+            name: "t".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let backend = Arc::new(ConceptEmbedBackend::new(64));
+        store.set_embed_backend(Some(backend.clone()), "concept-v1");
+        let r = import_memory_fs_sqlite(&store, &ws, 1_000).unwrap();
+        assert_eq!(r.inserted, 1, "expected one imported note");
+        let recs = store.changes_since(0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(
+            store.get_embedding(&recs[0].id).unwrap().is_some(),
+            "put_imported must store memory_embeddings when backend attached"
+        );
+
+        // Facade path (product two-pool recall) + paraphrase with no shared keywords.
+        let facade = TwoScopeMemory::open_in_memory("import-embed").unwrap();
+        facade.set_embed_backend(Some(backend.clone()), "concept-v1");
+        let r2 = import_memory_fs_sqlite(facade.workspace(), &ws, 1_001).unwrap();
+        assert_eq!(r2.inserted, 1);
+        let query = "which relational database engine was selected";
+        let hits = facade
+            .recall(
+                &RecallQuery::new(query),
+                Some(backend.as_ref()),
+                HybridWeights {
+                    keyword: 0.15,
+                    semantic: 0.75,
+                    recency: 0.10,
+                },
+                2_000,
+            )
+            .unwrap();
+        let hit = hits
+            .iter()
+            .find(|h| h.record.content.contains("Postgres") || h.record.content.contains("durable"))
+            .expect("imported note must surface on paraphrase");
+        assert!(
+            hit.semantic_score > 0.0,
+            "semantic_score>0 for imported content: {:?}",
+            hits.iter()
+                .map(|h| (&h.record.content, h.semantic_score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// #346: rows imported without a backend get vectors via backfill.
+    #[test]
+    fn backfill_embeds_legacy_import_rows() {
+        use crate::embed::ConceptEmbedBackend;
+        use std::sync::Arc;
+
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        // Import without embed backend (legacy attach order).
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let branding = crate::branding::Branding::embedded();
+        let mem = root.join(&branding.workspace_dir_name).join("memory");
+        fs::create_dir_all(&mem).unwrap();
+        fs::write(
+            mem.join("x.md"),
+            "# X\n\nChose Postgres as the durable brain backend\n",
+        )
+        .unwrap();
+        let ws = Workspace {
+            id: "bf".into(),
+            name: "t".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let r = import_memory_fs_sqlite(&store, &ws, 1).unwrap();
+        assert_eq!(r.inserted, 1);
+        let id = store.changes_since(0).unwrap()[0].id;
+        assert!(store.get_embedding(&id).unwrap().is_none());
+
+        store.set_embed_backend(Some(Arc::new(ConceptEmbedBackend::new(64))), "concept-v1");
+        let n = store.backfill_missing_embeddings(50).unwrap();
+        assert_eq!(n, 1);
+        assert!(store.get_embedding(&id).unwrap().is_some());
+    }
 }

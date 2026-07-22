@@ -237,6 +237,9 @@ impl SqliteMemoryStore {
     }
 
     /// Insert with a predetermined id (idempotent import). No-op if id exists.
+    ///
+    /// After commit, embeds via the same write-time path as [`MemoryStore::put`]
+    /// so migration (#273) and memory_fs import are paraphrase-recallable (#346).
     pub fn put_imported(
         &self,
         id: Uuid,
@@ -252,6 +255,9 @@ impl SqliteMemoryStore {
         match result {
             Ok(r) => {
                 conn.execute("COMMIT", []).map_err(sqlite_err)?;
+                drop(conn);
+                // Same embed-on-write seam as put() — harvest uses put; import uses this.
+                self.maybe_embed_content(&r.id, &r.content);
                 Ok(r)
             }
             Err(e) => {
