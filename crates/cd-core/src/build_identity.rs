@@ -169,10 +169,7 @@ mod tests {
     fn git_field_filters_empty() {
         assert_eq!(resolve_git_field(Some("  ")), None);
         assert_eq!(resolve_git_field(Some("unknown")), None);
-        assert_eq!(
-            resolve_git_field(Some("abc1234")),
-            Some("abc1234".into())
-        );
+        assert_eq!(resolve_git_field(Some("abc1234")), Some("abc1234".into()));
     }
 
     #[test]
