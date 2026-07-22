@@ -355,6 +355,127 @@ fn get_branding(state: State<'_, AppState>) -> BrandingDto {
     }
 }
 
+/// Base dir for session context packs: first workspace root / branding data dir / sessions.
+fn session_context_base(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let cfg = state.config.lock().expect("config");
+    let root = cfg
+        .workspace
+        .as_ref()
+        .and_then(|w| w.roots.first())
+        .cloned()
+        .ok_or_else(|| "No workspace root — open a workspace first".to_string())?;
+    let dir_name = state.branding.workspace_dir_name.clone();
+    Ok(root.join(dir_name))
+}
+
+#[tauri::command]
+fn session_context_list(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<cd_core::session_context::SessionContextEntry>, String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store.list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_context_import_path(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<cd_core::session_context::SessionContextEntry, String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store
+        .import_file(std::path::Path::new(&path), None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_context_import_bytes(
+    state: State<'_, AppState>,
+    session_id: String,
+    name: String,
+    data: Vec<u8>,
+) -> Result<cd_core::session_context::SessionContextEntry, String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    store
+        .import_bytes(if safe.is_empty() { "file.bin" } else { &safe }, &data)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_context_remove(
+    state: State<'_, AppState>,
+    session_id: String,
+    rel_path: String,
+) -> Result<(), String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store.remove(&rel_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_context_purge(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store.purge().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_context_import_zip(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<Vec<cd_core::session_context::SessionContextEntry>, String> {
+    let base = session_context_base(&state)?;
+    let store = cd_core::session_context::SessionContextStore::open(
+        &base,
+        &session_id,
+        cd_core::session_context::SessionContextCaps::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    store
+        .import_zip_bytes(&data, cd_core::session_context::DEFAULT_MAX_ZIP_NEST)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_config(state: State<'_, AppState>) -> AppConfig {
     state.config.lock().expect("config lock").clone()
@@ -3226,6 +3347,12 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_branding,
+            session_context_list,
+            session_context_import_path,
+            session_context_import_bytes,
+            session_context_import_zip,
+            session_context_remove,
+            session_context_purge,
             get_config,
             save_app_config,
             list_connectors,

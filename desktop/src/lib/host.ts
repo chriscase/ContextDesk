@@ -69,6 +69,65 @@ export async function hostGetBranding(): Promise<BrandingDto> {
   return invoke<BrandingDto>("get_branding");
 }
 
+/** Session-scoped context pack entry (#341). */
+export type SessionContextEntryDto = {
+  rel_path: string;
+  name: string;
+  size: number;
+};
+
+export async function hostSessionContextList(
+  sessionId: string,
+): Promise<SessionContextEntryDto[]> {
+  if (!isTauri()) return [];
+  return invoke<SessionContextEntryDto[]>("session_context_list", {
+    sessionId,
+  });
+}
+
+export async function hostSessionContextImportBytes(
+  sessionId: string,
+  name: string,
+  data: number[] | Uint8Array,
+): Promise<SessionContextEntryDto> {
+  if (!isTauri()) {
+    throw new Error("Session context requires the desktop app");
+  }
+  const bytes = Array.from(data instanceof Uint8Array ? data : data);
+  return invoke<SessionContextEntryDto>("session_context_import_bytes", {
+    sessionId,
+    name,
+    data: bytes,
+  });
+}
+
+export async function hostSessionContextImportZip(
+  sessionId: string,
+  data: number[] | Uint8Array,
+): Promise<SessionContextEntryDto[]> {
+  if (!isTauri()) {
+    throw new Error("Session context requires the desktop app");
+  }
+  const bytes = Array.from(data instanceof Uint8Array ? data : data);
+  return invoke<SessionContextEntryDto[]>("session_context_import_zip", {
+    sessionId,
+    data: bytes,
+  });
+}
+
+export async function hostSessionContextRemove(
+  sessionId: string,
+  relPath: string,
+): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("session_context_remove", { sessionId, relPath });
+}
+
+export async function hostSessionContextPurge(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke<void>("session_context_purge", { sessionId });
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);

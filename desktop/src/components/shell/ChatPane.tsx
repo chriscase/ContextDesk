@@ -4,6 +4,7 @@ import {
   type RefObject,
 } from "react";
 import { Composer } from "../Composer";
+import { SessionContextBar } from "../SessionContextBar";
 import { nextRovingIndex } from "../../lib/a11y";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import type { ChatSession, Msg } from "../../lib/session";
@@ -364,6 +365,10 @@ export function ChatPane(props: ChatPaneProps) {
               ) : null}
               </div>
               <div className="composer-dock">
+                <SessionContextBar
+                  sessionId={resolvedSessionId || null}
+                  disabled={busy}
+                />
                 <Composer
                   onSubmit={onSubmit}
                   disabled={busy}
