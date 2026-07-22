@@ -867,11 +867,9 @@ button.citation-chip:hover {
   margin-bottom: var(--space-3);
 }
 
-.settings-panel--narrow {
-  grid-template-columns: 1fr;
-  max-width: 520px;
-  max-height: 80vh;
-}
+/* Narrow panel dialog styles live in components/settings.css
+   (.settings-panel.settings-panel--narrow) so they win over the
+   two-column Settings grid. */
 
 .tool-row__detail--tall {
   max-height: 60vh;

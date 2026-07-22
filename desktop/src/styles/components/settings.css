@@ -26,6 +26,17 @@
   overflow: hidden;
 }
 
+/* Single-column dialogs (Permission, Rename). Must beat base .settings-panel
+   grid (180px | 1fr) — equal-specificity rules in layout.css lose because this
+   file loads later and left content crammed in the nav column (~180px). */
+.settings-panel.settings-panel--narrow {
+  grid-template-columns: minmax(0, 1fr);
+  width: min(560px, 100%);
+  max-width: 560px;
+  height: auto;
+  max-height: min(80vh, 640px);
+}
+
 .settings-panel--page {
   width: 100%;
   flex: 1 1 auto;
