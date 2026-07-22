@@ -40,6 +40,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Durable memory hybrid recall (embed-on-write) | Shipped | crates/cd-core/src/memory/sqlite_store.rs:MEMORY_EMBED_TIMEOUT_MS | #346 |
 | Log analysis Phase-1 pipeline | Shipped | crates/cd-core/src/log_analysis/mod.rs:ingest_path | #355–#362 |
 | Log event store (DuckDB) | Shipped | crates/cd-core/src/log_analysis/store.rs:EVENT_ENGINE | #358 |
+| Log why-tools (correlate/anomalies/trace) | Shipped | crates/cd-core/src/log_analysis/why.rs:correlate | #363 |
+| Log desktop surface | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #362 |
 
 ## Human checklist
 

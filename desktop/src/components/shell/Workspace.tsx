@@ -5,6 +5,7 @@ import {
   type CompositionTarget,
 } from "../panes/CompositionPane";
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
+import { LogPane } from "../panes/LogPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
 import { TodoPane } from "../panes/TodoPane";
 import { ChatPane, type ChatPaneProps } from "./ChatPane";
@@ -96,6 +97,16 @@ export function Workspace({
           className="pane-panel"
         >
           <SourcePreviewPane path={source.path} content={source.content} />
+        </div>
+      ) : null}
+      {pane === "logs" ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-logs"
+          aria-labelledby="pane-tab-logs"
+          className="pane-panel"
+        >
+          <LogPane />
         </div>
       ) : null}
       {pane === "todos" && todosKey ? (

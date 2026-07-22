@@ -12,7 +12,8 @@ export type PaneId =
   | "memory"
   | "compose"
   | "source"
-  | "todos";
+  | "todos"
+  | "logs";
 
 export type ChatSession = {
   id: string;

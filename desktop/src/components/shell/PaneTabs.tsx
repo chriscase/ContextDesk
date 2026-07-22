@@ -8,6 +8,7 @@ const PANES: { id: PaneId; label: string }[] = [
   { id: "compose", label: "Compose" },
   { id: "source", label: "Source" },
   { id: "todos", label: "Todos" },
+  { id: "logs", label: "Logs" },
 ];
 
 type Props = {

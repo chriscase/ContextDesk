@@ -1,6 +1,6 @@
 # Log & large-corpus analysis — design
 
-**Status:** design (2026-07-18) · **Scope:** a new cd-core subsystem for analyzing large log corpora to find *what* is going wrong and *why* · **Related:** shares the vector layer with memory ([`MEMORY.md`](MEMORY.md) + recall issue #346); log sources tie to the S3 (#292) and connector work.
+**Status:** Phase 1 **shipped** on `main` (DuckDB events + tools + Logs pane); Phase 2 **why** tools (`correlate_logs` / `anomalies_logs` / `trace_logs`) shipped · **Scope:** cd-core subsystem for analyzing large log corpora to find *what* is going wrong and *why* · **Related:** shares the vector layer with memory ([`MEMORY.md`](MEMORY.md) + #346); log sources tie to the S3 (#292) and connector work.
 
 ## 0. Locked scope (owner decisions, 2026-07-18)
 
@@ -60,8 +60,8 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 
 Two stores (event-store engine **decided 2026-07-18: DuckDB**):
 
-- **Event store (10–100M rows):** the analytical scans this whole feature exists for — "frequency of template T over this hour", "templates co-occurring within 5s of the incident", "count by service where level≥ERROR" — are columnar‑aggregate queries. **DuckDB (decided)** (embedded, columnar, no server, purpose‑built for exactly these scans over 100M rows, with native list/array types and a `vss` HNSW extension). The tradeoff is a second embedded engine in a codebase that is otherwise SQLite‑first. Bundle it via the `duckdb` Rust crate (embedded, no external process); verify the MIT license is compatible. (SQLite was the alternative considered and rejected — analytical scans over 100M rows are markedly slower.)
-- **Vector index (templates):** a `VectorIndex` trait (see §5) — exact for small sets, **HNSW** for large. Because we index templates, not lines, the vector count is modest even at 100M lines.
+- **Event store (10–100M rows):** the analytical scans this whole feature exists for — "frequency of template T over this hour", "templates co-occurring within 5s of the incident", "count by service where level≥ERROR" — are columnar‑aggregate queries. **DuckDB (shipped, #358)** (embedded via the MIT `duckdb` crate + `bundled`, no server). The tradeoff is a second embedded engine in a codebase that is otherwise SQLite‑first. (SQLite was considered and rejected for 100M-row analytical scans.)
+- **Vector index (templates):** a `VectorIndex` trait (see §5) — exact for small sets, **HNSW** for large. Because we index templates, not lines, the vector count is modest even at 100M lines. **Shipped as pure-Rust Exact/Hnsw** (`crates/cd-core/src/vector_index.rs`) — not DuckDB `vss` (events and ANN stay decoupled so memory and logs share one ANN implementation).
 
 Corpora are **per‑analysis, disposable** (an incident dump), stored under the app cache dir keyed by a corpus id — not mixed into durable memory. A corpus can be pinned/kept or discarded.
 
@@ -76,9 +76,9 @@ pub trait VectorIndex: Send + Sync {
     fn len(&self) -> usize;
 }
 ```
-- **`ExactIndex`** (brute-force cosine) — memory, and log corpora under ~50k templates.
-- **`HnswIndex`** — large corpora; backed by DuckDB's `vss` extension (DuckDB is the event store, so template vectors live alongside events — one fewer dependency).
-Selection is automatic by size. **#346's recall fix should build `VectorIndex` (starting with `ExactIndex`) rather than a bespoke cosine loop**, so logs get ANN for free by adding `HnswIndex` behind the same trait. This is the key reuse: fix recall once, scale both.
+- **`ExactIndex`** (brute-force cosine) — memory, and log corpora under ~50k templates. **Shipped.**
+- **`HnswIndex`** — pure-Rust navigable small-world ANN for large template corpora. **Shipped** (`vector_index.rs`). *Earlier draft said DuckDB `vss`; that was superseded so the ANN layer stays one pure-Rust implementation shared with memory, while DuckDB remains events-only.*
+Selection is automatic by size. Memory hybrid recall (#346) builds cosine-on-read on `ExactIndex`; logs reuse the same trait.
 
 ## 6. Embedding — throughput matters
 
@@ -122,21 +122,21 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 
 ## 10. Owner decisions
 
-1. **Event‑store engine: DuckDB — DECIDED 2026-07-18.** DuckDB is the event-store engine for the log subsystem (memory/KB stay SQLite). Chosen for the 100M-row analytical scans this feature is *for* (columnar, native array, `vss` HNSW); accepted cost is a second embedded engine, confined to logs.
-2. **HNSW library:** `usearch` (fast, C++ bindings, battle‑tested) vs `hnsw_rs`/`instant-distance` (pure Rust, simpler build) vs DuckDB `vss` (if DuckDB is chosen, one fewer dependency). DECIDED: DuckDB `vss` (DuckDB is the event store, so this is one fewer dependency).
-3. **Local ONNX embedder:** `fastembed-rs` (recommended) vs staying on Ollama HTTP for consistency. fastembed is much faster for bulk and fully in‑process.
-4. **Corpus retention:** keep‑until‑discarded (recommended) vs auto‑expire after N days.
+1. **Event‑store engine: DuckDB — SHIPPED (#358).** DuckDB is the event-store engine for the log subsystem (memory/KB stay SQLite). MIT `duckdb` crate + `bundled`. Confined to log corpora under app cache.
+2. **HNSW library — SHIPPED pure-Rust** (`crates/cd-core/src/vector_index.rs:HnswIndex`). *Not* DuckDB `vss` (reconsidered so memory and logs share one ANN crate; events stay DuckDB-only).
+3. **Local ONNX embedder:** `fastembed-rs` behind feature `log-fastembed` (optional; downloads model on first use). Default offline tests use deterministic `ConceptEmbedBackend`. Cloud embed is per-corpus opt-in with explicit “log content leaves this machine” confirm (`LogEmbedPolicy`). Host may also pass Ollama embeddings.
+4. **Corpus retention: keep-until-discarded** under app cache (`log_corpora/{id}`).
 
 ## 11. Phasing
 
-- **Phase 1 — post‑mortem batch (v1):** the `VectorIndex` trait (shared with #346) + `ExactIndex` then `HnswIndex`; ingest from local files/dir (format detect + Drain templating + redaction); the event store (engine per §10) + template table; local ONNX embedding of templates; `ingest_logs` + `search_logs` + `timeline` + `cluster_problems`.
-- **Phase 2 — the "why" engine:** `correlate` (temporal + co‑occurrence + sequence), `anomalies` (baseline vs incident), `trace` across services; cloud‑embed opt‑in.
-- **Phase 3 — sources & scale:** S3 (#292) + connectors (journald, Loki, Elastic, k8s) as corpus sources; sharding beyond 100M if needed.
-- **Phase 4 — live streaming:** incremental tail + continuous templating + threshold alerts via the watchers/triggers engine (#290).
+- **Phase 1 — post‑mortem batch (v1): SHIPPED** — `VectorIndex` + Exact/Hnsw; ingest (format detect + Drain + redact); DuckDB event store + template table; template embed (hash-cached); tools `ingest_logs` / `search_logs` / `timeline` / `cluster_problems`; desktop **Logs** pane.
+- **Phase 2 — the "why" engine: SHIPPED (core)** — `correlate_logs`, `anomalies_logs`, `trace_logs` (+ seeded corpus tests). Cloud-embed UI polish may continue.
+- **Phase 3 — sources & scale:** S3 (#292) + connectors (journald, Loki, Elastic, k8s) as corpus sources; sharding beyond 100M if needed. **Not started.**
+- **Phase 4 — live streaming:** incremental tail + continuous templating + threshold alerts via the watchers/triggers engine (#290). **Not started** (#363 tracker).
 
 ## 12. Relationship to the rest of the backlog
 
-- **#346 (memory recall)** builds the `VectorIndex` trait — logs add `HnswIndex` behind it. Fix recall once, scale both. **This is the dependency to sequence first.**
+- **#346 / #354** shipped the shared `VectorIndex` — logs reuse Exact/Hnsw for template vectors; DuckDB holds events only.
 - **#292 (S3 spike)** — a log source in Phase 3.
 - **#290 (watchers)** — the streaming/alerting path in Phase 4.
 - **Memory** — an analysis conclusion ("root cause was connection‑pool exhaustion in service X on 2026‑07‑12") is a natural `decision`/`fact` to save into memory. Logs feed memory; they don't live in it.

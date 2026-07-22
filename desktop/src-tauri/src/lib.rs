@@ -3174,6 +3174,204 @@ impl From<&cd_core::memory::MemoryRecord> for DurableMemoryDto {
     }
 }
 
+// ── Log analysis surface (#362) — no secrets over IPC ─────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogCorpusSummaryDto {
+    id: String,
+    name: String,
+    event_count: u64,
+    template_count: u64,
+    engine: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogClusterDto {
+    cluster_id: u64,
+    label: String,
+    count: u64,
+    severity: u8,
+    score: f32,
+    template_ids: Vec<u64>,
+    exemplars: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTimelineBucketDto {
+    start: i64,
+    width: i64,
+    count: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogSearchHitDto {
+    template_id: u64,
+    pattern: String,
+    score: f32,
+    semantic_score: f32,
+    count: u64,
+    severity: u8,
+    exemplars: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogIngestReportDto {
+    corpus_id: String,
+    lines: u64,
+    templates: u64,
+    reduction_ratio: f64,
+    embedded: u64,
+}
+
+fn log_cache_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
+    let dir = ensure_config_dir(&state.branding).map_err(|e| e.to_string())?;
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    Ok(cache)
+}
+
+/// List disposable log corpora under app cache.
+#[tauri::command]
+fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    let ids = cd_core::log_analysis::LogCorpus::list_ids(&cache).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Ok(c) = cd_core::log_analysis::LogCorpus::open(&cache, &id) {
+            out.push(LogCorpusSummaryDto {
+                id: c.id().to_string(),
+                name: c.name().to_string(),
+                event_count: c.event_count() as u64,
+                template_count: c.template_count() as u64,
+                engine: c.event_engine().to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
+#[tauri::command]
+fn ingest_log_path(
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<LogIngestReportDto, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let report = cd_core::log_analysis::ingest_path(
+        &cache,
+        std::path::Path::new(&path),
+        name.as_deref().unwrap_or("corpus"),
+        host.embed_backend().as_deref(),
+        host.embed_model(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(LogIngestReportDto {
+        corpus_id: report.corpus_id,
+        lines: report.stats.lines,
+        templates: report.stats.templates as u64,
+        reduction_ratio: report.stats.reduction_ratio,
+        embedded: report.stats.embedded as u64,
+    })
+}
+
+/// Problem clusters for a corpus.
+#[tauri::command]
+fn log_cluster_problems(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    max_clusters: Option<u32>,
+) -> Result<Vec<LogClusterDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let clusters =
+        cd_core::log_analysis::cluster_problems(&c, max_clusters.unwrap_or(10) as usize)
+            .map_err(|e| e.to_string())?;
+    Ok(clusters
+        .into_iter()
+        .map(|cl| LogClusterDto {
+            cluster_id: cl.cluster_id,
+            label: cl.label,
+            count: cl.count,
+            severity: cl.severity,
+            score: cl.score,
+            template_ids: cl.template_ids,
+            exemplars: cl.exemplars,
+        })
+        .collect())
+}
+
+/// Timeline buckets for a corpus.
+#[tauri::command]
+fn log_timeline(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    width_secs: Option<i64>,
+) -> Result<Vec<LogTimelineBucketDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let buckets = cd_core::log_analysis::timeline(&c, width_secs.unwrap_or(60), None, None)
+        .map_err(|e| e.to_string())?;
+    Ok(buckets
+        .into_iter()
+        .map(|b| LogTimelineBucketDto {
+            start: b.start,
+            width: b.width,
+            count: b.count,
+        })
+        .collect())
+}
+
+/// Hybrid log search (paraphrase-capable when embed backend present).
+#[tauri::command]
+fn log_search(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: String,
+    k: Option<u32>,
+) -> Result<Vec<LogSearchHitDto>, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let q = cd_core::log_analysis::SearchLogsQuery {
+        query: Some(query),
+        semantic: true,
+        k: k.unwrap_or(8) as usize,
+        ..Default::default()
+    };
+    let hits = cd_core::log_analysis::search_logs(&c, &q, host.embed_backend().as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(hits
+        .into_iter()
+        .map(|h| LogSearchHitDto {
+            template_id: h.template_id,
+            pattern: h.pattern,
+            score: h.score,
+            semantic_score: h.semantic_score,
+            count: h.count,
+            severity: h.severity,
+            exemplars: h.exemplars,
+        })
+        .collect())
+}
+
+/// Discard a disposable corpus.
+#[tauri::command]
+fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
+    let cache = log_cache_dir(&state)?;
+    cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
+}
+
 /// List durable memories from the Phase-1 store (#274).
 #[tauri::command]
 fn list_durable_memories(
@@ -3435,6 +3633,12 @@ pub fn run() {
             list_durable_memories,
             get_durable_memory,
             save_composition_draft,
+            list_log_corpora,
+            ingest_log_path,
+            log_cluster_problems,
+            log_timeline,
+            log_search,
+            discard_log_corpus,
             write_memory_note,
             sql_ro_query,
             get_confluence_settings,

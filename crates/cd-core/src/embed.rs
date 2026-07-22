@@ -302,6 +302,53 @@ impl EmbedBackend for ConceptEmbedBackend {
     }
 }
 
+/// Local in-process ONNX embeddings via **fastembed-rs** (#359).
+///
+/// Only compiled with `--features log-fastembed`. Downloads the small
+/// `AllMiniLML6V2` model on first use (network); default `cargo test` stays
+/// offline by using [`ConceptEmbedBackend`] instead.
+#[cfg(feature = "log-fastembed")]
+pub struct FastembedEmbedBackend {
+    inner: std::sync::Mutex<fastembed::TextEmbedding>,
+}
+
+#[cfg(feature = "log-fastembed")]
+impl FastembedEmbedBackend {
+    /// Create with the default small local model (may download once).
+    pub fn try_new() -> CoreResult<Self> {
+        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        )
+        .map_err(|e| crate::error::CoreError::Message(format!("fastembed init: {e}")))?;
+        Ok(Self {
+            inner: std::sync::Mutex::new(model),
+        })
+    }
+
+    /// Embed a batch (sync; called from async via spawn_blocking in trait impl).
+    fn embed_batch(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| crate::error::CoreError::Message("fastembed lock".into()))?;
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        g.embed(refs, None)
+            .map_err(|e| crate::error::CoreError::Message(format!("fastembed: {e}")))
+    }
+}
+
+#[cfg(feature = "log-fastembed")]
+#[async_trait]
+impl EmbedBackend for FastembedEmbedBackend {
+    async fn embed(&self, texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+        // Yield so callers exercise the async budget path (same as ConceptEmbed).
+        tokio::task::yield_now().await;
+        // ONNX work is sync under a Mutex; fine for batch template embed at write time.
+        self.embed_batch(texts)
+    }
+}
+
 /// Current unix seconds for recency.
 pub fn now_unix_secs() -> i64 {
     SystemTime::now()
