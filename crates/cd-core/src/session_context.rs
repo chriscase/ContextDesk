@@ -303,6 +303,170 @@ pub const DEFAULT_MAX_ZIP_NEST: u32 = 2;
 /// Max entries per zip expansion (including nested).
 pub const DEFAULT_MAX_ZIP_ENTRIES: usize = 500;
 
+/// One search hit inside session context (for `search_kb` overlay).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchHit {
+    /// Absolute path (for `read_file_slice`).
+    pub path: PathBuf,
+    /// Relative path under context root.
+    pub rel_path: String,
+    /// 1-based line of first match (approx).
+    pub line: usize,
+    /// Excerpt around the match.
+    pub excerpt: String,
+}
+
+/// Keyword search over files under a session context root (case-insensitive substring).
+///
+/// Used by ToolHost so newly dropped pack files are searchable without a full reindex.
+pub fn search_session_context(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> CoreResult<Vec<SessionSearchHit>> {
+    let q = query.trim();
+    if q.is_empty() || limit == 0 {
+        return Ok(vec![]);
+    }
+    let q_lower = q.to_ascii_lowercase();
+    let mut hits = Vec::new();
+    if !root.is_dir() {
+        return Ok(hits);
+    }
+    walk_search(root, root, &q_lower, limit, &mut hits)?;
+    Ok(hits)
+}
+
+fn walk_search(
+    root: &Path,
+    dir: &Path,
+    q_lower: &str,
+    limit: usize,
+    hits: &mut Vec<SessionSearchHit>,
+) -> CoreResult<()> {
+    if hits.len() >= limit {
+        return Ok(());
+    }
+    let rd = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    for ent in rd.flatten() {
+        if hits.len() >= limit {
+            break;
+        }
+        let path = ent.path();
+        let name = ent.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let ft = match ent.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            walk_search(root, &path, q_lower, limit, hits)?;
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        // Skip huge files / obvious binaries by size and extension
+        let meta = match ent.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() > 2 * 1024 * 1024 {
+            continue;
+        }
+        let lower_name = name.to_ascii_lowercase();
+        if lower_name.ends_with(".zip")
+            || lower_name.ends_with(".png")
+            || lower_name.ends_with(".jpg")
+            || lower_name.ends_with(".pdf")
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Char-based case-fold search (no UTF-8 byte indexing).
+        let text_chars: Vec<char> = text.chars().collect();
+        let lower_chars: Vec<char> = text_chars.iter().flat_map(|c| c.to_lowercase()).collect();
+        let q_chars: Vec<char> = q_lower.chars().collect();
+        if q_chars.is_empty() {
+            continue;
+        }
+        if let Some(char_idx) = lower_chars
+            .windows(q_chars.len())
+            .position(|w| w == q_chars.as_slice())
+        {
+            let line = text_chars
+                .iter()
+                .take(char_idx)
+                .filter(|c| **c == '\n')
+                .count()
+                + 1;
+            let start_c = char_idx.saturating_sub(40);
+            let end_c = (char_idx + q_chars.len() + 80).min(text_chars.len());
+            let excerpt: String = text_chars[start_c..end_c].iter().collect();
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| name.clone());
+            hits.push(SessionSearchHit {
+                path: path.clone(),
+                rel_path: rel,
+                line,
+                excerpt: excerpt.replace('\n', " "),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Purge session context pack for `session_id` under `base` (no-op if missing).
+///
+/// Host calls this from permanent session delete (#341).
+pub fn purge_session_at(base: impl AsRef<Path>, session_id: &str) -> CoreResult<()> {
+    let root = session_context_root(base, session_id)?;
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(|e| CoreError::Message(format!("purge: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Resolve a path for tools: session context first (when provided), else `None`.
+pub fn resolve_in_session_context(session_root: &Path, path: &str) -> CoreResult<Option<PathBuf>> {
+    let p = Path::new(path.trim());
+    // Absolute under session root
+    if p.is_absolute() {
+        let Ok(root_c) = session_root.canonicalize() else {
+            return Ok(None);
+        };
+        if let Ok(pc) = p.canonicalize() {
+            if pc.starts_with(&root_c) {
+                return Ok(Some(pc));
+            }
+        }
+        return Ok(None);
+    }
+    // Relative to session root (or session:rel prefix)
+    let rel = path
+        .trim()
+        .strip_prefix("session:")
+        .unwrap_or(path.trim())
+        .trim_start_matches('/');
+    if rel.is_empty() {
+        return Ok(None);
+    }
+    match resolve_under_root(session_root, rel) {
+        Ok(resolved) if resolved.exists() => Ok(Some(resolved)),
+        Ok(_) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn import_zip_into_store(
     store: &SessionContextStore,
     zip_bytes: &[u8],
@@ -459,5 +623,36 @@ mod tests {
         let entries = store.import_zip_bytes(&buf.into_inner(), 1).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].rel_path, "nested/log.txt");
+    }
+
+    #[test]
+    fn search_finds_imported_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SessionContextStore::open(dir.path(), "s3", SessionContextCaps::default()).unwrap();
+        store
+            .import_bytes("triage.log", b"FATAL connection refused at gateway\n")
+            .unwrap();
+        let hits = search_session_context(store.root(), "connection refused", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].excerpt.to_ascii_lowercase().contains("connection"));
+        let resolved =
+            resolve_in_session_context(store.root(), &hits[0].path.to_string_lossy()).unwrap();
+        assert!(resolved.is_some());
+        let by_rel = resolve_in_session_context(store.root(), "triage.log")
+            .unwrap()
+            .unwrap();
+        assert!(by_rel.ends_with("triage.log"));
+    }
+
+    #[test]
+    fn purge_session_at_removes_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SessionContextStore::open(dir.path(), "del-me", SessionContextCaps::default()).unwrap();
+        store.import_bytes("a.log", b"x").unwrap();
+        assert!(store.root().exists());
+        purge_session_at(dir.path(), "del-me").unwrap();
+        assert!(!store.root().exists());
     }
 }
