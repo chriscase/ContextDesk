@@ -1,9 +1,13 @@
 /**
  * Guided AI setup wizard (#311 follow-up).
  * Path → give us something to look at → narrow options → pick model → apply draft.
- * Mirrors TriageTool’s discover flow using host list_models_for_draft (no browser CORS).
+ * Mirrors TriageTool’s discover flow via hostProbeAiGateway (plain HTTP, multi-path).
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  resolveGatewayUrlPrefill,
+  saveLastGatewayUrl,
+} from "../../lib/aiGatewayPrefs";
 import {
   hostListModelsForDraft,
   hostProbeAiGateway,
@@ -23,6 +27,23 @@ export type DiscoveredOption = {
   note?: string;
 };
 
+/** Partial applied from wizard — parent merges into draft / Save. */
+export type WizardApplyPayload = {
+  setup: Pick<
+    AppSetupState,
+    | "providerKind"
+    | "providerLabel"
+    | "baseUrl"
+    | "chatModel"
+    | "localOnly"
+    | "ollamaReachable"
+    | "remoteReachable"
+    | "hasApiKey"
+  >;
+  /** New key to keychain on Save; omit to keep existing. */
+  apiKey?: string;
+};
+
 type Props = {
   baseId: string;
   draft: AppSetupState;
@@ -31,6 +52,8 @@ type Props = {
   setApiKeyDraft: (v: string) => void;
   candidates: LocalCandidateDto[];
   onApplied?: () => void;
+  /** Apply + persist host profile/keychain (TriageTool one-shot save). */
+  onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
   onOpenAdvanced?: () => void;
 };
 
@@ -67,6 +90,36 @@ function preferChatModels(ids: string[]): string[] {
   return [...ids].sort((a, b) => score(b) - score(a) || a.localeCompare(b));
 }
 
+function initialWizardPath(draft: AppSetupState): WizardPath {
+  if (draft.providerKind === "xai_grok_build") return "grok";
+  if (
+    draft.providerKind === "openai_compatible" ||
+    draft.providerKind === "anthropic"
+  ) {
+    return "gateway";
+  }
+  // Soft pref: last remote URL → start users on gateway path (TriageTool default).
+  if (resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind)) {
+    return "gateway";
+  }
+  return "ollama";
+}
+
+function initialProbeUrl(draft: AppSetupState, path: WizardPath): string {
+  if (path === "gateway") {
+    return (
+      resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind) || ""
+    );
+  }
+  if (path === "grok") {
+    return draft.baseUrl?.trim() || "https://api.x.ai/v1";
+  }
+  if (draft.providerKind === "ollama" && draft.baseUrl?.trim()) {
+    return draft.baseUrl.trim();
+  }
+  return "http://127.0.0.1:11434";
+}
+
 export function AiSetupWizard({
   baseId,
   draft,
@@ -74,32 +127,27 @@ export function AiSetupWizard({
   setApiKeyDraft,
   candidates,
   onApplied,
+  onApplyAndSave,
   onOpenAdvanced,
 }: Props) {
-  // Prefill from saved draft so users do not re-paste gateway URL each session.
-  const initialPath = ((): WizardPath => {
-    if (draft.providerKind === "xai_grok_build") return "grok";
-    if (draft.providerKind === "openai_compatible" || draft.providerKind === "anthropic")
-      return "gateway";
-    return "ollama";
-  })();
-  const [step, setStep] = useState<WizardStep>("start");
+  // Prefill from host-hydrated draft / last gateway URL so users do not re-paste.
+  const initialPath = initialWizardPath(draft);
+  // Skip path chooser when we already have a configured provider (or soft pref).
+  const [step, setStep] = useState<WizardStep>(() =>
+    draft.providerKind === "openai_compatible" ||
+    draft.providerKind === "anthropic" ||
+    draft.providerKind === "xai_grok_build" ||
+    (draft.providerKind === "ollama" && draft.baseUrl?.includes("11434"))
+      ? "configure"
+      : "start",
+  );
   const [path, setPath] = useState<WizardPath>(initialPath);
-  const [probeUrl, setProbeUrl] = useState(() => {
-    if (
-      draft.providerKind === "openai_compatible" ||
-      draft.providerKind === "anthropic" ||
-      draft.providerKind === "ollama"
-    ) {
-      return draft.baseUrl || "http://127.0.0.1:11434";
-    }
-    if (draft.providerKind === "xai_grok_build") {
-      return draft.baseUrl || "https://api.x.ai/v1";
-    }
-    return "http://127.0.0.1:11434";
-  });
+  const [probeUrl, setProbeUrl] = useState(() =>
+    initialProbeUrl(draft, initialPath),
+  );
   const [probeKey, setProbeKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
   const [options, setOptions] = useState<DiscoveredOption[]>([]);
@@ -110,6 +158,25 @@ export function AiSetupWizard({
     (c) => c.kind === "xai_grok_build" || c.id.includes("grok"),
   );
   const ollamaCandidate = candidates.find((c) => c.kind === "ollama");
+
+  // When Settings hydrates host provider after open, refresh URL/key status without clobbering a typed URL.
+  useEffect(() => {
+    if (step !== "configure" && step !== "start") return;
+    const remote =
+      draft.providerKind === "openai_compatible" ||
+      draft.providerKind === "anthropic";
+    if (remote && draft.baseUrl?.trim()) {
+      setPath("gateway");
+      setProbeUrl((cur) => {
+        // Only adopt host URL if user hasn't typed something different this session.
+        if (!cur.trim() || /127\.0\.0\.1|localhost/i.test(cur)) {
+          return draft.baseUrl.trim();
+        }
+        return cur;
+      });
+      if (step === "start") setStep("configure");
+    }
+  }, [draft.providerKind, draft.baseUrl, draft.hasApiKey, step]);
 
   const choosePath = (p: WizardPath) => {
     setPath(p);
@@ -131,14 +198,10 @@ export function AiSetupWizard({
       );
       setProbeKey("");
     } else {
-      // Gateway: keep last saved remote URL when available
       setProbeUrl(
-        draft.providerKind === "openai_compatible" ||
-          draft.providerKind === "anthropic"
-          ? draft.baseUrl
-          : "",
+        resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind),
       );
-      // Key stays blank — host reuses keychain when draft is empty
+      // Key stays blank — host reuses keychain when field empty
       setProbeKey("");
     }
     setStep("configure");
@@ -235,7 +298,13 @@ export function AiSetupWizard({
           noteBuf.push(
             "Using API key already in the OS keychain (leave blank to reuse).",
           );
+        } else if (!key && !draft.hasApiKey) {
+          noteBuf.push(
+            "No key in this field or keychain yet — many gateways need a key to list models.",
+          );
         }
+        // Remember URL as soft pref even before Save (never the key).
+        saveLastGatewayUrl(raw);
         const result = await hostProbeAiGateway({
           baseUrl: raw,
           apiKey: key,
@@ -277,12 +346,14 @@ export function AiSetupWizard({
                 : kind === "ollama"
                   ? "Ollama"
                   : "OpenAI-compatible gateway";
+            const effective = result.effective_base_url || raw;
+            saveLastGatewayUrl(effective);
             found.push({
               kind,
               label,
-              baseUrl: result.effective_base_url || raw,
+              baseUrl: effective,
               models,
-              note: `${models.length} model(s) · ${result.effective_base_url || raw}`,
+              note: `${models.length} model(s) · ${effective}`,
             });
             // If probe classified openai but also looks anthropic-heavy, offer both.
             if (
@@ -293,7 +364,7 @@ export function AiSetupWizard({
               found.push({
                 kind: "anthropic",
                 label: "Anthropic Messages API (alternate)",
-                baseUrl: result.effective_base_url || raw,
+                baseUrl: effective,
                 models,
                 note: "Catalog looks Claude-heavy — try Anthropic if chat fails.",
               });
@@ -329,41 +400,73 @@ export function AiSetupWizard({
   const activeOption =
     options.find((o) => o.kind === pickedKind) ?? options[0] ?? null;
 
-  const applyToDraft = () => {
-    if (!activeOption || !pickedModel.trim()) return;
+  const buildApplyPayload = (): WizardApplyPayload | null => {
+    if (!activeOption || !pickedModel.trim()) return null;
     const kind = activeOption.kind;
-    setDraft((d) => ({
-      ...d,
-      providerKind: kind,
-      providerLabel: activeOption.label,
-      baseUrl: activeOption.baseUrl,
-      chatModel: pickedModel.trim(),
-      localOnly: kind === "ollama",
-      ollamaReachable: kind === "ollama" ? true : d.ollamaReachable,
-      remoteReachable:
-        kind === "openai_compatible" || kind === "anthropic"
-          ? true
-          : d.remoteReachable,
-      hasApiKey:
-        kind === "xai_grok_build"
-          ? d.hasApiKey || Boolean(grokCandidate?.credentials_present)
-          : kind === "ollama"
-            ? d.hasApiKey
-            : d.hasApiKey || Boolean(probeKey.trim()),
-    }));
-    if (probeKey.trim() && kind !== "ollama" && kind !== "xai_grok_build") {
-      setApiKeyDraft(probeKey.trim());
+    const key =
+      probeKey.trim() && kind !== "ollama" && kind !== "xai_grok_build"
+        ? probeKey.trim()
+        : undefined;
+    if (
+      kind === "openai_compatible" ||
+      kind === "anthropic"
+    ) {
+      saveLastGatewayUrl(activeOption.baseUrl);
     }
+    return {
+      setup: {
+        providerKind: kind,
+        providerLabel: activeOption.label,
+        baseUrl: activeOption.baseUrl,
+        chatModel: pickedModel.trim(),
+        localOnly: kind === "ollama",
+        ollamaReachable: kind === "ollama" ? true : draft.ollamaReachable,
+        remoteReachable:
+          kind === "openai_compatible" || kind === "anthropic"
+            ? true
+            : draft.remoteReachable,
+        hasApiKey:
+          kind === "xai_grok_build"
+            ? draft.hasApiKey || Boolean(grokCandidate?.credentials_present)
+            : kind === "ollama"
+              ? draft.hasApiKey
+              : draft.hasApiKey || Boolean(key),
+      },
+      apiKey: key,
+    };
+  };
+
+  const applyToDraft = () => {
+    const payload = buildApplyPayload();
+    if (!payload) return;
+    setDraft((d) => ({ ...d, ...payload.setup }));
+    if (payload.apiKey) setApiKeyDraft(payload.apiKey);
     onApplied?.();
+  };
+
+  const applyAndSave = async () => {
+    const payload = buildApplyPayload();
+    if (!payload) return;
+    setDraft((d) => ({ ...d, ...payload.setup }));
+    if (payload.apiKey) setApiKeyDraft(payload.apiKey);
+    if (!onApplyAndSave) {
+      onApplied?.();
+      return;
+    }
+    setSaving(true);
+    try {
+      await onApplyAndSave(payload);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="ai-wizard">
       <p className="section-lead">
-        Setup wizard — tell us what you have (local Ollama, Grok Build, or a
-        gateway URL). We probe and narrow chat models; click{" "}
-        <strong>Apply to draft</strong>, then <strong>Save</strong> in Settings
-        to persist.
+        Setup wizard — same discovery as TriageTool (native multi-path probe).
+        Gateway URL is remembered after Discover; the API key lives in the OS
+        keychain after <strong>Apply &amp; Save</strong>.
       </p>
 
       <div className="ai-wizard__mode-row">
@@ -423,8 +526,11 @@ export function AiSetupWizard({
             <span className="ai-wizard__path-kicker">Remote</span>
             <span className="ai-wizard__path-label">Company or cloud gateway</span>
             <span className="ai-wizard__path-hint">
-              Paste a base URL (+ key). We try OpenAI-compatible and Anthropic
-              shapes and list models.
+              Paste a base URL once (+ key). We try OpenAI / Anthropic path
+              shapes. Leave key blank next time if already Saved.
+              {resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind)
+                ? " · Last gateway URL ready"
+                : ""}
             </span>
           </button>
         </div>
@@ -616,26 +722,37 @@ export function AiSetupWizard({
           ) : null}
 
           <div className="field-row">
+            {onApplyAndSave ? (
+              <button
+                type="button"
+                className="btn btn--primary"
+                disabled={!activeOption || !pickedModel.trim() || saving}
+                onClick={() => void applyAndSave()}
+              >
+                {saving ? "Saving…" : "Apply & Save"}
+              </button>
+            ) : null}
             <button
               type="button"
-              className="btn btn--primary"
-              disabled={!activeOption || !pickedModel.trim()}
+              className={onApplyAndSave ? "btn btn--ghost" : "btn btn--primary"}
+              disabled={!activeOption || !pickedModel.trim() || saving}
               onClick={applyToDraft}
             >
-              Apply to draft
+              Apply to draft only
             </button>
             <button
               type="button"
               className="btn btn--ghost"
-              disabled={busy}
+              disabled={busy || saving}
               onClick={() => void runDiscover()}
             >
               {busy ? "…" : "Re-discover"}
             </button>
           </div>
           <p className="field__hint">
-            Apply fills Settings draft only. Use the footer <strong>Save</strong>{" "}
-            to write the profile (and keychain) — same as the rest of Settings.
+            <strong>Apply &amp; Save</strong> writes the profile and keychain
+            (like TriageTool). Draft-only leaves the footer Save for later.
+            URL is soft-remembered after Discover even before Save.
           </p>
         </div>
       ) : null}

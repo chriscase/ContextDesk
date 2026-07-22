@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import {
+  resolveGatewayUrlPrefill,
+  saveLastGatewayUrl,
+} from "../../lib/aiGatewayPrefs";
 import type { LocalCandidateDto } from "../../lib/host";
 import { hostListModelsForDraft, normalizeProviderKind } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
@@ -8,7 +12,10 @@ import {
   TextField,
   ToggleField,
 } from "../forms";
-import { AiSetupWizard } from "./AiSetupWizard";
+import {
+  AiSetupWizard,
+  type WizardApplyPayload,
+} from "./AiSetupWizard";
 
 export type AiSectionProps = {
   baseId: string;
@@ -26,6 +33,7 @@ export type AiSectionProps = {
   urlError: string | null;
   recheck: () => void | Promise<void>;
   checking: boolean;
+  onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
 };
 
 export function AiSection({
@@ -40,6 +48,7 @@ export function AiSection({
   urlError,
   recheck,
   checking,
+  onApplyAndSave,
 }: AiSectionProps) {
   /** Wizard when unset; prefer wizard for gateways so Discover is one click. */
   const [mode, setMode] = useState<"wizard" | "advanced">(() =>
@@ -132,6 +141,7 @@ export function AiSection({
           candidates={candidates}
           onOpenAdvanced={() => setMode("advanced")}
           onApplied={() => setMode("advanced")}
+          onApplyAndSave={onApplyAndSave}
         />
       </div>
     );
@@ -273,37 +283,50 @@ export function AiSection({
     value={draft.providerKind}
     onChange={(e) => {
       const kind = e.target.value as AppSetupState["providerKind"];
-      setDraft((d) => ({
-        ...d,
-        providerKind: kind,
-        providerLabel:
-          kind === "ollama"
-            ? "Ollama (local)"
-            : kind === "openai_compatible"
-              ? "OpenAI-compatible gateway"
-              : kind === "anthropic"
-                ? "Anthropic"
-                : kind === "xai_grok_build"
-                  ? "Grok Build session"
-                  : null,
-        ollamaReachable: null,
-        remoteReachable: null,
-        localOnly: kind === "ollama",
-        baseUrl:
-          kind === "ollama"
-            ? "http://127.0.0.1:11434"
-            : kind === "xai_grok_build"
-              ? "https://api.x.ai/v1"
-              : kind === "anthropic"
-                ? "https://api.anthropic.com"
-                : d.baseUrl,
-        chatModel:
-          kind === "xai_grok_build" && !d.chatModel.trim()
-            ? "grok-3"
-            : kind === "anthropic" && !d.chatModel.trim()
-              ? "claude-sonnet-4-20250514"
-              : d.chatModel,
-      }));
+      setDraft((d) => {
+        // Remember gateway URL when leaving remote so switch-back is painless.
+        if (
+          (d.providerKind === "openai_compatible" ||
+            d.providerKind === "anthropic") &&
+          d.baseUrl?.trim()
+        ) {
+          saveLastGatewayUrl(d.baseUrl);
+        }
+        const lastGw = resolveGatewayUrlPrefill(d.baseUrl, d.providerKind);
+        return {
+          ...d,
+          providerKind: kind,
+          providerLabel:
+            kind === "ollama"
+              ? "Ollama (local)"
+              : kind === "openai_compatible"
+                ? "OpenAI-compatible gateway"
+                : kind === "anthropic"
+                  ? "Anthropic"
+                  : kind === "xai_grok_build"
+                    ? "Grok Build session"
+                    : null,
+          ollamaReachable: null,
+          remoteReachable: null,
+          localOnly: kind === "ollama",
+          baseUrl:
+            kind === "ollama"
+              ? "http://127.0.0.1:11434"
+              : kind === "xai_grok_build"
+                ? "https://api.x.ai/v1"
+                : kind === "anthropic"
+                  ? lastGw || "https://api.anthropic.com"
+                  : kind === "openai_compatible"
+                    ? lastGw || d.baseUrl
+                    : d.baseUrl,
+          chatModel:
+            kind === "xai_grok_build" && !d.chatModel.trim()
+              ? "grok-3"
+              : kind === "anthropic" && !d.chatModel.trim()
+                ? "claude-sonnet-4-20250514"
+                : d.chatModel,
+        };
+      });
     }}
   >
     <option value="none">Select…</option>
@@ -328,17 +351,22 @@ export function AiSection({
         error={remoteUrlCheck.error ?? urlError}
         ok={remoteUrlCheck.ok}
         pending={remoteUrlCheck.pending}
-        onChange={(e) =>
+        onChange={(e) => {
+          const v = e.target.value;
           setDraft((d) => ({
             ...d,
-            baseUrl: e.target.value,
+            baseUrl: v,
             remoteReachable: null,
-          }))
-        }
+          }));
+          if (v.trim() && !/127\.0\.0\.1|localhost/i.test(v)) {
+            saveLastGatewayUrl(v);
+          }
+        }}
         placeholder={
-          draft.providerKind === "anthropic"
+          resolveGatewayUrlPrefill(draft.baseUrl, draft.providerKind) ||
+          (draft.providerKind === "anthropic"
             ? "https://api.anthropic.com"
-            : "https://gateway.example.com/v1"
+            : "https://gateway.example.com/v1")
         }
       />
       <SecretField

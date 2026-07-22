@@ -302,13 +302,13 @@ pub async fn probe_ai_gateway(
                 .filter(|m| m.kind != "embedding")
                 .cloned()
                 .collect();
-            chat.sort_by(|a, b| rank_chat(&b.id).cmp(&rank_chat(&a.id)));
+            chat.sort_by_key(|m| std::cmp::Reverse(rank_chat(&m.id)));
             let mut emb: Vec<_> = local_models
                 .iter()
                 .filter(|m| m.kind == "embedding")
                 .cloned()
                 .collect();
-            emb.sort_by(|a, b| rank_embed(&b.id).cmp(&rank_embed(&a.id)));
+            emb.sort_by_key(|m| std::cmp::Reverse(rank_embed(&m.id)));
             return AiProbeResult {
                 ok: true,
                 flavor: Some("ollama".into()),
@@ -399,10 +399,9 @@ pub async fn probe_ai_gateway(
                                 "openai_compatible".into()
                             },
                         );
+                        // Prefer …/v1 when list was at …/v1/models; otherwise keep root.
                         effective = if path.ends_with("/v1/models") {
                             path.trim_end_matches("/models").to_string()
-                        } else if root.to_lowercase().ends_with("/v1") {
-                            root.clone()
                         } else {
                             root.clone()
                         };
@@ -443,10 +442,8 @@ pub async fn probe_ai_gateway(
                 Ok((status, _)) if status == 401 || status == 403 => {
                     errors.push(format!("{path}: auth failed ({status}) with x-api-key"));
                 }
-                Err(e) => {
-                    if !errors.iter().any(|x| x == &e) {
-                        errors.push(e);
-                    }
+                Err(e) if !errors.iter().any(|x| x == &e) => {
+                    errors.push(e);
                 }
                 _ => {}
             }
@@ -463,13 +460,13 @@ pub async fn probe_ai_gateway(
         .filter(|m| m.kind == "chat" || m.kind == "unknown")
         .cloned()
         .collect();
-    chat.sort_by(|a, b| rank_chat(&b.id).cmp(&rank_chat(&a.id)));
+    chat.sort_by_key(|m| std::cmp::Reverse(rank_chat(&m.id)));
     let mut emb: Vec<_> = unique
         .iter()
         .filter(|m| m.kind == "embedding")
         .cloned()
         .collect();
-    emb.sort_by(|a, b| rank_embed(&b.id).cmp(&rank_embed(&a.id)));
+    emb.sort_by_key(|m| std::cmp::Reverse(rank_embed(&m.id)));
 
     if ok && emb.is_empty() {
         notes.push("No embedding models listed (chat-only is fine for ContextDesk).".into());

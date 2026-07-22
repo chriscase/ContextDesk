@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SettingsSection } from "../components/SettingsModal";
+import { saveLastGatewayUrl } from "../lib/aiGatewayPrefs";
 import {
   hostCheckOllama,
   hostGetActiveProvider,
@@ -292,6 +293,12 @@ export function useShellState() {
         kind !== "xai_grok_build"
       ) {
         return;
+      }
+      if (
+        (kind === "openai_compatible" || kind === "anthropic") &&
+        p.base_url
+      ) {
+        saveLastGatewayUrl(p.base_url);
       }
       setSetup((s) => ({
         ...s,

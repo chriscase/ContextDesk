@@ -4,6 +4,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { shouldResetSettingsOnOpen } from "../../lib/settingsOpenGate";
+import { saveLastGatewayUrl } from "../../lib/aiGatewayPrefs";
 import {
   hostCheckOllama,
   hostConfluenceHasToken,
@@ -46,6 +47,7 @@ import {
   type PreflightReport,
 } from "../../lib/preflight";
 import { useDebouncedAsyncCheck } from "../forms";
+import type { WizardApplyPayload } from "./AiSetupWizard";
 
 /** NAV section ids for SettingsModal shell (#147). */
 export type SettingsSection =
@@ -180,6 +182,12 @@ export function useSettingsController({
           kind === "anthropic" ||
           kind === "xai_grok_build"
         ) {
+          if (
+            (kind === "openai_compatible" || kind === "anthropic") &&
+            active.base_url
+          ) {
+            saveLastGatewayUrl(active.base_url);
+          }
           setDraft((d) => ({
             ...d,
             providerKind: kind,
@@ -310,7 +318,8 @@ export function useSettingsController({
         draft.providerKind === "openai_compatible" ||
         draft.providerKind === "anthropic"
       ) {
-        const probe = await hostProbeUrl(draft.baseUrl, false);
+        // User-configured gateway may be on private/corp DNS — allow private (same as chat).
+        const probe = await hostProbeUrl(draft.baseUrl, true);
         if (probe.ok) {
           setProbeNote(
             `URL ok · effective ${probe.effective_base} · ${probe.candidates.length} candidate base(s)`,
@@ -445,46 +454,77 @@ export function useSettingsController({
     }
   };
 
+  /** Core AI profile save — shared by footer Save and wizard Apply & Save. */
+  const persistAiProvider = async (
+    source: AppSetupState,
+    keyDraft: string,
+  ): Promise<AppSetupState | null> => {
+    if (source.providerKind === "none") return source;
+    try {
+      if (
+        source.providerKind === "openai_compatible" ||
+        source.providerKind === "anthropic"
+      ) {
+        saveLastGatewayUrl(source.baseUrl);
+      }
+      const saved = await hostSaveActiveProvider({
+        kind: source.providerKind,
+        baseUrl: source.baseUrl,
+        chatModel: source.chatModel,
+        label: source.providerLabel ?? undefined,
+        apiKey:
+          source.providerKind === "xai_grok_build"
+            ? undefined
+            : keyDraft.trim() || undefined,
+        localOnly:
+          source.providerKind === "xai_grok_build"
+            ? false
+            : (source.localOnly ?? source.providerKind === "ollama"),
+      });
+      if (!saved) return source;
+      return {
+        ...source,
+        hasApiKey: saved.has_key,
+        baseUrl: saved.base_url,
+        chatModel: saved.chat_model,
+        providerLabel: saved.label,
+        providerKind: source.providerKind,
+        localOnly:
+          saved.kind === "xai_grok_build" ? false : source.localOnly,
+      };
+    } catch (e) {
+      const { dialogMessage } = await import("../../lib/dialogs");
+      await dialogMessage(
+        `Could not save AI provider: ${e instanceof Error ? e.message : String(e)}`,
+        { title: "AI provider", kind: "error" },
+      );
+      return null;
+    }
+  };
+
+  /** Wizard one-shot: merge payload, write host profile + keychain, close dirty. */
+  const applyAndSaveAi = async (payload: WizardApplyPayload) => {
+    const key = payload.apiKey ?? apiKeyDraft;
+    let next: AppSetupState = { ...draft, ...payload.setup };
+    if (payload.apiKey) setApiKeyDraft(payload.apiKey);
+    setDraft(next);
+    const savedAi = await persistAiProvider(next, key);
+    if (!savedAi) return;
+    next = savedAi;
+    setDraft(next);
+    setApiKeyDraft("");
+    onSaveSetup(next);
+    onRecheckHost?.();
+  };
+
   const save = async () => {
     let next: AppSetupState = { ...draft };
 
     // Persist AI provider + optional API key (keychain only; never in setup JSON).
     if (draft.providerKind !== "none") {
-      try {
-        const saved = await hostSaveActiveProvider({
-          kind: draft.providerKind,
-          baseUrl: draft.baseUrl,
-          chatModel: draft.chatModel,
-          label: draft.providerLabel ?? undefined,
-          apiKey:
-            draft.providerKind === "xai_grok_build"
-              ? undefined
-              : apiKeyDraft.trim() || undefined,
-          localOnly:
-            draft.providerKind === "xai_grok_build"
-              ? false
-              : (draft.localOnly ?? draft.providerKind === "ollama"),
-        });
-        if (saved) {
-          next = {
-            ...next,
-            hasApiKey: saved.has_key,
-            baseUrl: saved.base_url,
-            chatModel: saved.chat_model,
-            providerLabel: saved.label,
-            providerKind: draft.providerKind,
-            localOnly: saved.kind === "xai_grok_build" ? false : next.localOnly,
-          };
-        }
-      } catch (e) {
-        // Host present but save failed (e.g. no Grok session, bad URL) — don't silent-close.
-        const { dialogMessage } = await import("../../lib/dialogs");
-        await dialogMessage(
-          `Could not save AI provider: ${e instanceof Error ? e.message : String(e)}`,
-          { title: "AI provider", kind: "error" },
-        );
-        return;
-      }
+      const savedAi = await persistAiProvider(draft, apiKeyDraft);
+      if (!savedAi) return;
+      next = savedAi;
     }
 
     // Persist Confluence to host config + keychain when possible
@@ -671,6 +711,7 @@ export function useSettingsController({
     addRoot,
     applyDefaultWorkspace,
     save,
+    applyAndSaveAi,
     setSourceEnabled,
     setGroupEnabled,
   };
