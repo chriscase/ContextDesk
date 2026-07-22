@@ -571,15 +571,99 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
         }
     }
 
+    // Tool budget exhausted while the model still wanted tools (common on
+    // multi-fetch news turns). One forced no-tools completion so the user
+    // gets a synthesis instead of a hard "max tool rounds" dead-end.
+    trail.push(format!(
+        "budget_rounds:{} — synthesizing without tools",
+        opts.max_rounds
+    ));
     out.push(StreamEvent::Error {
         code: "budget_rounds".into(),
-        message: "Agent reached max tool rounds (router budget)".into(),
+        message: format!(
+            "Reached max tool rounds ({}) — answering from what was already gathered.",
+            opts.max_rounds
+        ),
     });
-    out.push(StreamEvent::TurnCompleted {
-        reason: "budget_rounds".into(),
+    history.push(ChatMessage {
+        role: Role::System,
+        content: SYNTHESIZE_AFTER_BUDGET.to_string(),
+        tool_call_id: None,
+        tool_calls: None,
     });
-    Ok(out.into_events())
+    let keep = opts.compact_keep_last.max(1);
+    let summary = crate::sessions::recompact_chat_history(history, keep);
+    let model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+    let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
+    let mut streamed_text = false;
+    let mut on_text = |t: String| {
+        if !t.is_empty() {
+            streamed_text = true;
+            out.push(StreamEvent::TextDelta { text: t });
+        }
+    };
+    match backend
+        .complete_streaming(&model_ctx, &[], &mut on_text, cancel_ref)
+        .await
+    {
+        Ok(completion) => {
+            // Ignore further tool_calls — budget is closed.
+            let content = if completion.content.trim().is_empty() {
+                "I gathered sources but hit the tool-round limit before finishing. \
+                 Try a more specific question, or ask me to continue from the results above."
+                    .to_string()
+            } else {
+                completion.content
+            };
+            if !streamed_text && !content.is_empty() {
+                out.push(StreamEvent::TextDelta {
+                    text: content.clone(),
+                });
+            }
+            history.push(ChatMessage {
+                role: Role::Assistant,
+                content,
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            if !trail.is_empty() {
+                out.push(StreamEvent::SearchTrail {
+                    steps: trail.clone(),
+                });
+            }
+            out.push(StreamEvent::TurnCompleted {
+                reason: "budget_rounds_answer".into(),
+            });
+            Ok(out.into_events())
+        }
+        Err(e) if e.to_string().contains("cancelled") => {
+            out.push(StreamEvent::TurnCompleted {
+                reason: "cancel".into(),
+            });
+            Ok(out.into_events())
+        }
+        Err(e) => {
+            out.push(StreamEvent::Error {
+                code: "budget_rounds_fail".into(),
+                message: format!(
+                    "Tool budget exhausted and final answer failed: {e}. \
+                     Try a narrower question or raise max tool rounds in Settings."
+                ),
+            });
+            out.push(StreamEvent::TurnCompleted {
+                reason: "budget_rounds".into(),
+            });
+            Ok(out.into_events())
+        }
+    }
 }
+
+/// Injected when the agent loop hits max_tool_rounds after tool use.
+const SYNTHESIZE_AFTER_BUDGET: &str = "\
+TOOL BUDGET EXHAUSTED. Do NOT call any more tools. \
+Write a complete final answer now from tool results already in this conversation. \
+If evidence is incomplete, say what you found and what is still uncertain. \
+Use short source names; do not invent facts not supported by the tool output.";
 
 /// Prefetch retrieval when tools unsupported: force search_kb then answer.
 pub async fn prefetch_context(host: &mut ToolHost, query: &str) -> CoreResult<String> {
@@ -702,7 +786,7 @@ mod tests {
         let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
         let idx = KeywordIndex::build(&ws).unwrap();
         let mut host = ToolHost::new(ws, idx, None);
-        // Always request another tool call — must stop after 2 rounds.
+        // Always request another tool call — after 2 rounds, forced no-tools synthesis.
         let always_tool = ChatCompletion {
             content: String::new(),
             tool_calls: vec![ToolCallMsg {
@@ -715,12 +799,12 @@ mod tests {
             }],
             finish_reason: "tool_calls".into(),
         };
-        let backend = ScriptedBackend::new(vec![
-            always_tool.clone(),
-            always_tool.clone(),
-            always_tool.clone(),
-            always_tool,
-        ]);
+        let final_answer = ChatCompletion {
+            content: "Here is what I found from the tools.".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        };
+        let backend = ScriptedBackend::new(vec![always_tool.clone(), always_tool, final_answer]);
         let mut history = vec![];
         let events = run_agent_turn(
             &backend,
@@ -739,8 +823,14 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Error { code, .. } if code == "budget_rounds")));
         assert!(events.iter().any(
-            |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_rounds")
+            |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_rounds_answer")
+        ));
+        assert!(events.iter().any(
+            |e| matches!(e, StreamEvent::TextDelta { text } if text.contains("what I found"))
         ));
     }
 

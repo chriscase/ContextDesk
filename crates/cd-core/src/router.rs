@@ -42,7 +42,9 @@ fn default_max_sources() -> usize {
     3
 }
 fn default_max_tool_rounds() -> usize {
-    8
+    // News / multi-fetch turns often need search + a few fetches + answer.
+    // Hard stop still applies; agent synthesizes once this is hit.
+    12
 }
 fn default_max_results_per_source() -> usize {
     8
@@ -168,7 +170,7 @@ mod tests {
         let b = RouterBudget::default();
         let t = b.trail_step();
         assert!(t.contains("sources=3"));
-        assert!(t.contains("rounds=8"));
+        assert!(t.contains("rounds=12"));
         assert!(t.contains("per_source=8"));
         assert!(t.contains("deadline="));
     }

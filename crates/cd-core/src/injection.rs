@@ -111,7 +111,11 @@ pub fn system_policy_with_tools(tool_names: &[&str]) -> String {
              (Al Jazeera, Anadolu, Euronews, BBC, Wikipedia). Paywalls (401/403) are soft failures; try another URL. \
              NEVER assert \"nobody was killed\" or \"no named officials\" from RSS titles alone — \
              report what titles/snippets show, what you could not verify, and point the user at the Sources chips. \
-             Cite by short name; never paste long raw URLs. Do not refuse web research when tools returned data.\n",
+             Cite by short name; never paste long raw URLs. Do not refuse web research when tools returned data.\n\
+             BUDGET DISCIPLINE: tool rounds are limited. Prefer 1–2 web_search calls, then at most 2–3 web_fetch \
+             on the best open URLs, then answer in the next turn. Do not keep searching after you have \
+             enough headlines/snippets for a useful brief. General \"what's in the news\" → one broad search, \
+             summarize top stories, stop.\n",
         );
     }
     if tool_names.contains(&"x_search") {
