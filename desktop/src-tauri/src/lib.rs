@@ -2173,19 +2173,25 @@ fn provider_group_label(p: &ProviderProfile) -> String {
     desc.group_label.to_string()
 }
 
+/// Keep almost everything for the picker (TriageTool shows full catalogs).
+/// Only drop clear non-chat tooling entries.
 fn looks_like_chat_model_id(id: &str) -> bool {
     let l = id.to_ascii_lowercase();
-    // Drop obvious non-chat entries from vendor catalogs.
     if l.contains("embed")
+        || l.contains("text-embedding")
         || l.contains("whisper")
-        || l.contains("tts")
-        || l.contains("dall")
-        || l.contains("image")
+        || l.contains("tts-")
+        || l.contains("dall-e")
         || l.contains("moderation")
         || l.contains("realtime")
-        || l.contains("audio")
         || l.contains("transcri")
+        || l.contains("speech")
     {
+        return false;
+    }
+    // "image" alone is too aggressive (filters valid vision/chat names);
+    // only drop explicit image-generation product ids.
+    if l.contains("dall") || l.starts_with("image-") || l.contains("-image-") {
         return false;
     }
     true
@@ -2221,98 +2227,11 @@ async fn models_for_profile(
     profile: &ProviderProfile,
     secrets: &KeychainSecretStore,
 ) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
     let api_key = profile
         .api_key_ref
         .as_ref()
         .and_then(|r| secrets.get(r).ok().flatten());
-
-    match profile.kind {
-        ProviderKind::Ollama => {
-            if let Ok(client) =
-                cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
-            {
-                if let Ok(tags) = client.list_tags().await {
-                    ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
-                }
-            }
-        }
-        ProviderKind::OpenAiCompatible => {
-            let policy = if profile.local_only {
-                SsrfPolicy::local_only()
-            } else {
-                SsrfPolicy::default()
-            };
-            if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
-                &profile.base_url,
-                api_key,
-                &profile.chat_model,
-                &policy,
-            ) {
-                if let Ok(listed) = client.list_models().await {
-                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
-                }
-            }
-        }
-        ProviderKind::XaiGrokBuild => {
-            ids.extend(
-                ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision-1212"]
-                    .into_iter()
-                    .map(str::to_string),
-            );
-            let base = if profile.base_url.trim().is_empty() {
-                "https://api.x.ai/v1"
-            } else {
-                profile.base_url.trim()
-            };
-            if cd_core::grok_auth::assert_grok_base_allowed(base).is_ok() {
-                if let Ok(creds) = cd_core::grok_auth::load_grok_session_credentials() {
-                    if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
-                        base,
-                        None,
-                        &profile.chat_model,
-                        &SsrfPolicy::default(),
-                    ) {
-                        let client = client.with_extra_headers(creds.request_headers());
-                        if let Ok(listed) = client.list_models().await {
-                            for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
-                                // Prefer chat-oriented grok ids from the catalog.
-                                let l = m.to_ascii_lowercase();
-                                if l.contains("grok") && !ids.iter().any(|x| x == &m) {
-                                    ids.push(m);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ProviderKind::Anthropic => {
-            let policy = if profile.local_only {
-                SsrfPolicy::local_only()
-            } else {
-                SsrfPolicy::default()
-            };
-            if let Ok(client) = cd_core::chat::AnthropicClient::new(
-                &profile.base_url,
-                api_key,
-                &profile.chat_model,
-                &policy,
-            ) {
-                if let Ok(listed) = client.list_models().await {
-                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
-                }
-            }
-        }
-    }
-
-    let profile_model = profile.chat_model.trim();
-    if !profile_model.is_empty() && !ids.iter().any(|x| x == profile_model) {
-        ids.insert(0, profile_model.to_string());
-    }
-    ids.sort();
-    ids.dedup();
-    ids
+    models_for_profile_with_key(profile, api_key.as_deref()).await
 }
 
 /// List chat models for the **Settings draft** (not only the saved profile).
@@ -2421,6 +2340,9 @@ async fn list_models_for_draft(
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
+///
+/// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
+/// keeps the **largest** successful model list so corporate path shapes work.
 async fn models_for_profile_with_key(
     profile: &ProviderProfile,
     api_key: Option<&str>,
@@ -2442,16 +2364,27 @@ async fn models_for_profile_with_key(
             } else {
                 SsrfPolicy::default()
             };
-            if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
-                &profile.base_url,
-                api_key.map(|s| s.to_string()),
-                &profile.chat_model,
-                &policy,
-            ) {
-                if let Ok(listed) = client.list_models().await {
-                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
+            let candidates = expand_base_candidates(&profile.base_url);
+            let mut best: Vec<String> = Vec::new();
+            for base in candidates {
+                if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                    &base,
+                    api_key.map(|s| s.to_string()),
+                    &profile.chat_model,
+                    &policy,
+                ) {
+                    if let Ok(listed) = client.list_models().await {
+                        let filtered: Vec<String> = listed
+                            .into_iter()
+                            .filter(|m| looks_like_chat_model_id(m))
+                            .collect();
+                        if filtered.len() > best.len() {
+                            best = filtered;
+                        }
+                    }
                 }
             }
+            ids.extend(best);
         }
         ProviderKind::XaiGrokBuild => {
             ids.extend(
@@ -2475,8 +2408,7 @@ async fn models_for_profile_with_key(
                         let client = client.with_extra_headers(creds.request_headers());
                         if let Ok(listed) = client.list_models().await {
                             for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
-                                let l = m.to_ascii_lowercase();
-                                if l.contains("grok") && !ids.iter().any(|x| x == &m) {
+                                if !ids.iter().any(|x| x == &m) {
                                     ids.push(m);
                                 }
                             }
@@ -2491,16 +2423,27 @@ async fn models_for_profile_with_key(
             } else {
                 SsrfPolicy::default()
             };
-            if let Ok(client) = cd_core::chat::AnthropicClient::new(
-                &profile.base_url,
-                api_key.map(|s| s.to_string()),
-                &profile.chat_model,
-                &policy,
-            ) {
-                if let Ok(listed) = client.list_models().await {
-                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
+            let candidates = expand_base_candidates(&profile.base_url);
+            let mut best: Vec<String> = Vec::new();
+            for base in candidates {
+                if let Ok(client) = cd_core::chat::AnthropicClient::new(
+                    &base,
+                    api_key.map(|s| s.to_string()),
+                    &profile.chat_model,
+                    &policy,
+                ) {
+                    if let Ok(listed) = client.list_models().await {
+                        let filtered: Vec<String> = listed
+                            .into_iter()
+                            .filter(|m| looks_like_chat_model_id(m))
+                            .collect();
+                        if filtered.len() > best.len() {
+                            best = filtered;
+                        }
+                    }
                 }
             }
+            ids.extend(best);
         }
     }
 
