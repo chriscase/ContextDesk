@@ -120,6 +120,10 @@ pub struct ToolHost {
     durable_memory_enabled: bool,
     /// Ambient recall injection each turn (MEMORY.md §10.1; host-wired from config).
     ambient_recall_enabled: bool,
+    /// Log analysis tools + corpora under app cache (#355–#362).
+    log_analysis_enabled: bool,
+    /// Cache root for disposable log corpora (app cache dir).
+    log_cache_dir: Option<PathBuf>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Dynamic tools from connector registry (#127).
@@ -180,6 +184,8 @@ impl ToolHost {
             active_session_id: None,
             durable_memory_enabled: false,
             ambient_recall_enabled: true,
+            log_analysis_enabled: false,
+            log_cache_dir: None,
             router_budget: crate::router::RouterBudget::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
@@ -625,6 +631,17 @@ impl ToolHost {
         self.ambient_recall_enabled
     }
 
+    /// Enable log analysis tools and set corpus cache root (#362).
+    pub fn set_log_analysis(&mut self, enabled: bool, cache_dir: Option<PathBuf>) {
+        self.log_analysis_enabled = enabled;
+        self.log_cache_dir = cache_dir;
+    }
+
+    /// Whether log analysis tools are registered.
+    pub fn log_analysis_enabled(&self) -> bool {
+        self.log_analysis_enabled
+    }
+
     /// Borrow the durable memory store when configured (ambient recall / tools).
     pub fn durable_memory_store(&self) -> Option<std::sync::Arc<dyn crate::memory::MemoryStore>> {
         self.durable_memory.clone()
@@ -727,6 +744,13 @@ impl ToolHost {
             // Replace legacy save_memory schema with durable memory suite.
             specs.retain(|t| t.name != names::SAVE_MEMORY);
             for t in crate::memory::memory_tool_specs() {
+                if !specs.iter().any(|s| s.name == t.name) {
+                    specs.push(t);
+                }
+            }
+        }
+        if self.log_analysis_enabled {
+            for t in crate::log_analysis::log_tool_specs() {
                 if !specs.iter().any(|s| s.name == t.name) {
                     specs.push(t);
                 }
@@ -963,6 +987,10 @@ impl ToolHost {
             names::RECALL_MEMORY => self.tool_recall_memory(arguments)?,
             names::SUPERSEDE_MEMORY => self.tool_supersede_memory(arguments)?,
             names::RETRACT_MEMORY => self.tool_retract_memory(arguments)?,
+            crate::log_analysis::INGEST_LOGS => self.tool_ingest_logs(arguments)?,
+            crate::log_analysis::SEARCH_LOGS => self.tool_search_logs(arguments)?,
+            crate::log_analysis::CLUSTER_PROBLEMS => self.tool_cluster_problems(arguments)?,
+            crate::log_analysis::TIMELINE => self.tool_timeline(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
@@ -1309,6 +1337,184 @@ impl ToolHost {
             summary,
             raw,
             hits.first().map(|h| h.source_id.clone()),
+        ))
+    }
+
+    fn tool_ingest_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("ingest_logs requires path".into()))?;
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("corpus");
+        let report = crate::log_analysis::ingest_path(
+            cache,
+            std::path::Path::new(path),
+            name,
+            self.embed_backend.as_deref(),
+            "default",
+        )?;
+        let mut raw = format!(
+            "corpus={} lines={} templates={} reduction={:.1}x embedded={}\nTop templates:\n",
+            report.corpus_id,
+            report.stats.lines,
+            report.stats.templates,
+            report.stats.reduction_ratio,
+            report.stats.embedded
+        );
+        for (id, pat, count, sev) in &report.top_templates {
+            raw.push_str(&format!("- t{id} sev={sev} n={count}: {pat}\n"));
+        }
+        Ok((
+            true,
+            format!(
+                "ingested {} lines → {} templates",
+                report.stats.lines, report.stats.templates
+            ),
+            raw,
+            Some(format!("log_corpus:{}", report.corpus_id)),
+        ))
+    }
+
+    fn tool_search_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("search_logs requires corpus".into()))?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let q = crate::log_analysis::SearchLogsQuery {
+            query: args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            level: args
+                .get("level")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            service: args
+                .get("service")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            trace_id: args
+                .get("trace_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            semantic: args
+                .get("semantic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            k: args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize,
+            ..Default::default()
+        };
+        let hits = crate::log_analysis::search_logs(&corpus, &q, self.embed_backend.as_deref())?;
+        let mut raw = String::new();
+        for h in &hits {
+            raw.push_str(&format!(
+                "- t{} score={:.3} sem={:.3} n={} sev={}: {}\n",
+                h.template_id, h.score, h.semantic_score, h.count, h.severity, h.pattern
+            ));
+            for e in &h.exemplars {
+                raw.push_str(&format!("    e.g. {e}\n"));
+            }
+        }
+        Ok((
+            true,
+            format!("{} log hits", hits.len()),
+            raw,
+            hits.first()
+                .map(|h| format!("log_template:{}", h.template_id)),
+        ))
+    }
+
+    fn tool_cluster_problems(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("cluster_problems requires corpus".into()))?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let max = args
+            .get("max_clusters")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+        let clusters = crate::log_analysis::cluster_problems(&corpus, max)?;
+        let mut raw = String::new();
+        for c in &clusters {
+            raw.push_str(&format!(
+                "- cluster={} score={:.2} sev={} n={} templates={:?}: {}\n",
+                c.cluster_id, c.score, c.severity, c.count, c.template_ids, c.label
+            ));
+        }
+        Ok((
+            true,
+            format!("{} problem clusters", clusters.len()),
+            raw,
+            clusters
+                .first()
+                .map(|c| format!("log_cluster:{}", c.cluster_id)),
+        ))
+    }
+
+    fn tool_timeline(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("timeline requires corpus".into()))?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let width = args
+            .get("width_secs")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(60);
+        let level = args.get("level").and_then(|v| v.as_str());
+        let service = args.get("service").and_then(|v| v.as_str());
+        let buckets = crate::log_analysis::timeline(&corpus, width, level, service)?;
+        let mut raw = String::new();
+        for b in &buckets {
+            raw.push_str(&format!(
+                "- t={}..{} n={} by_level={:?}\n",
+                b.start,
+                b.start + b.width,
+                b.count,
+                b.by_level
+            ));
+        }
+        Ok((
+            true,
+            format!("{} timeline buckets", buckets.len()),
+            raw,
+            Some(format!("log_corpus:{cid}")),
         ))
     }
 
