@@ -152,7 +152,7 @@ pub fn ingest_path(
             )
         })
         .collect();
-    top.sort_by(|a, b| b.2.cmp(&a.2));
+    top.sort_by_key(|b| std::cmp::Reverse(b.2));
     top.truncate(10);
 
     corpus.flush()?;
