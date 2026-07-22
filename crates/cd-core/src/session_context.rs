@@ -390,18 +390,26 @@ fn walk_search(
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let text_lower = text.to_ascii_lowercase();
-        if let Some(byte_idx) = text_lower.find(q_lower) {
-            // Map approx to line
-            let prefix = &text[..byte_idx.min(text.len())];
-            let line = prefix.chars().filter(|c| *c == '\n').count() + 1;
-            let start = byte_idx.saturating_sub(40);
-            let end = (byte_idx + q_lower.len() + 80).min(text.len());
-            let excerpt: String = text
-                .chars()
-                .skip(start)
-                .take(end.saturating_sub(start))
-                .collect();
+        // Char-based case-fold search (no UTF-8 byte indexing).
+        let text_chars: Vec<char> = text.chars().collect();
+        let lower_chars: Vec<char> = text_chars.iter().flat_map(|c| c.to_lowercase()).collect();
+        let q_chars: Vec<char> = q_lower.chars().collect();
+        if q_chars.is_empty() {
+            continue;
+        }
+        if let Some(char_idx) = lower_chars
+            .windows(q_chars.len())
+            .position(|w| w == q_chars.as_slice())
+        {
+            let line = text_chars
+                .iter()
+                .take(char_idx)
+                .filter(|c| **c == '\n')
+                .count()
+                + 1;
+            let start_c = char_idx.saturating_sub(40);
+            let end_c = (char_idx + q_chars.len() + 80).min(text_chars.len());
+            let excerpt: String = text_chars[start_c..end_c].iter().collect();
             let rel = path
                 .strip_prefix(root)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
