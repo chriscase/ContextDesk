@@ -41,3 +41,4 @@ When you change a capability’s status:
 2. Update README / DEV.md / PROTOCOL.md so prose matches.
 3. Run `sh scripts/check_claims.sh` before merge.
 4. Never mark **Shipped** without a grep-able anchor on `main`.
+| Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |

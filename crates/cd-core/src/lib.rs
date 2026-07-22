@@ -47,6 +47,7 @@ pub mod router;
 /// Back-compat alias path used in docs.
 pub use keychain_store as secrets;
 pub mod news_sources;
+pub mod session_context;
 pub mod sessions;
 pub mod skills;
 pub mod sql_ro;
