@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import {
   hostCheckForUpdates,
   hostGetAmbientRecallEnabled,
+  hostGetBranding,
   hostGetHybridRetrieval,
   hostInstallUpdate,
   hostSetAmbientRecallEnabled,
   hostSetHybridRetrieval,
+  type BrandingDto,
   type RouterBudgetDto,
 } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
@@ -30,6 +32,7 @@ export function GeneralSection({
   const [hybridNote, setHybridNote] = useState<string | null>(null);
   const [ambientOn, setAmbientOn] = useState(true);
   const [ambientNote, setAmbientNote] = useState<string | null>(null);
+  const [identity, setIdentity] = useState<BrandingDto | null>(null);
 
   useEffect(() => {
     void hostGetHybridRetrieval().then((v) => {
@@ -38,6 +41,7 @@ export function GeneralSection({
     void hostGetAmbientRecallEnabled().then((v) => {
       if (v !== null) setAmbientOn(v);
     });
+    void hostGetBranding().then((b) => setIdentity(b));
   }, []);
 
   const onCheckUpdates = async () => {
@@ -84,6 +88,22 @@ export function GeneralSection({
         Data directory status:{" "}
         {draft.dataDirWritable ? "writable" : "not writable"}.
       </p>
+      <h3 className="settings-connector-block__title">About / build identity</h3>
+      <p className="field__hint" data-testid="build-identity-line">
+        {identity?.identity_line ??
+          (identity
+            ? `v${identity.version} · channel=${identity.channel} · protocol=${identity.protocol}${
+                identity.git_sha ? ` · git=${identity.git_sha}` : ""
+              }`
+            : "Loading identity…")}
+      </p>
+      {identity?.channel === "dev" ? (
+        <p className="field__hint">
+          Channel <code>dev</code> is for source/debug runs — signed installer
+          auto-update does not apply. Packaged builds set{" "}
+          <code>CD_CHANNEL=installed</code>.
+        </p>
+      ) : null}
       <h3 className="settings-connector-block__title">Updates</h3>
       <p className="field__hint">
         Opt-in signed channel (#173). Checks only when you click; nothing

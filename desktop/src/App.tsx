@@ -334,6 +334,9 @@ export function App() {
             dismissedBanner={shell.dismissedBanner}
             agentError={turn.agentError}
             appVersion={shell.branding.version}
+            channel={shell.branding.channel}
+            gitSha={shell.branding.git_sha}
+            identityLine={shell.branding.identity_line}
             onOpenPreflight={() =>
               shell.openSettings("preflight", chatScrollRef.current)
             }

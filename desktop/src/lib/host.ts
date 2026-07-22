@@ -44,6 +44,11 @@ export type BrandingDto = {
   tagline: string;
   version: string;
   protocol: string;
+  /** `dev` | `installed` (#338). */
+  channel: string;
+  git_sha?: string | null;
+  git_describe?: string | null;
+  identity_line?: string;
 };
 
 /** Product identity from Rust host / branding.toml (fallback for browser-only). */
@@ -55,6 +60,10 @@ export async function hostGetBranding(): Promise<BrandingDto> {
       tagline: "Developer knowledge workbench — find, synthesize, remember.",
       version: "0.1.0",
       protocol: "cd.v1",
+      channel: "dev",
+      git_sha: null,
+      git_describe: null,
+      identity_line: "v0.1.0 · channel=dev · protocol=cd.v1",
     };
   }
   return invoke<BrandingDto>("get_branding");

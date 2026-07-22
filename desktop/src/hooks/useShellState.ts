@@ -95,6 +95,8 @@ export function useShellState() {
     tagline: "Developer knowledge workbench — find, synthesize, remember.",
     version: "0.1.0",
     protocol: "cd.v1",
+    channel: "dev",
+    identity_line: "v0.1.0 · channel=dev · protocol=cd.v1",
   });
   const [theme, setTheme] = useState<SkinId>(loadTheme);
   const [uiScale, setUiScale] = useState<UiScale>(loadUiScale);

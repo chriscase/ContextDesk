@@ -40,12 +40,16 @@ describe("buildErrorReport (#325)", () => {
     const r = buildErrorReport({
       raw: "confluence: error sending request for url (https://ies-ebs-conf.ies.mentorg.com/rest/api/content/search?cql=secret)",
       appVersion: "0.1.0-test",
+      channel: "dev",
+      gitSha: "abc1234",
       osHint: "macOS",
     });
     expect(r.summary.length).toBeGreaterThan(0);
     expect(r.reportMarkdown).toContain("redacted");
     expect(r.reportMarkdown).not.toContain("mentorg");
     expect(r.reportMarkdown).not.toContain("cql=secret");
+    expect(r.reportMarkdown).toContain("Channel: dev");
+    expect(r.reportMarkdown).toContain("Git: abc1234");
     expect(r.githubNewIssueUrl).toContain("github.com/chriscase/ContextDesk/issues/new");
     expect(r.githubNewIssueUrl).toContain("title=");
     expect(decodeURIComponent(r.githubNewIssueUrl)).not.toContain("mentorg");

@@ -6,6 +6,10 @@ type Props = {
   dismissedBanner: boolean;
   agentError: string | null;
   appVersion?: string;
+  /** Build channel (#338). */
+  channel?: string;
+  gitSha?: string | null;
+  identityLine?: string;
   onOpenPreflight: () => void;
   onDismissSetup: () => void;
   onDismissError: () => void;
@@ -16,6 +20,9 @@ export function Banners({
   dismissedBanner,
   agentError,
   appVersion,
+  channel,
+  gitSha,
+  identityLine,
   onOpenPreflight,
   onDismissSetup,
   onDismissError,
@@ -28,8 +35,11 @@ export function Banners({
     return buildErrorReport({
       raw: agentError,
       appVersion,
+      channel,
+      gitSha: gitSha ?? undefined,
+      identityLine,
     });
-  }, [agentError, appVersion]);
+  }, [agentError, appVersion, channel, gitSha, identityLine]);
 
   // Collapse details when error changes/clears
   useEffect(() => {
