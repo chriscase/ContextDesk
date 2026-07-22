@@ -49,6 +49,17 @@
   transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
 }
 
+/* Settings / advanced selects — same open-menu contrast as composer model picker */
+select.field__control {
+  color-scheme: inherit;
+}
+
+select.field__control option,
+select.field__control optgroup {
+  background-color: var(--bg-elevated);
+  color: var(--text);
+}
+
 .field__control:focus {
   outline: none;
   border-color: var(--accent);
