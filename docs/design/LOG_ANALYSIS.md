@@ -58,9 +58,9 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 
 ## 4. Storage — the columnar decision
 
-Two stores, one owner decision:
+Two stores (event-store engine **decided 2026-07-18: DuckDB**):
 
-- **Event store (10–100M rows):** the analytical scans this whole feature exists for — "frequency of template T over this hour", "templates co-occurring within 5s of the incident", "count by service where level≥ERROR" — are columnar‑aggregate queries. **Recommendation: DuckDB** (embedded, columnar, no server, purpose‑built for exactly these scans over 100M rows, with native list/array types and a `vss` HNSW extension). The tradeoff is a second embedded engine in a codebase that is otherwise SQLite‑first. The conservative alternative is **SQLite** with careful indexing — it *can* hold 100M rows, but analytical scans are markedly slower. **This is the one significant engine decision (see §10).** Either way it is embedded/local.
+- **Event store (10–100M rows):** the analytical scans this whole feature exists for — "frequency of template T over this hour", "templates co-occurring within 5s of the incident", "count by service where level≥ERROR" — are columnar‑aggregate queries. **DuckDB (decided)** (embedded, columnar, no server, purpose‑built for exactly these scans over 100M rows, with native list/array types and a `vss` HNSW extension). The tradeoff is a second embedded engine in a codebase that is otherwise SQLite‑first. Bundle it via the `duckdb` Rust crate (embedded, no external process); verify the MIT license is compatible. (SQLite was the alternative considered and rejected — analytical scans over 100M rows are markedly slower.)
 - **Vector index (templates):** a `VectorIndex` trait (see §5) — exact for small sets, **HNSW** for large. Because we index templates, not lines, the vector count is modest even at 100M lines.
 
 Corpora are **per‑analysis, disposable** (an incident dump), stored under the app cache dir keyed by a corpus id — not mixed into durable memory. A corpus can be pinned/kept or discarded.
@@ -77,7 +77,7 @@ pub trait VectorIndex: Send + Sync {
 }
 ```
 - **`ExactIndex`** (brute-force cosine) — memory, and log corpora under ~50k templates.
-- **`HnswIndex`** (via `usearch` bindings or `hnsw_rs`, or DuckDB `vss`) — large corpora.
+- **`HnswIndex`** — large corpora; backed by DuckDB's `vss` extension (DuckDB is the event store, so template vectors live alongside events — one fewer dependency).
 Selection is automatic by size. **#346's recall fix should build `VectorIndex` (starting with `ExactIndex`) rather than a bespoke cosine loop**, so logs get ANN for free by adding `HnswIndex` behind the same trait. This is the key reuse: fix recall once, scale both.
 
 ## 6. Embedding — throughput matters
@@ -122,8 +122,8 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 
 ## 10. Owner decisions
 
-1. **Event‑store engine: DuckDB (recommended) vs SQLite.** DuckDB is materially faster for the 100M‑row analytical scans this feature is *for*, and has native array + HNSW; the cost is a second embedded DB engine alongside SQLite. SQLite keeps the stack uniform but scans slower. My recommendation is DuckDB for the log subsystem specifically (memory/KB stay SQLite).
-2. **HNSW library:** `usearch` (fast, C++ bindings, battle‑tested) vs `hnsw_rs`/`instant-distance` (pure Rust, simpler build) vs DuckDB `vss` (if DuckDB is chosen, one fewer dependency). Recommend DuckDB `vss` if DuckDB wins #1, else `usearch`.
+1. **Event‑store engine: DuckDB — DECIDED 2026-07-18.** DuckDB is the event-store engine for the log subsystem (memory/KB stay SQLite). Chosen for the 100M-row analytical scans this feature is *for* (columnar, native array, `vss` HNSW); accepted cost is a second embedded engine, confined to logs.
+2. **HNSW library:** `usearch` (fast, C++ bindings, battle‑tested) vs `hnsw_rs`/`instant-distance` (pure Rust, simpler build) vs DuckDB `vss` (if DuckDB is chosen, one fewer dependency). DECIDED: DuckDB `vss` (DuckDB is the event store, so this is one fewer dependency).
 3. **Local ONNX embedder:** `fastembed-rs` (recommended) vs staying on Ollama HTTP for consistency. fastembed is much faster for bulk and fully in‑process.
 4. **Corpus retention:** keep‑until‑discarded (recommended) vs auto‑expire after N days.
 
