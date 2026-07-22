@@ -2332,12 +2332,8 @@ async fn list_models_for_draft(
         let probe_local = matches!(kind, ProviderKind::Ollama)
             || req.base_url.contains("127.0.0.1")
             || req.base_url.to_lowercase().contains("localhost");
-        let result = cd_core::ai_probe::probe_ai_gateway(
-            &req.base_url,
-            key.as_deref(),
-            probe_local,
-        )
-        .await;
+        let result =
+            cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
         // Prefer chat candidates; fall back to full model list.
         let mut ids: Vec<String> = if !result.chat_candidates.is_empty() {
             result.chat_candidates.into_iter().map(|m| m.id).collect()
