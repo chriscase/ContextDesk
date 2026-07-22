@@ -33,6 +33,8 @@ export function GeneralSection({
   const [ambientOn, setAmbientOn] = useState(true);
   const [ambientNote, setAmbientNote] = useState<string | null>(null);
   const [identity, setIdentity] = useState<BrandingDto | null>(null);
+  const [pollEnabled, setPollEnabled] = useState(false);
+  const [pollHours, setPollHours] = useState(24);
 
   useEffect(() => {
     void hostGetHybridRetrieval().then((v) => {
@@ -42,6 +44,11 @@ export function GeneralSection({
       if (v !== null) setAmbientOn(v);
     });
     void hostGetBranding().then((b) => setIdentity(b));
+    void import("../../lib/updatePoll").then(({ loadUpdatePollPrefs }) => {
+      const p = loadUpdatePollPrefs();
+      setPollEnabled(p.enabled);
+      setPollHours(p.intervalHours);
+    });
   }, []);
 
   const onCheckUpdates = async () => {
@@ -106,10 +113,57 @@ export function GeneralSection({
       ) : null}
       <h3 className="settings-connector-block__title">Updates</h3>
       <p className="field__hint">
-        Opt-in signed channel (#173). Checks only when you click; nothing
-        installs without confirmation. Private signing key is never in the
-        app or repo.
+        Opt-in signed channel (#173 / #339). Nothing installs without
+        confirmation. Background poll is off by default; only applies when
+        channel is <code>installed</code> (source/dev builds skip installer
+        updates).
       </p>
+      <label className="toggle-row">
+        <input
+          type="checkbox"
+          checked={pollEnabled}
+          onChange={(e) => {
+            const enabled = e.target.checked;
+            setPollEnabled(enabled);
+            void import("../../lib/updatePoll").then(
+              ({ loadUpdatePollPrefs, saveUpdatePollPrefs }) => {
+                const cur = loadUpdatePollPrefs();
+                saveUpdatePollPrefs({
+                  ...cur,
+                  enabled,
+                  intervalHours: pollHours,
+                });
+              },
+            );
+          }}
+        />
+        <span>Background update checks (opt-in)</span>
+      </label>
+      <label className="field__label" htmlFor={`${baseId}-poll-hours`}>
+        Check interval (hours)
+      </label>
+      <input
+        id={`${baseId}-poll-hours`}
+        className="field__control"
+        type="number"
+        min={1}
+        max={168}
+        value={pollHours}
+        disabled={!pollEnabled}
+        onChange={(e) => {
+          const intervalHours = Math.max(
+            1,
+            Math.min(168, Number(e.target.value) || 24),
+          );
+          setPollHours(intervalHours);
+          void import("../../lib/updatePoll").then(
+            ({ loadUpdatePollPrefs, saveUpdatePollPrefs }) => {
+              const cur = loadUpdatePollPrefs();
+              saveUpdatePollPrefs({ ...cur, intervalHours });
+            },
+          );
+        }}
+      />
       <div className="workspace-root-actions">
         <button
           type="button"

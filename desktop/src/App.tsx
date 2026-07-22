@@ -14,6 +14,7 @@ import { PermissionModal } from "./components/PermissionModal";
 import { RenameChatModal } from "./components/RenameChatModal";
 import { SettingsModal } from "./components/SettingsModal";
 import { Banners } from "./components/shell/Banners";
+import { UpdateBanner } from "./components/shell/UpdateBanner";
 import { ChatContextMenu } from "./components/shell/ChatContextMenu";
 import { SessionSidebar } from "./components/shell/SessionSidebar";
 import { StatusBar } from "./components/shell/StatusBar";
@@ -329,6 +330,7 @@ export function App() {
             }
             onToggleTheme={() => shell.setTheme((t) => nextSkinId(t))}
           />
+          <UpdateBanner branding={shell.branding} />
           <Banners
             setupIncomplete={shell.preflight.hasBlocking}
             dismissedBanner={shell.dismissedBanner}
