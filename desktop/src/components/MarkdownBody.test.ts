@@ -1,11 +1,12 @@
 /**
  * parseBlocks completeness (#156): ordered lists, blockquotes, fences.
- * Table cells / inline: safe <br> restore (model HTML).
+ * Lists + table cells: unicode bullets, no double markers / raw <br> text.
  */
 import { describe, expect, it } from "vitest";
 import { __mdTest } from "./MarkdownBody";
 
-const { parseBlocks, renderInline } = __mdTest;
+const { parseBlocks, renderInline, looksLikeListBlob, stripListMarker } =
+  __mdTest;
 
 describe("parseBlocks markdown completeness (#156)", () => {
   it("parses ordered lists as ol blocks", () => {
@@ -13,6 +14,14 @@ describe("parseBlocks markdown completeness (#156)", () => {
     expect(blocks).toEqual([
       { kind: "ol", items: ["first", "second", "third"] },
     ]);
+  });
+
+  it("parses unicode bullet lists as ul", () => {
+    const blocks = parseBlocks("• alpha\n• beta\n- gamma");
+    expect(blocks[0]).toEqual({
+      kind: "ul",
+      items: ["alpha", "beta", "gamma"],
+    });
   });
 
   it("parses blockquotes joining consecutive > lines", () => {
@@ -49,36 +58,51 @@ describe("parseBlocks markdown completeness (#156)", () => {
   });
 });
 
-describe("renderInline safe HTML in table cells", () => {
+describe("renderInline lists and breaks", () => {
   it("turns model <br> into real breaks, not visible tags", () => {
     const html = renderInline("Line one<br>Line two<br/>Line three");
     expect(html).toContain("Line one<br />Line two<br />Line three");
     expect(html).not.toContain("&lt;br");
-    expect(html).not.toMatch(/<script/i);
+  });
+
+  it("does not convert plain newlines into br (pre-wrap handles them)", () => {
+    const html = renderInline("Line one\nLine two");
+    // default ctx: no auto br; newlines remain or are list-handled
+    expect(html).not.toContain("<br />");
+    expect(html).toContain("Line one");
+    expect(html).toContain("Line two");
   });
 
   it("keeps dangerous tags escaped", () => {
-    const html = renderInline('ok <script>alert(1)</script> <img src=x onerror=1>');
+    const html = renderInline(
+      "ok <script>alert(1)</script> <img src=x onerror=1>",
+    );
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("&lt;img");
     expect(html).not.toMatch(/<script>/i);
     expect(html).not.toMatch(/<img/i);
   });
 
-  it("renders table cell content with br via parseBlocks path", () => {
-    const md = [
-      "| Story | Notes |",
-      "| --- | --- |",
-      "| Alpha <br> Beta | more |",
-    ].join("\n");
-    const blocks = parseBlocks(md);
-    const table = blocks.find((b) => b.kind === "table");
-    expect(table?.kind).toBe("table");
-    if (table?.kind !== "table") return;
-    const cell = table.rows[0]?.[0] ?? "";
-    expect(cell).toMatch(/br/i);
-    const html = renderInline(cell);
-    expect(html).toContain("<br />");
+  it("strips list markers for list-item context", () => {
+    const html = renderInline("• already bulleted", "list-item");
+    expect(html).toBe("already bulleted");
+    expect(html).not.toContain("•");
+  });
+
+  it("converts bullet blobs in table cells into nested lists", () => {
+    expect(looksLikeListBlob("• Alpha<br>• Beta<br>• Gamma")).toBe(true);
+    const html = renderInline("• Alpha<br>• Beta<br>• Gamma", "table-cell");
+    expect(html).toContain('class="md-inline-list"');
+    expect(html).toContain("<li>Alpha</li>");
+    expect(html).toContain("<li>Beta</li>");
+    // No leftover bullet glyphs inside the li text
+    expect(html).not.toMatch(/<li>•/);
     expect(html).not.toContain("&lt;br");
+  });
+
+  it("stripListMarker handles dash and unicode", () => {
+    expect(stripListMarker("- hello")).toBe("hello");
+    expect(stripListMarker("• hello")).toBe("hello");
+    expect(stripListMarker("1. hello")).toBe("hello");
   });
 });

@@ -52,27 +52,66 @@ function shortHostFromUrl(raw: string): string {
 }
 
 /**
- * After escapeHtml, restore a tiny allowlist of tags models often put in
- * table cells / prose (otherwise users see literal "&lt;br&gt;").
- * Never restore script/style/iframe or attributes.
+ * Markdown `-`/`*` and common model unicode bullets (`•`, en/em dash as bullets).
+ * Leading markers are stripped when we already render a real <ul>/<ol>.
  */
-function restoreSafeHtmlTags(escaped: string): string {
-  let s = escaped;
-  // <br>, <br/>, <br />, <BR>
-  s = s.replace(/&lt;br\s*\/?&gt;/gi, "<br />");
-  // Occasional model garbage: <br></br>
-  s = s.replace(/&lt;br\s*&gt;\s*&lt;\/br\s*&gt;/gi, "<br />");
-  // Soft line breaks that survived as real newlines inside a cell/paragraph
-  // (table cells often have \n from multi-line model output).
-  s = s.replace(/\n/g, "<br />");
-  return s;
+const BULLET_LINE_RE = /^(?:[-*+•●○◦‣▪▫–—]|·)\s+/u;
+const ORDERED_LINE_RE = /^\d+[.)]\s+/;
+
+function isBulletLine(line: string): boolean {
+  return BULLET_LINE_RE.test(line.trim());
 }
 
-function renderInline(src: string): string {
-  // Escape first so raw HTML from the model cannot inject markup.
+function isOrderedLine(line: string): boolean {
+  return ORDERED_LINE_RE.test(line.trim());
+}
+
+function stripListMarker(line: string): string {
+  const t = line.trim();
+  if (BULLET_LINE_RE.test(t)) return t.replace(BULLET_LINE_RE, "").trim();
+  if (ORDERED_LINE_RE.test(t)) return t.replace(ORDERED_LINE_RE, "").trim();
+  return t;
+}
+
+/** Normalize model HTML breaks to real newlines before list detection. */
+function normalizeBreaksToNewlines(src: string): string {
+  return src
+    .replace(/\r\n/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/br>/gi, "");
+}
+
+/**
+ * True when most non-empty lines look like list items (bullet or numbered).
+ * Used for table cells / prose blobs that models fill with "• a<br>• b".
+ */
+function looksLikeListBlob(src: string): boolean {
+  const lines = normalizeBreaksToNewlines(src)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return false;
+  const marked = lines.filter((l) => isBulletLine(l) || isOrderedLine(l)).length;
+  return marked >= Math.ceil(lines.length * 0.6);
+}
+
+/**
+ * After escapeHtml, restore only safe <br> tags models emit.
+ * Do NOT convert every \n → <br>: CSS pre-wrap already shows newlines, and
+ * double-converting made lists look like "bullet + line-break character".
+ */
+function restoreSafeBrTags(escaped: string): string {
+  return escaped
+    .replace(/&lt;br\s*\/?&gt;/gi, "<br />")
+    .replace(/&lt;br\s*&gt;\s*&lt;\/br\s*&gt;/gi, "<br />");
+}
+
+/** Core inline formatting (bold/links/code) after optional list restructuring. */
+function renderInlinePlain(src: string): string {
   let s = escapeHtml(src);
-  // Then re-allow only safe structural breaks (common in GFM tables).
-  s = restoreSafeHtmlTags(s);
+  s = restoreSafeBrTags(s);
+  // Soft breaks: only when the model used an explicit HTML br (already restored).
+  // Real \n stay as \n for pre-wrap containers (paragraphs, table cells).
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
@@ -89,6 +128,47 @@ function renderInline(src: string): string {
     return `${pre}<a class="md-ext-link" href="${href}" target="_blank" rel="noreferrer noopener" title="${href}">${host}</a>`;
   });
   return s;
+}
+
+type InlineCtx = "default" | "list-item" | "table-cell";
+
+/**
+ * Inline renderer. List items strip redundant markers (CSS list-style owns the
+ * bullet). Table cells / prose that are clearly multi-bullet blobs become a
+ * nested <ul> instead of "• text<br>• text".
+ */
+function renderInline(src: string, ctx: InlineCtx = "default"): string {
+  if (ctx === "list-item") {
+    return renderInlinePlain(stripListMarker(src));
+  }
+
+  // Models often dump "• a<br>• b" into one table cell or paragraph.
+  if ((ctx === "table-cell" || ctx === "default") && looksLikeListBlob(src)) {
+    const lines = normalizeBreaksToNewlines(src)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const ordered = lines.every((l) => isOrderedLine(l));
+    const tag = ordered ? "ol" : "ul";
+    const items = lines
+      .map((l) => stripListMarker(l))
+      .filter(Boolean)
+      .map((it) => `<li>${renderInlinePlain(it)}</li>`)
+      .join("");
+    return `<${tag} class="md-inline-list">${items}</${tag}>`;
+  }
+
+  // Single soft breaks in cells: keep explicit <br>; map lone newlines for cells
+  // that are multi-line prose (not lists) so pre-wrap isn't required alone.
+  if (ctx === "table-cell") {
+    const withBreaks = normalizeBreaksToNewlines(src)
+      .split("\n")
+      .map((line) => renderInlinePlain(line))
+      .join("<br />");
+    return withBreaks;
+  }
+
+  return renderInlinePlain(src);
 }
 
 /** GFM table row: has pipes and is not a fence. */
@@ -221,10 +301,11 @@ function parseBlocks(text: string): Block[] {
       continue;
     }
 
-    if (/^[-*]\s+/.test(line)) {
+    // Unordered list: - * + or unicode bullets models love (• – —)
+    if (isBulletLine(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^[-*]\s+/, ""));
+      while (i < lines.length && isBulletLine(lines[i])) {
+        items.push(stripListMarker(lines[i]));
         i += 1;
       }
       blocks.push({ kind: "ul", items });
@@ -232,10 +313,10 @@ function parseBlocks(text: string): Block[] {
     }
 
     // Ordered list: 1. / 1)
-    if (/^\d+[.)]\s+/.test(line)) {
+    if (isOrderedLine(line)) {
       const items: string[] = [];
-      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\d+[.)]\s+/, ""));
+      while (i < lines.length && isOrderedLine(lines[i])) {
+        items.push(stripListMarker(lines[i]));
         i += 1;
       }
       blocks.push({ kind: "ol", items });
@@ -266,8 +347,8 @@ function parseBlocks(text: string): Block[] {
       lines[i].trim() !== "" &&
       !lines[i].startsWith("```") &&
       !/^#{1,3}\s+/.test(lines[i]) &&
-      !/^[-*]\s+/.test(lines[i]) &&
-      !/^\d+[.)]\s+/.test(lines[i]) &&
+      !isBulletLine(lines[i]) &&
+      !isOrderedLine(lines[i]) &&
       !/^>\s?/.test(lines[i]) &&
       !isTableStart(lines, i)
     ) {
@@ -420,7 +501,9 @@ function TableView({
               <th
                 key={i}
                 style={{ textAlign: aligns[i] }}
-                dangerouslySetInnerHTML={{ __html: renderInline(h) }}
+                dangerouslySetInnerHTML={{
+                  __html: renderInline(h, "table-cell"),
+                }}
               />
             ))}
           </tr>
@@ -433,7 +516,7 @@ function TableView({
                   key={ci}
                   style={{ textAlign: aligns[ci] }}
                   dangerouslySetInnerHTML={{
-                    __html: renderInline(row[ci] ?? ""),
+                    __html: renderInline(row[ci] ?? "", "table-cell"),
                   }}
                 />
               ))}
@@ -514,7 +597,9 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
               {b.items.map((it, j) => (
                 <li
                   key={j}
-                  dangerouslySetInnerHTML={{ __html: renderInline(it) }}
+                  dangerouslySetInnerHTML={{
+                    __html: renderInline(it, "list-item"),
+                  }}
                 />
               ))}
             </ul>
@@ -526,7 +611,9 @@ function BlocksView({ blocks }: { blocks: Block[] }) {
               {b.items.map((it, j) => (
                 <li
                   key={j}
-                  dangerouslySetInnerHTML={{ __html: renderInline(it) }}
+                  dangerouslySetInnerHTML={{
+                    __html: renderInline(it, "list-item"),
+                  }}
                 />
               ))}
             </ol>
@@ -627,5 +714,7 @@ export const __mdTest = {
   isTableRow,
   parseTableRow,
   renderInline,
-  restoreSafeHtmlTags,
+  looksLikeListBlob,
+  stripListMarker,
+  isBulletLine,
 };
