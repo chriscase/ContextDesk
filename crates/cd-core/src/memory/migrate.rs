@@ -7,7 +7,7 @@ use crate::error::{CoreError, CoreResult};
 use rusqlite::Connection;
 
 /// Current schema version shipped by this crate.
-pub const MEMORY_SCHEMA_VERSION: i64 = 1;
+pub const MEMORY_SCHEMA_VERSION: i64 = 2;
 
 /// Apply all pending migrations up to [`MEMORY_SCHEMA_VERSION`].
 ///
@@ -38,6 +38,10 @@ pub fn migrate(conn: &Connection) -> CoreResult<()> {
     if current < 1 {
         apply_v1(conn)?;
         record(conn, 1)?;
+    }
+    if current < 2 {
+        apply_v2_harvest(conn)?;
+        record(conn, 2)?;
     }
 
     Ok(())
@@ -120,6 +124,54 @@ CREATE TABLE IF NOT EXISTS memory_tags (
     Ok(())
 }
 
+/// Harvest / SourceRef linkage tables (#326 PR2). Co-located with memory DB.
+fn apply_v2_harvest(conn: &Connection) -> CoreResult<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS harvest (
+  id                  TEXT PRIMARY KEY,
+  source_system       TEXT NOT NULL,
+  source_instance     TEXT NOT NULL,
+  source_remote_id    TEXT NOT NULL,
+  source_collection   TEXT,
+  source_url          TEXT,
+  remote_version      INTEGER,
+  remote_etag         TEXT,
+  remote_content_hash TEXT,
+  memory_id           TEXT,
+  memory_lineage_root TEXT,
+  workspace_path      TEXT,
+  transform_profile   TEXT NOT NULL,
+  last_synced_at      INTEGER NOT NULL,
+  local_content_hash  TEXT NOT NULL,
+  local_dirty         INTEGER NOT NULL DEFAULT 0,
+  sync_status         TEXT NOT NULL DEFAULT 'in_sync',
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  CHECK (
+    (memory_id IS NOT NULL AND workspace_path IS NULL)
+    OR (memory_id IS NULL AND workspace_path IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_harvest_mem_dest
+  ON harvest(source_system, source_instance, source_remote_id, transform_profile)
+  WHERE memory_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_harvest_file_dest
+  ON harvest(source_system, source_instance, source_remote_id, transform_profile)
+  WHERE workspace_path IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_harvest_remote
+  ON harvest(source_system, source_instance, source_remote_id);
+CREATE INDEX IF NOT EXISTS idx_harvest_memory ON harvest(memory_id);
+CREATE INDEX IF NOT EXISTS idx_harvest_lineage ON harvest(memory_lineage_root);
+"#,
+    )
+    .map_err(sqlite_err)?;
+    Ok(())
+}
+
 fn sqlite_err(e: rusqlite::Error) -> CoreError {
     CoreError::Message(format!("memory sqlite: {e}"))
 }
@@ -177,6 +229,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bad, 0, "must not create index-style embeddings table");
+        let harvest: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='harvest'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(harvest, 1, "v2 harvest table required");
     }
 
     #[test]
