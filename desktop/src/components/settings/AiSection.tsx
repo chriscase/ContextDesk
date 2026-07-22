@@ -8,6 +8,8 @@ import {
   TextField,
   ToggleField,
 } from "../forms";
+import { AiSetupWizard } from "./AiSetupWizard";
+
 export type AiSectionProps = {
   baseId: string;
   draft: AppSetupState;
@@ -39,6 +41,10 @@ export function AiSection({
   recheck,
   checking,
 }: AiSectionProps) {
+  /** Wizard first when no provider yet; advanced when already configured. */
+  const [mode, setMode] = useState<"wizard" | "advanced">(() =>
+    draft.providerKind === "none" ? "wizard" : "advanced",
+  );
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsNote, setModelsNote] = useState<string | null>(null);
@@ -110,14 +116,38 @@ export function AiSection({
       ? "__other__"
       : "";
 
+  if (mode === "wizard") {
+    return (
+      <div>
+        <AiSetupWizard
+          baseId={baseId}
+          draft={draft}
+          setDraft={setDraft}
+          apiKeyDraft={apiKeyDraft}
+          setApiKeyDraft={setApiKeyDraft}
+          candidates={candidates}
+          onOpenAdvanced={() => setMode("advanced")}
+          onApplied={() => setMode("advanced")}
+        />
+      </div>
+    );
+  }
+
   return (
 <div>
-  <p className="section-lead">
-    Discover or configure models here. Paste a base URL (or pick Ollama /
-    Grok Build) and we list available chat models when the host can reach
-    them. Keys go to the OS keychain; profiles never need a hand-edited
-    secrets file.
-  </p>
+  <div className="ai-wizard__mode-row">
+    <p className="section-lead" style={{ margin: 0, flex: 1 }}>
+      Advanced AI settings. Paste a base URL (or pick Ollama / Grok Build)
+      and we list models when reachable. Keys go to the OS keychain.
+    </p>
+    <button
+      type="button"
+      className="btn btn--ghost btn--sm"
+      onClick={() => setMode("wizard")}
+    >
+      Setup wizard
+    </button>
+  </div>
   {candidates.length > 0 ? (
     <div className="field">
       <span className="field__label">Local candidates</span>
