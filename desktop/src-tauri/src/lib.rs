@@ -1088,12 +1088,16 @@ fn save_confluence_settings(
         }
     }
 
-    let cf = ConfluenceSettings {
-        enabled: req.enabled,
-        base_url,
-        spaces,
-        pat_ref,
-    };
+    let mut cf = state
+        .config
+        .lock()
+        .expect("config")
+        .confluence
+        .clone();
+    cf.enabled = req.enabled;
+    cf.base_url = base_url;
+    cf.spaces = spaces;
+    cf.pat_ref = pat_ref;
 
     let mut cfg = state.config.lock().expect("config");
     cfg.confluence = cf.clone();

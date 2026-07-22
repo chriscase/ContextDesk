@@ -463,6 +463,7 @@ mod tests {
             base_url: "https://wiki.example.com".into(),
             spaces: vec!["ENG".into()],
             pat_ref: None,
+            ..ConfluenceSettings::default()
         };
         let report = run_preflight(PreflightInput {
             workspace: Some(&ws),
