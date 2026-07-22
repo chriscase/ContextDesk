@@ -180,6 +180,30 @@ fn classify_context_error(err: &CoreError) -> bool {
     is_context_length_error(status, &s)
 }
 
+/// Gateway rejected native tool calling (e.g. vLLM without `--enable-auto-tool-choice`).
+///
+/// Typical body:
+/// `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set`
+pub fn is_tools_unsupported_error(err: &CoreError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "tool choice",
+        "tool_choice",
+        "enable-auto-tool-choice",
+        "tool-call-parser",
+        "tool_call_parser",
+        "does not support tools",
+        "tools are not supported",
+        "tool use is not supported",
+        "function calling is not supported",
+        "does not support function",
+        "unsupported tool",
+        "tools not enabled",
+        "tool calling is not enabled",
+    ];
+    NEEDLES.iter().any(|n| s.contains(n))
+}
+
 /// Soft char budget before proactive recompact (~32k tokens * 4).
 const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 120_000;
 
@@ -366,6 +390,9 @@ pub async fn run_agent_turn_with_sink(
             }
         }
         let mut attempt = 0u8;
+        // When the gateway rejects tool_choice=auto (common on vLLM), retry once
+        // without native tools so chat still works.
+        let mut tools_disabled = false;
         let completion = loop {
             let mut on_text = |t: String| {
                 if !t.is_empty() {
@@ -373,8 +400,9 @@ pub async fn run_agent_turn_with_sink(
                     out.push(StreamEvent::TextDelta { text: t });
                 }
             };
+            let tool_arg: &[ToolSpec] = if tools_disabled { &[] } else { &specs };
             let result = backend
-                .complete_streaming(&model_ctx, &specs, &mut on_text, cancel_ref)
+                .complete_streaming(&model_ctx, tool_arg, &mut on_text, cancel_ref)
                 .await;
             match result {
                 Ok(c) => break c,
@@ -383,6 +411,32 @@ pub async fn run_agent_turn_with_sink(
                         reason: "cancel".into(),
                     });
                     return Ok(out.into_events());
+                }
+                Err(e) if !tools_disabled && is_tools_unsupported_error(&e) => {
+                    tools_disabled = true;
+                    trail.push("tools_disabled:gateway_rejected_tool_choice".into());
+                    out.push(StreamEvent::Error {
+                        code: "tools_unsupported".into(),
+                        message: "This gateway rejected native tool calling (tool_choice=auto). \
+Retrying without tools — answers still work; built-in tools (KB search, etc.) need a \
+tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-parser."
+                            .into(),
+                    });
+                    // Soft-ground the model with a local KB prefetch when tools are off.
+                    if let Ok(ctx) = prefetch_context(host, user_text).await {
+                        if !ctx.is_empty() {
+                            model_ctx.push(ChatMessage {
+                                role: Role::System,
+                                content: format!(
+                                    "Local knowledge prefetch (tools unavailable on this gateway):\n{ctx}"
+                                ),
+                                tool_call_id: None,
+                                tool_calls: None,
+                            });
+                            trail.push("prefetch:search_kb".into());
+                        }
+                    }
+                    continue;
                 }
                 Err(e) if attempt == 0 && classify_context_error(&e) => {
                     // Reactive: harder compact + single retry (#113).
@@ -760,6 +814,83 @@ mod tests {
         assert!(!is_context_length_error(500, "context length"));
         assert!(classify_context_error(&CoreError::Message(
             "stream HTTP 400: context_length_exceeded".into()
+        )));
+    }
+
+    #[test]
+    fn classifies_vllm_tool_choice_error() {
+        let e = CoreError::Message(
+            r#"chat HTTP 400 Bad Request: {"object":"error","message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError","param":null,"code":400}"#
+                .into(),
+        );
+        assert!(is_tools_unsupported_error(&e));
+        assert!(!is_tools_unsupported_error(&CoreError::Message(
+            "chat HTTP 400: context_length_exceeded".into()
+        )));
+        assert!(!is_tools_unsupported_error(&CoreError::Message(
+            "chat HTTP 401: invalid api key".into()
+        )));
+    }
+
+    /// Gateway rejects tool_choice=auto → retry without tools and still answer.
+    #[tokio::test]
+    async fn agent_retries_without_tools_on_tool_choice_reject() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FlakyToolsBackend {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ChatBackend for FlakyToolsBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    assert!(
+                        !tools.is_empty(),
+                        "first attempt should request native tools"
+                    );
+                    return Err(CoreError::Message(
+                        r#"chat HTTP 400 Bad Request: {"message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"}"#
+                            .into(),
+                    ));
+                }
+                assert!(tools.is_empty(), "retry must strip tools");
+                Ok(ChatCompletion {
+                    content: "plain answer without tools".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("note.md"), "hello workspace\n").unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let mut history = vec![];
+        let backend = FlakyToolsBackend {
+            calls: AtomicUsize::new(0),
+        };
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "hello",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::Error { code, .. } if code == "tools_unsupported"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::TextDelta { text } if text.contains("plain answer")
         )));
     }
 
