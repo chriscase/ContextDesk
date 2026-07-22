@@ -68,7 +68,7 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 - Renaming/removing event `kind` discriminants requires `cd.v2` and a migration note in this file.
 - Hosts should ignore unknown event kinds for forward compatibility.
 
-## Server HTTP surface (`cd-server`, remediation #165–#168)
+## Server HTTP surface (`cd-server`, remediation #165–#168, sync #287)
 
 | Method | Path | Role |
 |--------|------|------|
@@ -76,6 +76,69 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 | `GET` | `/v1/research/stream` | SSE of the same event kinds (incremental; cancel on disconnect) |
 | `POST` | `/v1/session/prompt` | Session turn or `invoke_tool`; may emit `permission_required` |
 | `POST` | `/v1/permission/respond` | Client grant/deny → `grant_and_execute` (never auto-approved) |
+| `GET` | `/v1/sync/membership` | Workspaces and `admin`/`member` role visible to the bearer |
+| `POST` | `/v1/sync/changes_since` | Cursor-paged authoritative workspace-memory records |
+| `POST` | `/v1/sync/apply` | Admin-only idempotent workspace-memory mutation batch |
 
 Session hosts are retained **in-process** for the lifetime of the `cd-server` process (keyed by `session_id`). No TTL yet; restart clears pending grants. Writes never execute without a matching client `permission/respond` allow.
 
+### Workspace-memory sync v1 (server half)
+
+All sync routes use the existing bearer authentication and workspace membership.
+Members may discover membership and pull; only admins may call `sync/apply`. Personal
+scope is rejected at the server boundary and never appears in a pull response.
+
+`POST /v1/sync/changes_since` accepts:
+
+```json
+{
+  "workspace_id": "team-a",
+  "cursor": { "updated_at": 0, "rev": 0, "id": "" },
+  "limit": 200
+}
+```
+
+Omit `cursor` for the first page. `limit` is clamped to 1–500. The response contains
+`records`, `next_cursor`, `has_more`, and `server_time`. The cursor is the stable
+`(updated_at, rev, id)` tuple of the last returned record; clients persist it only
+after applying the complete page. Records include superseded/retracted rows so links
+and tombstones reconcile correctly.
+
+`POST /v1/sync/apply` accepts 1–100 mutations:
+
+```json
+{
+  "workspace_id": "team-a",
+  "mutations": [{
+    "mutation_id": "desktop-a:42",
+    "origin_node": "desktop-a",
+    "client_updated_at": 1784745600,
+    "client_rev": 3,
+    "base_rev": 2,
+    "operation": {
+      "UpdateMeta": {
+        "id": "018f4c67-89ab-7def-8123-456789abcdef",
+        "tags": ["confirmed"],
+        "pinned": null,
+        "valid_to": null,
+        "status": null
+      }
+    }
+  }]
+}
+```
+
+`operation` is the serialized `MemoryWriteOp` (`Insert`, `UpdateMeta`, `Supersede`,
+or `Retract`). An insert must omit/null `base_rev`; updates should send the last seen
+revision. Results are per mutation: `applied`, `duplicate`, `conflict`, `rejected`,
+`not_found`, or `indeterminate`. The durable mutation journal makes a completed
+`mutation_id` retry-safe across restarts. `indeterminate` means a crash/store failure
+may have happened after the durable intent record: pull before deciding whether to
+retry with a new mutation id.
+
+Conflicts use `base_rev` first, then last-writer-wins on the client
+`(client_updated_at, client_rev)` tuple against the current server row. Accepted writes
+receive a monotonic server `updated_at`; supersession creates a replacement row and
+preserves both links. Client timestamps more than five minutes in the future are
+rejected. This is the server contract only; the desktop cache/offline worker remains
+open under #287.

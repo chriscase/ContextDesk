@@ -1,6 +1,6 @@
 # ADR 0002: Server-authoritative sync for shared workspace context
 
-**Status:** Accepted (design only)  
+**Status:** Accepted; server half implemented, client worker pending
 **Date:** 2026-07-18  
 **Issue:** #277 (epic #276)  
 **Implementation epic:** #287 (spawned)
@@ -42,3 +42,14 @@ Memory Phase-1 reserved sync columns: `rev`, `updated_at`, `origin_node`, plus `
 ## Implementation epic
 
 See **#287** (children: protocol + cursor, client sync worker, server apply/reconcile, personal-bar tests).
+
+The server half now uses one authoritative SQLite memory store per configured
+workspace and exposes membership, cursor pull, and admin-only mutation apply under
+`/v1/sync/*`. It also routes server research/session memory tools through that same
+store, imports the older JSONL notes idempotently, and keeps the JSONL wire as a
+compatibility mirror.
+
+The remaining #287 work is intentionally client-side: keychain-backed server
+credentials, a desktop local-cache pull/push worker, an offline mutation queue, and
+client reconciliation/UI state. Until that worker lands, the desktop does not claim
+automatic multi-install sync.

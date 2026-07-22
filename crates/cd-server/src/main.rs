@@ -12,6 +12,9 @@ use cd_core::config::{config_path, ensure_config_dir, load_config};
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{looks_like_raw_secret, KeychainSecretStore, SecretStore};
+use cd_core::memory::{
+    MemoryDraft, MemoryRecord, MemoryStore, MemoryWriteOp, Scope, SqliteMemoryStore,
+};
 use cd_core::permissions::PermissionDecision;
 use cd_core::providers::ProviderProfile;
 use cd_core::research::{
@@ -182,10 +185,142 @@ async fn run_research_turn(
 struct WorkspaceData {
     workspace: Workspace,
     index: KeywordIndex,
-    /// In-RAM mirror of the on-disk shared memory (`memory_path`), loaded at boot.
-    memory: Vec<MemoryNote>,
-    /// JSONL file the shared memory persists to (survives restart) (#167).
+    /// Compatibility mirror for the original #167 `/v1/memory/*` wire.
     memory_path: PathBuf,
+    /// Server-authoritative workspace memory store (#287).
+    sync_memory: Arc<SqliteMemoryStore>,
+    /// Durable mutation-id journal: retry-safe even across server restart.
+    sync_journal_path: PathBuf,
+    sync_journal: HashMap<String, SyncJournalState>,
+    /// Server-assigned monotonic write clock for cursor safety.
+    sync_clock: Arc<Mutex<i64>>,
+}
+
+/// Tool-facing view of the authoritative store. The server has no personal
+/// store, so personal writes are rejected and every workspace draft is stamped
+/// with the authenticated workspace before it reaches SQLite.
+struct AuthoritativeWorkspaceStore {
+    workspace_id: String,
+    inner: Arc<SqliteMemoryStore>,
+    sync_clock: Arc<Mutex<i64>>,
+}
+
+impl AuthoritativeWorkspaceStore {
+    fn normalize_draft(&self, draft: &mut MemoryDraft) -> cd_core::CoreResult<()> {
+        if draft.scope != Scope::Workspace {
+            return Err(cd_core::CoreError::Policy(
+                "personal memory is device-local and unavailable on cd-server".into(),
+            ));
+        }
+        draft.workspace_id = Some(self.workspace_id.clone());
+        Ok(())
+    }
+
+    fn ensure_target(&self, id: &uuid::Uuid) -> cd_core::CoreResult<()> {
+        let record = self
+            .inner
+            .get(id)?
+            .ok_or_else(|| cd_core::CoreError::Message(format!("memory not found: {id}")))?;
+        if record.scope != Scope::Workspace
+            || record.workspace_id.as_deref() != Some(self.workspace_id.as_str())
+        {
+            return Err(cd_core::CoreError::Policy(
+                "memory target is outside the server workspace".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl MemoryStore for AuthoritativeWorkspaceStore {
+    fn put(
+        &self,
+        mut operation: MemoryWriteOp,
+        now_secs: i64,
+    ) -> cd_core::CoreResult<MemoryRecord> {
+        match &mut operation {
+            MemoryWriteOp::Insert(draft) => self.normalize_draft(draft)?,
+            MemoryWriteOp::Supersede { old, new } => {
+                self.ensure_target(old)?;
+                self.normalize_draft(new)?;
+            }
+            MemoryWriteOp::UpdateMeta { id, .. } | MemoryWriteOp::Retract { id } => {
+                self.ensure_target(id)?;
+            }
+        }
+        let accepted_at = reserve_sync_timestamp(&self.sync_clock, now_secs)?;
+        self.inner.put(operation, accepted_at)
+    }
+
+    fn get(&self, id: &uuid::Uuid) -> cd_core::CoreResult<Option<MemoryRecord>> {
+        Ok(self.inner.get(id)?.filter(|record| {
+            record.scope == Scope::Workspace
+                && record.workspace_id.as_deref() == Some(self.workspace_id.as_str())
+        }))
+    }
+
+    fn recall(
+        &self,
+        query: &cd_core::memory::RecallQuery,
+        embed: Option<&dyn cd_core::embed::EmbedBackend>,
+        weights: cd_core::embed::HybridWeights,
+        now_secs: i64,
+    ) -> cd_core::CoreResult<Vec<cd_core::memory::RecallHit>> {
+        Ok(self
+            .inner
+            .recall(query, embed, weights, now_secs)?
+            .into_iter()
+            .filter(|hit| {
+                hit.record.scope == Scope::Workspace
+                    && hit.record.workspace_id.as_deref() == Some(self.workspace_id.as_str())
+            })
+            .collect())
+    }
+
+    fn set_embed_backend(
+        &self,
+        backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
+        model: &str,
+    ) {
+        self.inner.set_embed_backend(backend, model);
+    }
+
+    fn changes_since(&self, cursor: i64) -> cd_core::CoreResult<Vec<MemoryRecord>> {
+        Ok(self
+            .inner
+            .changes_since(cursor)?
+            .into_iter()
+            .filter(|record| {
+                record.scope == Scope::Workspace
+                    && record.workspace_id.as_deref() == Some(self.workspace_id.as_str())
+            })
+            .collect())
+    }
+
+    fn list(
+        &self,
+        kinds: Option<&[cd_core::memory::Kind]>,
+        include_superseded: bool,
+        include_retracted: bool,
+        now_secs: i64,
+        limit: usize,
+    ) -> cd_core::CoreResult<Vec<MemoryRecord>> {
+        Ok(self
+            .inner
+            .list(
+                kinds,
+                include_superseded,
+                include_retracted,
+                now_secs,
+                limit,
+            )?
+            .into_iter()
+            .filter(|record| {
+                record.scope == Scope::Workspace
+                    && record.workspace_id.as_deref() == Some(self.workspace_id.as_str())
+            })
+            .collect())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -193,6 +328,24 @@ struct MemoryNote {
     id: String,
     title: String,
     body: String,
+}
+
+#[derive(Clone)]
+enum SyncJournalState {
+    Indeterminate,
+    Applied(Box<MemoryRecord>),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum SyncJournalEntry {
+    Pending {
+        mutation_id: String,
+    },
+    Applied {
+        mutation_id: String,
+        record: Box<MemoryRecord>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +458,20 @@ fn workspace_memory_path(data_dir: &Path, workspace_id: &str) -> PathBuf {
         .join("memory.jsonl")
 }
 
+fn workspace_sync_db_path(data_dir: &Path, workspace_id: &str) -> PathBuf {
+    data_dir
+        .join("workspaces")
+        .join(workspace_id)
+        .join("memory.sqlite")
+}
+
+fn workspace_sync_journal_path(data_dir: &Path, workspace_id: &str) -> PathBuf {
+    data_dir
+        .join("workspaces")
+        .join(workspace_id)
+        .join("sync-mutations.jsonl")
+}
+
 /// Load persisted shared memory from disk (missing file → empty). Skips unparsable lines.
 fn load_memory_jsonl(path: &Path) -> Vec<MemoryNote> {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -328,6 +495,111 @@ fn append_memory_jsonl(path: &Path, note: &MemoryNote) -> std::io::Result<()> {
     Ok(())
 }
 
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn reserve_sync_timestamp(clock: &Mutex<i64>, requested_at: i64) -> cd_core::CoreResult<i64> {
+    let mut last = clock
+        .lock()
+        .map_err(|_| cd_core::CoreError::Message("sync clock lock poisoned".into()))?;
+    let accepted_at = requested_at.max(last.saturating_add(1));
+    *last = accepted_at;
+    Ok(accepted_at)
+}
+
+fn legacy_memory_id(workspace_id: &str, note_id: &str) -> uuid::Uuid {
+    if let Ok(id) = uuid::Uuid::parse_str(note_id) {
+        return id;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"contextdesk-server-legacy-memory\0");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(note_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Mark the stable hash as RFC 4122 variant/version 5-shaped UUID bytes.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
+/// Import the original #167 JSONL notes once into the authoritative store.
+/// Existing ids are preserved when they are UUIDs; `put_imported` is idempotent.
+fn import_legacy_memory(
+    store: &SqliteMemoryStore,
+    workspace_id: &str,
+    notes: &[MemoryNote],
+) -> Result<(), String> {
+    let mut at = now_unix_secs();
+    for note in notes {
+        let mut draft = MemoryDraft::new(cd_core::memory::Kind::ProjectNote, &note.body);
+        draft.title = note.title.clone();
+        draft.scope = Scope::Workspace;
+        draft.workspace_id = Some(workspace_id.to_string());
+        draft.source = cd_core::memory::MemorySource::Import;
+        draft.created_by = "server-jsonl-migration".into();
+        store
+            .put_imported(legacy_memory_id(workspace_id, &note.id), draft, at)
+            .map_err(|e| format!("legacy memory import failed: {e}"))?;
+        at = at.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn load_sync_journal(path: &Path) -> Result<HashMap<String, SyncJournalState>, String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(HashMap::new());
+    };
+    let mut out = HashMap::new();
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SyncJournalEntry = serde_json::from_str(line).map_err(|e| {
+            format!(
+                "invalid sync journal {} line {}: {e}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        match entry {
+            SyncJournalEntry::Pending { mutation_id } => {
+                out.insert(mutation_id, SyncJournalState::Indeterminate);
+            }
+            SyncJournalEntry::Applied {
+                mutation_id,
+                record,
+            } => {
+                out.insert(mutation_id, SyncJournalState::Applied(record));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Append and fsync before/after the store mutation. A crash after `pending`
+/// returns an indeterminate retry instead of risking a duplicate insert.
+fn append_sync_journal(path: &Path, entry: &SyncJournalEntry) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("sync journal directory: {e}"))?;
+    }
+    let line = serde_json::to_string(entry).map_err(|e| format!("sync journal json: {e}"))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("sync journal open: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("sync journal append: {e}"))?;
+    file.sync_data()
+        .map_err(|e| format!("sync journal fsync: {e}"))
+}
+
 /// Build [`AppState`] from resolved workspaces + a data dir. Loads persisted memory
 /// from disk (so a restart re-hydrates shared memory) and opens the shared audit log.
 fn build_state(
@@ -344,14 +616,31 @@ fn build_state(
         let ws = Workspace::new(&rw.id, rw.roots.clone());
         let index = KeywordIndex::build(&ws).unwrap_or_default();
         let memory_path = workspace_memory_path(data_dir, &rw.id);
-        let memory = load_memory_jsonl(&memory_path);
+        let legacy_memory = load_memory_jsonl(&memory_path);
+        let sync_memory = Arc::new(
+            SqliteMemoryStore::open(workspace_sync_db_path(data_dir, &rw.id))
+                .map_err(|e| format!("workspace '{}' sync memory: {e}", rw.id))?,
+        );
+        import_legacy_memory(&sync_memory, &rw.id, &legacy_memory)?;
+        let sync_journal_path = workspace_sync_journal_path(data_dir, &rw.id);
+        let sync_journal = load_sync_journal(&sync_journal_path)?;
+        let last_sync_updated_at = sync_memory
+            .changes_since(i64::MIN)
+            .map_err(|e| format!("workspace '{}' sync cursor init: {e}", rw.id))?
+            .into_iter()
+            .map(|record| record.updated_at)
+            .max()
+            .unwrap_or(0);
         workspaces.insert(
             rw.id.clone(),
             WorkspaceData {
                 workspace: ws,
                 index,
-                memory,
                 memory_path,
+                sync_memory,
+                sync_journal_path,
+                sync_journal,
+                sync_clock: Arc::new(Mutex::new(last_sync_updated_at)),
             },
         );
         for (h, role) in rw.keys {
@@ -373,6 +662,26 @@ fn build_state(
         provider,
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     })
+}
+
+fn build_authoritative_host(
+    workspace: Workspace,
+    sync_memory: Arc<SqliteMemoryStore>,
+    sync_clock: Arc<Mutex<i64>>,
+    audit_path: PathBuf,
+) -> Result<ToolHost, StatusCode> {
+    // Server workspaces are keyed by the configured name; `Workspace::id` is a
+    // locally generated filesystem identity and is not the sync protocol id.
+    let workspace_id = workspace.name.clone();
+    let mut host =
+        build_host(workspace, Some(audit_path)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let store: Arc<dyn MemoryStore> = Arc::new(AuthoritativeWorkspaceStore {
+        workspace_id,
+        inner: sync_memory,
+        sync_clock,
+    });
+    host.set_durable_memory(store, true);
+    Ok(host)
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState, workspace_id: &str) -> Result<(), StatusCode> {
@@ -529,13 +838,8 @@ async fn publish_memory(
         &deny_target,
     )?;
 
-    let note = MemoryNote {
-        id: uuid::Uuid::new_v4().to_string(),
-        title: body.title,
-        body: body.body,
-    };
-    let bytes = note.body.len() as u64;
-    {
+    let bytes = body.body.len() as u64;
+    let note = {
         let mut map = state
             .workspaces
             .lock()
@@ -543,13 +847,33 @@ async fn publish_memory(
         let data = map
             .get_mut(&body.workspace_id)
             .ok_or(StatusCode::NOT_FOUND)?;
-        // Persist to disk FIRST so a crash never acknowledges an unsaved note.
+        let at = reserve_sync_timestamp(&data.sync_clock, now_unix_secs())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut draft = MemoryDraft::new(cd_core::memory::Kind::ProjectNote, body.body);
+        draft.title = body.title;
+        draft.scope = Scope::Workspace;
+        draft.workspace_id = Some(body.workspace_id.clone());
+        draft.created_by = "server-api".into();
+        let record = data
+            .sync_memory
+            .put(MemoryWriteOp::Insert(draft), at)
+            .map_err(|e| {
+                tracing::error!(error = %e, "authoritative shared memory persist failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let note = MemoryNote {
+            id: record.id.to_string(),
+            title: record.title,
+            body: record.content,
+        };
+        // Compatibility mirror for operators/tests from #167. SQLite above is
+        // authoritative; a failed mirror never acknowledges the request.
         append_memory_jsonl(&data.memory_path, &note).map_err(|e| {
-            tracing::error!("shared memory persist failed: {e}");
+            tracing::error!("shared memory JSONL mirror failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-        data.memory.push(note.clone());
-    }
+        note
+    };
     let _ = state.audit.log(
         "memory_publish",
         ToolSideEffect::HardWrite,
@@ -577,7 +901,23 @@ async fn list_memory(
         .lock()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(serde_json::json!({ "notes": data.memory })))
+    let records = data
+        .sync_memory
+        .list(None, false, false, now_unix_secs(), 500)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let notes: Vec<MemoryNote> = records
+        .into_iter()
+        .filter(|record| {
+            record.scope == Scope::Workspace
+                && record.workspace_id.as_deref() == Some(body.workspace_id.as_str())
+        })
+        .map(|record| MemoryNote {
+            id: record.id.to_string(),
+            title: record.title,
+            body: record.content,
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "notes": notes })))
 }
 
 #[derive(Deserialize)]
@@ -595,16 +935,24 @@ async fn research(
     Json(body): Json<ResearchBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
     authorize(&headers, &state, &body.workspace_id)?;
-    let ws = {
+    let (ws, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
-        data.workspace.clone()
+        (
+            data.workspace.clone(),
+            data.sync_memory.clone(),
+            data.sync_clock.clone(),
+        )
     };
-    let mut host = build_host(ws, Some(state.audit.path().to_path_buf()))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut host = build_authoritative_host(
+        ws,
+        sync_memory,
+        sync_clock,
+        state.audit.path().to_path_buf(),
+    )?;
     let sid = body.session_id.unwrap_or_else(|| "server".into());
     let (events, degraded, model) = run_research_turn(
         &mut host,
@@ -650,13 +998,17 @@ async fn research_sse(
     Query(q): Query<StreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     authorize(&headers, &state, &q.workspace_id)?;
-    let ws = {
+    let (ws, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let data = map.get(&q.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
-        data.workspace.clone()
+        (
+            data.workspace.clone(),
+            data.sync_memory.clone(),
+            data.sync_clock.clone(),
+        )
     };
     let provider = state.provider.clone();
     let force_local = q.force_local;
@@ -669,7 +1021,7 @@ async fn research_sse(
     let cancel_task = cancel.clone();
 
     tokio::spawn(async move {
-        let Ok(mut host) = build_host(ws, Some(audit_path)) else {
+        let Ok(mut host) = build_authoritative_host(ws, sync_memory, sync_clock, audit_path) else {
             let _ = tx.send(StreamEvent::Error {
                 code: "host_build".into(),
                 message: "failed to build tool host".into(),
@@ -798,16 +1150,24 @@ async fn ensure_session_host(
         }
         return Ok(());
     }
-    let ws = {
+    let (ws, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let data = map.get(workspace_id).ok_or(StatusCode::NOT_FOUND)?;
-        data.workspace.clone()
+        (
+            data.workspace.clone(),
+            data.sync_memory.clone(),
+            data.sync_clock.clone(),
+        )
     };
-    let host = build_host(ws, Some(state.audit.path().to_path_buf()))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let host = build_authoritative_host(
+        ws,
+        sync_memory,
+        sync_clock,
+        state.audit.path().to_path_buf(),
+    )?;
     sessions.insert(
         session_id.to_string(),
         SessionHost {
@@ -900,6 +1260,431 @@ async fn permission_respond(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// Server-authoritative workspace memory sync (#287, server half only).
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct SyncMembership {
+    workspace_id: String,
+    role: Role,
+}
+
+async fn sync_membership(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    let mut memberships = Vec::new();
+    if state.key_hashes.is_empty() {
+        let map = state
+            .workspaces
+            .lock()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        memberships.extend(map.keys().cloned().map(|workspace_id| SyncMembership {
+            workspace_id,
+            role: Role::Admin,
+        }));
+    } else {
+        let hash = token_hash(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+        if !key_hash_authorized(&state.key_hashes, &hash) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        if let Some(roles) = state.key_roles.get(&hash) {
+            memberships.extend(roles.iter().map(|(workspace_id, role)| SyncMembership {
+                workspace_id: workspace_id.clone(),
+                role: *role,
+            }));
+        }
+    }
+    memberships.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+    Ok(Json(serde_json::json!({ "workspaces": memberships })))
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct SyncCursor {
+    updated_at: i64,
+    rev: i64,
+    id: String,
+}
+
+impl SyncCursor {
+    fn for_record(record: &MemoryRecord) -> Self {
+        Self {
+            updated_at: record.updated_at,
+            rev: record.rev,
+            id: record.id.to_string(),
+        }
+    }
+}
+
+fn sync_record_after_cursor(record: &MemoryRecord, cursor: &SyncCursor) -> bool {
+    (record.updated_at, record.rev, record.id.to_string())
+        > (cursor.updated_at, cursor.rev, cursor.id.clone())
+}
+
+fn overlay_journal_origin(
+    mut record: MemoryRecord,
+    journal: &HashMap<String, SyncJournalState>,
+) -> MemoryRecord {
+    // SQLite's v1 write op does not accept origin_node. Preserve the most
+    // recent journaled origin for this row at or before its current revision;
+    // a later supersession changes the old row without changing its author.
+    let origin = journal
+        .values()
+        .filter_map(|state| match state {
+            SyncJournalState::Applied(applied)
+                if applied.id == record.id
+                    && (applied.updated_at, applied.rev) <= (record.updated_at, record.rev) =>
+            {
+                Some(applied.as_ref())
+            }
+            _ => None,
+        })
+        .max_by_key(|applied| (applied.updated_at, applied.rev))
+        .and_then(|applied| applied.origin_node.clone());
+    if let Some(origin) = origin {
+        record.origin_node = Some(origin);
+    }
+    record
+}
+
+#[derive(Deserialize)]
+struct SyncChangesBody {
+    workspace_id: String,
+    cursor: Option<SyncCursor>,
+    limit: Option<usize>,
+}
+
+async fn sync_changes_since(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SyncChangesBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    let cursor = body.cursor.unwrap_or(SyncCursor {
+        updated_at: i64::MIN,
+        rev: i64::MIN,
+        id: String::new(),
+    });
+    let limit = body.limit.unwrap_or(200).clamp(1, 500);
+    let map = state
+        .workspaces
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
+    // Query one second back so records sharing the cursor timestamp remain visible;
+    // the tuple cursor below removes already-delivered rows deterministically.
+    let query_cursor = cursor.updated_at.saturating_sub(1);
+    let mut records: Vec<MemoryRecord> = data
+        .sync_memory
+        .changes_since(query_cursor)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .into_iter()
+        .filter(|record| {
+            record.scope == Scope::Workspace
+                && record.workspace_id.as_deref() == Some(body.workspace_id.as_str())
+                && sync_record_after_cursor(record, &cursor)
+        })
+        .map(|record| overlay_journal_origin(record, &data.sync_journal))
+        .collect();
+    records.sort_by_key(|record| (record.updated_at, record.rev, record.id.to_string()));
+    let has_more = records.len() > limit;
+    records.truncate(limit);
+    let next_cursor = records.last().map(SyncCursor::for_record).unwrap_or(cursor);
+    Ok(Json(serde_json::json!({
+        "workspace_id": body.workspace_id,
+        "records": records,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "server_time": now_unix_secs(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SyncApplyBody {
+    workspace_id: String,
+    mutations: Vec<SyncMutation>,
+}
+
+#[derive(Deserialize)]
+struct SyncMutation {
+    mutation_id: String,
+    origin_node: String,
+    client_updated_at: i64,
+    client_rev: i64,
+    base_rev: Option<i64>,
+    operation: MemoryWriteOp,
+}
+
+#[derive(Serialize)]
+struct SyncApplyResult {
+    mutation_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record: Option<MemoryRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_record: Option<MemoryRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+fn sync_identifier_valid(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+}
+
+fn sync_operation_target(operation: &MemoryWriteOp) -> Option<uuid::Uuid> {
+    match operation {
+        MemoryWriteOp::Insert(_) => None,
+        MemoryWriteOp::UpdateMeta { id, .. } | MemoryWriteOp::Retract { id } => Some(*id),
+        MemoryWriteOp::Supersede { old, .. } => Some(*old),
+    }
+}
+
+fn normalize_sync_operation(
+    mut operation: MemoryWriteOp,
+    workspace_id: &str,
+) -> Result<MemoryWriteOp, &'static str> {
+    let normalize = |draft: &mut MemoryDraft| -> Result<(), &'static str> {
+        if draft.scope != Scope::Workspace {
+            return Err("personal scope is device-local and cannot be synced");
+        }
+        draft.workspace_id = Some(workspace_id.to_string());
+        Ok(())
+    };
+    match &mut operation {
+        MemoryWriteOp::Insert(draft) => normalize(draft)?,
+        MemoryWriteOp::Supersede { new, .. } => normalize(new)?,
+        MemoryWriteOp::UpdateMeta { .. } | MemoryWriteOp::Retract { .. } => {}
+    }
+    Ok(operation)
+}
+
+fn rejected_sync_result(mutation_id: String, status: &str, detail: &str) -> SyncApplyResult {
+    SyncApplyResult {
+        mutation_id,
+        status: status.into(),
+        record: None,
+        server_record: None,
+        detail: Some(detail.into()),
+    }
+}
+
+async fn sync_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SyncApplyBody>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &body.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &body.workspace_id,
+        "sync_apply",
+        &body.workspace_id,
+    )?;
+    if body.mutations.is_empty() || body.mutations.len() > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let server_now = now_unix_secs();
+    let mut map = state
+        .workspaces
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let data = map
+        .get_mut(&body.workspace_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut results = Vec::with_capacity(body.mutations.len());
+
+    for mutation in body.mutations {
+        let mutation_id = mutation.mutation_id.trim().to_string();
+        if !sync_identifier_valid(&mutation_id) || !sync_identifier_valid(&mutation.origin_node) {
+            results.push(rejected_sync_result(
+                mutation_id,
+                "rejected",
+                "mutation_id/origin_node must be 1-128 safe identifier characters",
+            ));
+            continue;
+        }
+        if mutation.client_rev < 0 || mutation.client_updated_at > server_now.saturating_add(300) {
+            results.push(rejected_sync_result(
+                mutation_id,
+                "rejected",
+                "invalid revision or client timestamp exceeds allowed clock skew",
+            ));
+            continue;
+        }
+        if let Some(previous) = data.sync_journal.get(&mutation_id) {
+            results.push(match previous {
+                SyncJournalState::Applied(record) => SyncApplyResult {
+                    mutation_id,
+                    status: "duplicate".into(),
+                    record: Some(record.as_ref().clone()),
+                    server_record: None,
+                    detail: None,
+                },
+                SyncJournalState::Indeterminate => rejected_sync_result(
+                    mutation_id,
+                    "indeterminate",
+                    "a prior attempt may have committed; pull changes before retrying",
+                ),
+            });
+            continue;
+        }
+
+        let operation = match normalize_sync_operation(mutation.operation, &body.workspace_id) {
+            Ok(operation) => operation,
+            Err(detail) => {
+                let _ = state.audit.log(
+                    "sync_apply",
+                    ToolSideEffect::SoftWrite,
+                    &body.workspace_id,
+                    outcomes::DENIED,
+                    detail,
+                    0,
+                );
+                results.push(rejected_sync_result(mutation_id, "rejected", detail));
+                continue;
+            }
+        };
+
+        if let Some(target_id) = sync_operation_target(&operation) {
+            let current = data
+                .sync_memory
+                .get(&target_id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let Some(current) = current else {
+                results.push(rejected_sync_result(
+                    mutation_id,
+                    "not_found",
+                    "target record does not exist",
+                ));
+                continue;
+            };
+            if current.scope != Scope::Workspace
+                || current.workspace_id.as_deref() != Some(body.workspace_id.as_str())
+            {
+                let _ = state.audit.log(
+                    "sync_apply",
+                    ToolSideEffect::SoftWrite,
+                    &target_id.to_string(),
+                    outcomes::DENIED,
+                    "cross-workspace or personal target denied",
+                    0,
+                );
+                results.push(rejected_sync_result(
+                    mutation_id,
+                    "rejected",
+                    "target is outside the requested workspace",
+                ));
+                continue;
+            }
+            let base_matches = mutation.base_rev == Some(current.rev);
+            let candidate_wins = (mutation.client_updated_at, mutation.client_rev)
+                > (current.updated_at, current.rev);
+            if !base_matches && !candidate_wins {
+                results.push(SyncApplyResult {
+                    mutation_id,
+                    status: "conflict".into(),
+                    record: None,
+                    server_record: Some(overlay_journal_origin(current, &data.sync_journal)),
+                    detail: Some("server record wins by updated_at/rev".into()),
+                });
+                continue;
+            }
+        } else if mutation.base_rev.is_some() {
+            results.push(rejected_sync_result(
+                mutation_id,
+                "rejected",
+                "insert must not include base_rev",
+            ));
+            continue;
+        }
+
+        if append_sync_journal(
+            &data.sync_journal_path,
+            &SyncJournalEntry::Pending {
+                mutation_id: mutation_id.clone(),
+            },
+        )
+        .is_err()
+        {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        data.sync_journal
+            .insert(mutation_id.clone(), SyncJournalState::Indeterminate);
+        let accepted_at = reserve_sync_timestamp(&data.sync_clock, server_now)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let stored = match data.sync_memory.put(operation, accepted_at) {
+            Ok(record) => record,
+            Err(_) => {
+                let _ = state.audit.log(
+                    "sync_apply",
+                    ToolSideEffect::SoftWrite,
+                    &body.workspace_id,
+                    outcomes::ERROR,
+                    "authoritative memory store rejected mutation",
+                    0,
+                );
+                results.push(rejected_sync_result(
+                    mutation_id,
+                    "indeterminate",
+                    "store rejected mutation; pull changes before retrying",
+                ));
+                continue;
+            }
+        };
+        let mut record = stored;
+        record.origin_node = Some(mutation.origin_node.clone());
+        if append_sync_journal(
+            &data.sync_journal_path,
+            &SyncJournalEntry::Applied {
+                mutation_id: mutation_id.clone(),
+                record: Box::new(record.clone()),
+            },
+        )
+        .is_err()
+        {
+            results.push(rejected_sync_result(
+                mutation_id,
+                "indeterminate",
+                "mutation committed but result journal failed; pull before retry",
+            ));
+            continue;
+        }
+        data.sync_journal.insert(
+            mutation_id.clone(),
+            SyncJournalState::Applied(Box::new(record.clone())),
+        );
+        let _ = state.audit.log(
+            "sync_apply",
+            ToolSideEffect::SoftWrite,
+            &format!("{}/{}", body.workspace_id, record.id),
+            outcomes::ALLOWED,
+            &format!("origin_node={}", mutation.origin_node),
+            record.content.len() as u64,
+        );
+        results.push(SyncApplyResult {
+            mutation_id,
+            status: "applied".into(),
+            record: Some(record),
+            server_record: None,
+            detail: None,
+        });
+    }
+
+    Ok(Json(serde_json::json!({
+        "workspace_id": body.workspace_id,
+        "results": results,
+        "server_time": now_unix_secs(),
+    })))
+}
+
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -910,6 +1695,9 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/research/stream", get(research_sse))
         .route("/v1/session/prompt", post(session_prompt))
         .route("/v1/permission/respond", post(permission_respond))
+        .route("/v1/sync/membership", get(sync_membership))
+        .route("/v1/sync/changes_since", post(sync_changes_since))
+        .route("/v1/sync/apply", post(sync_apply))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state)
 }
@@ -1321,6 +2109,71 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn sync_apply_req(key: &str, workspace_id: &str, mutation: SyncMutation) -> Request<Body> {
+        let body = serde_json::json!({
+            "workspace_id": workspace_id,
+            "mutations": [{
+                "mutation_id": mutation.mutation_id,
+                "origin_node": mutation.origin_node,
+                "client_updated_at": mutation.client_updated_at,
+                "client_rev": mutation.client_rev,
+                "base_rev": mutation.base_rev,
+                "operation": mutation.operation,
+            }],
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/v1/sync/apply")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn test_sync_mutation(
+        mutation_id: &str,
+        origin_node: &str,
+        client_updated_at: i64,
+        client_rev: i64,
+        base_rev: Option<i64>,
+        operation: MemoryWriteOp,
+    ) -> SyncMutation {
+        SyncMutation {
+            mutation_id: mutation_id.into(),
+            origin_node: origin_node.into(),
+            client_updated_at,
+            client_rev,
+            base_rev,
+            operation,
+        }
+    }
+
+    fn sync_changes_req(
+        key: &str,
+        workspace_id: &str,
+        cursor: Option<SyncCursor>,
+        limit: usize,
+    ) -> Request<Body> {
+        let body = serde_json::json!({
+            "workspace_id": workspace_id,
+            "cursor": cursor,
+            "limit": limit,
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/v1/sync/changes_since")
+            .header("authorization", format!("Bearer {key}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn workspace_draft(content: &str) -> MemoryDraft {
+        let mut draft = MemoryDraft::new(cd_core::memory::Kind::ProjectNote, content);
+        draft.scope = Scope::Workspace;
+        draft
+    }
+
     #[test]
     fn resolve_key_hash_variants() {
         // Raw dev token → hashed (matches hash_key).
@@ -1541,6 +2394,407 @@ mod tests {
         assert_eq!(loaded[1].title, "T2");
         // Missing file → empty, not an error.
         assert!(load_memory_jsonl(&dir.path().join("nope.jsonl")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_membership_enforces_roles_and_workspace_isolation() {
+        let dir = tempdir().unwrap();
+        let state = test_state_with_roles(
+            dir.path().to_path_buf(),
+            &[
+                ("member-a", "ws-a", Role::Member),
+                ("admin-b", "ws-b", Role::Admin),
+            ],
+            None,
+        );
+        let app = build_app(state);
+
+        let membership = Request::builder()
+            .uri("/v1/sync/membership")
+            .header("authorization", "Bearer member-a")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(membership).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["workspaces"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(body["workspaces"][0]["workspace_id"], "ws-a");
+        assert_eq!(body["workspaces"][0]["role"], "member");
+
+        let response = app
+            .clone()
+            .oneshot(sync_changes_req("member-a", "ws-b", None, 10))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(sync_apply_req(
+                "member-a",
+                "ws-a",
+                test_sync_mutation(
+                    "member-write",
+                    "laptop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    MemoryWriteOp::Insert(workspace_draft("must not persist")),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_apply_pull_cursor_and_restart_are_idempotent() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let operation = MemoryWriteOp::Insert(workspace_draft("server truth"));
+        let state = test_state_with_roles(root.clone(), &[("admin", "ws-a", Role::Admin)], None);
+        let app = build_app(state);
+
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "mutation-1",
+                    "desktop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    operation.clone(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let applied = json_body(response).await;
+        assert_eq!(applied["results"][0]["status"], "applied", "{applied}");
+        assert_eq!(applied["results"][0]["record"]["workspace_id"], "ws-a");
+        assert_eq!(applied["results"][0]["record"]["origin_node"], "desktop-a");
+        let record_id = applied["results"][0]["record"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(sync_changes_req("admin", "ws-a", None, 1))
+            .await
+            .unwrap();
+        let page = json_body(response).await;
+        assert_eq!(page["records"].as_array().unwrap().len(), 1, "{page}");
+        assert_eq!(page["records"][0]["id"], record_id);
+        assert_eq!(page["records"][0]["origin_node"], "desktop-a");
+        let cursor: SyncCursor = serde_json::from_value(page["next_cursor"].clone()).unwrap();
+        let response = app
+            .clone()
+            .oneshot(sync_changes_req("admin", "ws-a", Some(cursor), 1))
+            .await
+            .unwrap();
+        let next_page = json_body(response).await;
+        assert!(next_page["records"].as_array().unwrap().is_empty());
+
+        let response = app
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "mutation-1",
+                    "desktop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    operation.clone(),
+                ),
+            ))
+            .await
+            .unwrap();
+        let duplicate = json_body(response).await;
+        assert_eq!(duplicate["results"][0]["status"], "duplicate");
+        assert_eq!(duplicate["results"][0]["record"]["id"], record_id);
+
+        let restarted = test_state_with_roles(root, &[("admin", "ws-a", Role::Admin)], None);
+        let response = build_app(restarted)
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "mutation-1",
+                    "desktop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    operation,
+                ),
+            ))
+            .await
+            .unwrap();
+        let duplicate_after_restart = json_body(response).await;
+        assert_eq!(duplicate_after_restart["results"][0]["status"], "duplicate");
+        assert_eq!(
+            duplicate_after_restart["results"][0]["record"]["id"],
+            record_id
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_rejects_personal_and_preserves_conflict_and_supersession() {
+        let dir = tempdir().unwrap();
+        let state = test_state_with_roles(
+            dir.path().to_path_buf(),
+            &[("admin", "ws-a", Role::Admin)],
+            None,
+        );
+        let app = build_app(state);
+
+        let mut personal = workspace_draft("device only");
+        personal.scope = Scope::Personal;
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "personal-1",
+                    "desktop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    MemoryWriteOp::Insert(personal),
+                ),
+            ))
+            .await
+            .unwrap();
+        let rejected = json_body(response).await;
+        assert_eq!(rejected["results"][0]["status"], "rejected");
+        assert!(rejected["results"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("device-local"));
+
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "insert-1",
+                    "desktop-a",
+                    now_unix_secs(),
+                    1,
+                    None,
+                    MemoryWriteOp::Insert(workspace_draft("original")),
+                ),
+            ))
+            .await
+            .unwrap();
+        let inserted = json_body(response).await;
+        let old_id =
+            uuid::Uuid::parse_str(inserted["results"][0]["record"]["id"].as_str().unwrap())
+                .unwrap();
+
+        let stale_update = MemoryWriteOp::UpdateMeta {
+            id: old_id,
+            tags: Some(vec!["stale".into()]),
+            pinned: None,
+            valid_to: None,
+            status: None,
+        };
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation("stale-1", "desktop-b", 0, 0, None, stale_update),
+            ))
+            .await
+            .unwrap();
+        let conflict = json_body(response).await;
+        assert_eq!(conflict["results"][0]["status"], "conflict");
+        assert_eq!(
+            conflict["results"][0]["server_record"]["id"],
+            old_id.to_string()
+        );
+
+        let winning_update = MemoryWriteOp::UpdateMeta {
+            id: old_id,
+            tags: Some(vec!["confirmed".into()]),
+            pinned: None,
+            valid_to: None,
+            status: None,
+        };
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "update-1",
+                    "desktop-b",
+                    now_unix_secs(),
+                    2,
+                    Some(1),
+                    winning_update,
+                ),
+            ))
+            .await
+            .unwrap();
+        let updated = json_body(response).await;
+        assert_eq!(updated["results"][0]["status"], "applied");
+        let updated_rev = updated["results"][0]["record"]["rev"].as_i64().unwrap();
+
+        let replacement = workspace_draft("replacement");
+        let response = app
+            .clone()
+            .oneshot(sync_apply_req(
+                "admin",
+                "ws-a",
+                test_sync_mutation(
+                    "supersede-1",
+                    "desktop-b",
+                    now_unix_secs(),
+                    updated_rev + 1,
+                    Some(updated_rev),
+                    MemoryWriteOp::Supersede {
+                        old: old_id,
+                        new: replacement,
+                    },
+                ),
+            ))
+            .await
+            .unwrap();
+        let superseded = json_body(response).await;
+        assert_eq!(superseded["results"][0]["status"], "applied");
+        assert_eq!(
+            superseded["results"][0]["record"]["supersedes"],
+            old_id.to_string()
+        );
+
+        let response = app
+            .oneshot(sync_changes_req("admin", "ws-a", None, 20))
+            .await
+            .unwrap();
+        let changes = json_body(response).await;
+        let records = changes["records"].as_array().unwrap();
+        assert_eq!(records.len(), 2, "{changes}");
+        let old = records
+            .iter()
+            .find(|record| record["id"] == old_id.to_string())
+            .unwrap();
+        assert_eq!(old["status"], "superseded");
+        assert!(old["superseded_by"].as_str().is_some());
+        assert_eq!(old["origin_node"], "desktop-b");
+    }
+
+    #[tokio::test]
+    async fn legacy_publish_and_permissioned_tool_writes_feed_sync_pull() {
+        use http_body_util::BodyExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let state = test_state_with_roles(root, &[("admin", "ws-a", Role::Admin)], None);
+        let app = build_app(state);
+
+        let response = app
+            .clone()
+            .oneshot(publish_req(
+                "admin",
+                "ws-a",
+                "Legacy",
+                "compatibility write",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(sync_changes_req("admin", "ws-a", None, 20))
+            .await
+            .unwrap();
+        let first_pull = json_body(response).await;
+        assert_eq!(first_pull["records"].as_array().unwrap().len(), 1);
+        assert_eq!(first_pull["records"][0]["content"], "compatibility write");
+        let cursor: SyncCursor = serde_json::from_value(first_pull["next_cursor"].clone()).unwrap();
+
+        let prompt = Request::builder()
+            .method("POST")
+            .uri("/v1/session/prompt")
+            .header("authorization", "Bearer admin")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{
+                  "workspace_id":"ws-a",
+                  "session_id":"sync-tool",
+                  "invoke_tool":{
+                    "name":"save_memory",
+                    "arguments":{
+                      "kind":"decision",
+                      "title":"Tool write",
+                      "content":"permissioned authoritative write",
+                      "scope":"workspace"
+                    }
+                  }
+                }"#,
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(prompt).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let request_id = body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "permission_required")
+            .and_then(|event| event["payload"]["request_id"].as_str())
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/permission/respond")
+                    .header("authorization", "Bearer admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"workspace_id":"ws-a","session_id":"sync-tool","request_id":"{request_id}","decision":"allow_once","tool_name":"save_memory","arguments":{{}}}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(sync_changes_req("admin", "ws-a", Some(cursor), 20))
+            .await
+            .unwrap();
+        let changes = json_body(response).await;
+        let records = changes["records"].as_array().unwrap();
+        assert_eq!(records.len(), 1, "{changes}");
+        assert!(records
+            .iter()
+            .all(|record| { record["scope"] == "workspace" && record["workspace_id"] == "ws-a" }));
+        assert!(records
+            .iter()
+            .any(|record| record["content"] == "permissioned authoritative write"));
+    }
+
+    #[test]
+    fn legacy_non_uuid_import_id_is_stable() {
+        assert_eq!(
+            legacy_memory_id("ws-a", "old-note"),
+            legacy_memory_id("ws-a", "old-note")
+        );
+        assert_ne!(
+            legacy_memory_id("ws-a", "old-note"),
+            legacy_memory_id("ws-b", "old-note")
+        );
     }
 
     #[tokio::test]
