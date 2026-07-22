@@ -645,8 +645,8 @@ impl OpenAiCompatibleClient {
 /// Parse OpenAI-style model catalogs (`data[]`, `models[]`, or top-level array).
 /// Accepts `id` or `name` fields (enterprise gateways vary).
 pub fn parse_openai_style_models_list(text: &str) -> CoreResult<Vec<String>> {
-    let v: Value = serde_json::from_str(text)
-        .map_err(|e| CoreError::Message(format!("models json: {e}")))?;
+    let v: Value =
+        serde_json::from_str(text).map_err(|e| CoreError::Message(format!("models json: {e}")))?;
     let mut ids = Vec::new();
     let mut push_arr = |arr: &Vec<Value>| {
         for m in arr {
