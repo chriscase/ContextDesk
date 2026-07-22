@@ -96,7 +96,7 @@ export function useSettingsController({
   const [newsSources, setNewsSources] = useState<NewsSourceDto[]>([]);
   const [routerBudget, setRouterBudget] = useState<RouterBudgetDto>({
     max_sources: 3,
-    max_tool_rounds: 8,
+    max_tool_rounds: 12,
     max_results_per_source: 8,
     deadline_ms: 60_000,
   });
