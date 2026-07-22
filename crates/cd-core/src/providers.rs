@@ -201,6 +201,29 @@ impl ProviderConfig {
         let id = self.active_id.as_deref()?;
         self.profiles.iter().find(|p| p.id == id)
     }
+
+    /// Set `capabilities.tools` on a profile by id. Returns true if a profile was updated.
+    ///
+    /// Used when a gateway rejects tool_choice=auto (#327) so subsequent turns
+    /// skip native tools without burning another 400.
+    pub fn set_profile_tools_enabled(&mut self, profile_id: &str, tools: bool) -> bool {
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
+            p.capabilities.tools = tools;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// True when stream events include a tools-unsupported classification (#327).
+pub fn events_indicate_tools_unsupported(events: &[crate::events::StreamEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            crate::events::StreamEvent::Error { code, .. } if code == "tools_unsupported"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -223,6 +246,32 @@ mod tests {
         assert!(!s.contains("sk-"));
         let back: ProviderConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.profiles.len(), 1);
+    }
+
+    #[test]
+    fn set_profile_tools_enabled_persists_flag() {
+        let mut cfg = ProviderConfig::with_local_ollama();
+        let id = cfg.active_id.clone().unwrap();
+        assert!(cfg.active().unwrap().capabilities.tools);
+        assert!(cfg.set_profile_tools_enabled(&id, false));
+        assert!(!cfg.active().unwrap().capabilities.tools);
+        assert!(cfg.set_profile_tools_enabled(&id, true));
+        assert!(cfg.active().unwrap().capabilities.tools);
+        assert!(!cfg.set_profile_tools_enabled("missing", false));
+    }
+
+    #[test]
+    fn events_indicate_tools_unsupported_from_error_code() {
+        use crate::events::StreamEvent;
+        let ok = vec![StreamEvent::TurnCompleted {
+            reason: "stop".into(),
+        }];
+        assert!(!events_indicate_tools_unsupported(&ok));
+        let bad = vec![StreamEvent::Error {
+            code: "tools_unsupported".into(),
+            message: "gateway rejected".into(),
+        }];
+        assert!(events_indicate_tools_unsupported(&bad));
     }
 
     #[test]

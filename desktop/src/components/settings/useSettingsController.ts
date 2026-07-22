@@ -195,6 +195,7 @@ export function useSettingsController({
             baseUrl: active.base_url || d.baseUrl,
             chatModel: active.chat_model || d.chatModel,
             hasApiKey: active.has_key,
+            toolsEnabled: active.tools_enabled ?? true,
             localOnly: kind === "ollama",
           }));
         }
@@ -480,6 +481,7 @@ export function useSettingsController({
           source.providerKind === "xai_grok_build"
             ? false
             : (source.localOnly ?? source.providerKind === "ollama"),
+        toolsEnabled: source.toolsEnabled,
       });
       if (!saved) return source;
       return {
@@ -488,6 +490,7 @@ export function useSettingsController({
         baseUrl: saved.base_url,
         chatModel: saved.chat_model,
         providerLabel: saved.label,
+        toolsEnabled: saved.tools_enabled ?? source.toolsEnabled ?? true,
         providerKind: source.providerKind,
         localOnly:
           saved.kind === "xai_grok_build" ? false : source.localOnly,

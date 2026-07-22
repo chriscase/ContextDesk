@@ -4,7 +4,11 @@ import {
   saveLastGatewayUrl,
 } from "../../lib/aiGatewayPrefs";
 import type { LocalCandidateDto } from "../../lib/host";
-import { hostListModelsForDraft, normalizeProviderKind } from "../../lib/host";
+import {
+  hostListModelsForDraft,
+  hostSetProviderToolsEnabled,
+  normalizeProviderKind,
+} from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
 import {
   SecretField,
@@ -430,6 +434,48 @@ export function AiSection({
         autoComplete="off"
       />
     </>
+  ) : null}
+
+  {draft.providerKind !== "none" ? (
+    <div className="field">
+      <span className="field__label">Native tool calling</span>
+      <p className="field__hint" role="status">
+        {draft.toolsEnabled === false
+          ? "Chat-only — this provider rejected tool_choice=auto. KB/web/Confluence tools are skipped until you re-enable."
+          : "Tools enabled when the model/gateway supports them. Auto-disables after a tools-unsupported error."}
+      </p>
+      {draft.toolsEnabled === false ? (
+        <button
+          type="button"
+          className="btn btn--primary btn--sm"
+          onClick={() => {
+            void hostSetProviderToolsEnabled(true).then((p) => {
+              setDraft((d) => ({
+                ...d,
+                toolsEnabled: p?.tools_enabled ?? true,
+              }));
+            });
+          }}
+        >
+          Re-enable tools attempt
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="btn btn--ghost btn--sm"
+          onClick={() => {
+            void hostSetProviderToolsEnabled(false).then((p) => {
+              setDraft((d) => ({
+                ...d,
+                toolsEnabled: p?.tools_enabled ?? false,
+              }));
+            });
+          }}
+        >
+          Force chat-only (no tools)
+        </button>
+      )}
+    </div>
   ) : null}
 
   {draft.providerKind === "xai_grok_build" ? (
