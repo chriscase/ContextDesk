@@ -48,6 +48,12 @@ pub mod names {
     pub const CONFLUENCE_SEARCH: &str = "confluence_search";
     /// Confluence page fetch (read-only).
     pub const CONFLUENCE_GET_PAGE: &str = "confluence_get_page";
+    /// Confluence child pages or space roots (read-only). #326
+    pub const CONFLUENCE_LIST_CHILDREN: &str = "confluence_list_children";
+    /// Confluence ancestors breadcrumb (read-only). #326
+    pub const CONFLUENCE_GET_ANCESTORS: &str = "confluence_get_ancestors";
+    /// Confluence attachment metadata (read-only). #326
+    pub const CONFLUENCE_LIST_ATTACHMENTS: &str = "confluence_list_attachments";
     /// Open-web search (opt-in; DuckDuckGo HTML lite by default).
     pub const WEB_SEARCH: &str = "web_search";
     /// Open-web page fetch (opt-in; SSRF-safe text extract).
@@ -135,7 +141,53 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::CONFLUENCE_GET_PAGE.into(),
-            description: "Fetch a Confluence page body (read-only). Space must be allowlisted."
+            description: "Fetch a Confluence page (read-only). format: plain (default strip_tags), meta, storage, or all (JSON). Space allowlist applied when set."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string" },
+                    "format": {
+                        "type": "string",
+                        "description": "plain | meta | storage | all",
+                        "enum": ["plain", "meta", "storage", "all"]
+                    }
+                },
+                "required": ["page_id"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_LIST_CHILDREN.into(),
+            description: "List Confluence child pages of a page_id, or space root pages when space is set (read-only tree browse)."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string", "description": "Parent page id (mutually exclusive with space for roots)" },
+                    "space": { "type": "string", "description": "Space key — list root pages when page_id omitted" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
+                    "start": { "type": "integer", "minimum": 0 }
+                }
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_GET_ANCESTORS.into(),
+            description: "List Confluence page ancestors (breadcrumb) for a page_id (read-only)."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string" }
+                },
+                "required": ["page_id"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_LIST_ATTACHMENTS.into(),
+            description: "List Confluence attachment metadata for a page (read-only; no binary download)."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({

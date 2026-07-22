@@ -29,6 +29,39 @@ pub struct ConfluenceSettings {
     /// Keychain reference id when a PAT has been saved (never the secret).
     #[serde(default)]
     pub pat_ref: Option<String>,
+    /// When true, register write tools (still HardWrite-gated). Default false. (#326)
+    #[serde(default)]
+    pub write_enabled: bool,
+    /// Max pages per harvest Accept batch. Default 25. (#326)
+    #[serde(default = "default_harvest_batch_max")]
+    pub harvest_batch_max: u32,
+    /// REST path layout. Default Standard (Server/DC). (#326)
+    #[serde(default)]
+    pub rest_path_mode: crate::confluence_ro::ConfluenceRestPathMode,
+    /// Auth header mode. Default Bearer. (#326)
+    #[serde(default)]
+    pub auth_mode: ConfluenceAuthMode,
+    /// Email for Basic auth (not secret); token still in keychain.
+    #[serde(default)]
+    pub basic_email: Option<String>,
+    /// Web UI URL style when `_links.webui` missing. (#326)
+    #[serde(default)]
+    pub url_style: crate::confluence_ro::ConfluenceUrlStyle,
+}
+
+/// Confluence HTTP auth mode (credentials still in keychain for tokens).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfluenceAuthMode {
+    /// `Authorization: Bearer {pat}` (Server/DC default).
+    #[default]
+    Bearer,
+    /// `Authorization: Basic base64(email:token)` (typical Cloud).
+    Basic,
+}
+
+fn default_harvest_batch_max() -> u32 {
+    25
 }
 
 /// X (Twitter) search connector (bearer token in keychain under [`X_API_KEY_REF`]).
@@ -63,6 +96,8 @@ impl ConfluenceSettings {
         crate::confluence_ro::ConfluenceRoConfig {
             base_url: self.base_url.trim().trim_end_matches('/').to_string(),
             spaces: self.spaces.clone(),
+            rest_path_mode: self.rest_path_mode,
+            url_style: self.url_style,
         }
     }
 }
@@ -262,6 +297,7 @@ mod tests {
                 base_url: "https://wiki.example.com".into(),
                 spaces: vec!["ENG".into()],
                 pat_ref: Some(CONFLUENCE_PAT_REF.into()),
+                ..ConfluenceSettings::default()
             },
             web_research_enabled: true,
             x: XSettings {
@@ -326,6 +362,7 @@ mod tests {
             base_url: "https://wiki.example.com".into(),
             spaces: vec![],
             pat_ref: None,
+            ..ConfluenceSettings::default()
         };
         assert!(!c.is_configured());
     }

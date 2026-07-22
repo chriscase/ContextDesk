@@ -21,6 +21,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+fn confluence_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        names::CONFLUENCE_SEARCH
+            | names::CONFLUENCE_GET_PAGE
+            | names::CONFLUENCE_LIST_CHILDREN
+            | names::CONFLUENCE_GET_ANCESTORS
+            | names::CONFLUENCE_LIST_ATTACHMENTS
+    )
+}
+
 /// Result of a tool invocation.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -621,9 +632,7 @@ impl ToolHost {
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
-            specs.retain(|t| {
-                t.name != names::CONFLUENCE_SEARCH && t.name != names::CONFLUENCE_GET_PAGE
-            });
+            specs.retain(|t| !confluence_tool_name(&t.name));
         }
         if !self.web_research_enabled {
             specs.retain(|t| t.name != names::WEB_SEARCH && t.name != names::WEB_FETCH);
@@ -874,6 +883,15 @@ impl ToolHost {
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
+            names::CONFLUENCE_LIST_CHILDREN => {
+                self.tool_confluence_list_children(arguments).await?
+            }
+            names::CONFLUENCE_GET_ANCESTORS => {
+                self.tool_confluence_get_ancestors(arguments).await?
+            }
+            names::CONFLUENCE_LIST_ATTACHMENTS => {
+                self.tool_confluence_list_attachments(arguments).await?
+            }
             names::WEB_SEARCH => {
                 let (ok, summary, raw, cites) = self.tool_web_search(arguments).await?;
                 let first = cites.first().map(|(u, _, _)| u.clone());
@@ -1324,12 +1342,195 @@ impl ToolHost {
                 "confluence_get_page requires page_id".into(),
             ));
         }
+        let format = args
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("plain")
+            .trim()
+            .to_ascii_lowercase();
         self.throttle_confluence().await?;
-        let body = confluence_ro::fetch_page(&cfg, page_id, &pat).await?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let expanded =
+            confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, false).await?;
+        let cite = Some(format!("confluence:{page_id}"));
+        let raw = match format.as_str() {
+            "meta" => serde_json::to_string_pretty(&expanded.meta)
+                .unwrap_or_else(|_| format!("{:?}", expanded.meta)),
+            "storage" => expanded.storage,
+            "all" => {
+                serde_json::to_string_pretty(&expanded).unwrap_or_else(|_| expanded.plain.clone())
+            }
+            _ => expanded.plain,
+        };
         Ok((
             true,
-            format!("fetched confluence page {page_id}"),
-            body,
+            format!("fetched confluence page {page_id} ({format})"),
+            raw,
+            cite,
+        ))
+    }
+
+    async fn tool_confluence_list_children(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let page_id = args
+            .get("page_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let space = args
+            .get("space")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(25)
+            .min(25) as usize;
+        let start = args.get("start").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        if page_id.is_empty() && space.is_empty() {
+            return Err(CoreError::Message(
+                "confluence_list_children requires page_id or space".into(),
+            ));
+        }
+        self.throttle_confluence().await?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let pages = if !page_id.is_empty() {
+            confluence_ro::list_child_pages(&cfg, page_id, start, limit, &auth, &policy, false)
+                .await?
+        } else {
+            confluence_ro::list_space_root_pages(&cfg, space, start, limit, &auth, &policy, false)
+                .await?
+        };
+        let mut lines = Vec::new();
+        let mut first = None;
+        for p in &pages {
+            if first.is_none() {
+                first = Some(format!("confluence:{}", p.id));
+            }
+            let ver = p.version.map(|v| format!(" v{v}")).unwrap_or_default();
+            lines.push(format!("- [{}] {} (space {}){ver}", p.id, p.title, p.space));
+        }
+        let raw = if lines.is_empty() {
+            "No child/root pages found.".into()
+        } else {
+            lines.join("\n")
+        };
+        Ok((
+            true,
+            format!("{} Confluence page(s)", pages.len()),
+            raw,
+            first,
+        ))
+    }
+
+    async fn tool_confluence_get_ancestors(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let page_id = args
+            .get("page_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if page_id.is_empty() {
+            return Err(CoreError::Message(
+                "confluence_get_ancestors requires page_id".into(),
+            ));
+        }
+        self.throttle_confluence().await?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let ancestors = confluence_ro::list_ancestors(&cfg, page_id, &auth, &policy, false).await?;
+        let mut lines = Vec::new();
+        for p in &ancestors {
+            lines.push(format!("- [{}] {} (space {})", p.id, p.title, p.space));
+        }
+        let raw = if lines.is_empty() {
+            format!("No ancestors for page {page_id}.")
+        } else {
+            lines.join("\n")
+        };
+        Ok((
+            true,
+            format!("{} ancestor(s)", ancestors.len()),
+            raw,
+            Some(format!("confluence:{page_id}")),
+        ))
+    }
+
+    async fn tool_confluence_list_attachments(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .clone();
+        let page_id = args
+            .get("page_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if page_id.is_empty() {
+            return Err(CoreError::Message(
+                "confluence_list_attachments requires page_id".into(),
+            ));
+        }
+        self.throttle_confluence().await?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let atts =
+            confluence_ro::list_attachments_meta(&cfg, page_id, &auth, &policy, false).await?;
+        let mut lines = Vec::new();
+        for a in &atts {
+            let size = a.file_size.map(|s| format!(" {s}B")).unwrap_or_default();
+            let mt = a
+                .media_type
+                .as_deref()
+                .map(|m| format!(" ({m})"))
+                .unwrap_or_default();
+            lines.push(format!("- [{}] {}{mt}{size}", a.id, a.title));
+        }
+        let raw = if lines.is_empty() {
+            format!("No attachments on page {page_id}.")
+        } else {
+            lines.join("\n")
+        };
+        Ok((
+            true,
+            format!("{} attachment(s)", atts.len()),
+            raw,
             Some(format!("confluence:{page_id}")),
         ))
     }
@@ -2225,10 +2426,10 @@ mod tests {
         let idx = KeywordIndex::build(&ws).unwrap();
         let mut host = ToolHost::new(ws, idx, None);
         host.set_confluence(
-            Some(ConfluenceRoConfig {
-                base_url: "https://wiki.example.com".into(),
-                spaces: vec!["ENG".into()],
-            }),
+            Some(ConfluenceRoConfig::new(
+                "https://wiki.example.com",
+                vec!["ENG".into()],
+            )),
             None,
         );
         let err = host
