@@ -559,6 +559,33 @@ export async function hostListChatModels(): Promise<ModelOptionDto[]> {
   return invoke<ModelOptionDto[]>("list_chat_models");
 }
 
+/**
+ * Discover model ids for the Settings draft (URL/key not necessarily saved yet).
+ * Returns [] when the host cannot list (offline, bad URL, missing key).
+ */
+export async function hostListModelsForDraft(args: {
+  kind: string;
+  baseUrl: string;
+  apiKey?: string | null;
+  localOnly?: boolean | null;
+  chatModel?: string | null;
+}): Promise<string[]> {
+  if (!isTauri()) return [];
+  try {
+    return await invoke<string[]>("list_models_for_draft", {
+      req: {
+        kind: args.kind,
+        base_url: args.baseUrl,
+        api_key: args.apiKey ?? null,
+        local_only: args.localOnly ?? null,
+        chat_model: args.chatModel ?? null,
+      },
+    });
+  } catch {
+    return [];
+  }
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");

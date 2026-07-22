@@ -2315,6 +2315,204 @@ async fn models_for_profile(
     ids
 }
 
+/// List chat models for the **Settings draft** (not only the saved profile).
+///
+/// Used when the user pastes a base URL / key so the model field can become a
+/// select (TriageTool-style discover-on-URL), before Save.
+#[derive(Debug, Deserialize)]
+struct ListModelsDraftReq {
+    kind: String,
+    base_url: String,
+    /// Optional not-yet-saved key (never logged). Empty → try keychain for kind.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    local_only: Option<bool>,
+    #[serde(default)]
+    chat_model: Option<String>,
+}
+
+#[tauri::command]
+async fn list_models_for_draft(
+    state: State<'_, AppState>,
+    req: ListModelsDraftReq,
+) -> Result<Vec<String>, String> {
+    let kind = match req.kind.as_str() {
+        "ollama" => ProviderKind::Ollama,
+        "openai_compatible" => ProviderKind::OpenAiCompatible,
+        "anthropic" => ProviderKind::Anthropic,
+        "xai_grok_build" => ProviderKind::XaiGrokBuild,
+        other => return Err(format!("unsupported provider kind: {other}")),
+    };
+    let desc = cd_core::providers::descriptor_for(kind);
+    let id = desc.profile_id_slug.to_string();
+    let mut base_url = req.base_url.trim().trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        if let Some(def) = desc.default_base_url {
+            base_url = def.to_string();
+        }
+    }
+    // Normalize gateway paste (…/v1/models → …/v1) like probe_url.
+    if matches!(
+        kind,
+        ProviderKind::OpenAiCompatible | ProviderKind::Anthropic | ProviderKind::XaiGrokBuild
+    ) {
+        base_url = normalize_gateway_input(&base_url);
+    }
+
+    let local_only = req.local_only.unwrap_or(desc.is_local);
+    let chat_model = req
+        .chat_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mistral")
+        .to_string();
+
+    // Prefer draft paste; else keychain for this profile slug.
+    let draft_key = req
+        .api_key
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.chars().all(|c| c == '•'));
+    let api_key = if matches!(kind, ProviderKind::XaiGrokBuild) {
+        None
+    } else if let Some(k) = draft_key {
+        Some(k)
+    } else {
+        let r = key_ref_for_profile(&id);
+        state.secrets.get(&r).ok().flatten()
+    };
+
+    // Also reuse saved profile ref if config has a different key ref for this id.
+    let api_key = if api_key.is_none() && !matches!(kind, ProviderKind::XaiGrokBuild) {
+        let cfg = state.config.lock().expect("config");
+        if let Some(p) = cfg.providers.profiles.iter().find(|p| p.id == id) {
+            p.api_key_ref
+                .as_ref()
+                .and_then(|r| state.secrets.get(r).ok().flatten())
+        } else {
+            None
+        }
+    } else {
+        api_key
+    };
+
+    let profile = ProviderProfile {
+        id: id.clone(),
+        label: desc.default_label.to_string(),
+        kind,
+        base_url,
+        api_key_ref: None,
+        chat_model,
+        embedding_model: None,
+        embedding_base_url: None,
+        local_only,
+        capabilities: desc.default_capabilities,
+    };
+
+    // models_for_profile expects key from secrets path for OpenAI — pass via temporary:
+    // we already resolved api_key above; inject by calling logic with a one-off.
+    // Reuse models_for_profile by temporarily using secrets is awkward; call with
+    // a thin duplicate that accepts Option key — here we shadow secrets via profile
+    // path only when key is in keychain. So push key into a local list helper.
+    let ids = models_for_profile_with_key(&profile, api_key.as_deref()).await;
+    Ok(ids)
+}
+
+/// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
+async fn models_for_profile_with_key(
+    profile: &ProviderProfile,
+    api_key: Option<&str>,
+) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    match profile.kind {
+        ProviderKind::Ollama => {
+            if let Ok(client) =
+                cd_core::chat::OllamaClient::new(&profile.base_url, &profile.chat_model)
+            {
+                if let Ok(tags) = client.list_tags().await {
+                    ids.extend(tags.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                }
+            }
+        }
+        ProviderKind::OpenAiCompatible => {
+            let policy = if profile.local_only {
+                SsrfPolicy::local_only()
+            } else {
+                SsrfPolicy::default()
+            };
+            if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                &profile.base_url,
+                api_key.map(|s| s.to_string()),
+                &profile.chat_model,
+                &policy,
+            ) {
+                if let Ok(listed) = client.list_models().await {
+                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                }
+            }
+        }
+        ProviderKind::XaiGrokBuild => {
+            ids.extend(
+                ["grok-3", "grok-3-mini", "grok-2", "grok-2-vision-1212"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+            let base = if profile.base_url.trim().is_empty() {
+                "https://api.x.ai/v1"
+            } else {
+                profile.base_url.trim()
+            };
+            if cd_core::grok_auth::assert_grok_base_allowed(base).is_ok() {
+                if let Ok(creds) = cd_core::grok_auth::load_grok_session_credentials() {
+                    if let Ok(client) = cd_core::chat::OpenAiCompatibleClient::new(
+                        base,
+                        None,
+                        &profile.chat_model,
+                        &SsrfPolicy::default(),
+                    ) {
+                        let client = client.with_extra_headers(creds.request_headers());
+                        if let Ok(listed) = client.list_models().await {
+                            for m in listed.into_iter().filter(|m| looks_like_chat_model_id(m)) {
+                                let l = m.to_ascii_lowercase();
+                                if l.contains("grok") && !ids.iter().any(|x| x == &m) {
+                                    ids.push(m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ProviderKind::Anthropic => {
+            let policy = if profile.local_only {
+                SsrfPolicy::local_only()
+            } else {
+                SsrfPolicy::default()
+            };
+            if let Ok(client) = cd_core::chat::AnthropicClient::new(
+                &profile.base_url,
+                api_key.map(|s| s.to_string()),
+                &profile.chat_model,
+                &policy,
+            ) {
+                if let Ok(listed) = client.list_models().await {
+                    ids.extend(listed.into_iter().filter(|m| looks_like_chat_model_id(m)));
+                }
+            }
+        }
+    }
+
+    let profile_model = profile.chat_model.trim();
+    if !profile_model.is_empty() && !ids.iter().any(|x| x == profile_model) {
+        ids.insert(0, profile_model.to_string());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// List models from **all** configured providers, for grouped UI selection.
 #[tauri::command]
 async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionDto>, String> {
@@ -2929,6 +3127,7 @@ pub fn run() {
             archive_chat_session,
             search_chat_sessions,
             list_chat_models,
+            list_models_for_draft,
             set_default_chat_model,
             get_default_chat_model,
             suggest_chat_title,

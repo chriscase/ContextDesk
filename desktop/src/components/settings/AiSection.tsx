@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import type { LocalCandidateDto } from "../../lib/host";
-import { normalizeProviderKind } from "../../lib/host";
+import { hostListModelsForDraft, normalizeProviderKind } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
 import {
   SecretField,
@@ -38,11 +39,84 @@ export function AiSection({
   recheck,
   checking,
 }: AiSectionProps) {
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsNote, setModelsNote] = useState<string | null>(null);
+  /** Force re-fetch (Refresh models / Test connection). */
+  const [modelsTick, setModelsTick] = useState(0);
+
+  // TriageTool-style: when provider + URL (and key when needed) settle, list models.
+  // Do not depend on chatModel — typing a custom id must not re-probe.
+  useEffect(() => {
+    const kind = draft.providerKind;
+    if (kind === "none") {
+      setDiscoveredModels([]);
+      setModelsNote(null);
+      setModelsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setModelsLoading(true);
+    setModelsNote(null);
+    const t = window.setTimeout(() => {
+      void hostListModelsForDraft({
+        kind,
+        baseUrl: draft.baseUrl,
+        apiKey: apiKeyDraft.trim() || null,
+        localOnly: draft.localOnly ?? kind === "ollama",
+        chatModel: null,
+      }).then((list) => {
+        if (cancelled) return;
+        setDiscoveredModels(list);
+        setModelsLoading(false);
+        if (list.length === 0) {
+          setModelsNote(
+            kind === "ollama"
+              ? "No models listed — is Ollama running? Try `ollama pull mistral`."
+              : kind === "xai_grok_build"
+                ? "Using built-in Grok ids (session catalog unavailable or offline)."
+                : "No models listed yet — check URL/key, then Refresh models.",
+          );
+        } else {
+          setModelsNote(`Found ${list.length} model${list.length === 1 ? "" : "s"}.`);
+          // If empty model field, pick first discovered.
+          setDraft((d) => {
+            if (d.chatModel.trim()) return d;
+            return { ...d, chatModel: list[0] ?? d.chatModel };
+          });
+        }
+      });
+    }, 450);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [
+    draft.providerKind,
+    draft.baseUrl,
+    draft.localOnly,
+    apiKeyDraft,
+    draft.hasApiKey,
+    modelsTick,
+    setDraft,
+  ]);
+
+  const modelInList =
+    draft.chatModel.trim() !== "" &&
+    discoveredModels.some((m) => m === draft.chatModel.trim());
+  const selectValue = modelInList
+    ? draft.chatModel.trim()
+    : discoveredModels.length > 0
+      ? "__other__"
+      : "";
+
   return (
 <div>
   <p className="section-lead">
-    Discover or configure models here. Keys go to the OS keychain;
-    profiles never need a hand-edited secrets file.
+    Discover or configure models here. Paste a base URL (or pick Ollama /
+    Grok Build) and we list available chat models when the host can reach
+    them. Keys go to the OS keychain; profiles never need a hand-edited
+    secrets file.
   </p>
   {candidates.length > 0 ? (
     <div className="field">
@@ -361,24 +435,76 @@ export function AiSection({
   ) : null}
 
   {draft.providerKind !== "none" ? (
-    <TextField
-      id={`${baseId}-model`}
-      label="Chat model"
-      value={draft.chatModel}
-      error={!draft.chatModel.trim() ? "Model id is required." : null}
-      onChange={(e) =>
-        setDraft((d) => ({ ...d, chatModel: e.target.value }))
-      }
-      placeholder={
-        draft.providerKind === "ollama"
-          ? "mistral"
-          : draft.providerKind === "xai_grok_build"
-            ? "grok-3"
-            : draft.providerKind === "anthropic"
-              ? "claude-sonnet-4-20250514"
-              : "provider/model"
-      }
-    />
+    <>
+      {discoveredModels.length > 0 ? (
+        <SelectField
+          id={`${baseId}-model-select`}
+          label="Chat model"
+          hint={
+            modelsLoading
+              ? "Refreshing model list…"
+              : modelsNote ?? "Listed from the provider when reachable."
+          }
+          value={selectValue || discoveredModels[0]}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "__other__") {
+              // Keep current free-text if already custom; otherwise clear for typing.
+              if (modelInList) {
+                setDraft((d) => ({ ...d, chatModel: "" }));
+              }
+              return;
+            }
+            setDraft((d) => ({ ...d, chatModel: v }));
+          }}
+        >
+          {discoveredModels.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+          <option value="__other__">Other… (type below)</option>
+        </SelectField>
+      ) : null}
+      {discoveredModels.length === 0 || selectValue === "__other__" || !modelInList ? (
+        <TextField
+          id={`${baseId}-model`}
+          label={discoveredModels.length > 0 ? "Custom model id" : "Chat model"}
+          value={draft.chatModel}
+          error={!draft.chatModel.trim() ? "Model id is required." : null}
+          ok={
+            modelsLoading
+              ? "Looking up models…"
+              : discoveredModels.length === 0
+                ? modelsNote
+                : null
+          }
+          pending={modelsLoading && discoveredModels.length === 0 ? "Listing models…" : null}
+          onChange={(e) =>
+            setDraft((d) => ({ ...d, chatModel: e.target.value }))
+          }
+          placeholder={
+            draft.providerKind === "ollama"
+              ? "mistral"
+              : draft.providerKind === "xai_grok_build"
+                ? "grok-3"
+                : draft.providerKind === "anthropic"
+                  ? "claude-sonnet-4-20250514"
+                  : "provider/model"
+          }
+          list={
+            discoveredModels.length > 0 ? `${baseId}-model-suggestions` : undefined
+          }
+        />
+      ) : null}
+      {discoveredModels.length > 0 ? (
+        <datalist id={`${baseId}-model-suggestions`}>
+          {discoveredModels.map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
+      ) : null}
+    </>
   ) : null}
 
   {draft.providerKind !== "none" &&
@@ -405,10 +531,25 @@ export function AiSection({
     >
       {checking ? "Testing…" : "Test connection"}
     </button>
+    <button
+      type="button"
+      className="btn btn--ghost"
+      onClick={() => setModelsTick((n) => n + 1)}
+      disabled={
+        modelsLoading || checking || draft.providerKind === "none"
+      }
+    >
+      {modelsLoading ? "Listing…" : "Refresh models"}
+    </button>
   </div>
   {probeNote ? (
     <p className="field__hint" role="status">
       {probeNote}
+    </p>
+  ) : null}
+  {modelsNote && discoveredModels.length > 0 ? (
+    <p className="field__hint" role="status">
+      {modelsNote}
     </p>
   ) : null}
 </div>
