@@ -1,8 +1,9 @@
 //! ContextDesk headless server — localhost by default, API key auth, research + SSE.
 
 mod telegram;
+mod watchers;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
@@ -11,6 +12,7 @@ use axum::{Json, Router};
 use cd_core::audit::{outcomes, AuditLog};
 use cd_core::chat::ChatMessage;
 use cd_core::config::{config_path, ensure_config_dir, load_config};
+use cd_core::connectors::ConnectorConfig;
 use cd_core::events::StreamEvent;
 use cd_core::index::KeywordIndex;
 use cd_core::keychain_store::{looks_like_raw_secret, KeychainSecretStore, SecretStore};
@@ -20,8 +22,8 @@ use cd_core::memory::{
 use cd_core::permissions::PermissionDecision;
 use cd_core::providers::ProviderProfile;
 use cd_core::research::{
-    build_host, event_to_dto, events_to_dto, grant_and_execute, research_local, research_turn,
-    research_turn_with_cancel,
+    build_host_with_connectors, event_to_dto, events_to_dto, grant_and_execute, research_local,
+    research_turn, research_turn_with_cancel,
 };
 use cd_core::tool_host::ToolHost;
 use cd_core::tools::ToolSideEffect;
@@ -45,6 +47,9 @@ use tracing_subscriber::EnvFilter;
 use telegram::{
     ChatPermissionProposal, TelegramBridge, TelegramConfig, TelegramIdentity, TelegramMessage,
     TelegramUpdate,
+};
+use watchers::{
+    WatchAction, WatchCondition, WatchSource, WatcherDefinition, WatcherRecord, WatcherStore,
 };
 
 #[derive(Debug, Parser)]
@@ -121,6 +126,8 @@ struct AppState {
     /// Optional Telegram input/notification bridge (#289). Secrets remain inside
     /// the Rust process; webhook clients never receive them.
     telegram: Option<Arc<TelegramBridge>>,
+    /// Durable watch definitions, source-event claims, and last-run state (#290).
+    watchers: Arc<WatcherStore>,
 }
 
 /// Session-scoped host retained between prompt and permission.respond (#168).
@@ -134,6 +141,7 @@ struct SessionHost {
 enum SessionOrigin {
     TrustedClient,
     Telegram,
+    Watcher,
 }
 
 /// Load generic provider profile + keychain secret for server research (#165).
@@ -248,6 +256,8 @@ async fn run_research_turn(
 struct WorkspaceData {
     workspace: Workspace,
     index: KeywordIndex,
+    /// Generic connector definitions attached to every workspace ToolHost.
+    connectors: Arc<Vec<ConnectorConfig>>,
     /// Compatibility mirror for the original #167 `/v1/memory/*` wire.
     memory_path: PathBuf,
     /// Server-authoritative workspace memory store (#287).
@@ -257,6 +267,8 @@ struct WorkspaceData {
     sync_journal: HashMap<String, SyncJournalState>,
     /// Server-assigned monotonic write clock for cursor safety.
     sync_clock: Arc<Mutex<i64>>,
+    /// Config-level kill switch for all watchers in this workspace.
+    watchers_enabled: bool,
 }
 
 /// Tool-facing view of the authoritative store. The server has no personal
@@ -435,8 +447,16 @@ struct ServerConfig {
 struct WsConfig {
     id: String,
     roots: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    watchers_enabled: bool,
+    #[serde(default)]
+    connectors: Vec<ConnectorConfig>,
     #[serde(default)]
     keys: Vec<KeyEntry>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,6 +474,8 @@ struct KeyEntry {
 struct ResolvedWorkspace {
     id: String,
     roots: Vec<PathBuf>,
+    watchers_enabled: bool,
+    connectors: Vec<ConnectorConfig>,
     /// (api-key-hash, role) pairs authorized on this workspace.
     keys: Vec<([u8; 32], Role)>,
 }
@@ -485,6 +507,17 @@ fn resolve_key_hash(entry: &KeyEntry) -> Result<[u8; 32], String> {
     Err("each key entry needs `key` or `key_hash`".into())
 }
 
+fn connector_settings_embed_raw_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => looks_like_raw_secret(value) || value.contains("ATATT"),
+        serde_json::Value::Array(values) => values.iter().any(connector_settings_embed_raw_secret),
+        serde_json::Value::Object(values) => {
+            values.values().any(connector_settings_embed_raw_secret)
+        }
+        _ => false,
+    }
+}
+
 /// Parse a server config file (TOML). Offline; no network, no keychain.
 fn load_server_config(path: &Path) -> Result<ServerConfig, String> {
     let raw = std::fs::read_to_string(path)
@@ -502,6 +535,27 @@ fn resolve_config_workspaces(cfg: &ServerConfig) -> Result<Vec<ResolvedWorkspace
         if ws.roots.is_empty() {
             return Err(format!("workspace '{}' has no roots", ws.id));
         }
+        let mut connector_ids = std::collections::HashSet::new();
+        for connector in &ws.connectors {
+            if connector.id.trim().is_empty() || connector.kind.trim().is_empty() {
+                return Err(format!(
+                    "workspace '{}' connector id and kind must not be empty",
+                    ws.id
+                ));
+            }
+            if !connector_ids.insert(connector.id.as_str()) {
+                return Err(format!(
+                    "workspace '{}' has duplicate connector id '{}'",
+                    ws.id, connector.id
+                ));
+            }
+            if connector_settings_embed_raw_secret(&connector.settings) {
+                return Err(format!(
+                    "workspace '{}' connector '{}' embeds a raw secret; use a keychain reference",
+                    ws.id, connector.id
+                ));
+            }
+        }
         let mut keys = Vec::new();
         for entry in &ws.keys {
             keys.push((resolve_key_hash(entry)?, entry.role));
@@ -509,6 +563,8 @@ fn resolve_config_workspaces(cfg: &ServerConfig) -> Result<Vec<ResolvedWorkspace
         out.push(ResolvedWorkspace {
             id: ws.id.clone(),
             roots: ws.roots.clone(),
+            watchers_enabled: ws.watchers_enabled,
+            connectors: ws.connectors.clone(),
             keys,
         });
     }
@@ -701,11 +757,13 @@ fn build_state(
             WorkspaceData {
                 workspace: ws,
                 index,
+                connectors: Arc::new(rw.connectors),
                 memory_path,
                 sync_memory,
                 sync_journal_path,
                 sync_journal,
                 sync_clock: Arc::new(Mutex::new(last_sync_updated_at)),
+                watchers_enabled: rw.watchers_enabled,
             },
         );
         for (h, role) in rw.keys {
@@ -718,6 +776,7 @@ fn build_state(
     }
 
     let audit = AuditLog::new(data_dir.join("audit.jsonl"));
+    let watchers = WatcherStore::open(data_dir.join("watchers.sqlite"))?;
     Ok(AppState {
         key_hashes: Arc::new(key_hashes),
         workspaces: Arc::new(Mutex::new(workspaces)),
@@ -727,11 +786,13 @@ fn build_state(
         provider,
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         telegram: None,
+        watchers: Arc::new(watchers),
     })
 }
 
 fn build_authoritative_host(
     workspace: Workspace,
+    connectors: &[ConnectorConfig],
     sync_memory: Arc<SqliteMemoryStore>,
     sync_clock: Arc<Mutex<i64>>,
     audit_path: PathBuf,
@@ -739,8 +800,16 @@ fn build_authoritative_host(
     // Server workspaces are keyed by the configured name; `Workspace::id` is a
     // locally generated filesystem identity and is not the sync protocol id.
     let workspace_id = workspace.name.clone();
-    let mut host =
-        build_host(workspace, Some(audit_path)).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut host = build_host_with_connectors(
+        workspace,
+        Some(audit_path),
+        None,
+        None,
+        None,
+        None,
+        connectors,
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let store: Arc<dyn MemoryStore> = Arc::new(AuthoritativeWorkspaceStore {
         workspace_id,
         inner: sync_memory,
@@ -1001,7 +1070,7 @@ async fn research(
     Json(body): Json<ResearchBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
     authorize(&headers, &state, &body.workspace_id)?;
-    let (ws, sync_memory, sync_clock) = {
+    let (ws, connectors, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1009,12 +1078,14 @@ async fn research(
         let data = map.get(&body.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         (
             data.workspace.clone(),
+            data.connectors.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
     };
     let mut host = build_authoritative_host(
         ws,
+        &connectors,
         sync_memory,
         sync_clock,
         state.audit.path().to_path_buf(),
@@ -1064,7 +1135,7 @@ async fn research_sse(
     Query(q): Query<StreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     authorize(&headers, &state, &q.workspace_id)?;
-    let (ws, sync_memory, sync_clock) = {
+    let (ws, connectors, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1072,6 +1143,7 @@ async fn research_sse(
         let data = map.get(&q.workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         (
             data.workspace.clone(),
+            data.connectors.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
@@ -1087,7 +1159,9 @@ async fn research_sse(
     let cancel_task = cancel.clone();
 
     tokio::spawn(async move {
-        let Ok(mut host) = build_authoritative_host(ws, sync_memory, sync_clock, audit_path) else {
+        let Ok(mut host) =
+            build_authoritative_host(ws, &connectors, sync_memory, sync_clock, audit_path)
+        else {
             let _ = tx.send(StreamEvent::Error {
                 code: "host_build".into(),
                 message: "failed to build tool host".into(),
@@ -1217,7 +1291,7 @@ async fn ensure_session_host(
         }
         return Ok(());
     }
-    let (ws, sync_memory, sync_clock) = {
+    let (ws, connectors, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1225,12 +1299,14 @@ async fn ensure_session_host(
         let data = map.get(workspace_id).ok_or(StatusCode::NOT_FOUND)?;
         (
             data.workspace.clone(),
+            data.connectors.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
     };
     let host = build_authoritative_host(
         ws,
+        &connectors,
         sync_memory,
         sync_clock,
         state.audit.path().to_path_buf(),
@@ -1313,15 +1389,15 @@ async fn permission_respond(
     if session.workspace_id != body.workspace_id {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Chat-originated pending writes are only actionable through the paired-
-    // desktop chat approval endpoint. Knowing/guessing a request id is not enough.
-    if session.origin == SessionOrigin::Telegram {
+    // External-origin pending writes are only actionable through the paired-
+    // desktop approval endpoint. Knowing/guessing a request id is not enough.
+    if session.origin != SessionOrigin::TrustedClient {
         let _ = state.audit.log(
-            "chat_permission_respond",
+            "external_permission_respond",
             ToolSideEffect::HardWrite,
             &body.session_id,
             outcomes::DENIED,
-            "generic permission endpoint refused Telegram-originated session",
+            "generic permission endpoint refused external-origin session",
             0,
         );
         return Err(StatusCode::FORBIDDEN);
@@ -1998,7 +2074,7 @@ async fn run_telegram_action(
     Ok(events)
 }
 
-async fn execute_chat_permission(
+async fn execute_external_permission(
     state: &AppState,
     proposal: &ChatPermissionProposal,
     decision: PermissionDecision,
@@ -2008,7 +2084,12 @@ async fn execute_chat_permission(
     let session = sessions
         .get_mut(&proposal.session_id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    if session.workspace_id != proposal.workspace_id || session.origin != SessionOrigin::Telegram {
+    if session.workspace_id != proposal.workspace_id
+        || !matches!(
+            session.origin,
+            SessionOrigin::Telegram | SessionOrigin::Watcher
+        )
+    {
         return Err(StatusCode::FORBIDDEN);
     }
     grant_and_execute(
@@ -2079,7 +2160,7 @@ async fn telegram_soft_approval(
         return Ok(true);
     }
 
-    let events = execute_chat_permission(
+    let events = execute_external_permission(
         state,
         &proposal,
         PermissionDecision::AllowOnce,
@@ -2343,7 +2424,7 @@ async fn chat_approval_respond(
         return Err(StatusCode::BAD_REQUEST);
     }
     let events =
-        execute_chat_permission(&state, &proposal, decision, body.typed.as_deref()).await?;
+        execute_external_permission(&state, &proposal, decision, body.typed.as_deref()).await?;
     bridge
         .remove_proposal(&body.request_id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2378,6 +2459,578 @@ async fn chat_approval_respond(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// Persistent server-resident watchers / triggers (#290).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct WatchObservation {
+    event_key: String,
+    text: String,
+    result_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WatcherRunReport {
+    watcher_id: String,
+    outcome: String,
+    event_key: Option<String>,
+    request_id: Option<String>,
+}
+
+fn unix_timestamp_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .min(i64::MAX as u64) as i64
+}
+
+fn workspace_watchers_enabled(state: &AppState, workspace_id: &str) -> Result<bool, StatusCode> {
+    state
+        .workspaces
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .get(workspace_id)
+        .map(|workspace| workspace.watchers_enabled)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+fn watch_condition_matches(condition: &WatchCondition, observation: &WatchObservation) -> bool {
+    match condition {
+        WatchCondition::Always => true,
+        WatchCondition::Contains { needle } => observation
+            .text
+            .to_lowercase()
+            .contains(&needle.to_lowercase()),
+        WatchCondition::ResultCountAtLeast { minimum } => observation.result_count >= *minimum,
+    }
+}
+
+fn bounded_watch_text(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
+async fn observe_watcher(
+    state: &AppState,
+    definition: &WatcherDefinition,
+    now: i64,
+) -> Result<WatchObservation, String> {
+    match &definition.watch {
+        WatchSource::Query {
+            query,
+            result_limit,
+            ..
+        } => {
+            // Rebuild from the workspace roots on each scheduled run. The server's
+            // request index is a startup snapshot; watchers must see later file changes.
+            let workspace = {
+                let workspaces = state
+                    .workspaces
+                    .lock()
+                    .map_err(|_| "workspace lock poisoned".to_string())?;
+                workspaces
+                    .get(&definition.workspace_id)
+                    .map(|workspace| workspace.workspace.clone())
+                    .ok_or_else(|| "watcher workspace not found".to_string())?
+            };
+            let index = KeywordIndex::build(&workspace)
+                .map_err(|_| "watch query index rebuild failed".to_string())?;
+            let matches = index.search(query, *result_limit);
+            let mut text = String::new();
+            for (score, chunk) in &matches {
+                text.push_str(&format!(
+                    "{}:{}-{} score={score:.3}\n{}\n",
+                    chunk.path.display(),
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.text
+                ));
+            }
+            let event_key = watchers::event_key("query", text.as_bytes());
+            Ok(WatchObservation {
+                event_key,
+                text: bounded_watch_text(&text, 12_000),
+                result_count: matches.len(),
+            })
+        }
+        WatchSource::Schedule {
+            interval_seconds, ..
+        } => {
+            let slot = now.div_euclid(*interval_seconds as i64);
+            Ok(WatchObservation {
+                event_key: format!("schedule:{slot}"),
+                text: format!("scheduled interval slot {slot}"),
+                result_count: 1,
+            })
+        }
+        WatchSource::ConnectorPoll {
+            connector_id,
+            tool_name,
+            arguments,
+            ..
+        } => {
+            let session_id = format!("watcher-{}", definition.id);
+            ensure_session_host(
+                state,
+                &definition.workspace_id,
+                &session_id,
+                SessionOrigin::Watcher,
+            )
+            .await
+            .map_err(|status| format!("connector poll session failed: {status}"))?;
+            let result = {
+                let mut sessions = state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "watcher session disappeared".to_string())?;
+                if session.host.side_effect_for(tool_name) != ToolSideEffect::Read {
+                    return Err(
+                        "connector poll tool is not Read; writes cannot be watch sources".into(),
+                    );
+                }
+                session
+                    .host
+                    .execute(tool_name, arguments, None)
+                    .await
+                    .map_err(|_| "connector poll tool failed".to_string())?
+            };
+            if !result.ok {
+                return Err("connector poll returned an unsuccessful result".into());
+            }
+            let text = bounded_watch_text(&result.detail_raw, 12_000);
+            let key_material = format!("{connector_id}\0{text}");
+            Ok(WatchObservation {
+                event_key: watchers::event_key("connector", key_material.as_bytes()),
+                text,
+                result_count: 1,
+            })
+        }
+    }
+}
+
+fn permission_proposal_from_event(
+    event: &StreamEvent,
+    definition: &WatcherDefinition,
+    session_id: &str,
+    side_effect: ToolSideEffect,
+    chat_id: i64,
+    message_thread_id: Option<i64>,
+) -> Option<ChatPermissionProposal> {
+    let StreamEvent::PermissionRequired {
+        request_id,
+        tool_name,
+        target,
+        reason,
+        preview,
+        risk,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(ChatPermissionProposal {
+        request_id: request_id.clone(),
+        workspace_id: definition.workspace_id.clone(),
+        session_id: session_id.to_string(),
+        // Watchers are a system origin, never a Telegram user. This also makes
+        // in-chat SoftWrite approval impossible; only the paired desktop can grant.
+        user_id: 0,
+        chat_id,
+        message_thread_id,
+        tool_name: tool_name.clone(),
+        target: target.clone(),
+        reason: reason.clone(),
+        preview: preview.clone(),
+        risk: risk.clone(),
+        side_effect,
+        trusted_desktop_connected: false,
+    })
+}
+
+async fn execute_watch_action(
+    state: &AppState,
+    definition: &WatcherDefinition,
+    observation: &WatchObservation,
+) -> Result<Option<String>, String> {
+    match &definition.action {
+        WatchAction::Notify {
+            chat_id,
+            message_thread_id,
+            text,
+        } => {
+            let bridge = state
+                .telegram
+                .as_deref()
+                .ok_or_else(|| "Telegram bridge is not configured".to_string())?;
+            let rendered = text
+                .replace("{{watcher_id}}", &definition.id)
+                .replace("{{event}}", &bounded_watch_text(&observation.text, 2_000));
+            bridge
+                .send_text(*chat_id, *message_thread_id, None, &rendered)
+                .await?;
+            let _ = state.audit.log(
+                "watcher_notify",
+                ToolSideEffect::Read,
+                &definition.id,
+                outcomes::ALLOWED,
+                &format!("workspace_id={}", definition.workspace_id),
+                rendered.len() as u64,
+            );
+            Ok(None)
+        }
+        WatchAction::ProposeTool {
+            tool_name,
+            arguments,
+            chat_id,
+            message_thread_id,
+        } => {
+            // Do not create an unreachable pending permission when no approval
+            // queue/paired-desktop transport exists.
+            let bridge = state
+                .telegram
+                .as_deref()
+                .ok_or_else(|| "Telegram bridge is not configured".to_string())?;
+            let session_id = format!("watcher-{}", definition.id);
+            ensure_session_host(
+                state,
+                &definition.workspace_id,
+                &session_id,
+                SessionOrigin::Watcher,
+            )
+            .await
+            .map_err(|status| format!("watch action session failed: {status}"))?;
+
+            let (events, side_effect) = {
+                let mut sessions = state.sessions.lock().await;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "watcher session disappeared".to_string())?;
+                let side_effect = session.host.side_effect_for(tool_name);
+                if side_effect == ToolSideEffect::Read {
+                    return Err(
+                        "propose_tool requires a write-classified tool; Read actions are not proposals"
+                            .into(),
+                    );
+                }
+                let events = session
+                    .host
+                    .execute(tool_name, arguments, None)
+                    .await
+                    .map_err(|_| "watcher tool proposal failed".to_string())?
+                    .events;
+                (events, side_effect)
+            };
+
+            let proposal = events
+                .iter()
+                .find_map(|event| {
+                    permission_proposal_from_event(
+                        event,
+                        definition,
+                        &session_id,
+                        side_effect,
+                        *chat_id,
+                        *message_thread_id,
+                    )
+                })
+                .ok_or_else(|| {
+                    "write action did not produce a permission proposal; execution refused"
+                        .to_string()
+                })?;
+            let request_id = proposal.request_id.clone();
+            bridge.queue_proposal(proposal)?;
+            let _ = state.audit.log(
+                "watcher_permission_proposal",
+                side_effect,
+                &definition.id,
+                outcomes::PENDING,
+                &format!(
+                    "origin=watcher workspace_id={} event_key={}",
+                    definition.workspace_id, observation.event_key
+                ),
+                0,
+            );
+            bridge
+                .send_text(
+                    *chat_id,
+                    *message_thread_id,
+                    None,
+                    &format!(
+                        "Watcher `{}` proposed `{}`. A paired desktop must approve request `{}`.",
+                        definition.id, tool_name, request_id
+                    ),
+                )
+                .await?;
+            Ok(Some(request_id))
+        }
+    }
+}
+
+async fn run_watcher_record(
+    state: &AppState,
+    record: &WatcherRecord,
+    now: i64,
+) -> Result<WatcherRunReport, String> {
+    let definition = &record.definition;
+    if !definition.enabled {
+        return Ok(WatcherRunReport {
+            watcher_id: definition.id.clone(),
+            outcome: "disabled".into(),
+            event_key: None,
+            request_id: None,
+        });
+    }
+    if !workspace_watchers_enabled(state, &definition.workspace_id)
+        .map_err(|status| format!("watcher workspace unavailable: {status}"))?
+    {
+        state
+            .watchers
+            .record_run(&definition.id, now, None, "workspace_disabled")?;
+        return Ok(WatcherRunReport {
+            watcher_id: definition.id.clone(),
+            outcome: "workspace_disabled".into(),
+            event_key: None,
+            request_id: None,
+        });
+    }
+
+    let observation = match observe_watcher(state, definition, now).await {
+        Ok(observation) => observation,
+        Err(error) => {
+            state
+                .watchers
+                .record_run(&definition.id, now, None, "source_error")?;
+            return Err(error);
+        }
+    };
+    if !watch_condition_matches(&definition.condition, &observation) {
+        state.watchers.record_run(
+            &definition.id,
+            now,
+            Some(&observation.event_key),
+            "condition_not_met",
+        )?;
+        return Ok(WatcherRunReport {
+            watcher_id: definition.id.clone(),
+            outcome: "condition_not_met".into(),
+            event_key: Some(observation.event_key),
+            request_id: None,
+        });
+    }
+    if !state
+        .watchers
+        .claim_event(&definition.id, &observation.event_key, now)?
+    {
+        return Ok(WatcherRunReport {
+            watcher_id: definition.id.clone(),
+            outcome: "duplicate".into(),
+            event_key: Some(observation.event_key),
+            request_id: None,
+        });
+    }
+
+    let request_id = match execute_watch_action(state, definition, &observation).await {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            state.watchers.record_run(
+                &definition.id,
+                now,
+                Some(&observation.event_key),
+                "action_error",
+            )?;
+            return Err(error);
+        }
+    };
+    let outcome = if request_id.is_some() {
+        "proposed"
+    } else {
+        "notified"
+    };
+    state.watchers.record_fired(&definition.id, now, outcome)?;
+    Ok(WatcherRunReport {
+        watcher_id: definition.id.clone(),
+        outcome: outcome.into(),
+        event_key: Some(observation.event_key),
+        request_id,
+    })
+}
+
+async fn watcher_scheduler_tick(state: &AppState, now: i64) -> Result<usize, String> {
+    let records = state.watchers.list_enabled()?;
+    let mut ran = 0;
+    for record in records
+        .iter()
+        .filter(|record| watchers::is_due(record, now))
+    {
+        match run_watcher_record(state, record, now).await {
+            Ok(_) => ran += 1,
+            Err(error) => tracing::warn!(
+                watcher_id = %record.definition.id,
+                error = %error,
+                "watcher tick failed closed"
+            ),
+        }
+    }
+    Ok(ran)
+}
+
+async fn watcher_scheduler_loop(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        if let Err(error) = watcher_scheduler_tick(&state, unix_timestamp_i64()).await {
+            tracing::warn!(error = %error, "watcher scheduler tick failed");
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct WatchersQuery {
+    workspace_id: String,
+}
+
+async fn watchers_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WatchersQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&headers, &state, &query.workspace_id)?;
+    let records = state
+        .watchers
+        .list_workspace(&query.workspace_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "workspace_id": query.workspace_id,
+        "workspace_enabled": workspace_watchers_enabled(&state, &query.workspace_id)?,
+        "watchers": records,
+    })))
+}
+
+async fn watchers_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(watcher_id): AxumPath<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let record = state
+        .watchers
+        .get(&watcher_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    authorize(&headers, &state, &record.definition.workspace_id)?;
+    Ok(Json(record))
+}
+
+async fn watchers_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(watcher_id): AxumPath<String>,
+    Json(mut definition): Json<WatcherDefinition>,
+) -> Result<impl IntoResponse, StatusCode> {
+    if watcher_id.trim().is_empty()
+        || (!definition.id.trim().is_empty() && definition.id != watcher_id)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    definition.id = watcher_id;
+    authorize(&headers, &state, &definition.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &definition.workspace_id,
+        "watcher_put",
+        &definition.id,
+    )?;
+    workspace_watchers_enabled(&state, &definition.workspace_id)?;
+    definition.validate().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if let Some(existing) = state
+        .watchers
+        .get(&definition.id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        if existing.definition.workspace_id != definition.workspace_id {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+    state
+        .watchers
+        .put(&definition, unix_timestamp_i64())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = state.audit.log(
+        "watcher_put",
+        ToolSideEffect::SoftWrite,
+        &definition.id,
+        outcomes::ALLOWED,
+        &format!("workspace_id={}", definition.workspace_id),
+        0,
+    );
+    Ok((StatusCode::OK, Json(definition)))
+}
+
+async fn watchers_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(watcher_id): AxumPath<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let record = state
+        .watchers
+        .get(&watcher_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    authorize(&headers, &state, &record.definition.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &record.definition.workspace_id,
+        "watcher_delete",
+        &watcher_id,
+    )?;
+    let deleted = state
+        .watchers
+        .delete(&watcher_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let _ = state.audit.log(
+        "watcher_delete",
+        ToolSideEffect::SoftWrite,
+        &watcher_id,
+        outcomes::ALLOWED,
+        &format!("workspace_id={}", record.definition.workspace_id),
+        0,
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn watchers_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(watcher_id): AxumPath<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let record = state
+        .watchers
+        .get(&watcher_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    authorize(&headers, &state, &record.definition.workspace_id)?;
+    require_admin(
+        &headers,
+        &state,
+        &record.definition.workspace_id,
+        "watcher_run",
+        &watcher_id,
+    )?;
+    let report = run_watcher_record(&state, &record, unix_timestamp_i64())
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(report))
+}
+
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -2395,6 +3048,12 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/chat/pair", post(chat_pair))
         .route("/v1/chat/approvals", get(chat_approvals))
         .route("/v1/chat/approvals/respond", post(chat_approval_respond))
+        .route("/v1/watchers", get(watchers_list))
+        .route(
+            "/v1/watchers/{watcher_id}",
+            get(watchers_get).put(watchers_put).delete(watchers_delete),
+        )
+        .route("/v1/watchers/{watcher_id}/run", post(watchers_run))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state)
 }
@@ -2456,6 +3115,8 @@ async fn main() {
             resolved.push(ResolvedWorkspace {
                 id: "default".into(),
                 roots: vec![root],
+                watchers_enabled: true,
+                connectors: Vec::new(),
                 keys: legacy_hashes.iter().map(|h| (*h, Role::Admin)).collect(),
             });
         }
@@ -2548,6 +3209,10 @@ async fn main() {
     };
     state.telegram = telegram;
 
+    let watcher_state = state.clone();
+    tokio::spawn(async move {
+        watcher_scheduler_loop(watcher_state).await;
+    });
     let app = build_app(state);
     tracing::info!(%addr, "cd-server listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
@@ -2768,11 +3433,15 @@ mod tests {
             ResolvedWorkspace {
                 id: "ws-a".into(),
                 roots: vec![root.join("a")],
+                watchers_enabled: true,
+                connectors: Vec::new(),
                 keys: ws_keys.remove("ws-a").unwrap_or_default(),
             },
             ResolvedWorkspace {
                 id: "ws-b".into(),
                 roots: vec![root.join("b")],
+                watchers_enabled: true,
+                connectors: Vec::new(),
                 keys: ws_keys.remove("ws-b").unwrap_or_default(),
             },
         ];
@@ -2999,11 +3668,38 @@ mod tests {
         let resolved = resolve_config_workspaces(&cfg).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].keys.len(), 2);
+        assert!(resolved[0].watchers_enabled);
+        assert!(resolved[0].connectors.is_empty());
         assert_eq!(resolved[0].keys[0].1, Role::Admin);
         assert_eq!(resolved[0].keys[1].1, Role::Member);
         let telegram = cfg.telegram.as_ref().unwrap();
         assert_eq!(telegram.users.len(), 1);
         assert!(telegram.users[0].allow_soft_write);
+    }
+
+    #[test]
+    fn server_workspace_connectors_reject_embedded_secrets() {
+        let cfg = ServerConfig {
+            data_dir: None,
+            workspaces: vec![WsConfig {
+                id: "team-a".into(),
+                roots: vec![PathBuf::from("/tmp/team-a")],
+                watchers_enabled: true,
+                connectors: vec![ConnectorConfig {
+                    id: "jira".into(),
+                    kind: "mcp".into(),
+                    enabled: true,
+                    settings: serde_json::json!({
+                        "token": "ATATT3xFfGF0example-secret-that-must-not-be-configured"
+                    }),
+                }],
+                keys: Vec::new(),
+            }],
+            telegram: None,
+        };
+        let error = resolve_config_workspaces(&cfg).err().unwrap();
+        assert!(error.contains("raw secret"), "{error}");
+        assert!(error.contains("keychain"), "{error}");
     }
 
     #[tokio::test]
@@ -4122,6 +4818,327 @@ mod tests {
             1,
             "duplicate update was processed"
         );
+    }
+
+    fn schedule_notify_watcher(id: &str) -> WatcherDefinition {
+        WatcherDefinition {
+            id: id.into(),
+            workspace_id: "ws-a".into(),
+            enabled: true,
+            watch: WatchSource::Schedule {
+                interval_seconds: watchers::MIN_INTERVAL_SECONDS,
+            },
+            condition: WatchCondition::Always,
+            action: WatchAction::Notify {
+                chat_id: -1001,
+                message_thread_id: Some(7),
+                text: "Watcher {{watcher_id}} fired: {{event}}".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_crud_is_workspace_scoped_and_admin_mutated() {
+        let dir = tempdir().unwrap();
+        let state = test_state_with_roles(
+            dir.path().to_path_buf(),
+            &[
+                ("admin-k", "ws-a", Role::Admin),
+                ("member-k", "ws-a", Role::Member),
+            ],
+            None,
+        );
+        let app = build_app(state);
+        let definition = schedule_notify_watcher("crud-watch");
+        let body = serde_json::to_string(&definition).unwrap();
+
+        let member_put = Request::builder()
+            .method("PUT")
+            .uri("/v1/watchers/crud-watch")
+            .header("authorization", "Bearer member-k")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(member_put).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let admin_put = Request::builder()
+            .method("PUT")
+            .uri("/v1/watchers/crud-watch")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(admin_put).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let list = Request::builder()
+            .uri("/v1/watchers?workspace_id=ws-a")
+            .header("authorization", "Bearer member-k")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(list).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let listed = json_body(response).await;
+        assert_eq!(listed["watchers"].as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed["watchers"][0]["definition"]["id"], "crud-watch");
+
+        let delete = Request::builder()
+            .method("DELETE")
+            .uri("/v1/watchers/crud-watch")
+            .header("authorization", "Bearer admin-k")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(delete).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let get = Request::builder()
+            .uri("/v1/watchers/crud-watch")
+            .header("authorization", "Bearer admin-k")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(get).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_notify_fires_once_and_deduplicates_same_schedule_event() {
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Admin, false);
+        let definition = schedule_notify_watcher("notify-watch");
+        state.watchers.put(&definition, 1).unwrap();
+        let record = state.watchers.get(&definition.id).unwrap().unwrap();
+
+        let first = run_watcher_record(&state, &record, 600).await.unwrap();
+        assert_eq!(first.outcome, "notified");
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        assert!(sent.lock().unwrap()[0].text.contains("notify-watch"));
+
+        let second = run_watcher_record(&state, &record, 600).await.unwrap();
+        assert_eq!(second.outcome, "duplicate");
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            1,
+            "same schedule event fired a second notification"
+        );
+        let persisted = state.watchers.get(&definition.id).unwrap().unwrap();
+        assert_eq!(persisted.state.last_fired_at, Some(600));
+        assert_eq!(persisted.state.last_outcome.as_deref(), Some("duplicate"));
+    }
+
+    #[tokio::test]
+    async fn watcher_workspace_kill_switch_prevents_action() {
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Admin, false);
+        state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut("ws-a")
+            .unwrap()
+            .watchers_enabled = false;
+        let definition = schedule_notify_watcher("disabled-workspace-watch");
+        state.watchers.put(&definition, 1).unwrap();
+        let record = state.watchers.get(&definition.id).unwrap().unwrap();
+
+        let report = run_watcher_record(&state, &record, 600).await.unwrap();
+        assert_eq!(report.outcome, "workspace_disabled");
+        assert!(sent.lock().unwrap().is_empty());
+        let persisted = state.watchers.get(&definition.id).unwrap().unwrap();
+        assert_eq!(
+            persisted.state.last_outcome.as_deref(),
+            Some("workspace_disabled")
+        );
+        assert!(persisted.state.last_fired_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn watcher_supports_query_connector_poll_and_schedule_sources() {
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[]);
+
+        let query = WatcherDefinition {
+            id: "query-source".into(),
+            workspace_id: "ws-a".into(),
+            enabled: true,
+            watch: WatchSource::Query {
+                query: "alpha".into(),
+                interval_seconds: watchers::MIN_INTERVAL_SECONDS,
+                result_limit: 5,
+            },
+            condition: WatchCondition::Contains {
+                needle: "alpha only data".into(),
+            },
+            action: WatchAction::Notify {
+                chat_id: 1,
+                message_thread_id: None,
+                text: "unused".into(),
+            },
+        };
+        let query_observation = observe_watcher(&state, &query, 600).await.unwrap();
+        assert_eq!(query_observation.result_count, 1);
+        assert!(watch_condition_matches(
+            &query.condition,
+            &query_observation
+        ));
+
+        let connector = WatcherDefinition {
+            id: "connector-source".into(),
+            workspace_id: "ws-a".into(),
+            enabled: true,
+            watch: WatchSource::ConnectorPoll {
+                connector_id: "fixture".into(),
+                tool_name: "fixture_poll".into(),
+                arguments: serde_json::json!({}),
+                interval_seconds: watchers::MIN_INTERVAL_SECONDS,
+            },
+            condition: WatchCondition::Contains {
+                needle: "new ticket".into(),
+            },
+            action: WatchAction::Notify {
+                chat_id: 1,
+                message_thread_id: None,
+                text: "unused".into(),
+            },
+        };
+        let connector_session = "watcher-connector-source";
+        {
+            let mut workspaces = state.workspaces.lock().unwrap();
+            workspaces.get_mut("ws-a").unwrap().connectors = Arc::new(vec![ConnectorConfig {
+                id: "fixture".into(),
+                kind: "fixture".into(),
+                enabled: true,
+                settings: serde_json::json!({
+                    "stub_tool": {
+                        "name": "fixture_poll",
+                        "description": "offline connector poll fixture",
+                        "detail": "new ticket ABC-123",
+                        "side_effect": "read"
+                    }
+                }),
+            }]);
+        }
+        assert!(!state.sessions.lock().await.contains_key(connector_session));
+        let connector_observation = observe_watcher(&state, &connector, 600).await.unwrap();
+        assert!(watch_condition_matches(
+            &connector.condition,
+            &connector_observation
+        ));
+        assert!(connector_observation.event_key.starts_with("connector:"));
+
+        let schedule = schedule_notify_watcher("schedule-source");
+        let schedule_observation = observe_watcher(&state, &schedule, 600).await.unwrap();
+        assert_eq!(schedule_observation.event_key, "schedule:2");
+    }
+
+    #[tokio::test]
+    async fn watcher_hardwrite_only_executes_after_paired_desktop_approval() {
+        use cd_core::connectors::{ConnectorExecutor, RegisteredTool};
+        use cd_core::tools::ToolSpec;
+
+        let dir = tempdir().unwrap();
+        let (state, sent) = telegram_test_state(dir.path().to_path_buf(), Role::Admin, false);
+        let bridge = state.telegram.as_deref().unwrap();
+        let (pairing_id, _) = bridge.pair_desktop("ws-a", "Watcher test desktop").unwrap();
+        let definition = WatcherDefinition {
+            id: "write-watch".into(),
+            workspace_id: "ws-a".into(),
+            enabled: true,
+            watch: WatchSource::Schedule {
+                interval_seconds: watchers::MIN_INTERVAL_SECONDS,
+            },
+            condition: WatchCondition::Always,
+            action: WatchAction::ProposeTool {
+                tool_name: "remote_publish".into(),
+                arguments: serde_json::json!({"issue": "ABC-123"}),
+                chat_id: -1001,
+                message_thread_id: Some(7),
+            },
+        };
+        state.watchers.put(&definition, 1).unwrap();
+        let session_id = "watcher-write-watch";
+        ensure_session_host(&state, "ws-a", session_id, SessionOrigin::Watcher)
+            .await
+            .unwrap();
+        {
+            let mut sessions = state.sessions.lock().await;
+            sessions
+                .get_mut(session_id)
+                .unwrap()
+                .host
+                .register_tool(RegisteredTool {
+                    spec: ToolSpec {
+                        name: "remote_publish".into(),
+                        description: "offline HardWrite fixture".into(),
+                        side_effect: ToolSideEffect::HardWrite,
+                        parameters: serde_json::json!({"type":"object"}),
+                    },
+                    exec: ConnectorExecutor::Stub {
+                        detail: "remote publish executed".into(),
+                    },
+                });
+        }
+
+        let record = state.watchers.get(&definition.id).unwrap().unwrap();
+        let report = run_watcher_record(&state, &record, 600).await.unwrap();
+        assert_eq!(report.outcome, "proposed");
+        let request_id = report.request_id.expect("write must produce request id");
+        let proposal = bridge.proposal(&request_id).unwrap().unwrap();
+        assert_eq!(proposal.side_effect, ToolSideEffect::HardWrite);
+        assert!(proposal.trusted_desktop_connected);
+        assert!(
+            sent.lock()
+                .unwrap()
+                .iter()
+                .all(|message| !message.text.contains("remote publish executed")),
+            "triggered HardWrite executed before approval"
+        );
+
+        let app = build_app(state.clone());
+        let generic = Request::builder()
+            .method("POST")
+            .uri("/v1/permission/respond")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","session_id":"{session_id}","request_id":"{request_id}","decision":"allow_once","typed":"WRITE"}}"#
+            )))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(generic).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "generic endpoint must not grant watcher-originated writes"
+        );
+
+        let approve = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/approvals/respond")
+            .header("authorization", "Bearer admin-k")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"workspace_id":"ws-a","pairing_id":"{pairing_id}","request_id":"{request_id}","decision":"allow_once","typed":"WRITE"}}"#
+            )))
+            .unwrap();
+        let response = app.oneshot(approve).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let approved = json_body(response).await;
+        assert!(
+            approved["events"].as_array().unwrap().iter().any(|event| {
+                event["kind"] == "tool"
+                    && event["payload"]["ok"] == true
+                    && event["payload"]["detail"] == "remote publish executed"
+            }),
+            "paired desktop did not execute watcher HardWrite: {approved}"
+        );
+        assert!(bridge.proposal(&request_id).unwrap().is_none());
     }
 
     #[tokio::test]
