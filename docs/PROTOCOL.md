@@ -182,3 +182,13 @@ The SQLite `(watcher_id, event_key)` primary key is claimed transactionally befo
 Repeated query/connector results or the same schedule slot therefore cannot fire twice, including
 after restart. The store also persists `last_run_at`, `last_event_key`, `last_fired_at`, and the
 last outcome. A crash after the claim is fail-closed (the event may be missed, never duplicated).
+
+### Jira MCP preset
+
+Workspace connector `kind = "mcp"` with `settings.preset = "atlassian_rovo"` normalizes to the
+fixed official Rovo MCP endpoint and a local absolute `mcp-remote` command. `api_key_ref` is
+resolved from the OS keychain into a child-only Authorization environment value; it is never a
+wire field. Jira read/search tools are host-classified `Read`. Comment, worklog, create, edit, and
+transition tools are `HardWrite`; unlisted MCP tools remain `HardWrite` by default. Session grants
+are valid only for Read MCP tools. Every MCP write requires a fresh AllowOnce decision and core
+type-to-confirm.

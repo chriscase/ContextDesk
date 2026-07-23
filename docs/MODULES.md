@@ -58,8 +58,10 @@ secret_refs = []                 # keychain refs only; never raw secrets
 | **HardWrite** | Destructive or remote-side effect | UI Accept; often type-to-confirm |
 
 The host classifies tools. `hard_write_tools` lists names the host must treat
-as HardWrite. A module **cannot** declare itself trusted or self-grant
-capabilities (`ModuleGrantStore::try_self_grant_from_manifest` always fails).
+as HardWrite. Session-wide MCP grants apply to Read tools only; every MCP
+SoftWrite/HardWrite requires a fresh action-specific decision. A module
+**cannot** declare itself trusted or self-grant capabilities
+(`ModuleGrantStore::try_self_grant_from_manifest` always fails).
 
 ### Capabilities
 
