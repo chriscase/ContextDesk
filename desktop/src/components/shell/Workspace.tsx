@@ -6,6 +6,7 @@ import {
 } from "../panes/CompositionPane";
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
 import { LogPane } from "../panes/LogPane";
+import { HarvestPane } from "../panes/HarvestPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
 import { TodoPane } from "../panes/TodoPane";
 import { ChatPane, type ChatPaneProps } from "./ChatPane";
@@ -107,6 +108,16 @@ export function Workspace({
           className="pane-panel"
         >
           <LogPane />
+        </div>
+      ) : null}
+      {pane === "harvest" ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-harvest"
+          aria-labelledby="pane-tab-harvest"
+          className="pane-panel"
+        >
+          <HarvestPane />
         </div>
       ) : null}
       {pane === "todos" && todosKey ? (

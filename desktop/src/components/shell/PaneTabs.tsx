@@ -9,6 +9,7 @@ const PANES: { id: PaneId; label: string }[] = [
   { id: "source", label: "Source" },
   { id: "todos", label: "Todos" },
   { id: "logs", label: "Logs" },
+  { id: "harvest", label: "Harvest" },
 ];
 
 type Props = {

@@ -28,6 +28,8 @@ export type ConfluenceSetup = {
   /** Comma-separated space keys */
   spaces: string;
   hasToken: boolean;
+  /** HardWrite Confluence create/update (default off). */
+  writeEnabled?: boolean;
 };
 
 export type XSetup = {

@@ -138,7 +138,9 @@ export function useShellState() {
       p === "source" ||
       p === "todos" ||
       p === "chat" ||
-      p === "archive"
+      p === "archive" ||
+      p === "logs" ||
+      p === "harvest"
     ) {
       return p;
     }

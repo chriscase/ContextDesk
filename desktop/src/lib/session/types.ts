@@ -13,7 +13,8 @@ export type PaneId =
   | "compose"
   | "source"
   | "todos"
-  | "logs";
+  | "logs"
+  | "harvest";
 
 export type ChatSession = {
   id: string;

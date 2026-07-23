@@ -238,6 +238,24 @@ export async function hostPreflight(): Promise<PreflightReportDto | null> {
   return invoke<PreflightReportDto>("run_preflight_cmd");
 }
 
+/** Harvest provenance row (#326). */
+export type HarvestRowDto = {
+  id: string;
+  system: string;
+  remoteId: string;
+  space?: string | null;
+  url?: string | null;
+  transform: string;
+  syncStatus: string;
+  destination: string;
+  lastSyncedAt: number;
+};
+
+export async function hostListHarvests(limit = 100): Promise<HarvestRowDto[]> {
+  if (!isTauri()) return [];
+  return invoke<HarvestRowDto[]>("list_harvests", { limit });
+}
+
 export async function hostCheckOllama(baseUrl: string): Promise<boolean | null> {
   if (!isTauri()) return null;
   return invoke<boolean>("check_ollama", { baseUrl });
@@ -1026,6 +1044,7 @@ export type ConfluenceSettingsDto = {
   base_url: string;
   spaces: string[];
   pat_ref: string | null;
+  write_enabled?: boolean;
 };
 
 export async function hostGetConfluence(): Promise<ConfluenceSettingsDto | null> {
@@ -1038,6 +1057,7 @@ export async function hostSaveConfluence(args: {
   baseUrl: string;
   spaces: string;
   pat?: string;
+  writeEnabled?: boolean;
 }): Promise<ConfluenceSettingsDto> {
   if (!isTauri()) {
     throw new Error("Confluence settings require Tauri host");
@@ -1048,6 +1068,7 @@ export async function hostSaveConfluence(args: {
       base_url: args.baseUrl,
       spaces: args.spaces,
       pat: args.pat ?? null,
+      write_enabled: args.writeEnabled ?? false,
     },
   });
 }
