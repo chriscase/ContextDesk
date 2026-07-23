@@ -3586,11 +3586,7 @@ fn edit_memory_candidate(
         .ok_or_else(|| "candidate inbox not attached".to_string())?;
     let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
     let c = inbox
-        .edit(
-            &uuid,
-            title.as_deref(),
-            content.as_deref(),
-        )
+        .edit(&uuid, title.as_deref(), content.as_deref())
         .map_err(|e| e.to_string())?;
     Ok(MemoryCandidateDto::from(&c))
 }
