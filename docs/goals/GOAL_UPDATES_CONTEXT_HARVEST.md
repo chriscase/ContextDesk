@@ -40,7 +40,7 @@ Follow [`docs/CLOSE_PROOF.md`](../CLOSE_PROOF.md) and [`docs/ISSUE_HONESTY.md`](
 2. **Close comment** must include: merge SHA or PR number, pasted command output, issue-specific prose, `Adversarial: CONFIRMED — …` or leave open with `Residual: …`.
 3. **`docs/CLAIMS.md`** — only mark **Shipped** when the capability is true on `main` with a real `path:symbol` anchor. No harvest/write/poll claims until that phase merges.
 4. **No mass-close** of the epic until children meet their own proof bars.
-5. Prefer **small PRs** (one child issue or one design PR) with green CI before merge.
+5. Prefer an **`integrate/<slug>` batch** for multi-step work (local gates; one promote PR→main with full CI). Direct small PRs to `main` only for true one-shot fixes — see [`docs/AGENT_WORKFLOW.md`](../AGENT_WORKFLOW.md). Tag closes with agent/model labels.
 
 ---
 
@@ -53,7 +53,8 @@ You are implementing ContextDesk product arcs already designed and filed. Worksp
 - Every closed issue needs close-proof: merge SHA or PR URL, pasted test/gate output with test names, issue-specific prose, Adversarial line — see docs/CLOSE_PROOF.md
 - Update docs/CLAIMS.md only when a capability truly ships on main (grep-able path:symbol)
 - Do not mark #326 epic complete until PR3+ that you claim are actually merged with proof
-- Prefer small sequential PRs over big bang; green CI before merge
+- Use integrate/<slug> for multi-step work; promote once to main (full CI once); see docs/AGENT_WORKFLOW.md
+- On close: CLOSE_PROOF + Agent/Model lines + scripts/tag-issue-agent.sh labels
 - If blocked on product choice, AskUserQuestion once with 2–4 options (batch decisions)
 
 ## Epics (do not re-design from scratch)

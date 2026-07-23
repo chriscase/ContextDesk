@@ -41,6 +41,22 @@ test result: ok. 7 passed; 0 failed; …
 - **No** byte-identical comments copied across issues (mass-script reopens or
   closes). Close-rule 3 in ISSUE_HONESTY.md.
 
+### (d) Agent kind + model (attribution)
+
+For later analysis of which automation completed the work:
+
+- Apply labels: `agent:<kind>` and `model:<slug>` (see [`AGENT_WORKFLOW.md`](./AGENT_WORKFLOW.md)).
+- Helper: `scripts/tag-issue-agent.sh -r ContextDesk -i N --kind grok-build --model grok-4.5 --comment`
+- Include in the close comment:
+
+```text
+Agent: grok-build
+Model: grok-4.5
+```
+
+Kinds: `grok-build` | `claude-code` | `copilot` | `cursor` | `codex` | `human` | `other`.
+If the model slug is unknown, use `model:unknown` and `Model: unknown`.
+
 ## Adversarial review line
 
 Include a one-line verdict:

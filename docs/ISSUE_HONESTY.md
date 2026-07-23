@@ -12,8 +12,10 @@ These rules exist because the backlog was once **batch-closed without true compl
    - **(a)** Correct merged commit/PR SHA (verifiable with `git show`) — not a related-but-wrong SHA
    - **(b)** Pasted verification output (real `test result: ok` lines / clippy / UI click-path)
    - **(c)** Issue-specific prose (no copy-paste mass comments)
+   - **(d)** Agent kind + model labels and close-comment lines (for multi-agent analysis)
    - Adversarial review outcome: CONFIRMED, or leave OPEN with Residual
 5. Types-only, stubs, or “UI shell exists” are **not** completion for feature issues.
+6. Multi-step goals land on `integrate/<slug>` and promote once — see [`AGENT_WORKFLOW.md`](./AGENT_WORKFLOW.md). Closing still requires proof on **`main`**, not only on the integration branch.
 
 CI: `scripts/check_close_proof.sh` enforces (a) for recently closed `remediation` issues
 and offline fixtures that prove the checker fails without a SHA (#254).
