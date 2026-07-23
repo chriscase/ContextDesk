@@ -349,6 +349,34 @@ impl EmbedBackend for FastembedEmbedBackend {
     }
 }
 
+/// Product default for **log template** embedding (#359).
+///
+/// When built with `log-fastembed` (desktop host default), returns local ONNX
+/// via [`FastembedEmbedBackend`]. Without the feature (default `cargo test`),
+/// returns `None` so callers use an injected offline backend (e.g. Concept).
+///
+/// Model id for `memory_embeddings` / template cache keys when ONNX is used:
+/// [`LOCAL_LOG_EMBED_MODEL_ID`].
+pub fn default_log_embed_backend() -> CoreResult<Option<std::sync::Arc<dyn EmbedBackend>>> {
+    #[cfg(feature = "log-fastembed")]
+    {
+        let b = FastembedEmbedBackend::try_new()?;
+        Ok(Some(std::sync::Arc::new(b)))
+    }
+    #[cfg(not(feature = "log-fastembed"))]
+    {
+        Ok(None)
+    }
+}
+
+/// Model id stored with log template vectors when using local ONNX.
+pub const LOCAL_LOG_EMBED_MODEL_ID: &str = "all-minilm-l6-v2-onnx";
+
+/// Whether this build includes the local ONNX log embedder (desktop product).
+pub fn log_fastembed_enabled() -> bool {
+    cfg!(feature = "log-fastembed")
+}
+
 /// Current unix seconds for recency.
 pub fn now_unix_secs() -> i64 {
     SystemTime::now()
@@ -367,6 +395,24 @@ pub fn chunk_content_key(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_log_embed_backend_respects_feature_flag() {
+        // Without log-fastembed (default cargo test): None so tests stay offline.
+        // With the feature (desktop product): Some(ONNX).
+        let got = default_log_embed_backend().expect("factory must not error when feature off");
+        if log_fastembed_enabled() {
+            assert!(
+                got.is_some(),
+                "product build must supply local ONNX backend"
+            );
+        } else {
+            assert!(
+                got.is_none(),
+                "default cargo test must not download ONNX models"
+            );
+        }
+    }
 
     #[test]
     fn cosine_identical_is_one() {

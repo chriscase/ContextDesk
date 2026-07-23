@@ -253,6 +253,23 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         let _ = std::fs::create_dir_all(&log_cache);
         host.set_log_analysis(true, Some(log_cache));
     }
+    // #359: product default for log templates = local ONNX (fastembed), not Ollama HTTP.
+    // May download the small model once; on failure fall back to shared host embed later.
+    match cd_core::embed::default_log_embed_backend() {
+        Ok(Some(be)) => {
+            host.set_log_embed_backend(Some(be), cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID);
+            tracing::info!(
+                model = cd_core::embed::LOCAL_LOG_EMBED_MODEL_ID,
+                "log template embed: local ONNX (fastembed)"
+            );
+        }
+        Ok(None) => {
+            tracing::debug!("log-fastembed not in this build; log embed falls back to host");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "local ONNX log embed init failed; will fall back to host embed");
+        }
+    }
     // #119 hybrid search_kb opt-in; #346 memory embed-on-write needs the same backend
     // whenever durable memory is on (not only when hybrid_retrieval is toggled).
     host.set_hybrid_retrieval(cfg.hybrid_retrieval);
@@ -3270,8 +3287,8 @@ fn ingest_log_path(
         &cache,
         std::path::Path::new(&path),
         name.as_deref().unwrap_or("corpus"),
-        host.embed_backend().as_deref(),
-        host.embed_model(),
+        host.log_embed_backend().as_deref(),
+        host.log_embed_model(),
     )
     .map_err(|e| e.to_string())?;
     Ok(LogIngestReportDto {
@@ -3351,7 +3368,7 @@ fn log_search(
         k: k.unwrap_or(8) as usize,
         ..Default::default()
     };
-    let hits = cd_core::log_analysis::search_logs(&c, &q, host.embed_backend().as_deref())
+    let hits = cd_core::log_analysis::search_logs(&c, &q, host.log_embed_backend().as_deref())
         .map_err(|e| e.to_string())?;
     Ok(hits
         .into_iter()

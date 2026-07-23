@@ -106,6 +106,11 @@ pub struct ToolHost {
     embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
     /// Model id keyed into `memory_embeddings` on embed-on-write (#346).
     embed_model: String,
+    /// Dedicated embed backend for log templates (#359 local ONNX default).
+    /// Falls back to [`Self::embed_backend`] when unset.
+    log_embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    /// Model id for log template vectors.
+    log_embed_model: String,
     /// Hybrid weight knobs (documented in `embed` module).
     hybrid_weights: crate::embed::HybridWeights,
     /// Durable memory store (Phase 1); when set, memory tools write here.
@@ -177,6 +182,8 @@ impl ToolHost {
             hybrid_retrieval: false,
             embed_backend: None,
             embed_model: "default".into(),
+            log_embed_backend: None,
+            log_embed_model: crate::embed::LOCAL_LOG_EMBED_MODEL_ID.into(),
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
             harvest_db_path: None,
@@ -699,6 +706,37 @@ impl ToolHost {
     /// Model id used for `memory_embeddings` / template cache keys. #346
     pub fn embed_model(&self) -> &str {
         &self.embed_model
+    }
+
+    /// Attach log-template embed backend (product default: local ONNX via fastembed). #359
+    pub fn set_log_embed_backend(
+        &mut self,
+        backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+        model: impl Into<String>,
+    ) {
+        self.log_embed_backend = backend;
+        let m = model.into();
+        self.log_embed_model = if m.trim().is_empty() {
+            crate::embed::LOCAL_LOG_EMBED_MODEL_ID.into()
+        } else {
+            m
+        };
+    }
+
+    /// Embed backend for log ingest/search: log-specific, else shared host embed. #359
+    pub fn log_embed_backend(&self) -> Option<std::sync::Arc<dyn crate::embed::EmbedBackend>> {
+        self.log_embed_backend
+            .clone()
+            .or_else(|| self.embed_backend.clone())
+    }
+
+    /// Model id for log template vectors. #359
+    pub fn log_embed_model(&self) -> &str {
+        if self.log_embed_backend.is_some() {
+            &self.log_embed_model
+        } else {
+            &self.embed_model
+        }
     }
 
     /// Override hybrid weights (tests / advanced config).
@@ -1368,8 +1406,8 @@ impl ToolHost {
             cache,
             std::path::Path::new(path),
             name,
-            self.embed_backend.as_deref(),
-            "default",
+            self.log_embed_backend().as_deref(),
+            self.log_embed_model(),
         )?;
         let mut raw = format!(
             "corpus={} lines={} templates={} reduction={:.1}x embedded={}\nTop templates:\n",
@@ -1430,7 +1468,8 @@ impl ToolHost {
             k: args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize,
             ..Default::default()
         };
-        let hits = crate::log_analysis::search_logs(&corpus, &q, self.embed_backend.as_deref())?;
+        let hits =
+            crate::log_analysis::search_logs(&corpus, &q, self.log_embed_backend().as_deref())?;
         let mut raw = String::new();
         for h in &hits {
             raw.push_str(&format!(

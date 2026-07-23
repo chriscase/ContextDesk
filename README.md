@@ -65,7 +65,7 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Semantic** chat-archive search (#79) — archive search today is keyword-based
 - Log **live streaming** / multi-source connectors (Phase 3–4; tracker #363) — batch post-mortem is shipped
 - Proven multi-OS release installers (#172)
-- Optional **fastembed** ONNX binary (`--features log-fastembed`) for bulk local log embedding without Ollama — default tests use a hermetic deterministic embedder
+- **Log template embedding default:** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 
 ---
 

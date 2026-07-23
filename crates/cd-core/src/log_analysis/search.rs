@@ -248,19 +248,48 @@ mod tests {
             Some(&backend),
         )
         .unwrap();
-        assert!(!hits.is_empty());
+        assert!(!hits.is_empty(), "paraphrase search returned no hits");
+        // Must surface the connection-refused template (not merely any score>0).
+        let refused = hits.iter().find(|h| {
+            let p = h.pattern.to_lowercase();
+            (p.contains("connection") && p.contains("refused"))
+                || p.contains("econnrefused")
+                || p.contains("upstream unavailable")
+        });
+        let hit = refused.unwrap_or_else(|| {
+            panic!(
+                "paraphrase must surface connection-refused template; hits={:?}",
+                hits.iter()
+                    .map(|h| (&h.pattern, h.semantic_score, h.score))
+                    .collect::<Vec<_>>()
+            )
+        });
         assert!(
-            hits.iter().any(|h| h.semantic_score > 0.0),
-            "paraphrase must yield semantic_score>0: {:?}",
-            hits
+            hit.semantic_score > 0.0,
+            "connection-refused hit must have semantic_score>0: {hit:?}"
         );
-        // Prefer connection-refused cluster over login
-        let top = &hits[0];
+        // Login decoy must not outrank the refused cluster on semantic.
+        if let Some(login) = hits
+            .iter()
+            .find(|h| h.pattern.to_lowercase().contains("login"))
+        {
+            assert!(
+                hit.semantic_score >= login.semantic_score,
+                "refused sem={} should beat login sem={}; hits={:?}",
+                hit.semantic_score,
+                login.semantic_score,
+                hits.iter()
+                    .map(|h| (&h.pattern, h.semantic_score))
+                    .collect::<Vec<_>>()
+            );
+        }
+        // Top hybrid hit should also be the refused template (semantic weight high).
         assert!(
-            top.pattern.to_lowercase().contains("connection")
-                || top.pattern.to_lowercase().contains("refused")
-                || top.semantic_score > 0.0,
-            "top hit={top:?}"
+            hits[0].template_id == hit.template_id
+                || hits[0].pattern.to_lowercase().contains("refused")
+                || hits[0].pattern.to_lowercase().contains("connection"),
+            "top hit should be connection-refused cluster: {:?}",
+            hits[0]
         );
     }
 }
