@@ -429,6 +429,30 @@ pub fn content_hash_for(content: &str) -> String {
     crate::embed::chunk_content_key(content)
 }
 
+/// Stable import fingerprint for bulk import idempotency (Phase 2).
+pub fn import_fp(source: &str, remote_or_path_key: &str) -> String {
+    crate::embed::chunk_content_key(&format!("{source}\0{remote_or_path_key}"))
+}
+
+/// Tombstone left after GDPR purge (content hard-deleted).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PurgeTombstone {
+    /// Purged memory id.
+    pub id: Uuid,
+    /// When purged (unix secs).
+    pub purged_at: i64,
+    /// Kind at purge time.
+    pub kind: String,
+    /// Scope at purge time.
+    pub scope: String,
+    /// Content hash (for audit; content itself is gone).
+    pub content_hash: String,
+    /// Redacted title stub (no body).
+    pub title_redacted: String,
+    /// Reason string (e.g. gdpr_purge).
+    pub reason: String,
+}
+
 /// Valid-now predicate (MEMORY.md §4):  
 /// `(valid_from IS NULL OR valid_from <= now) AND (valid_to IS NULL OR valid_to > now)`.
 pub fn is_valid_now(valid_from: Option<i64>, valid_to: Option<i64>, now_secs: i64) -> bool {

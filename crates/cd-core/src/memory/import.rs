@@ -64,6 +64,44 @@ pub struct ServerMemoryNote {
     pub kind: Option<String>,
 }
 
+/// Bulk-import arbitrary markdown notes with stable `import_fp` ids (Phase 2).
+///
+/// Each note is keyed by `(source, path_key)`; re-running is idempotent.
+pub fn bulk_import_markdown_notes(
+    store: &SqliteMemoryStore,
+    notes: &[(String, String, String)],
+    source_label: &str,
+    now_secs: i64,
+) -> CoreResult<ImportReport> {
+    // notes: (path_key, title, body)
+    let mut report = ImportReport::default();
+    for (path_key, title, body) in notes {
+        if body.trim().is_empty() {
+            continue;
+        }
+        let fp = import_fp(source_label, path_key);
+        let id = stable_import_id(&fp);
+        if store.get(&id)?.is_some() {
+            report.skipped_existing += 1;
+            continue;
+        }
+        let mut draft = MemoryDraft::new(Kind::ProjectNote, body.clone());
+        draft.title = title.clone();
+        draft.source = MemorySource::Import;
+        draft.created_by = "bulk_import".into();
+        draft.origin_tool = Some("bulk_import".into());
+        draft.structured = serde_json::json!({
+            "import_fp": fp,
+            "path_key": path_key,
+        });
+        match store.put_imported(id, draft, now_secs) {
+            Ok(_) => report.inserted += 1,
+            Err(e) => report.errors.push(format!("{path_key}: {e}")),
+        }
+    }
+    Ok(report)
+}
+
 /// Import memory_fs into a [`SqliteMemoryStore`] with stable ids.
 pub fn import_memory_fs_sqlite(
     store: &SqliteMemoryStore,
@@ -236,6 +274,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn bulk_import_is_idempotent() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let notes = vec![
+            (
+                "notes/a.md".into(),
+                "A".into(),
+                "Rememberable note body alpha".into(),
+            ),
+            (
+                "notes/b.md".into(),
+                "B".into(),
+                "Second note body beta".into(),
+            ),
+        ];
+        let r1 = bulk_import_markdown_notes(&store, &notes, "md_bulk", 10).unwrap();
+        assert_eq!(r1.inserted, 2);
+        let r2 = bulk_import_markdown_notes(&store, &notes, "md_bulk", 20).unwrap();
+        assert_eq!(r2.inserted, 0);
+        assert_eq!(r2.skipped_existing, 2);
     }
 
     #[test]

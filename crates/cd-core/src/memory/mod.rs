@@ -16,10 +16,15 @@
 //! inject a fixed [`Clock`] or pass `now_secs` into store methods.
 
 pub mod ambient;
+pub mod candidates;
+pub mod cue;
+pub mod dedup;
+pub mod edges;
 pub mod facade;
 pub mod import;
 pub mod migrate;
 pub mod recall;
+pub mod score;
 pub mod sqlite_store;
 pub mod tools;
 pub mod types;
@@ -27,15 +32,20 @@ pub mod types;
 pub use ambient::{
     inject_memory_context, inject_memory_context_with_embed, AmbientBudget, AmbientInjection,
 };
+pub use candidates::{propose_from_turn, CandidateInbox};
+pub use cue::{CandidateStatus, CueExtractOpts, CueExtractor, MemoryCandidate};
+pub use dedup::{apply_dedup_proposal, detect_dedup, DedupProposal};
+pub use edges::{expand_recall_neighbors, EdgeStore, MemoryEdge};
 pub use facade::{
     attach_durable_memory_to_host, ensure_workspace_memory_gitignored, personal_memory_db_path,
     workspace_memory_db_path, workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory,
     WorkspaceMemoryLocation,
 };
 pub use import::{
-    import_memory_fs_sqlite, import_memory_jsonl_sqlite, is_migrated_memory_fs_path,
-    stable_import_id, ImportReport,
+    bulk_import_markdown_notes, import_memory_fs_sqlite, import_memory_jsonl_sqlite,
+    is_migrated_memory_fs_path, stable_import_id, ImportReport,
 };
+pub use score::{kind_half_life_days, recency_boost_kind, score_candidate, ScorePair};
 pub use sqlite_store::{embed_blocking, SqliteMemoryStore, MEMORY_EMBED_TIMEOUT_MS};
 pub use tools::{
     format_recall_hits, is_destructive_memory_tool, memory_tool_specs, permission_target_for_write,
@@ -126,6 +136,15 @@ pub trait MemoryStore: Send + Sync {
         );
         Ok(vec![])
     }
+
+    /// GDPR hard-delete content + tombstone (≠ retract). Default: unsupported.
+    ///
+    /// UI must type-to-confirm before calling. Tombstone-preserving.
+    fn purge_gdpr(&self, _id: &Uuid, _now_secs: i64, _reason: &str) -> CoreResult<PurgeTombstone> {
+        Err(crate::error::CoreError::Policy(
+            "GDPR purge not supported on this store".into(),
+        ))
+    }
 }
 
 /// Build the frozen audit `target` string for a memory op.
@@ -147,6 +166,10 @@ pub mod tool_names {
     /// Soft tombstone (`status=retracted`). v1 tier is SoftWrite per owner
     /// default (§10); permanent purge remains HardWrite / type-to-confirm.
     pub const RETRACT_MEMORY: &str = "retract_memory";
+    /// Link two memories (SoftWrite).
+    pub const LINK_MEMORIES: &str = "link_memories";
+    /// Propose candidates from text (Read — does not write durable memory).
+    pub const PROPOSE_MEMORY_CANDIDATES: &str = "propose_memory_candidates";
 }
 
 #[cfg(test)]

@@ -43,6 +43,12 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Log why-tools (correlate/anomalies/trace) | Shipped | crates/cd-core/src/log_analysis/why.rs:correlate | #363 |
 | Log desktop surface | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #362 |
 | Log template embed (local ONNX default) | Shipped | crates/cd-core/src/embed.rs:default_log_embed_backend | #359 |
+| Memory Phase-2 rule-based cue extract | Shipped | crates/cd-core/src/memory/cue.rs:CueExtractor | #381 |
+| Memory candidate review inbox | Shipped | crates/cd-core/src/memory/candidates.rs:CandidateInbox | #382 |
+| Memory salience/confidence + dedup proposals | Shipped | crates/cd-core/src/memory/score.rs:score_candidate | #383 |
+| Memory edges + neighbor recall expand | Shipped | crates/cd-core/src/memory/edges.rs:EdgeStore | #384 |
+| Memory bulk import + GDPR purge | Shipped | crates/cd-core/src/memory/sqlite_store.rs:purge_gdpr | #385 |
+| Memory desktop candidate inbox | Shipped | desktop/src/components/panes/MemoryPane.tsx:MemoryPane | #382 |
 
 ## Human checklist
 

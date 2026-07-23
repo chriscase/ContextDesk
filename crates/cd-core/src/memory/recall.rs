@@ -91,7 +91,9 @@ pub const PINNED_SCORE_BOOST: f32 = 0.15;
 
 fn rescore_hits(hits: &mut [RecallHit], w: HybridWeights, now_secs: i64) {
     for h in hits.iter_mut() {
-        let recency = recency_boost(h.record.updated_at, now_secs);
+        // Phase 2: per-kind half-life recency (task ages faster than durable fact).
+        let recency =
+            super::score::recency_boost_kind(h.record.updated_at, now_secs, &h.record.kind);
         h.recency_score = recency;
         let pinned_boost = if h.record.pinned {
             PINNED_SCORE_BOOST

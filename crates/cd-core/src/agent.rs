@@ -489,12 +489,21 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     text: completion.content.clone(),
                 });
             }
+            let assistant_text = completion.content.clone();
             history.push(ChatMessage {
                 role: Role::Assistant,
                 content: completion.content,
                 tool_call_id: None,
                 tool_calls: None,
             });
+            // Phase-2: propose candidates only (never silent durable write).
+            let n = host
+                .propose_memory_from_turn(user_text, Some(&assistant_text), None)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            if n > 0 {
+                trail.push(format!("memory_candidates:{n}"));
+            }
             if !trail.is_empty() {
                 out.push(StreamEvent::SearchTrail {
                     steps: trail.clone(),
