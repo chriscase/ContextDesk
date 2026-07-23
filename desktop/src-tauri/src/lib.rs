@@ -986,6 +986,12 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         None
     };
     let grok_session_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
+    let mem_active = {
+        let host = state.host.lock().expect("host");
+        host.as_ref()
+            .map(|h| h.durable_memory_active())
+            .unwrap_or(false)
+    };
     Ok(run_preflight(PreflightInput {
         workspace: ws.as_ref(),
         providers: &cfg.providers,
@@ -997,6 +1003,8 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
         confluence: Some(&cfg.confluence),
         confluence_pat_present: confluence_pat,
         grok_session_present,
+        connectors: &cfg.connectors,
+        durable_memory_active: Some(mem_active),
     }))
 }
 

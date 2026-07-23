@@ -37,9 +37,27 @@ import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview } from "./lib/session";
 import { nextSkinId } from "./lib/skins";
+import { SplashScreen } from "./components/launch/SplashScreen";
+import { ContextDeskMark } from "./components/launch/ContextDeskMark";
+import { IdentityPhase } from "./components/launch/IdentityPhase";
+import { PreLaunchScreen } from "./components/launch/PreLaunchScreen";
+import { hostSaveActiveProvider } from "./lib/host";
+import { saveLastGatewayUrl } from "./lib/aiGatewayPrefs";
+import type { WizardApplyPayload } from "./components/settings/AiSetupWizard";
+import { shouldSkipSplash } from "./components/launch/splashDuration";
 
 export function App() {
   const shell = useShellState();
+
+  // Dev/screenshot: skip splash without setState during render
+  useEffect(() => {
+    if (
+      shell.launchPhase === "splash" &&
+      shouldSkipSplash(window.location.search)
+    ) {
+      shell.completeSplash();
+    }
+  }, [shell.launchPhase, shell.completeSplash]);
   const sessionsApi = useChatSessions();
   const {
     sessions,
@@ -103,7 +121,7 @@ export function App() {
     defaultModelKey: shell.defaultModelKey,
     preflightBlocking: shell.preflight.hasBlocking,
     onNeedPreflight: () =>
-      shell.openSettings("preflight", chatScrollRef.current),
+      shell.openSettings("health", chatScrollRef.current),
     persistSession,
     upgradeTitleWithLlm,
     pinScrollToEnd,
@@ -207,7 +225,7 @@ export function App() {
       {
         id: "action:settings",
         label: "Open Settings",
-        keywords: [",", "preflight"],
+        keywords: [",", "health"],
         group: "action",
       },
       {
@@ -240,7 +258,7 @@ export function App() {
         return;
       }
       if (id === "action:settings") {
-        shell.openSettings("preflight", chatScrollRef.current);
+        shell.openSettings("health", chatScrollRef.current);
         return;
       }
       if (id === "action:rename" && activeSession) {
@@ -267,7 +285,7 @@ export function App() {
     },
     onOpenPalette: openPalette,
     onOpenSettings: () =>
-      shell.openSettings("preflight", chatScrollRef.current),
+      shell.openSettings("health", chatScrollRef.current),
     onPrevSession: () => switchSessionByDelta(-1),
     onNextSession: () => switchSessionByDelta(1),
     onSessionByIndex: (i) => {
@@ -287,6 +305,122 @@ export function App() {
     settingsOpen: shell.settingsOpen,
     permissionOpen: Boolean(turn.permission),
   });
+
+  const applyAiFromLaunch = async (payload: WizardApplyPayload) => {
+    const key = payload.apiKey ?? "";
+    let next = { ...shell.setup, ...payload.setup };
+    if (
+      next.providerKind === "openai_compatible" ||
+      next.providerKind === "anthropic"
+    ) {
+      saveLastGatewayUrl(next.baseUrl);
+    }
+    if (next.providerKind !== "none") {
+      try {
+        const saved = await hostSaveActiveProvider({
+          kind: next.providerKind,
+          baseUrl: next.baseUrl,
+          chatModel: next.chatModel,
+          label: next.providerLabel ?? undefined,
+          apiKey:
+            next.providerKind === "xai_grok_build"
+              ? undefined
+              : key.trim() || undefined,
+          localOnly:
+            next.providerKind === "xai_grok_build"
+              ? false
+              : (next.localOnly ?? next.providerKind === "ollama"),
+          toolsEnabled: next.toolsEnabled,
+        });
+        if (saved) {
+          next = {
+            ...next,
+            hasApiKey: saved.has_key,
+            baseUrl: saved.base_url,
+            chatModel: saved.chat_model,
+            providerLabel: saved.label,
+            toolsEnabled: saved.tools_enabled ?? next.toolsEnabled ?? true,
+          };
+        }
+      } catch {
+        /* host may be browser stub */
+      }
+    }
+    shell.onSaveSetup(next);
+    await shell.refreshHostPreflight();
+  };
+
+  if (shell.launchPhase === "splash") {
+    if (shouldSkipSplash(window.location.search)) {
+      return (
+        <div className="launch-root" aria-busy>
+          <IdentityPhase onSelected={() => shell.completeIdentity()} auto />
+        </div>
+      );
+    }
+    return (
+      <SplashScreen
+        icon={<ContextDeskMark size={120} />}
+        title={shell.branding.name}
+        tagline={
+          shell.branding.tagline || "Your workspace, remembered."
+        }
+        company="Open source"
+        accentColor="#4a9eff"
+        onComplete={shell.completeSplash}
+      />
+    );
+  }
+
+  if (shell.launchPhase === "identity") {
+    return (
+      <div className="launch-root">
+        <IdentityPhase onSelected={() => shell.completeIdentity()} auto />
+      </div>
+    );
+  }
+
+  if (shell.launchPhase === "prelaunch") {
+    if (shell.settingsOpen) {
+      return (
+        <div className="app-shell">
+          <SettingsModal
+            open
+            initialSection={shell.settingsSection}
+            setup={shell.setup}
+            theme={shell.theme}
+            onThemeChange={shell.setTheme}
+            uiScale={shell.uiScale}
+            onUiScaleChange={shell.setUiScale}
+            onClose={() => shell.closeSettings(() => {})}
+            onSaveSetup={shell.onSaveSetup}
+            onRecheckHost={shell.refreshHostPreflight}
+            hostReport={shell.hostPreflightReport}
+          />
+        </div>
+      );
+    }
+    return (
+      <PreLaunchScreen
+        productName={shell.branding.name}
+        tagline={
+          shell.branding.tagline ||
+          "Find, synthesize, remember — without config files."
+        }
+        setup={shell.setup}
+        preflight={shell.preflight}
+        onSaveSetup={shell.onSaveSetup}
+        onApplyAi={applyAiFromLaunch}
+        onRecheck={shell.refreshHostPreflight}
+        onEnterApp={shell.enterAppFromPrelaunch}
+        onOpenSettings={(sec) =>
+          shell.openSettings(
+            (sec as "workspace" | "ai" | "connectors" | "health") || "health",
+          )
+        }
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -326,7 +460,7 @@ export function App() {
             }
             onOpenAi={() => shell.openSettings("ai", chatScrollRef.current)}
             onOpenSettings={() =>
-              shell.openSettings("preflight", chatScrollRef.current)
+              shell.openSettings("health", chatScrollRef.current)
             }
             onToggleTheme={() => shell.setTheme((t) => nextSkinId(t))}
           />
@@ -340,7 +474,7 @@ export function App() {
             gitSha={shell.branding.git_sha}
             identityLine={shell.branding.identity_line}
             onOpenPreflight={() =>
-              shell.openSettings("preflight", chatScrollRef.current)
+              shell.openSettings("health", chatScrollRef.current)
             }
             onDismissSetup={shell.dismissSetupPrompt}
             onDismissError={() => turn.setAgentError(null)}
@@ -431,7 +565,7 @@ export function App() {
                   onStop: turn.stopTurn,
                   preflightBlocking: shell.preflight.hasBlocking,
                   openSettings: (s) =>
-                    shell.openSettings(s ?? "preflight", chatScrollRef.current),
+                    shell.openSettings(s ?? "health", chatScrollRef.current),
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
                   setMemoryPath: shell.setMemoryPath,
@@ -562,7 +696,7 @@ export function App() {
             egressLabel={shell.egressLabel}
             effectiveChatModel={effectiveChatModel}
             onOpenPreflight={() =>
-              shell.openSettings("preflight", chatScrollRef.current)
+              shell.openSettings("health", chatScrollRef.current)
             }
             onOpenWorkspace={() =>
               shell.openSettings("workspace", chatScrollRef.current)

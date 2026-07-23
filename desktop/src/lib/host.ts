@@ -10,9 +10,10 @@ export type EventDto = {
 export type PreflightItemDto = {
   id: string;
   title: string;
-  level: "pass" | "warn" | "fail";
+  level: "pass" | "warn" | "fail" | "off";
   detail: string;
   fix_action?: string | null;
+  category?: "launch" | "work" | "optional";
 };
 
 export type PreflightReportDto = {

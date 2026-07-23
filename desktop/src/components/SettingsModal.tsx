@@ -46,20 +46,41 @@ type Props = {
   hostReport?: PreflightReport | null;
 };
 
-const NAV: { id: SettingsSection; label: string; icon: ReactNode }[] = [
-  { id: "preflight", label: "Preflight", icon: <IconPreflight /> },
-  { id: "workspace", label: "Workspace", icon: <IconWorkspace /> },
-  { id: "ai", label: "AI / Models", icon: <IconAi /> },
-  { id: "connectors", label: "Connectors", icon: <IconConnectors /> },
-  { id: "modules", label: "Modules", icon: <IconModules /> },
-  { id: "skills", label: "Skills", icon: <IconSkills /> },
-  { id: "appearance", label: "Appearance", icon: <IconAppearance /> },
-  { id: "general", label: "General", icon: <IconSliders /> },
+/** Grouped IA (#396): Core / Sources / Extensions / Preferences / System / Health */
+const NAV: {
+  id: SettingsSection;
+  label: string;
+  icon: ReactNode;
+  group: string;
+}[] = [
+  { id: "workspace", label: "Workspace", icon: <IconWorkspace />, group: "Core" },
+  { id: "ai", label: "AI / Models", icon: <IconAi />, group: "Core" },
+  {
+    id: "connectors",
+    label: "Connectors",
+    icon: <IconConnectors />,
+    group: "Sources",
+  },
+  { id: "modules", label: "Modules", icon: <IconModules />, group: "Extensions" },
+  { id: "skills", label: "Skills", icon: <IconSkills />, group: "Extensions" },
+  {
+    id: "appearance",
+    label: "Appearance",
+    icon: <IconAppearance />,
+    group: "Preferences",
+  },
+  { id: "general", label: "General", icon: <IconSliders />, group: "System" },
+  {
+    id: "health",
+    label: "Health",
+    icon: <IconPreflight />,
+    group: "Health",
+  },
 ];
 
 export function SettingsModal({
   open,
-  initialSection = "preflight",
+  initialSection = "workspace",
   setup,
   theme,
   onThemeChange,
@@ -88,20 +109,33 @@ export function SettingsModal({
       <div className="settings-panel settings-panel--page">
         <nav className="settings-nav" aria-label="Settings sections">
           <div className="settings-nav__title">Settings</div>
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="settings-nav__item"
-              data-active={c.section === item.id ? "true" : "false"}
-              onClick={() => c.setSection(item.id)}
-            >
-              <span className="settings-nav__icon" aria-hidden>
-                {item.icon}
-              </span>
-              <span className="settings-nav__label">{item.label}</span>
-            </button>
-          ))}
+          {NAV.map((item, idx) => {
+            const prev = NAV[idx - 1];
+            const showGroup = !prev || prev.group !== item.group;
+            return (
+              <div key={item.id}>
+                {showGroup ? (
+                  <div className="settings-nav__group">{item.group}</div>
+                ) : null}
+                <button
+                  type="button"
+                  className="settings-nav__item"
+                  data-active={
+                    c.section === item.id ||
+                    (item.id === "health" && c.section === "preflight")
+                      ? "true"
+                      : "false"
+                  }
+                  onClick={() => c.setSection(item.id)}
+                >
+                  <span className="settings-nav__icon" aria-hidden>
+                    {item.icon}
+                  </span>
+                  <span className="settings-nav__label">{item.label}</span>
+                </button>
+              </div>
+            );
+          })}
         </nav>
         <div className="settings-body">
           <header className="settings-header">
@@ -118,7 +152,7 @@ export function SettingsModal({
             </button>
           </header>
           <div className="settings-content">
-            {c.section === "preflight" ? (
+            {c.section === "health" || c.section === "preflight" ? (
               <PreflightSection
                 report={c.report}
                 onRecheck={c.recheck}

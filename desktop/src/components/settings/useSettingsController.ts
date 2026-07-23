@@ -51,7 +51,8 @@ import type { WizardApplyPayload } from "./AiSetupWizard";
 
 /** NAV section ids for SettingsModal shell (#147). */
 export type SettingsSection =
-  | "preflight"
+  | "health"
+  | "preflight" // alias → health (compat)
   | "workspace"
   | "ai"
   | "connectors"
