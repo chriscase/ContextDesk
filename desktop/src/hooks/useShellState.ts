@@ -64,13 +64,14 @@ function loadSetup(): AppSetupState {
   } catch {
     /* ignore */
   }
+  // Honest cold start (#394): not "configured" until wizard/host says so.
   return {
     dataDirWritable: true,
     workspaceName: null,
     workspaceRoots: [],
-    providerLabel: "Ollama (local)",
-    providerKind: "ollama",
-    chatModel: "mistral",
+    providerLabel: null,
+    providerKind: "none",
+    chatModel: "",
     baseUrl: "http://127.0.0.1:11434",
     hasApiKey: false,
     toolsEnabled: true,
@@ -87,6 +88,11 @@ function loadSetup(): AppSetupState {
     webResearchEnabled: false,
   };
 }
+
+/** Launch phase machine (#391). */
+export type LaunchPhase = "splash" | "identity" | "prelaunch" | "app";
+
+const LAUNCH_COMPLETE_KEY = "contextdesk.launchReady";
 
 export function useShellState() {
   const [branding, setBranding] = useState<BrandingDto>({
@@ -109,11 +115,21 @@ export function useShellState() {
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
-    useState<SettingsSection>("preflight");
+    useState<SettingsSection>("workspace");
   const [dismissedBanner, setDismissedBanner] = useState(
     () => sessionStorage.getItem("cd-setup-dismissed") === "1",
   );
-  const autoOpenedPreflight = useRef(false);
+  const [launchPhase, setLaunchPhase] = useState<LaunchPhase>(() => {
+    if (
+      typeof window !== "undefined" &&
+      (window.location.search.includes("skipStartup=1") ||
+        window.location.search.includes("skipSplash=1"))
+    ) {
+      return "app";
+    }
+    return "splash";
+  });
+  const [identityDone, setIdentityDone] = useState(false);
   const [pane, setPane] = useState<PaneId>(() => {
     const p = localStorage.getItem("cd-pane");
     if (
@@ -151,7 +167,7 @@ export function useShellState() {
       items: report.items.map((i) => ({
         id: i.id,
         title: i.title,
-        level: i.level,
+        level: i.level as "pass" | "warn" | "fail" | "off",
         detail: i.detail,
         fixAction:
           (i.fix_action as
@@ -160,7 +176,9 @@ export function useShellState() {
             | "connectors"
             | "general"
             | "appearance"
+            | "health"
             | undefined) ?? undefined,
+        category: (i as { category?: "launch" | "work" | "optional" }).category,
       })),
       hasBlocking: report.has_blocking,
     });
@@ -353,26 +371,53 @@ export function useShellState() {
     }
   }, [setup.workspaceRoots, refreshMemory]);
 
+  // After host hydrate: returning users with non-blocking preflight skip pre-launch.
   useEffect(() => {
-    if (!preflight.hasBlocking) {
-      autoOpenedPreflight.current = false;
-      return;
-    }
+    if (launchPhase !== "prelaunch" && launchPhase !== "identity") return;
+    if (launchPhase === "identity") return;
+    // Returning shortcut once we know host truth
     if (
-      dismissedBanner ||
-      settingsOpen ||
-      autoOpenedPreflight.current ||
-      sessionStorage.getItem("cd-setup-dismissed") === "1"
+      !preflight.hasBlocking &&
+      setup.workspaceRoots.length > 0 &&
+      setup.providerKind !== "none" &&
+      localStorage.getItem(LAUNCH_COMPLETE_KEY) === "1"
     ) {
-      return;
+      setLaunchPhase("app");
     }
-    autoOpenedPreflight.current = true;
-    setSettingsSection("preflight");
-    setSettingsOpen(true);
-  }, [preflight.hasBlocking, dismissedBanner, settingsOpen]);
+  }, [
+    launchPhase,
+    preflight.hasBlocking,
+    setup.workspaceRoots.length,
+    setup.providerKind,
+  ]);
+
+  const completeSplash = useCallback(() => {
+    setLaunchPhase("identity");
+  }, []);
+
+  const completeIdentity = useCallback(() => {
+    setIdentityDone(true);
+    // First-run or blocking → pre-launch; else main
+    const returning =
+      localStorage.getItem(LAUNCH_COMPLETE_KEY) === "1" &&
+      !preflight.hasBlocking &&
+      setup.workspaceRoots.length > 0 &&
+      setup.providerKind !== "none";
+    setLaunchPhase(returning ? "app" : "prelaunch");
+  }, [preflight.hasBlocking, setup.workspaceRoots.length, setup.providerKind]);
+
+  const enterAppFromPrelaunch = useCallback(() => {
+    if (preflight.hasBlocking) return;
+    try {
+      localStorage.setItem(LAUNCH_COMPLETE_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    setLaunchPhase("app");
+  }, [preflight.hasBlocking]);
 
   const openSettings = useCallback(
-    (section: SettingsSection = "preflight", scrollEl?: HTMLElement | null) => {
+    (section: SettingsSection = "health", scrollEl?: HTMLElement | null) => {
       if (scrollEl) {
         chatScrollSaveRef.current = scrollEl.scrollTop;
       }
@@ -513,6 +558,11 @@ export function useShellState() {
     preflight,
     refreshHostPreflight,
     refreshMemory,
+    launchPhase,
+    completeSplash,
+    completeIdentity,
+    enterAppFromPrelaunch,
+    identityDone,
     openSettings,
     dismissSetupPrompt,
     closeSettings,

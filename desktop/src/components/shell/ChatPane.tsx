@@ -62,7 +62,7 @@ export type ChatPaneProps = {
   onSubmit: (text: string) => Promise<boolean>;
   onStop: () => void;
   preflightBlocking: boolean;
-  openSettings: (section?: "preflight") => void;
+  openSettings: (section?: "health" | "workspace" | "ai") => void;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
 };
@@ -290,7 +290,7 @@ export function ChatPane(props: ChatPaneProps) {
                       <button
                         type="button"
                         className="btn btn--primary"
-                        onClick={() => openSettings("preflight")}
+                        onClick={() => openSettings("health")}
                       >
                         Fix setup issues
                       </button>

@@ -1,13 +1,20 @@
 /** Client-side preflight mirror (host will call cd-core later). */
 
-export type PreflightLevel = "pass" | "warn" | "fail";
+export type PreflightLevel = "pass" | "warn" | "fail" | "off";
 
 export type PreflightItem = {
   id: string;
   title: string;
   level: PreflightLevel;
   detail: string;
-  fixAction?: "general" | "workspace" | "ai" | "appearance" | "connectors";
+  fixAction?:
+    | "general"
+    | "workspace"
+    | "ai"
+    | "appearance"
+    | "connectors"
+    | "health";
+  category?: "launch" | "work" | "optional";
 };
 
 export type PreflightReport = {

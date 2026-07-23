@@ -49,6 +49,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Memory edges + neighbor recall expand | Shipped | crates/cd-core/src/memory/edges.rs:EdgeStore | #384 |
 | Memory bulk import + GDPR purge | Shipped | crates/cd-core/src/memory/sqlite_store.rs:purge_gdpr | #385 |
 | Memory desktop candidate inbox | Shipped | desktop/src/components/panes/MemoryPane.tsx:MemoryPane | #382 |
+| Launch splash + pre-launch shell | Shipped | desktop/src/components/launch/SplashScreen.tsx:SplashScreen | #391–#394 |
+| Work-context preflight categories | Shipped | crates/cd-core/src/preflight.rs:work_context_items | #395 |
+| Settings IA groups (Health demoted) | Shipped | desktop/src/components/SettingsModal.tsx:NAV | #396 |
 
 ## Human checklist
 

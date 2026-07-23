@@ -739,3 +739,13 @@
   gap: var(--space-2);
   margin-top: 6px;
 }
+
+.settings-nav__group {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted, #8b919a);
+  padding: 0.75rem 0.75rem 0.25rem;
+  margin-top: 0.35rem;
+}
+

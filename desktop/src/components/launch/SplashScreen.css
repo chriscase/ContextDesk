@@ -1,0 +1,133 @@
+/* Vendored NexaCore-style splash motion; themed via --splash-accent */
+
+.splash-screen {
+  --splash-accent: #4a9eff;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: #0a0a0a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.9s ease-out;
+  opacity: 0;
+}
+
+.splash-screen--enter {
+  animation: splash-fadeIn 0.9s ease-out forwards;
+}
+
+.splash-screen--hold {
+  opacity: 1;
+}
+
+.splash-screen--exit {
+  animation: splash-fadeOut 0.9s ease-out forwards;
+}
+
+.splash-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.splash-icon {
+  position: relative;
+  opacity: 0;
+  transform: translateY(10px);
+  animation: splash-elementIn 0.8s ease-out 0.2s forwards;
+}
+
+.splash-icon::before {
+  content: "";
+  position: absolute;
+  inset: -16px;
+  border: 1px solid color-mix(in srgb, var(--splash-accent) 18%, transparent);
+  border-radius: 50%;
+  animation: splash-ring-pulse 3s ease-in-out 1.2s infinite;
+  opacity: 0;
+}
+
+.splash-icon::after {
+  content: "";
+  position: absolute;
+  inset: -32px;
+  border: 1px solid color-mix(in srgb, var(--splash-accent) 10%, transparent);
+  border-radius: 50%;
+  animation: splash-ring-pulse 3s ease-in-out 1.6s infinite;
+  opacity: 0;
+}
+
+.splash-title {
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  opacity: 0;
+  transform: translateY(8px);
+  animation: splash-elementIn 0.7s ease-out 0.45s forwards;
+  color: #ffffff;
+}
+
+.splash-company {
+  font-size: 0.95rem;
+  color: #888;
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: splash-elementIn 0.6s ease-out 0.7s forwards;
+}
+
+.splash-tagline {
+  font-size: 0.75rem;
+  color: #555;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0;
+  transform: translateY(6px);
+  animation: splash-elementIn 0.6s ease-out 0.95s forwards;
+  max-width: 28rem;
+  text-align: center;
+  line-height: 1.4;
+}
+
+@keyframes splash-ring-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes splash-fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes splash-fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes splash-elementIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

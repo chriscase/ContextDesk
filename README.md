@@ -44,6 +44,7 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 
 **Shipped on `main` (desktop-focused):**
 
+- **Launch surface:** animated ContextDesk splash → local identity stub → **pre-launch** (workspace → AI wizard → Ready with **work-context** health pills for files/memory/DBs/Confluence/MCP — not news/X) before main chrome; Settings demoted from first-run onboarding (`docs/design/LAUNCH.md`, #391–#397)
 - Allowlisted workspace files + markdown memory search, with **citations** and a **search trail** (`index.rs:KeywordIndex`, incremental SQLite)
 - Streaming agent turns with cancel and live event sink (`agent.rs:run_agent_turn_with_sink`)
 - Permission-gated soft/hard writes to memory and skills (`tool_host.rs:ToolHost`)
