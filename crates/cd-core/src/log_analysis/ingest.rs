@@ -1,13 +1,15 @@
 //! Path/dir ingest orchestration (#355–#359, #362 core).
 
 use super::drain::DrainMiner;
+use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::parse::{detect_format, parse_line, LogFormat};
 use super::redact_log::{redact_message, redact_params};
 use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow};
 use crate::embed::EmbedBackend;
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Stats from one ingest run.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +42,48 @@ pub struct IngestReport {
 /// Streams line-by-line (bounded memory). `embed` is optional — when present,
 /// templates are embedded (content-hash cached). Uses realistic embed budget.
 pub fn ingest_path(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+) -> CoreResult<IngestReport> {
+    ingest_path_inner(cache_root, path, name, embed, embed_model)
+}
+
+/// Ingest with an explicit [`LogEmbedPolicy`] (#359).
+///
+/// - **Local:** uses `embed` when provided (host/Ollama/Concept/fastembed).
+/// - **Cloud:** requires confirm flag; caller must pass a cloud `EmbedBackend`
+///   (secrets stay keychain-side — never in policy).
+/// - **None:** skip template embedding.
+pub fn ingest_path_with_policy(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+    )
+}
+
+fn ingest_path_inner(
     cache_root: &Path,
     path: &Path,
     name: &str,
@@ -237,5 +281,39 @@ mod tests {
             report.stats.reduction_ratio,
             report.stats.embedded
         );
+    }
+
+    #[test]
+    fn cloud_policy_refuses_without_confirm() {
+        use crate::log_analysis::LogEmbedPolicy;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("l");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("a.log"), "error connection refused\n").unwrap();
+        let policy = LogEmbedPolicy::cloud_opt_in("https://example.invalid", false);
+        let backend: Arc<dyn EmbedBackend> = Arc::new(ConceptEmbedBackend::new(64));
+        let err =
+            ingest_path_with_policy(dir.path(), &logs, "c", &policy, Some(backend)).unwrap_err();
+        assert!(format!("{err}").contains("leaves this machine"), "{err}");
+    }
+
+    #[test]
+    fn content_hash_cache_skips_reembed_of_same_pattern() {
+        // Two identical patterns in miner collapse to one template → one embed call path.
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("x.log")).unwrap();
+        for i in 0..20 {
+            writeln!(f, "connection refused to upstream host-{i}").unwrap();
+        }
+        let backend = ConceptEmbedBackend::new(64);
+        let report = ingest_path(dir.path(), &logs, "h", Some(&backend), "concept").unwrap();
+        assert_eq!(
+            report.stats.embedded, report.stats.templates,
+            "one embed per distinct template (content-hash keyed)"
+        );
+        assert!(report.stats.templates < 5);
     }
 }

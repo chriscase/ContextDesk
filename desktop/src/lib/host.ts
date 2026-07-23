@@ -1097,6 +1097,103 @@ export async function hostGetAmbientRecallEnabled(): Promise<boolean | null> {
   return invoke<boolean>("get_ambient_recall_enabled");
 }
 
+// ── Log analysis (#362) — no secrets ──────────────────────────────────────
+
+export type LogCorpusSummaryDto = {
+  id: string;
+  name: string;
+  eventCount: number;
+  templateCount: number;
+  engine: string;
+};
+
+export type LogIngestReportDto = {
+  corpusId: string;
+  lines: number;
+  templates: number;
+  reductionRatio: number;
+  embedded: number;
+};
+
+export type LogClusterDto = {
+  clusterId: number;
+  label: string;
+  count: number;
+  severity: number;
+  score: number;
+  templateIds: number[];
+  exemplars: string[];
+};
+
+export type LogTimelineBucketDto = {
+  start: number;
+  width: number;
+  count: number;
+};
+
+export type LogSearchHitDto = {
+  templateId: number;
+  pattern: string;
+  score: number;
+  semanticScore: number;
+  count: number;
+  severity: number;
+  exemplars: string[];
+};
+
+export async function hostListLogCorpora(): Promise<LogCorpusSummaryDto[] | null> {
+  if (!isTauri()) return [];
+  return invoke<LogCorpusSummaryDto[]>("list_log_corpora");
+}
+
+export async function hostIngestLogPath(
+  path: string,
+  name?: string,
+): Promise<LogIngestReportDto> {
+  if (!isTauri()) throw new Error("Log ingest requires Tauri host");
+  return invoke<LogIngestReportDto>("ingest_log_path", { path, name: name ?? null });
+}
+
+export async function hostLogClusterProblems(
+  corpusId: string,
+  maxClusters?: number,
+): Promise<LogClusterDto[] | null> {
+  if (!isTauri()) return [];
+  return invoke<LogClusterDto[]>("log_cluster_problems", {
+    corpusId,
+    maxClusters: maxClusters ?? null,
+  });
+}
+
+export async function hostLogTimeline(
+  corpusId: string,
+  widthSecs?: number,
+): Promise<LogTimelineBucketDto[] | null> {
+  if (!isTauri()) return [];
+  return invoke<LogTimelineBucketDto[]>("log_timeline", {
+    corpusId,
+    widthSecs: widthSecs ?? null,
+  });
+}
+
+export async function hostLogSearch(
+  corpusId: string,
+  query: string,
+  k?: number,
+): Promise<LogSearchHitDto[] | null> {
+  if (!isTauri()) return [];
+  return invoke<LogSearchHitDto[]>("log_search", {
+    corpusId,
+    query,
+    k: k ?? null,
+  });
+}
+
+export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
+  if (!isTauri()) throw new Error("Discard requires Tauri host");
+  await invoke("discard_log_corpus", { corpusId });
+}
+
 export async function hostSetAmbientRecallEnabled(
   enabled: boolean,
 ): Promise<boolean> {

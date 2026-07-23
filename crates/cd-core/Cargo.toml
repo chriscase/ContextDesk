@@ -35,6 +35,19 @@ webpki-roots = "1.0.9"
 tokio-postgres-rustls = "0.14.0"
 # Session context zip ingest (#342)
 zip = "2"
+# Log event store — embedded DuckDB (MIT; LOG_ANALYSIS.md §10 / #358)
+duckdb = { version = "1.10505.0", features = ["bundled"] }
+# Local ONNX template embed (#359) — optional so default CI stays offline/fast.
+# Enable with `--features log-fastembed` or desktop host feature.
+fastembed = { version = "5", optional = true, default-features = false, features = [
+  "ort-download-binaries-rustls-tls",
+  "hf-hub-rustls-tls",
+] }
+
+[features]
+default = []
+# Local ONNX template embeddings via fastembed-rs (downloads model on first use).
+log-fastembed = ["dep:fastembed"]
 
 [dev-dependencies]
 tempfile = "3"

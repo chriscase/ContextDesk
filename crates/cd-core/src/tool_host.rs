@@ -996,6 +996,9 @@ impl ToolHost {
             crate::log_analysis::SEARCH_LOGS => self.tool_search_logs(arguments)?,
             crate::log_analysis::CLUSTER_PROBLEMS => self.tool_cluster_problems(arguments)?,
             crate::log_analysis::TIMELINE => self.tool_timeline(arguments)?,
+            crate::log_analysis::CORRELATE => self.tool_correlate_logs(arguments)?,
+            crate::log_analysis::ANOMALIES => self.tool_anomalies_logs(arguments)?,
+            crate::log_analysis::TRACE => self.tool_trace_logs(arguments)?,
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
@@ -1520,6 +1523,134 @@ impl ToolHost {
             format!("{} timeline buckets", buckets.len()),
             raw,
             Some(format!("log_corpus:{cid}")),
+        ))
+    }
+
+    fn tool_correlate_logs(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("correlate_logs requires corpus".into()))?;
+        let focus = args
+            .get("focus_template_id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                CoreError::Message("correlate_logs requires focus_template_id".into())
+            })?;
+        let around = args.get("around_ts").and_then(|v| v.as_i64());
+        let window = args
+            .get("window_secs")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(60);
+        let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let hits = crate::log_analysis::correlate(&corpus, focus, around, window, k)?;
+        let mut raw = String::new();
+        for h in &hits {
+            raw.push_str(&format!(
+                "- t{} score={:.2} n={} precedes={} : {}\n",
+                h.template_id, h.score, h.count, h.precedes_focus, h.pattern
+            ));
+        }
+        Ok((
+            true,
+            format!("{} correlated templates", hits.len()),
+            raw,
+            hits.first()
+                .map(|h| format!("log_template:{}", h.template_id)),
+        ))
+    }
+
+    fn tool_anomalies_logs(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("anomalies_logs requires corpus".into()))?;
+        let bf = args
+            .get("baseline_from")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| CoreError::Message("baseline_from required".into()))?;
+        let bt = args
+            .get("baseline_to")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| CoreError::Message("baseline_to required".into()))?;
+        let inf = args
+            .get("incident_from")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| CoreError::Message("incident_from required".into()))?;
+        let ito = args
+            .get("incident_to")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| CoreError::Message("incident_to required".into()))?;
+        let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let hits = crate::log_analysis::anomalies(&corpus, bf, bt, inf, ito, k)?;
+        let mut raw = String::new();
+        for h in &hits {
+            raw.push_str(&format!(
+                "- t{} score={:.2} incident={} baseline={} : {}\n",
+                h.template_id, h.score, h.incident_count, h.baseline_count, h.pattern
+            ));
+        }
+        Ok((
+            true,
+            format!("{} anomalies", hits.len()),
+            raw,
+            hits.first()
+                .map(|h| format!("log_template:{}", h.template_id)),
+        ))
+    }
+
+    fn tool_trace_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.log_analysis_enabled {
+            return Err(CoreError::Policy("log analysis disabled".into()));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let cid = args
+            .get("corpus")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("trace_logs requires corpus".into()))?;
+        let tid = args
+            .get("trace_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("trace_logs requires trace_id".into()))?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let events = crate::log_analysis::trace(&corpus, tid)?;
+        let mut raw = String::new();
+        for e in &events {
+            raw.push_str(&format!(
+                "- t={} svc={:?} level={} tplt={} : {}\n",
+                e.ts, e.service, e.level, e.template_id, e.message
+            ));
+        }
+        Ok((
+            true,
+            format!("{} trace events", events.len()),
+            raw,
+            Some(format!("log_trace:{tid}")),
         ))
     }
 
