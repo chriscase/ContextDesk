@@ -988,7 +988,9 @@ async fn run_preflight_cmd(state: State<'_, AppState>) -> Result<PreflightReport
     let grok_session_present = Some(cd_core::grok_auth::detect_grok_session().is_some());
     let mem_active = {
         let host = state.host.lock().expect("host");
-        host.as_ref().map(|h| h.durable_memory_active()).unwrap_or(false)
+        host.as_ref()
+            .map(|h| h.durable_memory_active())
+            .unwrap_or(false)
     };
     Ok(run_preflight(PreflightInput {
         workspace: ws.as_ref(),
