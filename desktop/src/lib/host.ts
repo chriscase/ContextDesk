@@ -935,6 +935,80 @@ export async function hostSaveCompositionDraft(args: {
   });
 }
 
+/** Phase-2 capture proposal (not durable until Approve). */
+export type MemoryCandidateDto = {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  scope: string;
+  salience: number;
+  confidence: number;
+  cue: string;
+  sourceExcerpt: string;
+  status: string;
+  proposeSupersedeOf?: string | null;
+  createdAt: number;
+};
+
+export async function hostListMemoryCandidates(opts?: {
+  includeResolved?: boolean;
+  limit?: number;
+}): Promise<MemoryCandidateDto[]> {
+  if (!isTauri()) return [];
+  return invoke<MemoryCandidateDto[]>("list_memory_candidates", {
+    includeResolved: opts?.includeResolved ?? false,
+    limit: opts?.limit ?? 100,
+  });
+}
+
+export async function hostApproveMemoryCandidate(
+  id: string,
+): Promise<DurableMemoryDto> {
+  if (!isTauri()) throw new Error("Approve requires Tauri host");
+  return invoke<DurableMemoryDto>("approve_memory_candidate", { id });
+}
+
+export async function hostDiscardMemoryCandidate(id: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("discard_memory_candidate", { id });
+}
+
+export async function hostEditMemoryCandidate(args: {
+  id: string;
+  title?: string;
+  content?: string;
+}): Promise<MemoryCandidateDto> {
+  if (!isTauri()) throw new Error("Edit requires Tauri host");
+  return invoke<MemoryCandidateDto>("edit_memory_candidate", {
+    id: args.id,
+    title: args.title ?? null,
+    content: args.content ?? null,
+  });
+}
+
+export async function hostBatchApproveMemoryCandidates(args?: {
+  minConfidence?: number;
+  minSalience?: number;
+  typeConfirm?: string;
+}): Promise<DurableMemoryDto[]> {
+  if (!isTauri()) return [];
+  return invoke<DurableMemoryDto[]>("batch_approve_memory_candidates", {
+    minConfidence: args?.minConfidence ?? 0.55,
+    minSalience: args?.minSalience ?? 0.4,
+    typeConfirm: args?.typeConfirm ?? null,
+  });
+}
+
+/** GDPR hard-delete + tombstone. typeConfirm must be exactly "PURGE". */
+export async function hostPurgeMemoryGdpr(
+  id: string,
+  typeConfirm: string,
+): Promise<{ id: string; purged_at: number; title_redacted: string }> {
+  if (!isTauri()) throw new Error("Purge requires Tauri host");
+  return invoke("purge_memory_gdpr", { id, typeConfirm });
+}
+
 export async function hostWriteMemory(
   filename: string,
   title: string,

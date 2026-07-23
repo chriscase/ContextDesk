@@ -24,7 +24,11 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
                         "description": "Optional kind filter: fact, decision, bookmark, preference, project_note, contact, term, task"
                     },
                     "k": { "type": "integer", "minimum": 1, "maximum": 50 },
-                    "include_superseded": { "type": "boolean" }
+                    "include_superseded": { "type": "boolean" },
+                    "expand_neighbors": {
+                        "type": "boolean",
+                        "description": "Include one-hop linked memories (default true when edges configured)"
+                    }
                 },
                 "required": ["query"]
             }),
@@ -81,6 +85,36 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
                 "required": ["id"]
             }),
         },
+        ToolSpec {
+            name: tool_names::LINK_MEMORIES.into(),
+            description: "Link two durable memories (decision→project, bookmark→fact, …). SoftWrite — requires user Accept.".into(),
+            side_effect: ToolSideEffect::SoftWrite,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "from_id": { "type": "string" },
+                    "to_id": { "type": "string" },
+                    "edge_type": {
+                        "type": "string",
+                        "description": "Relationship: relates | supports | child_of | supersedes_proposed"
+                    }
+                },
+                "required": ["from_id", "to_id"]
+            }),
+        },
+        ToolSpec {
+            name: tool_names::PROPOSE_MEMORY_CANDIDATES.into(),
+            description: "Extract candidate memories from text into the review inbox (does NOT write durable memory). Offline rule-based cues.".into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" },
+                    "assistant_text": { "type": "string" }
+                },
+                "required": ["text"]
+            }),
+        },
     ]
 }
 
@@ -88,7 +122,7 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
 pub fn is_destructive_memory_tool(name: &str) -> bool {
     matches!(
         name,
-        tool_names::RETRACT_MEMORY | "purge_memory" | "memory_purge"
+        tool_names::RETRACT_MEMORY | "purge_memory" | "memory_purge" | "purge_memory_gdpr"
     )
 }
 
@@ -259,6 +293,8 @@ mod tests {
     fn specs_cover_four_tools() {
         let specs = memory_tool_specs();
         let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"link_memories"));
+        assert!(names.contains(&"propose_memory_candidates"));
         assert!(names.contains(&"recall_memory"));
         assert!(names.contains(&"save_memory"));
         assert!(names.contains(&"supersede_memory"));

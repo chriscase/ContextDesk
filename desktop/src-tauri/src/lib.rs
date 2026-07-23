@@ -3485,6 +3485,175 @@ fn save_composition_draft(
     Ok(DurableMemoryDto::from(&rec))
 }
 
+/// Phase-2 candidate review inbox row (not durable until approve).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryCandidateDto {
+    id: String,
+    kind: String,
+    title: String,
+    content: String,
+    scope: String,
+    salience: f32,
+    confidence: f32,
+    cue: String,
+    source_excerpt: String,
+    status: String,
+    propose_supersede_of: Option<String>,
+    created_at: i64,
+}
+
+impl From<&cd_core::memory::MemoryCandidate> for MemoryCandidateDto {
+    fn from(c: &cd_core::memory::MemoryCandidate) -> Self {
+        Self {
+            id: c.id.to_string(),
+            kind: c.kind.as_str().to_string(),
+            title: c.title.clone(),
+            content: c.content.clone(),
+            scope: c.scope.as_str().to_string(),
+            salience: c.salience,
+            confidence: c.confidence,
+            cue: c.cue.clone(),
+            source_excerpt: c.source_excerpt.clone(),
+            status: c.status.as_str().to_string(),
+            propose_supersede_of: c.propose_supersede_of.map(|u| u.to_string()),
+            created_at: c.created_at,
+        }
+    }
+}
+
+/// List pending (or all) memory candidates from the review inbox.
+#[tauri::command]
+fn list_memory_candidates(
+    state: State<'_, AppState>,
+    include_resolved: Option<bool>,
+    limit: Option<u32>,
+) -> Result<Vec<MemoryCandidateDto>, String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let inbox = host
+        .candidate_inbox()
+        .ok_or_else(|| "candidate inbox not attached".to_string())?;
+    let list = inbox
+        .list(
+            include_resolved.unwrap_or(false),
+            limit.unwrap_or(100) as usize,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(list.iter().map(MemoryCandidateDto::from).collect())
+}
+
+/// SoftWrite-style approve: human confirmed → store.put (embed + redaction).
+#[tauri::command]
+fn approve_memory_candidate(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DurableMemoryDto, String> {
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
+    let rec = host
+        .approve_memory_candidate(&uuid)
+        .map_err(|e| e.to_string())?;
+    Ok(DurableMemoryDto::from(&rec))
+}
+
+/// Discard a pending candidate (no durable write).
+#[tauri::command]
+fn discard_memory_candidate(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let inbox = host
+        .candidate_inbox()
+        .ok_or_else(|| "candidate inbox not attached".to_string())?;
+    let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
+    inbox.discard(&uuid).map_err(|e| e.to_string())
+}
+
+/// Edit pending candidate title/content before approve.
+#[tauri::command]
+fn edit_memory_candidate(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    content: Option<String>,
+) -> Result<MemoryCandidateDto, String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let inbox = host
+        .candidate_inbox()
+        .ok_or_else(|| "candidate inbox not attached".to_string())?;
+    let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
+    let c = inbox
+        .edit(&uuid, title.as_deref(), content.as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(MemoryCandidateDto::from(&c))
+}
+
+/// Batch approve above confidence/salience floors; large batches need type_confirm "APPROVE".
+#[tauri::command]
+fn batch_approve_memory_candidates(
+    state: State<'_, AppState>,
+    min_confidence: Option<f32>,
+    min_salience: Option<f32>,
+    type_confirm: Option<String>,
+) -> Result<Vec<DurableMemoryDto>, String> {
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let inbox = host
+        .candidate_inbox()
+        .ok_or_else(|| "candidate inbox not attached".to_string())?;
+    let store = host
+        .durable_memory_store()
+        .ok_or_else(|| "durable memory not attached".to_string())?;
+    let now = cd_core::embed::now_unix_secs();
+    let recs = inbox
+        .batch_approve_above(
+            store.as_ref(),
+            min_confidence.unwrap_or(0.55),
+            min_salience.unwrap_or(0.40),
+            3, // type-to-confirm threshold
+            type_confirm.as_deref(),
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(recs.iter().map(DurableMemoryDto::from).collect())
+}
+
+/// GDPR purge: hard-delete content, keep tombstone. Type-to-confirm "PURGE".
+/// Distinct from reversible retract.
+#[tauri::command]
+fn purge_memory_gdpr(
+    state: State<'_, AppState>,
+    id: String,
+    type_confirm: String,
+) -> Result<serde_json::Value, String> {
+    if type_confirm.trim() != "PURGE" {
+        return Err("type-to-confirm required: type PURGE exactly".into());
+    }
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let store = host
+        .durable_memory_store()
+        .ok_or_else(|| "durable memory not attached".to_string())?;
+    let uuid = cd_core::memory::parse_memory_id(&id).map_err(|e| e.to_string())?;
+    let now = cd_core::embed::now_unix_secs();
+    let tomb = store
+        .purge_gdpr(&uuid, now, "gdpr_ui")
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "id": tomb.id.to_string(),
+        "purged_at": tomb.purged_at,
+        "kind": tomb.kind,
+        "scope": tomb.scope,
+        "title_redacted": tomb.title_redacted,
+        "reason": tomb.reason,
+    }))
+}
+
 #[tauri::command]
 fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
     let cfg = state.config.lock().expect("config").clone();
@@ -3652,6 +3821,12 @@ pub fn run() {
             list_durable_memories,
             get_durable_memory,
             save_composition_draft,
+            list_memory_candidates,
+            approve_memory_candidate,
+            discard_memory_candidate,
+            edit_memory_candidate,
+            batch_approve_memory_candidates,
+            purge_memory_gdpr,
             list_log_corpora,
             ingest_log_path,
             log_cluster_problems,

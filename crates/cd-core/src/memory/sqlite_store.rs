@@ -236,6 +236,88 @@ impl SqliteMemoryStore {
         Ok(out)
     }
 
+    /// GDPR purge: hard-delete content, keep tombstone (≠ retract).
+    ///
+    /// Requires type-to-confirm at the UI/host; this method only performs the
+    /// store mutation. Removes FTS + embeddings for the id.
+    pub fn purge_gdpr(&self, id: &Uuid, now_secs: i64, reason: &str) -> CoreResult<PurgeTombstone> {
+        let conn = self.conn.lock().map_err(|_| lock_err())?;
+        let rec = load_record(&conn, id)?
+            .ok_or_else(|| CoreError::Message(format!("purge target missing: {id}")))?;
+        let title_redacted = if rec.title.is_empty() {
+            "[purged]".into()
+        } else {
+            format!(
+                "[purged] {}",
+                rec.title.chars().take(40).collect::<String>()
+            )
+        };
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
+        let tomb = PurgeTombstone {
+            id: *id,
+            purged_at: now_secs,
+            kind: rec.kind.as_str().to_string(),
+            scope: rec.scope.as_str().to_string(),
+            content_hash: rec.content_hash.clone(),
+            title_redacted: title_redacted.clone(),
+            reason: reason.to_string(),
+        };
+        conn.execute(
+            "INSERT INTO memory_purge_tombstones (id, purged_at, kind, scope, content_hash, title_redacted, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET purged_at=excluded.purged_at, reason=excluded.reason",
+            params![
+                id.to_string(),
+                now_secs,
+                tomb.kind,
+                tomb.scope,
+                tomb.content_hash,
+                tomb.title_redacted,
+                tomb.reason,
+            ],
+        )
+        .map_err(sqlite_err)?;
+        // Hard delete content row + tags + embeddings + FTS
+        let _ = conn.execute(
+            "DELETE FROM memory_tags WHERE memory_id = ?1",
+            params![id.to_string()],
+        );
+        let _ = conn.execute(
+            "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+            params![id.to_string()],
+        );
+        fts_delete(&conn, id)?;
+        conn.execute("DELETE FROM memory WHERE id = ?1", params![id.to_string()])
+            .map_err(sqlite_err)?;
+        conn.execute("COMMIT", []).map_err(sqlite_err)?;
+        Ok(tomb)
+    }
+
+    /// Fetch purge tombstone if present.
+    pub fn get_purge_tombstone(&self, id: &Uuid) -> CoreResult<Option<PurgeTombstone>> {
+        let conn = self.conn.lock().map_err(|_| lock_err())?;
+        let row = conn
+            .query_row(
+                "SELECT id, purged_at, kind, scope, content_hash, title_redacted, reason
+                 FROM memory_purge_tombstones WHERE id = ?1",
+                params![id.to_string()],
+                |r| {
+                    Ok(PurgeTombstone {
+                        id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or(*id),
+                        purged_at: r.get(1)?,
+                        kind: r.get(2)?,
+                        scope: r.get(3)?,
+                        content_hash: r.get(4)?,
+                        title_redacted: r.get(5)?,
+                        reason: r.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+        Ok(row)
+    }
+
     /// Insert with a predetermined id (idempotent import). No-op if id exists.
     ///
     /// After commit, embeds via the same write-time path as [`MemoryStore::put`]
@@ -749,6 +831,15 @@ impl MemoryStore for SqliteMemoryStore {
             limit,
         )
     }
+
+    fn purge_gdpr(
+        &self,
+        id: &Uuid,
+        now_secs: i64,
+        reason: &str,
+    ) -> CoreResult<crate::memory::PurgeTombstone> {
+        SqliteMemoryStore::purge_gdpr(self, id, now_secs, reason)
+    }
 }
 
 fn load_record(conn: &Connection, id: &Uuid) -> CoreResult<Option<MemoryRecord>> {
@@ -1226,5 +1317,23 @@ mod tests {
         let since = store.changes_since(150).unwrap();
         assert_eq!(since.len(), 1);
         assert_eq!(since[0].content, "b");
+    }
+    #[test]
+    fn purge_gdpr_removes_content_keeps_tombstone() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let rec = store
+            .put(
+                MemoryWriteOp::Insert(MemoryDraft::new(Kind::Fact, "secret personal fact xyz")),
+                10,
+            )
+            .unwrap();
+        let id = rec.id;
+        let tomb = store.purge_gdpr(&id, 20, "gdpr_purge").unwrap();
+        assert_eq!(tomb.id, id);
+        assert!(store.get(&id).unwrap().is_none());
+        let t2 = store.get_purge_tombstone(&id).unwrap().unwrap();
+        assert_eq!(t2.content_hash, rec.content_hash);
+        assert!(t2.title_redacted.contains("purged"));
+        // retract is different path — purged id cannot be gotten
     }
 }

@@ -222,6 +222,17 @@ pub fn attach_durable_memory_to_host(
             }
         }
     }
+    // Phase-2 inbox + edges co-located with workspace memory dir.
+    let mem_dir = ws_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ws_path.clone());
+    if let Ok(inbox) = super::CandidateInbox::open(mem_dir.join("candidates.sqlite")) {
+        host.set_candidate_inbox(Some(std::sync::Arc::new(inbox)));
+    }
+    if let Ok(edges) = super::EdgeStore::open(mem_dir.join("edges.sqlite")) {
+        host.set_edge_store(Some(std::sync::Arc::new(edges)));
+    }
     host.set_durable_memory(std::sync::Arc::new(store), true);
     host.set_harvest_db_path(Some(ws_path));
     host.set_ambient_recall_enabled(memory_cfg.ambient_recall_enabled);
@@ -378,6 +389,23 @@ impl MemoryStore for TwoScopeMemory {
         ws.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         ws.truncate(limit.max(1));
         Ok(ws)
+    }
+
+    fn purge_gdpr(
+        &self,
+        id: &Uuid,
+        now_secs: i64,
+        reason: &str,
+    ) -> CoreResult<super::PurgeTombstone> {
+        if self.personal.get(id)?.is_some() {
+            return self.personal.purge_gdpr(id, now_secs, reason);
+        }
+        if self.workspace.get(id)?.is_some() {
+            return self.workspace.purge_gdpr(id, now_secs, reason);
+        }
+        Err(CoreError::Message(format!(
+            "purge target missing in both scopes: {id}"
+        )))
     }
 }
 

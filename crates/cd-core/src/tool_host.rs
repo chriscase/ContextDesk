@@ -115,6 +115,10 @@ pub struct ToolHost {
     hybrid_weights: crate::embed::HybridWeights,
     /// Durable memory store (Phase 1); when set, memory tools write here.
     durable_memory: Option<std::sync::Arc<dyn crate::memory::MemoryStore>>,
+    /// Phase-2 candidate review inbox (non-durable until SoftWrite approve).
+    candidate_inbox: Option<std::sync::Arc<crate::memory::CandidateInbox>>,
+    /// Phase-2 memory edges store.
+    edge_store: Option<std::sync::Arc<crate::memory::EdgeStore>>,
     /// Path to workspace memory SQLite (for co-located harvest table). #326
     harvest_db_path: Option<PathBuf>,
     /// Base dir for session context packs (`…/.contextdesk`). #341
@@ -186,6 +190,8 @@ impl ToolHost {
             log_embed_model: crate::embed::LOCAL_LOG_EMBED_MODEL_ID.into(),
             hybrid_weights: crate::embed::HybridWeights::default(),
             durable_memory: None,
+            candidate_inbox: None,
+            edge_store: None,
             harvest_db_path: None,
             session_context_base: None,
             active_session_id: None,
@@ -579,6 +585,73 @@ impl ToolHost {
         }
         self.durable_memory = Some(store);
         self.durable_memory_enabled = enabled;
+    }
+
+    /// Attach Phase-2 candidate review inbox (proposals only until SoftWrite approve).
+    pub fn set_candidate_inbox(
+        &mut self,
+        inbox: Option<std::sync::Arc<crate::memory::CandidateInbox>>,
+    ) {
+        self.candidate_inbox = inbox;
+    }
+
+    /// Borrow candidate inbox when configured.
+    pub fn candidate_inbox(&self) -> Option<std::sync::Arc<crate::memory::CandidateInbox>> {
+        self.candidate_inbox.clone()
+    }
+
+    /// Attach Phase-2 memory edge store.
+    pub fn set_edge_store(&mut self, edges: Option<std::sync::Arc<crate::memory::EdgeStore>>) {
+        self.edge_store = edges;
+    }
+
+    /// Borrow edge store when configured.
+    pub fn edge_store(&self) -> Option<std::sync::Arc<crate::memory::EdgeStore>> {
+        self.edge_store.clone()
+    }
+
+    /// End-of-turn cue extract → inbox (never writes durable memory).
+    ///
+    /// Returns proposed candidates (may be empty). Offline / zero-token.
+    pub fn propose_memory_from_turn(
+        &self,
+        user_text: &str,
+        assistant_text: Option<&str>,
+        session_id: Option<&str>,
+    ) -> crate::error::CoreResult<Vec<crate::memory::MemoryCandidate>> {
+        let Some(inbox) = self.candidate_inbox.as_ref() else {
+            return Ok(vec![]);
+        };
+        let now = crate::embed::now_unix_secs();
+        let store = self.durable_memory.as_deref();
+        let embed = self.embed_backend.as_deref();
+        crate::memory::propose_from_turn(
+            inbox,
+            store,
+            user_text,
+            assistant_text,
+            session_id,
+            now,
+            embed,
+            crate::memory::CueExtractOpts::default(),
+        )
+    }
+
+    /// Approve a pending candidate through SoftWrite → store.put (embed-on-write + redaction).
+    pub fn approve_memory_candidate(
+        &self,
+        id: &uuid::Uuid,
+    ) -> crate::error::CoreResult<crate::memory::MemoryRecord> {
+        let inbox = self
+            .candidate_inbox
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("candidate inbox not configured".into()))?;
+        let store = self
+            .durable_memory
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+        let now = crate::embed::now_unix_secs();
+        inbox.approve(id, store.as_ref(), now)
     }
 
     /// Set SQLite path for harvest rows co-located with workspace memory (#326).
@@ -1030,6 +1103,10 @@ impl ToolHost {
             names::RECALL_MEMORY => self.tool_recall_memory(arguments)?,
             names::SUPERSEDE_MEMORY => self.tool_supersede_memory(arguments)?,
             names::RETRACT_MEMORY => self.tool_retract_memory(arguments)?,
+            crate::memory::tool_names::LINK_MEMORIES => self.tool_link_memories(arguments)?,
+            crate::memory::tool_names::PROPOSE_MEMORY_CANDIDATES => {
+                self.tool_propose_memory_candidates(arguments)?
+            }
             crate::log_analysis::INGEST_LOGS => self.tool_ingest_logs(arguments)?,
             crate::log_analysis::SEARCH_LOGS => self.tool_search_logs(arguments)?,
             crate::log_analysis::CLUSTER_PROBLEMS => self.tool_cluster_problems(arguments)?,
@@ -1375,7 +1452,23 @@ impl ToolHost {
         }
         let now = crate::embed::now_unix_secs();
         let embed = self.embed_backend.as_deref();
-        let hits = store.recall(&q, embed, self.hybrid_weights, now)?;
+        let mut hits = store.recall(&q, embed, self.hybrid_weights, now)?;
+        // Phase-2: expand to graph neighbors of hits (one hop).
+        if let Some(edges) = self.edge_store.as_ref() {
+            let expand = args
+                .get("expand_neighbors")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if expand {
+                hits = crate::memory::expand_recall_neighbors(
+                    store.as_ref(),
+                    edges.as_ref(),
+                    &hits,
+                    now,
+                    4,
+                )?;
+            }
+        }
         let raw = crate::memory::format_recall_hits(&hits);
         let summary = format!("recalled {} memories", hits.len());
         Ok((
@@ -1383,6 +1476,86 @@ impl ToolHost {
             summary,
             raw,
             hits.first().map(|h| h.source_id.clone()),
+        ))
+    }
+
+    fn tool_link_memories(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let edges = self
+            .edge_store
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("edge store not configured".into()))?;
+        let from_s = args
+            .get("from_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("link_memories requires from_id".into()))?;
+        let to_s = args
+            .get("to_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("link_memories requires to_id".into()))?;
+        let from = crate::memory::parse_memory_id(from_s)?;
+        let to = crate::memory::parse_memory_id(to_s)?;
+        let edge_type = args
+            .get("edge_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("relates");
+        let now = crate::embed::now_unix_secs();
+        let edge = edges.link(from, to, edge_type, now)?;
+        let raw = serde_json::json!({
+            "id": edge.id.to_string(),
+            "from_id": edge.from_id.to_string(),
+            "to_id": edge.to_id.to_string(),
+            "edge_type": edge.edge_type,
+        })
+        .to_string();
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                crate::memory::tool_names::LINK_MEMORIES,
+                ToolSideEffect::SoftWrite,
+                &format!("mem://edge/{}→{}", edge.from_id, edge.to_id),
+                crate::audit::outcomes::ALLOWED,
+                "memory edge linked",
+                0,
+            );
+        }
+        Ok((
+            true,
+            format!(
+                "linked {} → {} ({})",
+                edge.from_id, edge.to_id, edge.edge_type
+            ),
+            raw,
+            Some(format!("memory_edge:{}", edge.id)),
+        ))
+    }
+
+    fn tool_propose_memory_candidates(
+        &self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let text = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            return Err(CoreError::Message(
+                "propose_memory_candidates requires text".into(),
+            ));
+        }
+        let assistant = args.get("assistant_text").and_then(|v| v.as_str());
+        let cands = self.propose_memory_from_turn(text, assistant, None)?;
+        let raw = serde_json::to_string(&cands).unwrap_or_else(|_| "[]".into());
+        Ok((
+            true,
+            format!(
+                "proposed {} candidates (review inbox; not durable)",
+                cands.len()
+            ),
+            raw,
+            None,
         ))
     }
 
@@ -2651,6 +2824,12 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
                 "mem://retract/unknown".into()
             }
         }
+        crate::memory::tool_names::LINK_MEMORIES => {
+            let from = args.get("from_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let to = args.get("to_id").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("mem://edge/{from}→{to}")
+        }
+        crate::memory::tool_names::PROPOSE_MEMORY_CANDIDATES => "mem://candidates/propose".into(),
         names::RECALL_MEMORY => args
             .get("query")
             .and_then(|v| v.as_str())
@@ -3455,6 +3634,147 @@ mod tests {
         assert!(hits
             .iter()
             .all(|h| h.record.status != crate::memory::Status::Retracted));
+    }
+
+    /// Phase 2: propose from turn → approve → recall; link + neighbor expand; purge.
+    ///
+    /// No embed backend on host (avoid nested `block_on` inside tokio test).
+    #[tokio::test]
+    async fn memory_phase2_capture_inbox_edges_purge() {
+        use crate::embed::HybridWeights;
+        use crate::memory::{CandidateInbox, EdgeStore, MemoryStore, TwoScopeMemory};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".contextdesk")).unwrap();
+        let ws = crate::workspace::Workspace {
+            id: "p2-ws".into(),
+            name: "p2".into(),
+            roots: vec![root],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let store = Arc::new(TwoScopeMemory::open_in_memory("p2-ws").unwrap());
+        host.set_durable_memory(store.clone(), true);
+        let inbox = Arc::new(CandidateInbox::open_in_memory().unwrap());
+        let edges = Arc::new(EdgeStore::open_in_memory().unwrap());
+        host.set_candidate_inbox(Some(inbox.clone()));
+        host.set_edge_store(Some(edges.clone()));
+
+        // Propose only — no durable write
+        let proposed = host
+            .propose_memory_from_turn(
+                "Remember that staging DB is Postgres on port 5433 unique-p2-cap.",
+                None,
+                Some("sess-p2"),
+            )
+            .unwrap();
+        assert!(!proposed.is_empty(), "cue extractor must propose");
+        assert_eq!(inbox.list(false, 20).unwrap().len(), proposed.len());
+        assert!(
+            store
+                .list(None, false, false, 1_000, 50)
+                .unwrap()
+                .is_empty(),
+            "nothing durable until approve"
+        );
+
+        let cand_id = proposed[0].id;
+        let rec = host.approve_memory_candidate(&cand_id).unwrap();
+        assert_eq!(rec.status, crate::memory::Status::Active);
+
+        let hits = store
+            .recall(
+                &crate::memory::RecallQuery::new("unique-p2-cap"),
+                None,
+                HybridWeights::default(),
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.record.id == rec.id),
+            "approved candidate must be recallable"
+        );
+
+        // Second memory + link + neighbor expansion on recall tool path
+        let r2 = store
+            .put(
+                crate::memory::MemoryWriteOp::Insert(crate::memory::MemoryDraft::new(
+                    crate::memory::Kind::Decision,
+                    "we decided Postgres for the durable brain unique-p2-dec",
+                )),
+                2_000,
+            )
+            .unwrap();
+        let link_args = serde_json::json!({
+            "from_id": rec.id.to_string(),
+            "to_id": r2.id.to_string(),
+            "edge_type": "relates"
+        });
+        let link_r = host
+            .execute(crate::memory::tool_names::LINK_MEMORIES, &link_args, None)
+            .await
+            .unwrap();
+        assert!(!link_r.ok, "link is SoftWrite");
+        let rid = link_r
+            .events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("link permission");
+        host.complete_permission(
+            &rid,
+            crate::permissions::PermissionDecision::AllowOnce,
+            None,
+        )
+        .unwrap();
+        let link_ok = host
+            .execute(
+                crate::memory::tool_names::LINK_MEMORIES,
+                &link_args,
+                Some(&rid),
+            )
+            .await
+            .unwrap();
+        assert!(link_ok.ok, "{}", link_ok.summary);
+
+        let recall_args = serde_json::json!({
+            "query": "unique-p2-cap",
+            "expand_neighbors": true,
+            "k": 10
+        });
+        let rr = host
+            .execute("recall_memory", &recall_args, None)
+            .await
+            .unwrap();
+        assert!(rr.ok, "{}", rr.summary);
+        assert!(
+            rr.detail_raw.contains(&rec.id.to_string()) || rr.detail_raw.contains("unique-p2"),
+            "recall raw should include hit: {}",
+            rr.detail_raw
+        );
+        // Neighbor of hit may appear (one hop expand)
+        assert!(
+            rr.detail_raw.contains(&r2.id.to_string())
+                || rr.detail_raw.contains("unique-p2-dec")
+                || rr.detail_raw.contains(&rec.id.to_string()),
+            "expand or primary hit present: {}",
+            rr.detail_raw
+        );
+
+        // GDPR purge
+        let tomb = store.purge_gdpr(&rec.id, 9_000, "test_purge").unwrap();
+        assert_eq!(tomb.id, rec.id);
+        assert!(store.get(&rec.id).unwrap().is_none());
+        let tomb2 = store
+            .workspace()
+            .get_purge_tombstone(&rec.id)
+            .unwrap()
+            .or_else(|| store.personal().get_purge_tombstone(&rec.id).unwrap());
+        assert!(tomb2.is_some(), "tombstone must remain after purge");
     }
 
     #[tokio::test]

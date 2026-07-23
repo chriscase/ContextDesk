@@ -7,7 +7,7 @@ use crate::error::{CoreError, CoreResult};
 use rusqlite::Connection;
 
 /// Current schema version shipped by this crate.
-pub const MEMORY_SCHEMA_VERSION: i64 = 2;
+pub const MEMORY_SCHEMA_VERSION: i64 = 3;
 
 /// Apply all pending migrations up to [`MEMORY_SCHEMA_VERSION`].
 ///
@@ -43,14 +43,48 @@ pub fn migrate(conn: &Connection) -> CoreResult<()> {
         apply_v2_harvest(conn)?;
         record(conn, 2)?;
     }
+    if current < 3 {
+        apply_v3_phase2(conn)?;
+        record(conn, 3)?;
+    }
 
+    Ok(())
+}
+
+/// Phase 2: edges + purge tombstones (candidates live in separate inbox file).
+fn apply_v3_phase2(conn: &Connection) -> CoreResult<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS memory_edges (
+  id TEXT PRIMARY KEY,
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(from_id, to_id, edge_type)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_from ON memory_edges(from_id);
+CREATE INDEX IF NOT EXISTS idx_edges_to ON memory_edges(to_id);
+
+CREATE TABLE IF NOT EXISTS memory_purge_tombstones (
+  id TEXT PRIMARY KEY,
+  purged_at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  title_redacted TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT 'gdpr_purge'
+);
+"#,
+    )
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
 fn record(conn: &Connection, version: i64) -> CoreResult<()> {
     let now = crate::embed::now_unix_secs();
     conn.execute(
-        "INSERT INTO memory_schema_migrations (version, applied_at) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO memory_schema_migrations (version, applied_at) VALUES (?1, ?2)",
         rusqlite::params![version, now],
     )
     .map_err(sqlite_err)?;
