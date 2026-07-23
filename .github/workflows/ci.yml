@@ -73,6 +73,11 @@ jobs:
       - name: Linux keyring deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Free disk space (Linux — bundled DuckDB build is large, #358)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+          df -h /
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         # rustfmt is OS-agnostic; still run on all three for early signal.
