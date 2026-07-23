@@ -50,6 +50,7 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - Providers: **Ollama** (local), **Grok Build session** (opt-in reuse of `~/.grok/auth.json`), OpenAI-compatible, Anthropic Messages; multi-model selection in the composer
 - **Durable typed memory** with **hybrid semantic recall** (embed-on-write, cosine-on-read, ambient injection) — `memory/sqlite_store.rs`, `memory/recall.rs`, #346
 - **Log analysis** (post-mortem): point the **Logs** pane or `ingest_logs` at a dump → Drain templates → **DuckDB** event store → clusters / timeline / hybrid search → **why** tools (`correlate_logs`, `anomalies_logs`, `trace_logs`) — `log_analysis/*`, #358–#363
+- **Log template embedding default (product):** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on; `embed.rs:default_log_embed_backend`); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 - Opt-in web research (`web_search` / `web_fetch`) behind SSRF gates
 - Read-only connectors: SQLite, Postgres, Confluence, X search
 - MCP stdio tools and HTTP/OpenAPI presets wired as agent tools (`tool_host.rs:attach_mcp_connector`, `http_preset.rs`)
@@ -65,7 +66,6 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Semantic** chat-archive search (#79) — archive search today is keyword-based
 - Log **live streaming** / multi-source connectors (Phase 3–4; tracker #363) — batch post-mortem is shipped
 - Proven multi-OS release installers (#172)
-- **Log template embedding default:** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 
 ---
 
