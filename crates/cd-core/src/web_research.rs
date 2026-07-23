@@ -30,6 +30,58 @@ pub const REQUEST_TIMEOUT_SECS: u64 = 20;
 pub const DEFAULT_SEARCH_LIMIT: usize = 8;
 /// Hard ceiling for `web_search` result count.
 pub const MAX_SEARCH_LIMIT: usize = 15;
+/// Minimum interval between open-web calls within one agent session.
+pub const DEFAULT_SESSION_MIN_INTERVAL_MS: u64 = 800;
+
+/// Observable result of enforcing the per-session web-call interval (#84).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebRateLimitObservation {
+    /// Audit-safe session label (not a secret).
+    pub session: String,
+    /// Configured minimum interval between calls.
+    pub min_interval_ms: u64,
+    /// Delay applied before this call.
+    pub waited_ms: u64,
+}
+
+impl WebRateLimitObservation {
+    /// Stable audit target identifying this as session-scoped policy.
+    pub fn audit_target(&self) -> String {
+        format!("web://rate-limit/session/{}", self.session)
+    }
+
+    /// Compact detail for both the hash-chained audit log and tool trail.
+    pub fn trail_detail(&self) -> String {
+        format!(
+            "rate_limit scope=session session={} min_interval_ms={} waited_ms={}",
+            self.session, self.min_interval_ms, self.waited_ms
+        )
+    }
+}
+
+/// Build an audit-safe observation without exposing arbitrary session text.
+pub fn session_rate_limit_observation(
+    session: Option<&str>,
+    min_interval: Duration,
+    waited: Duration,
+) -> WebRateLimitObservation {
+    let session = session
+        .unwrap_or("unbound")
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(80)
+        .collect::<String>();
+    WebRateLimitObservation {
+        session: if session.is_empty() {
+            "unbound".into()
+        } else {
+            session
+        },
+        min_interval_ms: min_interval.as_millis().min(u128::from(u64::MAX)) as u64,
+        waited_ms: waited.as_millis().min(u128::from(u64::MAX)) as u64,
+    }
+}
 
 /// Strict policy for agent open-web requests (no loopback, no private nets).
 pub fn web_ssrf_policy() -> SsrfPolicy {
@@ -48,6 +100,66 @@ pub struct WebSearchHit {
     pub url: String,
     /// Snippet / excerpt.
     pub snippet: String,
+}
+
+/// Return only search hits whose URL the assistant actually cited in Markdown.
+///
+/// Fragments and surrounding Markdown punctuation do not affect matching.
+/// Search-hit order is preserved and duplicates are removed by candidate URL.
+pub fn cited_search_hits(markdown: &str, hits: &[WebSearchHit]) -> Vec<WebSearchHit> {
+    let cited: std::collections::HashSet<String> = markdown_urls(markdown)
+        .into_iter()
+        .filter_map(|url| canonical_citation_url(&url))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    hits.iter()
+        .filter_map(|hit| {
+            let canonical = canonical_citation_url(&hit.url)?;
+            if cited.contains(&canonical) && seen.insert(canonical) {
+                Some(hit.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn canonical_citation_url(raw: &str) -> Option<String> {
+    let mut url = validate_web_url(raw).ok()?;
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn markdown_urls(markdown: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut offset = 0;
+    while offset < markdown.len() {
+        let tail = &markdown[offset..];
+        let http = tail.find("http://");
+        let https = tail.find("https://");
+        let Some(relative) = (match (http, https) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+        let start = offset + relative;
+        let candidate_tail = &markdown[start..];
+        let end = candidate_tail
+            .char_indices()
+            .find_map(|(i, c)| {
+                (i > 0 && (c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))).then_some(i)
+            })
+            .unwrap_or(candidate_tail.len());
+        let candidate =
+            candidate_tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        if !candidate.is_empty() {
+            urls.push(candidate.to_string());
+        }
+        offset = start + end.max(1);
+    }
+    urls
 }
 
 /// Fetched page extract.
@@ -1250,7 +1362,8 @@ pub fn format_search_hits_with_notes(
         lines.push(format!("[sources: {}]", notes.join(", ")));
     }
     lines.push(
-        "Cite sources by short name (e.g. Al Jazeera, BBC). Do not paste full URLs into the user-facing answer."
+        "Cite used sources as Markdown links with short labels (e.g. [BBC](provided link)). \
+         The UI promotes cited result URLs to source chips; do not expose raw URLs as prose."
             .into(),
     );
     lines.push(
@@ -1427,6 +1540,43 @@ mod tests {
         assert_eq!(clamp_search_limit(None), DEFAULT_SEARCH_LIMIT);
         assert_eq!(clamp_search_limit(Some(0)), 1);
         assert_eq!(clamp_search_limit(Some(100)), MAX_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn cited_search_hits_require_a_matching_answer_url() {
+        let hits = vec![
+            WebSearchHit {
+                title: "One - BBC".into(),
+                url: "https://www.bbc.com/news/one".into(),
+                snippet: "one".into(),
+            },
+            WebSearchHit {
+                title: "Two - Reuters".into(),
+                url: "https://www.reuters.com/world/two?x=1".into(),
+                snippet: "two".into(),
+            },
+        ];
+        let markdown = "Use [BBC](https://www.bbc.com/news/one#details). \
+                        An unrelated link is https://example.com/nope.";
+        let cited = cited_search_hits(markdown, &hits);
+        assert_eq!(cited, vec![hits[0].clone()]);
+    }
+
+    #[test]
+    fn session_rate_limit_observation_is_audit_safe() {
+        let observation = session_rate_limit_observation(
+            Some(" session/84\nsecret "),
+            Duration::from_millis(DEFAULT_SESSION_MIN_INTERVAL_MS),
+            Duration::from_millis(321),
+        );
+        assert_eq!(observation.session, "session84secret");
+        assert_eq!(observation.min_interval_ms, 800);
+        assert_eq!(observation.waited_ms, 321);
+        assert_eq!(
+            observation.audit_target(),
+            "web://rate-limit/session/session84secret"
+        );
+        assert!(observation.trail_detail().contains("scope=session"));
     }
 
     #[test]
