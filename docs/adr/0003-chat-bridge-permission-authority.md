@@ -1,6 +1,6 @@
 # ADR 0003: Chat bridges + permission-authority pattern
 
-**Status:** Accepted (design only)  
+**Status:** Accepted; Telegram server bridge implemented by #289
 **Date:** 2026-07-18  
 **Issue:** #278 (epic #276)  
 **Implementation epic:** #289 (spawned)

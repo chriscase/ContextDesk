@@ -79,6 +79,10 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 | `GET` | `/v1/sync/membership` | Workspaces and `admin`/`member` role visible to the bearer |
 | `POST` | `/v1/sync/changes_since` | Cursor-paged authoritative workspace-memory records |
 | `POST` | `/v1/sync/apply` | Admin-only idempotent workspace-memory mutation batch |
+| `POST` | `/v1/chat/telegram/webhook` | Telegram update input; authenticated by Telegram's secret-token header |
+| `POST` | `/v1/chat/pair` | Authenticated workspace admin registers a process-lifetime trusted desktop pairing |
+| `GET` | `/v1/chat/approvals` | Paired admin polls queued chat-originated SoftWrite/HardWrite proposals |
+| `POST` | `/v1/chat/approvals/respond` | Paired admin AllowOnce/deny; core type-to-confirm remains enforced |
 
 Session hosts are retained **in-process** for the lifetime of the `cd-server` process (keyed by `session_id`). No TTL yet; restart clears pending grants. Writes never execute without a matching client `permission/respond` allow.
 
@@ -142,3 +146,13 @@ receive a monotonic server `updated_at`; supersession creates a replacement row 
 preserves both links. Client timestamps more than five minutes in the future are
 rejected. This is the server contract only; the desktop cache/offline worker remains
 open under #287.
+
+### Telegram chat bridge
+
+Telegram chat/thread ids map to process-lifetime `telegram-*` sessions. Research replies are
+rendered from the same `cd.v1` `StreamEvent` sequence used by `/v1/research` and SSE. Telegram
+sessions carry a distinct server-side origin: `/v1/permission/respond` refuses them even when a
+caller knows a request id. Configured admin users may confirm **SoftWrite only** in-channel with
+an exact `/approve_soft <request-id> WRITE`; arbitrary chat assent is ordinary model input.
+HardWrite can only be completed by `/v1/chat/approvals/respond` from an authenticated paired
+workspace admin. Pairings and pending chat proposals are in-memory and clear on restart.

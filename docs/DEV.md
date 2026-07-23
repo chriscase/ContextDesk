@@ -299,6 +299,64 @@ curl -s -XPOST localhost:8799/v1/sync/changes_since \
   -d '{"workspace_id":"team-a","limit":200}'
 ```
 
+### Telegram chat bridge (#289)
+
+Telegram is an input/notification surface, not a HardWrite authority. Add the bridge to the
+same server TOML. The file contains keychain reference ids and numeric Telegram user ids only:
+
+```toml
+[telegram]
+bot_token_ref = "telegram/default/bot_token"
+webhook_secret_ref = "telegram/default/webhook_secret"
+users = [
+  # Read/research only:
+  { user_id = 10001, workspace_id = "team-a", role = "member" },
+  # May explicitly confirm SoftWrite in Telegram; still cannot approve HardWrite:
+  { user_id = 10002, workspace_id = "team-a", role = "admin", allow_soft_write = true },
+]
+```
+
+Store the bot token and a separately generated Telegram webhook secret in the OS keychain under
+service `{branding.slug}-secrets` (default `contextdesk-secrets`) and the account/ref ids shown
+above. Use the platform keychain UI or another secret-aware provisioning tool; do not put either
+value in TOML, command history, environment variables, or process arguments. Startup fails closed
+when a ref is malformed/missing, a SoftWrite user is not an admin, a user is duplicated, or a
+mapped workspace does not exist. Bot API egress is fixed to `https://api.telegram.org`, DNS-vetted
+and pinned through `ssrf.rs`, with redirects disabled.
+
+Configure the Telegram webhook to
+`https://<public-server>/v1/chat/telegram/webhook` and set Telegram's `secret_token` to the value
+stored by `webhook_secret_ref`. TLS remains operator-owned at the reverse proxy. The webhook is
+acknowledged immediately; research continues asynchronously and replies stay in the originating
+chat thread. `/save <title>\n<body>` creates a SoftWrite proposal. Only a configured admin with
+`allow_soft_write = true` can complete it using the exact command printed by the bot:
+`/approve_soft <request-id> WRITE`. A plain “yes” is not a grant.
+
+HardWrite proposals (and SoftWrite proposals without the explicit in-channel policy) queue for a
+trusted desktop. An authenticated workspace-admin client pairs, polls, and responds:
+
+```bash
+# Pair this authenticated desktop for the process lifetime.
+curl -s -XPOST localhost:8799/v1/chat/pair \
+  -H 'authorization: Bearer <admin>' -H 'content-type: application/json' \
+  -d '{"workspace_id":"team-a","device_label":"Chris desktop"}'
+
+# Poll with the returned pairing_id.
+curl -s 'localhost:8799/v1/chat/approvals?workspace_id=team-a&pairing_id=<pairing-id>' \
+  -H 'authorization: Bearer <admin>'
+
+# HardWrite requires AllowOnce and the core type-to-confirm phrase (normally WRITE).
+curl -s -XPOST localhost:8799/v1/chat/approvals/respond \
+  -H 'authorization: Bearer <admin>' -H 'content-type: application/json' \
+  -d '{"workspace_id":"team-a","pairing_id":"<pairing-id>","request_id":"<request-id>","decision":"allow_once","typed":"WRITE"}'
+```
+
+The generic `/v1/permission/respond` endpoint refuses Telegram-originated sessions. With no paired
+desktop, HardWrite stays queued and never executes. Session mappings, pairings, and proposal queues
+are intentionally process-lifetime in v1; restart clears them. Chat ingress, authorization denial,
+proposal, and decision records are written to the existing scrubbed hash-chain audit log without
+storing message text.
+
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
 
 ## Secrets
