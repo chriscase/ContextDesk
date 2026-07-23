@@ -3407,7 +3407,7 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
 }
 
-/// Harvest row DTO for Harvest Browser (#326 PR6).
+/// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HarvestRowDto {
@@ -3420,6 +3420,10 @@ struct HarvestRowDto {
     sync_status: String,
     destination: String,
     last_synced_at: i64,
+    /// Remote page version when known (required for Publish update).
+    remote_version: Option<i64>,
+    /// True when transform is raw_storage (Publish without storage paste).
+    can_publish_from_local: bool,
 }
 
 /// List harvest provenance rows (co-located with workspace memory).
@@ -3455,13 +3459,101 @@ fn list_harvests(
                 remote_id: r.source.remote_id,
                 space: r.source.collection,
                 url: r.source.url,
-                transform: r.transform_profile,
+                transform: r.transform_profile.clone(),
                 sync_status: r.sync_status.as_str().to_string(),
                 destination,
                 last_synced_at: r.last_synced_at,
+                remote_version: r.source.remote_version,
+                can_publish_from_local: cd_core::harvest::publish_from_local_body_allowed(
+                    &r.transform_profile,
+                ),
             }
         })
         .collect())
+}
+
+/// Propose Confluence Publish for a harvest row via ToolHost HardWrite (#326 PR8).
+///
+/// Returns permission_required events until UI Allow once + type WRITE + re-execute
+/// via `complete_permission_cmd`. Never bypasses the tool host.
+#[tauri::command]
+async fn propose_confluence_publish(
+    state: State<'_, AppState>,
+    harvest_id: String,
+    body_storage_override: Option<String>,
+    title: Option<String>,
+) -> Result<Vec<EventDto>, String> {
+    ensure_host(&state)?;
+    let hid = cd_core::memory::parse_memory_id(harvest_id.trim())
+        .map_err(|e| format!("harvest_id: {e}"))?;
+
+    // Resolve harvest + body while holding host briefly (sync IO).
+    let args = {
+        let host_guard = state.host.lock().expect("host");
+        let host = host_guard.as_ref().ok_or("host missing")?;
+        if !host.confluence_write_enabled() {
+            return Err(
+                "Confluence write_enabled is false (Settings → Connectors → enable write)".into(),
+            );
+        }
+        let path = host
+            .harvest_db_path_for_ui()
+            .ok_or_else(|| "harvest store not attached".to_string())?;
+        let store = cd_core::harvest::HarvestStore::open(path).map_err(|e| e.to_string())?;
+        let record = store
+            .get(&hid)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("harvest not found: {hid}"))?;
+
+        let override_body = body_storage_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        cd_core::harvest::gate_publish(&record.transform_profile, override_body)
+            .map_err(|e| e.to_string())?;
+
+        let body = if let Some(b) = override_body {
+            b.to_string()
+        } else {
+            match &record.destination {
+                cd_core::harvest::HarvestDestination::Memory { memory_id, .. } => {
+                    let mem = host
+                        .durable_memory_store()
+                        .ok_or_else(|| "durable memory not attached".to_string())?;
+                    let rec = mem
+                        .get(memory_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("memory missing for harvest: {memory_id}"))?;
+                    rec.content
+                }
+                cd_core::harvest::HarvestDestination::File { workspace_path } => {
+                    let cfg = state.config.lock().expect("config").clone();
+                    let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
+                    read_workspace_file(&ws, workspace_path).map_err(|e| e.to_string())?
+                }
+            }
+        };
+        if body.trim().is_empty() {
+            return Err("publish body is empty".into());
+        }
+        cd_core::harvest::build_update_args(&record, &body, title.as_deref())
+            .map_err(|e| e.to_string())?
+    };
+
+    let mut host = {
+        let mut host_guard = state.host.lock().expect("host");
+        host_guard.take().ok_or("host missing")?
+    };
+    let result = host
+        .execute(cd_core::tools::names::CONFLUENCE_UPDATE_PAGE, &args, None)
+        .await
+        .map_err(|e| e.to_string());
+    {
+        let mut host_guard = state.host.lock().expect("host");
+        *host_guard = Some(host);
+    }
+    let result = result?;
+    Ok(events_to_dto(&result.events))
 }
 
 /// List durable memories from the Phase-1 store (#274).
@@ -3877,6 +3969,7 @@ pub fn run() {
             list_skills_cmd,
             set_skill_enabled_cmd,
             propose_save_skill_cmd,
+            propose_confluence_publish,
             list_modules,
             install_module,
             set_module_enabled,

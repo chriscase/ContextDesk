@@ -2722,6 +2722,32 @@ impl ToolHost {
         let meta =
             confluence_ro::update_page(&cfg, page_id, title, body_storage, version, &auth, &policy)
                 .await?;
+        // Optional harvest linkage: bump remote_version / hashes after confirmed write (#326 PR8).
+        if let Some(hid) = args.get("harvest_id").and_then(|v| v.as_str()) {
+            if let Ok(id) = uuid::Uuid::parse_str(hid) {
+                if let Some(path) = &self.harvest_db_path {
+                    if let Ok(store) = crate::harvest::HarvestStore::open(path) {
+                        if let Ok(Some(mut rec)) = store.get(&id) {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            if let Some(v) = meta.version {
+                                rec.source.remote_version = Some(v);
+                            }
+                            rec.source.remote_content_hash =
+                                Some(crate::harvest::content_hash(body_storage));
+                            rec.local_content_hash = crate::harvest::content_hash(body_storage);
+                            rec.local_dirty = false;
+                            rec.sync_status = crate::harvest::SyncStatus::InSync;
+                            rec.last_synced_at = now;
+                            rec.updated_at = now;
+                            let _ = store.update(&rec);
+                        }
+                    }
+                }
+            }
+        }
         let raw = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
         if let Some(log) = &self.audit {
             let _ = log.log(

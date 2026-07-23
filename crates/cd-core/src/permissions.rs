@@ -154,6 +154,10 @@ impl PermissionState {
         if crate::harvest::is_harvest_target(target) {
             return false;
         }
+        // Confluence remote write: never session-auto (#326 K11).
+        if is_confluence_write_target(target) {
+            return false;
+        }
         match side_effect {
             ToolSideEffect::Read => true,
             ToolSideEffect::SoftWrite => self.session_path_allowed(target),
@@ -166,6 +170,13 @@ impl PermissionState {
             }
         }
     }
+}
+
+/// True when a permission target is a Confluence remote write (`confluence://…`).
+///
+/// Session path grants must never auto-approve these (#326 K11 / design PR7–8).
+pub fn is_confluence_write_target(target: &str) -> bool {
+    target.trim().starts_with("confluence://")
 }
 
 /// True when a permission target identifies a destructive memory op (#270).
@@ -204,6 +215,16 @@ pub fn validate_decision(
     if matches!(decision, PermissionDecision::Deny) {
         return Ok(PermissionDecision::Deny);
     }
+    // Confluence + harvest: AllowSessionPath is never valid (#326 K11/K15).
+    if matches!(decision, PermissionDecision::AllowSessionPath)
+        && (is_confluence_write_target(&request.target)
+            || crate::harvest::is_harvest_target(&request.target))
+    {
+        return Err(
+            "session path grants are not allowed for Confluence write or harvest targets; use Allow once"
+                .into(),
+        );
+    }
     if let Some(expected) = &request.type_confirm_phrase {
         let got = typed_phrase.unwrap_or("").trim();
         if got != expected {
@@ -236,6 +257,31 @@ mod tests {
         );
         assert!(!st
             .may_execute_without_prompt(ToolSideEffect::SoftWrite, "harvest://confluence/batch/3"));
+    }
+
+    #[test]
+    fn confluence_write_targets_never_session_auto() {
+        let mut st = PermissionState::default();
+        st.allow_session_path("confluence://");
+        st.allow_session_path("confluence://write/update/42");
+        assert!(!st
+            .may_execute_without_prompt(ToolSideEffect::HardWrite, "confluence://write/update/42"));
+        assert!(!st.may_execute_without_prompt(
+            ToolSideEffect::HardWrite,
+            "confluence://write/create/ENG"
+        ));
+        let req = PermissionRequest::new(
+            "confluence_update_page",
+            ToolSideEffect::HardWrite,
+            "confluence://write/update/42",
+            "update",
+            "preview",
+            "remote",
+        );
+        assert!(
+            validate_decision(&req, PermissionDecision::AllowSessionPath, Some("WRITE")).is_err()
+        );
+        assert!(validate_decision(&req, PermissionDecision::AllowOnce, Some("WRITE")).is_ok());
     }
 
     #[test]
