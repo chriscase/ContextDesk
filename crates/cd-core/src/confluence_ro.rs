@@ -682,6 +682,156 @@ pub async fn list_space_root_pages(
     Ok(roots)
 }
 
+/// Create a page (HardWrite path — caller enforces write_enabled + WRITE confirm).
+pub async fn create_page(
+    cfg: &ConfluenceRoConfig,
+    space: &str,
+    title: &str,
+    body_storage: &str,
+    parent_id: Option<&str>,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<ConfluencePageMeta> {
+    if !space_permitted(cfg, space, true) {
+        if cfg.spaces.is_empty() {
+            return Err(CoreError::Policy(
+                "spaces allowlist required for Confluence write".into(),
+            ));
+        }
+        return Err(CoreError::Policy(format!(
+            "space `{space}` not allowlisted for write"
+        )));
+    }
+    let mut ancestors = Vec::new();
+    if let Some(pid) = parent_id.filter(|s| !s.is_empty()) {
+        ancestors.push(serde_json::json!({ "id": pid }));
+    }
+    let payload = serde_json::json!({
+        "type": "page",
+        "title": title,
+        "space": { "key": space },
+        "body": {
+            "storage": {
+                "value": body_storage,
+                "representation": "storage"
+            }
+        },
+        "ancestors": ancestors
+    });
+    let v = confluence_post_json(cfg, "/content", &payload, auth, policy).await?;
+    parse_page_meta(cfg, &v, true)
+}
+
+/// Update page body (and optional title). Requires current version for optimistic lock.
+pub async fn update_page(
+    cfg: &ConfluenceRoConfig,
+    page_id: &str,
+    title: Option<&str>,
+    body_storage: &str,
+    version: i64,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<ConfluencePageMeta> {
+    // Load current to verify space allowlist
+    let body = fetch_page_expanded(cfg, page_id, auth, policy, true).await?;
+    let space = body.meta.space.as_str();
+    if !space_permitted(cfg, space, true) {
+        return Err(CoreError::Policy(format!(
+            "space `{space}` not allowlisted for write"
+        )));
+    }
+    let title = title.unwrap_or(body.meta.title.as_str());
+    let payload = serde_json::json!({
+        "id": page_id,
+        "type": "page",
+        "title": title,
+        "space": { "key": space },
+        "body": {
+            "storage": {
+                "value": body_storage,
+                "representation": "storage"
+            }
+        },
+        "version": { "number": version + 1 }
+    });
+    let path = format!("/content/{page_id}");
+    let v = confluence_put_json(cfg, &path, &payload, auth, policy).await?;
+    parse_page_meta(cfg, &v, true)
+}
+
+async fn confluence_post_json(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    body: &Value,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<Value> {
+    confluence_mutate_json(cfg, path_and_query, body, auth, policy, true).await
+}
+
+async fn confluence_put_json(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    body: &Value,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<Value> {
+    confluence_mutate_json(cfg, path_and_query, body, auth, policy, false).await
+}
+
+async fn confluence_mutate_json(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    body: &Value,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+    post: bool,
+) -> CoreResult<Value> {
+    let (base, client) = crate::ssrf::build_pinned_client_for_url(
+        &cfg.base_url,
+        policy,
+        &crate::ssrf::SystemResolver,
+        std::time::Duration::from_secs(30),
+    )?;
+    let root = api_root(cfg);
+    let url = if root.starts_with(base.as_str().trim_end_matches('/'))
+        || root.contains(&base.host_str().unwrap_or_default().to_string())
+    {
+        format!("{}{}", root.trim_end_matches('/'), path_and_query)
+    } else {
+        let origin = base.as_str().trim_end_matches('/');
+        let rest = match cfg.rest_path_mode {
+            ConfluenceRestPathMode::WikiPrefix => format!("{origin}/wiki/rest/api"),
+            _ => format!("{origin}/rest/api"),
+        };
+        format!("{rest}{path_and_query}")
+    };
+    let builder = if post {
+        client.post(&url)
+    } else {
+        client.put(&url)
+    };
+    let resp = builder
+        .header("Authorization", auth.authorization_header())
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| CoreError::Message(format_confluence_transport_error(&e)))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(CoreError::Message(format_confluence_http_error(
+            status.as_u16(),
+            &text,
+        )));
+    }
+    resp.json()
+        .await
+        .map_err(|e| CoreError::Message(format!("confluence json: {e}")))
+}
+
 async fn confluence_get_json(
     cfg: &ConfluenceRoConfig,
     path_and_query: &str,

@@ -538,6 +538,7 @@ export function useSettingsController({
         baseUrl: draft.confluence?.baseUrl ?? "",
         spaces: draft.confluence?.spaces ?? "",
         pat: cfTokenDraft.trim() || undefined,
+        writeEnabled: draft.confluence?.writeEnabled ?? false,
       });
       const has = await hostConfluenceHasToken();
       next = {
@@ -547,6 +548,7 @@ export function useSettingsController({
           baseUrl: saved.base_url,
           spaces: saved.spaces.join(", "),
           hasToken: has ?? Boolean(saved.pat_ref),
+          writeEnabled: saved.write_enabled ?? false,
         },
       };
     } catch {

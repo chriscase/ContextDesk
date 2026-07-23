@@ -242,8 +242,10 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
     if cfg.confluence.enabled && cfg.confluence.is_configured() {
         let pat = state.secrets.get(&key_ref_confluence_pat()).ok().flatten();
         host.set_confluence(Some(cfg.confluence.to_ro_config()), pat);
+        host.set_confluence_write_enabled(cfg.confluence.write_enabled);
     } else {
         host.set_confluence(None, None);
+        host.set_confluence_write_enabled(false);
     }
     host.set_web_research(cfg.web_research_enabled);
     host.set_web_research_sources(&cfg.web_research_sources);
@@ -1211,6 +1213,9 @@ struct SaveConfluenceReq {
     spaces: String,
     /// Optional new PAT; empty means keep existing.
     pat: Option<String>,
+    /// HardWrite tools (#326 PR7). Default false when omitted.
+    #[serde(default)]
+    write_enabled: bool,
 }
 
 #[tauri::command]
@@ -1263,11 +1268,14 @@ fn save_confluence_settings(
     cf.base_url = base_url;
     cf.spaces = spaces;
     cf.pat_ref = pat_ref;
+    cf.write_enabled = req.write_enabled;
 
     let mut cfg = state.config.lock().expect("config");
     cfg.confluence = cf.clone();
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    drop(cfg);
+    let _ = ensure_host(&state);
     Ok(cf)
 }
 
@@ -3399,6 +3407,63 @@ fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
 }
 
+/// Harvest row DTO for Harvest Browser (#326 PR6).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HarvestRowDto {
+    id: String,
+    system: String,
+    remote_id: String,
+    space: Option<String>,
+    url: Option<String>,
+    transform: String,
+    sync_status: String,
+    destination: String,
+    last_synced_at: i64,
+}
+
+/// List harvest provenance rows (co-located with workspace memory).
+#[tauri::command]
+fn list_harvests(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<HarvestRowDto>, String> {
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    // Path is set with durable memory attach
+    let path = host
+        .harvest_db_path_for_ui()
+        .ok_or_else(|| "harvest store not attached".to_string())?;
+    let store = cd_core::harvest::HarvestStore::open(path).map_err(|e| e.to_string())?;
+    let rows = store
+        .list(limit.unwrap_or(100) as usize)
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let destination = match &r.destination {
+                cd_core::harvest::HarvestDestination::Memory { memory_id, .. } => {
+                    format!("memory:{memory_id}")
+                }
+                cd_core::harvest::HarvestDestination::File { workspace_path } => {
+                    format!("file:{workspace_path}")
+                }
+            };
+            HarvestRowDto {
+                id: r.id.to_string(),
+                system: r.source.system,
+                remote_id: r.source.remote_id,
+                space: r.source.collection,
+                url: r.source.url,
+                transform: r.transform_profile,
+                sync_status: r.sync_status.as_str().to_string(),
+                destination,
+                last_synced_at: r.last_synced_at,
+            }
+        })
+        .collect())
+}
+
 /// List durable memories from the Phase-1 store (#274).
 #[tauri::command]
 fn list_durable_memories(
@@ -3826,6 +3891,7 @@ pub fn run() {
             read_memory_file,
             read_workspace_file_cmd,
             list_memory_notes,
+            list_harvests,
             list_durable_memories,
             get_durable_memory,
             save_composition_draft,

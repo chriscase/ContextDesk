@@ -33,6 +33,10 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Expandable diagnostics + redacted GitHub report | Shipped | desktop/src/lib/errorReport.ts:buildErrorReport | #325 P0–P1 |
 | Build identity (version, channel, git) | Shipped | crates/cd-core/src/build_identity.rs:current | #338 |
 | Confluence SoftWrite harvest → memory | Shipped | crates/cd-core/src/harvest/apply.rs:harvest_page_to_memory | #326 PR3 |
+| Confluence harvest file destination | Shipped | crates/cd-core/src/harvest/apply.rs:harvest_page_to_file | #326 #399 |
+| Confluence check/apply source sync | Shipped | crates/cd-core/src/harvest/sync.rs:check_sync_with_observation | #326 #400 |
+| Confluence HardWrite create/update | Shipped | crates/cd-core/src/confluence_ro.rs:create_page | #326 #402 |
+| Harvest Browser pane | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #401 |
 | Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |

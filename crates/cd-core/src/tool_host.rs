@@ -30,6 +30,10 @@ fn confluence_tool_name(name: &str) -> bool {
             | names::CONFLUENCE_GET_ANCESTORS
             | names::CONFLUENCE_LIST_ATTACHMENTS
             | names::HARVEST_FROM_SOURCE
+            | names::CHECK_SOURCE_SYNC
+            | names::APPLY_SOURCE_SYNC
+            | names::CONFLUENCE_CREATE_PAGE
+            | names::CONFLUENCE_UPDATE_PAGE
     )
 }
 
@@ -122,6 +126,8 @@ pub struct ToolHost {
     edge_store: Option<std::sync::Arc<crate::memory::EdgeStore>>,
     /// Path to workspace memory SQLite (for co-located harvest table). #326
     harvest_db_path: Option<PathBuf>,
+    /// When true, register Confluence HardWrite tools (#326 PR7). Default false.
+    confluence_write_enabled: bool,
     /// Base dir for session context packs (`…/.contextdesk`). #341
     session_context_base: Option<PathBuf>,
     /// Active chat session id for session-scoped context search/read. #341
@@ -194,6 +200,7 @@ impl ToolHost {
             candidate_inbox: None,
             edge_store: None,
             harvest_db_path: None,
+            confluence_write_enabled: false,
             session_context_base: None,
             active_session_id: None,
             durable_memory_enabled: false,
@@ -568,6 +575,16 @@ impl ToolHost {
         self.confluence_pat = pat;
     }
 
+    /// Enable Confluence HardWrite tools when settings.write_enabled (default false).
+    pub fn set_confluence_write_enabled(&mut self, enabled: bool) {
+        self.confluence_write_enabled = enabled;
+    }
+
+    /// Whether HardWrite Confluence tools may register.
+    pub fn confluence_write_enabled(&self) -> bool {
+        self.confluence_write_enabled
+    }
+
     /// Attach X search (enabled flag + bearer from host keychain only).
     pub fn set_x_search(&mut self, enabled: bool, bearer: Option<String>) {
         self.x_enabled = enabled;
@@ -658,6 +675,11 @@ impl ToolHost {
     /// Set SQLite path for harvest rows co-located with workspace memory (#326).
     pub fn set_harvest_db_path(&mut self, path: Option<PathBuf>) {
         self.harvest_db_path = path;
+    }
+
+    /// Harvest DB path for UI listing (#326).
+    pub fn harvest_db_path_for_ui(&self) -> Option<PathBuf> {
+        self.harvest_db_path.clone()
     }
 
     /// Configure session context base directory (usually workspace root + branding dir). #341
@@ -849,7 +871,23 @@ impl ToolHost {
             specs.retain(|t| !confluence_tool_name(&t.name));
         }
         if !self.durable_memory_active() {
-            specs.retain(|t| t.name != names::HARVEST_FROM_SOURCE);
+            specs.retain(|t| {
+                t.name != names::HARVEST_FROM_SOURCE
+                    && t.name != names::CHECK_SOURCE_SYNC
+                    && t.name != names::APPLY_SOURCE_SYNC
+            });
+        }
+        // Write tools: require write_enabled + non-empty space allowlist
+        let write_ok = self.confluence_write_enabled
+            && self
+                .confluence
+                .as_ref()
+                .is_some_and(|c| !c.spaces.is_empty())
+            && self.confluence_pat.is_some();
+        if !write_ok {
+            specs.retain(|t| {
+                t.name != names::CONFLUENCE_CREATE_PAGE && t.name != names::CONFLUENCE_UPDATE_PAGE
+            });
         }
         if !self.web_research_enabled {
             specs.retain(|t| t.name != names::WEB_SEARCH && t.name != names::WEB_FETCH);
@@ -1128,6 +1166,10 @@ impl ToolHost {
                 self.tool_confluence_list_attachments(arguments).await?
             }
             names::HARVEST_FROM_SOURCE => self.tool_harvest_from_source(arguments).await?,
+            names::CHECK_SOURCE_SYNC => self.tool_check_source_sync(arguments).await?,
+            names::APPLY_SOURCE_SYNC => self.tool_apply_source_sync(arguments).await?,
+            names::CONFLUENCE_CREATE_PAGE => self.tool_confluence_create_page(arguments).await?,
+            names::CONFLUENCE_UPDATE_PAGE => self.tool_confluence_update_page(arguments).await?,
             names::WEB_SEARCH => {
                 let (ok, summary, raw, cites) = self.tool_web_search(arguments).await?;
                 let first = cites.first().map(|(u, _, _)| u.clone());
@@ -1876,8 +1918,17 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
         let op = crate::memory::write_op_from_supersede_args(args)?;
+        let old_id = match &op {
+            crate::memory::MemoryWriteOp::Supersede { old, .. } => Some(*old),
+            _ => None,
+        };
         let now = crate::embed::now_unix_secs();
         let rec = store.put(op, now)?;
+        if let (Some(old), Some(path)) = (old_id, &self.harvest_db_path) {
+            if let Ok(hv) = crate::harvest::HarvestStore::open(path) {
+                let _ = hv.on_memory_superseded(&old, &rec.id, now, true);
+            }
+        }
         let target = crate::memory::tools::audit_target_for_record(&rec);
         if let Some(log) = &self.audit {
             let _ = log.log(
@@ -1906,8 +1957,17 @@ impl ToolHost {
             .as_ref()
             .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
         let op = crate::memory::write_op_from_retract_args(args)?;
+        let rid = match &op {
+            crate::memory::MemoryWriteOp::Retract { id } => Some(*id),
+            _ => None,
+        };
         let now = crate::embed::now_unix_secs();
         let rec = store.put(op, now)?;
+        if let (Some(id), Some(path)) = (rid, &self.harvest_db_path) {
+            if let Ok(hv) = crate::harvest::HarvestStore::open(path) {
+                let _ = hv.on_memory_retracted(&id, now);
+            }
+        }
         let target = crate::memory::tools::audit_target_for_record(&rec);
         if let Some(log) = &self.audit {
             let _ = log.log(
@@ -2258,40 +2318,95 @@ impl ToolHost {
         let now = crate::embed::now_unix_secs();
         let mut results = Vec::new();
         let mut first_cite = None;
+        let to_file = harvest_args.destination == "file";
+        let file_path = harvest_args.file_path.clone();
         for page_id in &harvest_args.page_ids {
             self.throttle_confluence().await?;
             let page_result =
                 match confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, true).await
                 {
                     Ok(body) => {
-                        match crate::harvest::harvest_page_to_memory(
-                            &cfg,
-                            store.as_ref(),
-                            &harvest_store,
-                            &body,
-                            &harvest_args.transform,
-                            harvest_args.scope,
-                            now,
-                        ) {
-                            Ok((rec, hr)) => {
-                                if first_cite.is_none() {
-                                    first_cite = Some(format!("memory:{}", rec.id));
+                        if to_file {
+                            let rel = file_path.clone().unwrap_or_else(|| {
+                                format!(
+                                    "harvest/{}/{}.md",
+                                    body.meta.space.to_lowercase(),
+                                    body.meta.id
+                                )
+                            });
+                            let ws_root = self.workspace.roots.first().cloned();
+                            let write = |rel_path: &str, content: &str| -> CoreResult<()> {
+                                let root = ws_root.as_ref().ok_or_else(|| {
+                                    CoreError::Policy(
+                                        "workspace root required for file harvest".into(),
+                                    )
+                                })?;
+                                let full = root.join(rel_path);
+                                if let Some(parent) = full.parent() {
+                                    std::fs::create_dir_all(parent)?;
                                 }
-                                crate::harvest::HarvestPageResult {
+                                std::fs::write(&full, content)?;
+                                Ok(())
+                            };
+                            match crate::harvest::harvest_page_to_file(
+                                &cfg,
+                                &harvest_store,
+                                &body,
+                                &harvest_args.transform,
+                                &rel,
+                                &write,
+                                now,
+                            ) {
+                                Ok(hr) => {
+                                    if first_cite.is_none() {
+                                        first_cite = Some(rel.clone());
+                                    }
+                                    crate::harvest::HarvestPageResult {
+                                        page_id: page_id.clone(),
+                                        ok: true,
+                                        harvest_id: Some(hr.id),
+                                        memory_id: None,
+                                        error: None,
+                                    }
+                                }
+                                Err(e) => crate::harvest::HarvestPageResult {
                                     page_id: page_id.clone(),
-                                    ok: true,
-                                    harvest_id: Some(hr.id),
-                                    memory_id: Some(rec.id),
-                                    error: None,
-                                }
+                                    ok: false,
+                                    harvest_id: None,
+                                    memory_id: None,
+                                    error: Some(e.to_string()),
+                                },
                             }
-                            Err(e) => crate::harvest::HarvestPageResult {
-                                page_id: page_id.clone(),
-                                ok: false,
-                                harvest_id: None,
-                                memory_id: None,
-                                error: Some(e.to_string()),
-                            },
+                        } else {
+                            match crate::harvest::harvest_page_to_memory(
+                                &cfg,
+                                store.as_ref(),
+                                &harvest_store,
+                                &body,
+                                &harvest_args.transform,
+                                harvest_args.scope,
+                                now,
+                            ) {
+                                Ok((rec, hr)) => {
+                                    if first_cite.is_none() {
+                                        first_cite = Some(format!("memory:{}", rec.id));
+                                    }
+                                    crate::harvest::HarvestPageResult {
+                                        page_id: page_id.clone(),
+                                        ok: true,
+                                        harvest_id: Some(hr.id),
+                                        memory_id: Some(rec.id),
+                                        error: None,
+                                    }
+                                }
+                                Err(e) => crate::harvest::HarvestPageResult {
+                                    page_id: page_id.clone(),
+                                    ok: false,
+                                    harvest_id: None,
+                                    memory_id: None,
+                                    error: Some(e.to_string()),
+                                },
+                            }
                         }
                     }
                     Err(e) => crate::harvest::HarvestPageResult {
@@ -2314,6 +2429,7 @@ impl ToolHost {
                 "error": r.error,
             })).collect::<Vec<_>>(),
             "transform": harvest_args.transform,
+            "destination": harvest_args.destination,
             "scope": harvest_args.scope.as_str(),
         }))
         .unwrap_or_else(|_| "{}".into());
@@ -2332,6 +2448,296 @@ impl ToolHost {
             format!("harvested {ok_n}/{} page(s)", results.len()),
             raw,
             first_cite,
+        ))
+    }
+
+    async fn tool_check_source_sync(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let harvest_id = crate::harvest::parse_check_sync_args(args)?;
+        let harvest_path = self
+            .harvest_db_path
+            .clone()
+            .ok_or_else(|| CoreError::Policy("harvest database path not configured".into()))?;
+        let harvest_store = crate::harvest::HarvestStore::open(&harvest_path)?;
+        let record = harvest_store
+            .get(&harvest_id)?
+            .ok_or_else(|| CoreError::Message(format!("harvest not found: {harvest_id}")))?;
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .clone();
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        self.throttle_confluence().await?;
+        let remote = match confluence_ro::fetch_page_expanded(
+            &cfg,
+            &record.source.remote_id,
+            &auth,
+            &policy,
+            true,
+        )
+        .await
+        {
+            Ok(body) => crate::harvest::observation_from_page(&body),
+            Err(e) if e.to_string().contains("404") => crate::harvest::RemoteObservation {
+                version: None,
+                content_hash: None,
+                missing: true,
+            },
+            Err(e) => return Err(e),
+        };
+        let local_missing = match &record.destination {
+            crate::harvest::HarvestDestination::Memory { memory_id, .. } => {
+                let store = self
+                    .durable_memory
+                    .as_ref()
+                    .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+                store.get(memory_id)?.is_none()
+            }
+            crate::harvest::HarvestDestination::File { workspace_path } => self
+                .workspace
+                .roots
+                .first()
+                .map(|r| !r.join(workspace_path).exists())
+                .unwrap_or(true),
+        };
+        let now = crate::embed::now_unix_secs();
+        let check = crate::harvest::check_sync_with_observation(
+            &harvest_store,
+            &record,
+            &remote,
+            local_missing,
+            now,
+        )?;
+        let raw = serde_json::json!({
+            "harvest_id": check.harvest_id.to_string(),
+            "status": check.status.as_str(),
+            "detail": check.detail,
+        })
+        .to_string();
+        Ok((
+            true,
+            format!("sync {}", check.status.as_str()),
+            raw,
+            Some(format!("harvest:{}", check.harvest_id)),
+        ))
+    }
+
+    async fn tool_apply_source_sync(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let harvest_id = crate::harvest::parse_apply_sync_args(args)?;
+        let harvest_path = self
+            .harvest_db_path
+            .clone()
+            .ok_or_else(|| CoreError::Policy("harvest database path not configured".into()))?;
+        let harvest_store = crate::harvest::HarvestStore::open(&harvest_path)?;
+        let record = harvest_store
+            .get(&harvest_id)?
+            .ok_or_else(|| CoreError::Message(format!("harvest not found: {harvest_id}")))?;
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .clone();
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        self.throttle_confluence().await?;
+        let body = confluence_ro::fetch_page_expanded(
+            &cfg,
+            &record.source.remote_id,
+            &auth,
+            &policy,
+            true,
+        )
+        .await?;
+        let now = crate::embed::now_unix_secs();
+        match &record.destination {
+            crate::harvest::HarvestDestination::Memory { .. } => {
+                let store = self
+                    .durable_memory
+                    .as_ref()
+                    .ok_or_else(|| CoreError::Policy("durable memory not configured".into()))?;
+                let (mid, updated) = crate::harvest::apply_sync_page_to_memory(
+                    store.as_ref(),
+                    &harvest_store,
+                    &record,
+                    &body,
+                    now,
+                )?;
+                let raw = serde_json::json!({
+                    "harvest_id": updated.id.to_string(),
+                    "memory_id": mid.to_string(),
+                    "status": updated.sync_status.as_str(),
+                })
+                .to_string();
+                Ok((
+                    true,
+                    format!("applied sync → memory {mid}"),
+                    raw,
+                    Some(format!("memory:{mid}")),
+                ))
+            }
+            crate::harvest::HarvestDestination::File { .. } => {
+                let (rel, content) =
+                    crate::harvest::apply_sync_page_to_file_content(&record, &body)?;
+                let root = self.workspace.roots.first().ok_or_else(|| {
+                    CoreError::Policy("workspace root required for file apply".into())
+                })?;
+                let full = root.join(&rel);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&full, &content)?;
+                let mut updated = record.clone();
+                updated.local_content_hash = crate::harvest::content_hash(&content);
+                updated.local_dirty = false;
+                updated.sync_status = crate::harvest::SyncStatus::InSync;
+                updated.last_synced_at = now;
+                updated.updated_at = now;
+                updated.source.remote_version = body.meta.version;
+                updated.source.remote_content_hash =
+                    Some(crate::harvest::content_hash(&body.storage));
+                harvest_store.update(&updated)?;
+                Ok((
+                    true,
+                    format!("applied sync → file {rel}"),
+                    serde_json::json!({"path": rel, "status": "in_sync"}).to_string(),
+                    Some(rel),
+                ))
+            }
+        }
+    }
+
+    async fn tool_confluence_create_page(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.confluence_write_enabled {
+            return Err(CoreError::Policy(
+                "Confluence write_enabled is false (Settings → Connectors)".into(),
+            ));
+        }
+        let space = args
+            .get("space")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("confluence_create_page requires space".into()))?;
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("confluence_create_page requires title".into()))?;
+        let body_storage = args
+            .get("body_storage")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CoreError::Message("confluence_create_page requires body_storage".into())
+            })?;
+        let parent_id = args.get("parent_id").and_then(|v| v.as_str());
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .clone();
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        self.throttle_confluence().await?;
+        let meta =
+            confluence_ro::create_page(&cfg, space, title, body_storage, parent_id, &auth, &policy)
+                .await?;
+        let raw = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                names::CONFLUENCE_CREATE_PAGE,
+                ToolSideEffect::HardWrite,
+                &format!("confluence://write/create/{space}"),
+                crate::audit::outcomes::ALLOWED,
+                "page created",
+                raw.len() as u64,
+            );
+        }
+        Ok((
+            true,
+            format!("created page {}", meta.id),
+            raw,
+            meta.url.clone().or(Some(format!("confluence:{}", meta.id))),
+        ))
+    }
+
+    async fn tool_confluence_update_page(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        if !self.confluence_write_enabled {
+            return Err(CoreError::Policy(
+                "Confluence write_enabled is false (Settings → Connectors)".into(),
+            ));
+        }
+        let page_id = args
+            .get("page_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CoreError::Message("confluence_update_page requires page_id".into()))?;
+        let body_storage = args
+            .get("body_storage")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CoreError::Message("confluence_update_page requires body_storage".into())
+            })?;
+        let version = args
+            .get("version")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| CoreError::Message("confluence_update_page requires version".into()))?;
+        let title = args.get("title").and_then(|v| v.as_str());
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence not configured".into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .clone();
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        self.throttle_confluence().await?;
+        let meta =
+            confluence_ro::update_page(&cfg, page_id, title, body_storage, version, &auth, &policy)
+                .await?;
+        let raw = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
+        if let Some(log) = &self.audit {
+            let _ = log.log(
+                names::CONFLUENCE_UPDATE_PAGE,
+                ToolSideEffect::HardWrite,
+                &format!("confluence://write/update/{page_id}"),
+                crate::audit::outcomes::ALLOWED,
+                "page updated",
+                raw.len() as u64,
+            );
+        }
+        Ok((
+            true,
+            format!("updated page {}", meta.id),
+            raw,
+            meta.url.clone().or(Some(format!("confluence:{}", meta.id))),
         ))
     }
 
@@ -2811,7 +3217,13 @@ fn risk_for(side: ToolSideEffect, name: &str) -> &'static str {
         ToolSideEffect::SoftWrite if name == names::RETRACT_MEMORY => "local",
         ToolSideEffect::SoftWrite if name == names::SAVE_SKILL => "local",
         ToolSideEffect::SoftWrite if name == names::HARVEST_FROM_SOURCE => "local",
+        ToolSideEffect::SoftWrite if name == names::APPLY_SOURCE_SYNC => "local",
         ToolSideEffect::SoftWrite => "local",
+        ToolSideEffect::HardWrite
+            if name == names::CONFLUENCE_CREATE_PAGE || name == names::CONFLUENCE_UPDATE_PAGE =>
+        {
+            "remote"
+        }
         ToolSideEffect::HardWrite => "destructive",
     }
 }
@@ -2879,6 +3291,21 @@ fn resolve_write_target(name: &str, args: &Value, memory_dir: &std::path::Path) 
             Ok(a) => crate::harvest::harvest_permission_target(&a),
             Err(_) => "harvest://confluence/invalid".into(),
         },
+        names::APPLY_SOURCE_SYNC => {
+            if let Ok(id) = crate::harvest::parse_apply_sync_args(args) {
+                format!("harvest://confluence/apply/{id}")
+            } else {
+                "harvest://confluence/apply/invalid".into()
+            }
+        }
+        names::CONFLUENCE_CREATE_PAGE => {
+            let space = args.get("space").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("confluence://write/create/{space}")
+        }
+        names::CONFLUENCE_UPDATE_PAGE => {
+            let id = args.get("page_id").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("confluence://write/update/{id}")
+        }
         names::SAVE_SKILL => {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("skill");
             let safe: String = id
@@ -3554,6 +3981,36 @@ mod tests {
         );
         assert!(!preview.contains("abcdefghijklmnop"), "{preview}");
         let _ = PermissionDecision::AllowOnce;
+    }
+
+    #[test]
+    fn confluence_write_tools_gated_by_write_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = crate::workspace::Workspace {
+            id: "w".into(),
+            name: "w".into(),
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_confluence(
+            Some(crate::confluence_ro::ConfluenceRoConfig::new(
+                "https://wiki.example.com",
+                vec!["ENG".into()],
+            )),
+            Some("pat".into()),
+        );
+        host.set_confluence_write_enabled(false);
+        let names: Vec<_> = host.specs_for_model().into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n == names::CONFLUENCE_CREATE_PAGE));
+        host.set_confluence_write_enabled(true);
+        let names2: Vec<_> = host.specs_for_model().into_iter().map(|t| t.name).collect();
+        assert!(names2.iter().any(|n| n == names::CONFLUENCE_CREATE_PAGE));
+        assert!(names2.iter().any(|n| n == names::CONFLUENCE_UPDATE_PAGE));
+        assert_eq!(
+            risk_for(ToolSideEffect::HardWrite, names::CONFLUENCE_CREATE_PAGE),
+            "remote"
+        );
     }
 
     /// Product path: durable store → save (Accept) → recall → supersede → retract.

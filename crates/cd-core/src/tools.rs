@@ -56,6 +56,14 @@ pub mod names {
     pub const CONFLUENCE_LIST_ATTACHMENTS: &str = "confluence_list_attachments";
     /// Harvest Confluence page(s) into durable memory (SoftWrite). #326 PR3
     pub const HARVEST_FROM_SOURCE: &str = "harvest_from_source";
+    /// Read: classify harvest sync vs remote (#326 PR5).
+    pub const CHECK_SOURCE_SYNC: &str = "check_source_sync";
+    /// SoftWrite: re-apply remote into local harvest destination (#326 PR5).
+    pub const APPLY_SOURCE_SYNC: &str = "apply_source_sync";
+    /// HardWrite: create Confluence page (#326 PR7).
+    pub const CONFLUENCE_CREATE_PAGE: &str = "confluence_create_page";
+    /// HardWrite: update Confluence page (#326 PR7).
+    pub const CONFLUENCE_UPDATE_PAGE: &str = "confluence_update_page";
     /// Open-web search (opt-in; DuckDuckGo HTML lite by default).
     pub const WEB_SEARCH: &str = "web_search";
     /// Open-web page fetch (opt-in; SSRF-safe text extract).
@@ -216,9 +224,64 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "page_id": { "type": "string", "description": "Single page id alternative" },
                     "transform": { "type": "string" },
-                    "destination": { "type": "string", "description": "memory only in PR3" },
+                    "destination": { "type": "string", "description": "memory | file" },
+                    "file_path": { "type": "string", "description": "Workspace-relative path when destination=file" },
                     "scope": { "type": "string", "description": "workspace|personal" }
                 }
+            }),
+        },
+        ToolSpec {
+            name: names::CHECK_SOURCE_SYNC.into(),
+            description: "Check a harvest row against Confluence remote version/hash (Read). Updates sync_status on the harvest record.".into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "harvest_id": { "type": "string" }
+                },
+                "required": ["harvest_id"]
+            }),
+        },
+        ToolSpec {
+            name: names::APPLY_SOURCE_SYNC.into(),
+            description: "Re-apply remote Confluence page into local harvest destination (SoftWrite; Accept required). AllowOnce only.".into(),
+            side_effect: ToolSideEffect::SoftWrite,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "harvest_id": { "type": "string" }
+                },
+                "required": ["harvest_id"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_CREATE_PAGE.into(),
+            description: "Create a Confluence page (HardWrite remote; type-confirm WRITE). Requires write_enabled + space allowlist + PAT.".into(),
+            side_effect: ToolSideEffect::HardWrite,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "space": { "type": "string" },
+                    "title": { "type": "string" },
+                    "body_storage": { "type": "string", "description": "Confluence storage format body" },
+                    "parent_id": { "type": "string" }
+                },
+                "required": ["space", "title", "body_storage"]
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_UPDATE_PAGE.into(),
+            description: "Update a Confluence page body/title (HardWrite remote; type-confirm WRITE). Requires write_enabled.".into(),
+            side_effect: ToolSideEffect::HardWrite,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "page_id": { "type": "string" },
+                    "title": { "type": "string" },
+                    "body_storage": { "type": "string" },
+                    "version": { "type": "integer", "description": "Current version number (required for optimistic lock)" }
+                },
+                "required": ["page_id", "body_storage", "version"]
             }),
         },
         ToolSpec {

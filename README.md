@@ -55,6 +55,7 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Log template embedding default (product):** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on; `embed.rs:default_log_embed_backend`); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 - Opt-in web research (`web_search` / `web_fetch`) behind SSRF gates
 - Read-only connectors: SQLite, Postgres, Confluence, X search
+- **Confluence harvest & re-sync:** SoftWrite `harvest_from_source` (memory or workspace file) with provenance; `check_source_sync` / `apply_source_sync`; Harvest pane; optional HardWrite create/update when `write_enabled` (type-confirm `WRITE`) — `docs/design/CONFLUENCE_GAP.md`, #326
 - MCP stdio tools and HTTP/OpenAPI presets wired as agent tools (`tool_host.rs:attach_mcp_connector`, `http_preset.rs`)
 - Durable chat sessions + keyword archive search; hybrid embed scoring available as a core/opt-in retrieval path (`index.rs:search_hybrid`, #119)
 - Optional headless server: incremental **SSE research endpoint** on `main` (`crates/cd-server/src/main.rs:research_sse`)

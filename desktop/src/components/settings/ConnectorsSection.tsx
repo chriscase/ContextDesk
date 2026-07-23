@@ -1006,6 +1006,24 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     }
     placeholder="ENG, DOCS"
   />
+  <ToggleField
+    id={`${baseId}-cf-write`}
+    label="Enable Confluence writes (create/update)"
+    hint="Default off. HardWrite + type-confirm WRITE. Requires non-empty space allowlist."
+    checked={draft.confluence?.writeEnabled ?? false}
+    onChange={(on) =>
+      setDraft((d) => ({
+        ...d,
+        confluence: {
+          enabled: d.confluence?.enabled ?? true,
+          baseUrl: d.confluence?.baseUrl ?? "",
+          spaces: d.confluence?.spaces ?? "",
+          hasToken: d.confluence?.hasToken ?? false,
+          writeEnabled: on,
+        },
+      }))
+    }
+  />
   <div className="field-row">
     <button
       type="button"
@@ -1019,6 +1037,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
               baseUrl: draft.confluence?.baseUrl ?? "",
               spaces: draft.confluence?.spaces ?? "",
               pat: cfTokenDraft.trim() || undefined,
+              writeEnabled: draft.confluence?.writeEnabled ?? false,
             });
             const msg = await hostTestConfluence();
             setCfStatus(msg);
