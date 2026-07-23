@@ -36,6 +36,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Confluence harvest file destination | Shipped | crates/cd-core/src/harvest/apply.rs:harvest_page_to_file | #326 #399 |
 | Confluence check/apply source sync | Shipped | crates/cd-core/src/harvest/sync.rs:check_sync_with_observation | #326 #400 |
 | Confluence HardWrite create/update | Shipped | crates/cd-core/src/confluence_ro.rs:create_page | #326 #402 |
+| Confluence Desktop Publish (HardWrite UI) | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #403 PR8 |
+| Confluence publish converter gate (K16) | Shipped | crates/cd-core/src/harvest/publish.rs:gate_publish | #326 #403 |
 | Harvest Browser pane | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #401 |
 | Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |

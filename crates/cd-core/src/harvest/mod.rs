@@ -3,6 +3,7 @@
 //! Co-locates `harvest` tables with the destination memory SQLite DB.
 
 pub mod apply;
+pub mod publish;
 pub mod store;
 pub mod sync;
 pub mod transform;
@@ -11,6 +12,9 @@ pub mod types;
 pub use apply::{
     harvest_page_to_file, harvest_page_to_memory, harvest_permission_target, is_harvest_target,
     parse_harvest_args, HarvestArgs, HarvestPageResult,
+};
+pub use publish::{
+    build_create_args, build_update_args, gate_publish, publish_from_local_body_allowed,
 };
 pub use store::HarvestStore;
 pub use sync::{

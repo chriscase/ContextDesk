@@ -123,6 +123,12 @@ function PermissionModalBody({
               <p className="field__label">
                 Retract (reversible soft tombstone — not permanent delete)
               </p>
+            ) : prompt.toolName === "confluence_update_page" ||
+              prompt.toolName === "confluence_create_page" ? (
+              <p className="field__label">
+                Remote Confluence write (HardWrite) — type WRITE; no session
+                auto-grant
+              </p>
             ) : (
               <p className="field__label">Preview</p>
             )}

@@ -249,11 +249,33 @@ export type HarvestRowDto = {
   syncStatus: string;
   destination: string;
   lastSyncedAt: number;
+  remoteVersion?: number | null;
+  /** raw_storage only — else paste body_storage (K16). */
+  canPublishFromLocal?: boolean;
 };
 
 export async function hostListHarvests(limit = 100): Promise<HarvestRowDto[]> {
   if (!isTauri()) return [];
   return invoke<HarvestRowDto[]>("list_harvests", { limit });
+}
+
+/**
+ * Propose HardWrite Confluence update for a harvest (#326 PR8).
+ * Returns permission_required events; complete via completePermission + type WRITE.
+ */
+export async function hostProposeConfluencePublish(args: {
+  harvestId: string;
+  bodyStorageOverride?: string;
+  title?: string;
+}): Promise<EventDto[]> {
+  if (!isTauri()) {
+    throw new Error("Confluence publish requires Tauri host");
+  }
+  return invoke<EventDto[]>("propose_confluence_publish", {
+    harvest_id: args.harvestId,
+    body_storage_override: args.bodyStorageOverride ?? null,
+    title: args.title ?? null,
+  });
 }
 
 export async function hostCheckOllama(baseUrl: string): Promise<boolean | null> {

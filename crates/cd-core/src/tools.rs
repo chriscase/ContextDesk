@@ -279,7 +279,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "page_id": { "type": "string" },
                     "title": { "type": "string" },
                     "body_storage": { "type": "string" },
-                    "version": { "type": "integer", "description": "Current version number (required for optimistic lock)" }
+                    "version": { "type": "integer", "description": "Current version number (required for optimistic lock)" },
+                    "harvest_id": { "type": "string", "description": "Optional harvest row to bump remote_version after success" }
                 },
                 "required": ["page_id", "body_storage", "version"]
             }),

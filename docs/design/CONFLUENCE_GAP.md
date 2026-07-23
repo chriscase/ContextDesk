@@ -15,8 +15,8 @@
 | **5** check/apply sync + supersede hooks | re-sync tools | **Shipped** (this goal) | `harvest/sync.rs`; tools; supersede/retract hooks in tool_host | sync offline tests | live check still needs network |
 | **6** Harvest Browser + conflict + citation | desktop | **Shipped** (this goal) | `HarvestPane.tsx`; `list_harvests` | tsc | Check/Apply via agent tools not one-click in-pane SoftWrite (document residual) |
 | **7** Confluence write core | HardWrite create/update | **Shipped** (this goal) | `create_page`/`update_page`; tools gated by write_enabled | write tools gated unit test | live HTTP #[ignore] not added |
-| **8** Desktop Publish | type-to-confirm WRITE UI | **Partial** | write_enabled Settings toggle; Harvest pane docs | — | Dedicated Publish modal residual — use agent tools after enable |
-| **9** Polish + CLAIMS | honesty | **Shipped** (this goal) | CLAIMS + README | check_claims | epic #326 may stay open for PR8 residual |
+| **8** Desktop Publish | type-to-confirm WRITE UI | **Shipped** | `HarvestPane` Publish; `propose_confluence_publish`; K16 gate; PermissionModal WRITE | publish unit tests + permissions | Live HTTP still unproven; md→storage converters residual |
+| **9** Polish + CLAIMS | honesty | **Shipped** | CLAIMS + README | check_claims | Live corp #[ignore]; epic may close when checklist updated |
 
 ## Already solid (do not rewrite)
 
