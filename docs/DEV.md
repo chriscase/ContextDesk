@@ -239,6 +239,7 @@ data_dir = "/var/lib/cd-server"      # optional; default: <config dir>/server
 [[workspaces]]
 id = "team-a"
 roots = ["/srv/knowledge/team-a"]
+watchers_enabled = true
 keys = [
   { key = "short-dev-token", role = "admin" },       # hashed at load (dev only)
   { key_hash = "…64 hex…",   role = "member" },       # preferred for strong tokens
@@ -247,6 +248,7 @@ keys = [
 [[workspaces]]
 id = "team-b"
 roots = ["/srv/knowledge/team-b"]
+watchers_enabled = false # config-level kill switch for this workspace
 keys = [ { key_hash = "…", role = "admin" } ]
 ```
 
@@ -254,6 +256,9 @@ keys = [ { key_hash = "…", role = "admin" } ]
   search / read and use scoped (permission-gated) writes. Admin-only endpoints reject a
   `member` key with **403** (`/v1/memory/publish`). Legacy `--root` + `--api-keys` still
   work: those keys are granted `admin` on the `default` workspace.
+- **Watchers.** `watchers_enabled` defaults to true and is a workspace-level kill
+  switch for the persistent scheduler. Watcher CRUD and immediate-run endpoints are
+  admin-only; members may list definitions and last-run state.
 - **No raw secrets in the config file.** Provide strong tokens as `key_hash` (a plain
   sha256 hex of the token — not a secret). The loader **refuses** a `key` that looks like a
   raw provider secret (`sk-…` / `xai-…` / high-entropy), reusing the `cd_core::config`
@@ -356,6 +361,39 @@ desktop, HardWrite stays queued and never executes. Session mappings, pairings, 
 are intentionally process-lifetime in v1; restart clears them. Chat ingress, authorization denial,
 proposal, and decision records are written to the existing scrubbed hash-chain audit log without
 storing message text.
+
+### Server-resident watchers (#290)
+
+Watchers persist in `<data_dir>/watchers.sqlite` and run while `cd-server` is alive. An admin
+creates or replaces a definition with `PUT /v1/watchers/{id}`; members may list definitions and
+last-run state. This example sends one notification per five-minute schedule slot:
+
+```bash
+curl -s -XPUT localhost:8799/v1/watchers/build-health \
+  -H 'authorization: Bearer <admin>' -H 'content-type: application/json' \
+  -d '{
+    "id":"build-health",
+    "workspace_id":"team-a",
+    "enabled":true,
+    "watch":{"kind":"schedule","interval_seconds":300},
+    "condition":{"kind":"always"},
+    "action":{
+      "kind":"notify",
+      "chat_id":-100012345,
+      "message_thread_id":7,
+      "text":"Watcher {{watcher_id}} fired: {{event}}"
+    }
+  }'
+```
+
+`watch.kind` may also be `query` (workspace search) or `connector_poll` (a configured connector
+tool classified `Read`). Intervals below 300 seconds are rejected. `condition.kind` is `always`,
+`contains`, or `result_count_at_least`. `action.kind=propose_tool` never supplies a grant: both
+SoftWrite and HardWrite become pending proposals for the paired desktop, and the generic
+permission endpoint refuses their watcher-originated session. SQLite claims each source-event
+fingerprint before dispatch, so an unchanged query/poll result or repeated schedule slot does not
+fire twice across ticks or restart. Use `POST /v1/watchers/{id}/run` for an authenticated manual
+evaluation; deduplication still applies.
 
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
 

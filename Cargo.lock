@@ -538,6 +538,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",

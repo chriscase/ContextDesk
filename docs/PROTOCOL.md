@@ -83,6 +83,11 @@ Hosts should treat the stream `EventDto` contract as the UI surface. Do not scra
 | `POST` | `/v1/chat/pair` | Authenticated workspace admin registers a process-lifetime trusted desktop pairing |
 | `GET` | `/v1/chat/approvals` | Paired admin polls queued chat-originated SoftWrite/HardWrite proposals |
 | `POST` | `/v1/chat/approvals/respond` | Paired admin AllowOnce/deny; core type-to-confirm remains enforced |
+| `GET` | `/v1/watchers?workspace_id=…` | List persistent watcher definitions and last-run state |
+| `GET` | `/v1/watchers/{watcher_id}` | Read one watcher and its last-run state |
+| `PUT` | `/v1/watchers/{watcher_id}` | Admin-only create/update of a workspace watcher |
+| `DELETE` | `/v1/watchers/{watcher_id}` | Admin-only watcher removal |
+| `POST` | `/v1/watchers/{watcher_id}/run` | Admin-only immediate evaluation (normal execution is scheduled) |
 
 Session hosts are retained **in-process** for the lifetime of the `cd-server` process (keyed by `session_id`). No TTL yet; restart clears pending grants. Writes never execute without a matching client `permission/respond` allow.
 
@@ -156,3 +161,24 @@ caller knows a request id. Configured admin users may confirm **SoftWrite only**
 an exact `/approve_soft <request-id> WRITE`; arbitrary chat assent is ordinary model input.
 HardWrite can only be completed by `/v1/chat/approvals/respond` from an authenticated paired
 workspace admin. Pairings and pending chat proposals are in-memory and clear on restart.
+
+### Watchers / triggers
+
+Watcher definitions are durable rows in `<data_dir>/watchers.sqlite`. Each definition is scoped
+to one workspace and has `watch`, `condition`, and `action` objects tagged by `kind`. Watch sources
+are `query`, `connector_poll`, or `schedule`; every interval is at least 300 seconds and receives
+a deterministic scheduler jitter. Query watchers rebuild from workspace roots so they observe
+changes after server startup. Connector polls may invoke only tools classified `Read`.
+
+Conditions are hermetic `always`, `contains`, or `result_count_at_least` predicates. Actions are:
+
+- `notify`, which sends through the configured Telegram bridge; `{{watcher_id}}` and `{{event}}`
+  are the only substitutions.
+- `propose_tool`, which accepts only write-classified tools and deliberately invokes without a
+  grant. The resulting permission request is queued for `/v1/chat/approvals`; watcher-originated
+  SoftWrite and HardWrite are both barred from `/v1/permission/respond` and from in-chat approval.
+
+The SQLite `(watcher_id, event_key)` primary key is claimed transactionally before an action.
+Repeated query/connector results or the same schedule slot therefore cannot fire twice, including
+after restart. The store also persists `last_run_at`, `last_event_key`, `last_fired_at`, and the
+last outcome. A crash after the claim is fail-closed (the event may be missed, never duplicated).
