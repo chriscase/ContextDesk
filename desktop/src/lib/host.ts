@@ -271,9 +271,10 @@ export async function hostProposeConfluencePublish(args: {
   if (!isTauri()) {
     throw new Error("Confluence publish requires Tauri host");
   }
+  // Tauri 2 IPC converts camelCase JS keys → snake_case Rust params.
   return invoke<EventDto[]>("propose_confluence_publish", {
-    harvest_id: args.harvestId,
-    body_storage_override: args.bodyStorageOverride ?? null,
+    harvestId: args.harvestId,
+    bodyStorageOverride: args.bodyStorageOverride ?? null,
     title: args.title ?? null,
   });
 }
