@@ -93,7 +93,8 @@ pub struct ToolHost {
     web_research_sources: std::collections::HashSet<String>,
     /// Rate-limit: min interval between open-web HTTP calls.
     web_min_interval: Duration,
-    last_web_call: Option<Instant>,
+    /// Last open-web call per active agent session (#84).
+    last_web_calls: std::collections::HashMap<String, Instant>,
     /// When set with bearer, `x_search` is registered.
     x_enabled: bool,
     /// X API bearer from host keychain (never logged).
@@ -178,8 +179,8 @@ impl ToolHost {
                 &std::collections::HashMap::new(),
             ),
             // Slightly more conservative than Confluence (public engines).
-            web_min_interval: Duration::from_millis(800),
-            last_web_call: None,
+            web_min_interval: Duration::from_millis(web_research::DEFAULT_SESSION_MIN_INTERVAL_MS),
+            last_web_calls: std::collections::HashMap::new(),
             x_enabled: false,
             x_bearer: None,
             max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
@@ -2334,15 +2335,38 @@ impl ToolHost {
         ))
     }
 
-    async fn throttle_web(&mut self) -> CoreResult<()> {
-        if let Some(last) = self.last_web_call {
+    async fn throttle_web(
+        &mut self,
+        tool_name: &str,
+    ) -> CoreResult<web_research::WebRateLimitObservation> {
+        let session = self
+            .active_session_id
+            .as_deref()
+            .unwrap_or("unbound")
+            .to_string();
+        let mut wait = Duration::ZERO;
+        if let Some(last) = self.last_web_calls.get(&session).copied() {
             let elapsed = last.elapsed();
             if elapsed < self.web_min_interval {
-                tokio::time::sleep(self.web_min_interval - elapsed).await;
+                wait = self.web_min_interval - elapsed;
+                tokio::time::sleep(wait).await;
             }
         }
-        self.last_web_call = Some(Instant::now());
-        Ok(())
+        self.last_web_calls.insert(session.clone(), Instant::now());
+        let observation = web_research::session_rate_limit_observation(
+            Some(&session),
+            self.web_min_interval,
+            wait,
+        );
+        self.audit_log(
+            tool_name,
+            ToolSideEffect::Read,
+            &observation.audit_target(),
+            crate::audit::outcomes::ALLOWED,
+            &observation.trail_detail(),
+            0,
+        );
+        Ok(observation)
     }
 
     /// Returns (ok, summary, raw, citations as (url, label, title)).
@@ -2371,10 +2395,14 @@ impl ToolHost {
             .unwrap_or_default();
         // Sanitize early for clearer errors before network.
         let q = web_research::sanitize_search_query(q)?;
-        self.throttle_web().await?;
+        let rate_limit = self.throttle_web(names::WEB_SEARCH).await?;
         let (hits, notes) =
             web_research::web_search(&q, limit, &self.web_research_sources, &packs).await?;
-        let raw = web_research::format_search_hits_with_notes(&hits, &q, &notes);
+        let raw = format!(
+            "[{}]\n{}",
+            rate_limit.trail_detail(),
+            web_research::format_search_hits_with_notes(&hits, &q, &notes)
+        );
         let cites: Vec<(String, String, Option<String>)> = hits
             .iter()
             .take(8)
@@ -2431,18 +2459,24 @@ impl ToolHost {
             .unwrap_or(10)
             .clamp(10, 25) as usize;
         let q = crate::x_search::sanitize_x_query(q)?;
-        self.throttle_web().await?;
+        let rate_limit = self.throttle_web(names::X_SEARCH).await?;
         let (hits, notes) = match crate::x_search::search_recent(&q, limit, &bearer).await {
             Ok(r) => r,
             Err(e) => {
                 let raw = format!(
-                    "x_search network/error for `{q}`: {e}\n\
-                     Soft fail — try web_search or report the gap. Do not invent posts."
+                    "[{}]\n\
+                     x_search network/error for `{q}`: {e}\n\
+                     Soft fail — try web_search or report the gap. Do not invent posts.",
+                    rate_limit.trail_detail()
                 );
                 return Ok((false, format!("x_search failed for `{q}`"), raw, vec![]));
             }
         };
-        let raw = crate::x_search::format_x_hits(&hits, &q, &notes);
+        let raw = format!(
+            "[{}]\n{}",
+            rate_limit.trail_detail(),
+            crate::x_search::format_x_hits(&hits, &q, &notes)
+        );
         let cites: Vec<(String, String, Option<String>)> = hits
             .iter()
             .take(8)
@@ -2482,14 +2516,16 @@ impl ToolHost {
         }
         // SSRF validation before any network I/O (hard fail — policy).
         let _ = web_research::validate_web_url(url)?;
-        self.throttle_web().await?;
+        let rate_limit = self.throttle_web(names::WEB_FETCH).await?;
         // Network / HTTP failures are soft: return tool result so the agent can retry.
         let fetched = match web_research::web_fetch(url).await {
             Ok(f) => f,
             Err(e) => {
                 let raw = format!(
-                    "web_fetch network error for {url}: {e}\n\
-                     Try another URL from web_search or answer from search snippets. Do not abort."
+                    "[{}]\n\
+                     web_fetch network error for {url}: {e}\n\
+                     Try another URL from web_search or answer from search snippets. Do not abort.",
+                    rate_limit.trail_detail()
                 );
                 let label = web_research::source_display_label(None, url);
                 return Ok((
@@ -2500,7 +2536,11 @@ impl ToolHost {
                 ));
             }
         };
-        let raw = web_research::format_fetch_result(&fetched);
+        let raw = format!(
+            "[{}]\n{}",
+            rate_limit.trail_detail(),
+            web_research::format_fetch_result(&fetched)
+        );
         let ok = fetched.ok();
         let label = web_research::source_display_label(
             if fetched.title.is_empty() {
@@ -3189,6 +3229,31 @@ mod tests {
         let names: Vec<_> = host.specs().into_iter().map(|t| t.name).collect();
         assert!(names.iter().any(|n| n == names::WEB_SEARCH));
         assert!(names.iter().any(|n| n == names::WEB_FETCH));
+    }
+
+    #[tokio::test]
+    async fn web_rate_limit_is_per_session_and_visible_in_audit() {
+        let (dir, mut host) = host_with_docs();
+        host.web_min_interval = Duration::from_millis(50);
+
+        host.set_active_session_id(Some("session-a".into()));
+        let first = host.throttle_web(names::WEB_SEARCH).await.unwrap();
+        let second = host.throttle_web(names::WEB_FETCH).await.unwrap();
+        assert_eq!(first.waited_ms, 0);
+        assert!(second.waited_ms > 0, "{second:?}");
+
+        host.set_active_session_id(Some("session-b".into()));
+        let other_session = host.throttle_web(names::WEB_SEARCH).await.unwrap();
+        assert_eq!(
+            other_session.waited_ms, 0,
+            "a different session must have an independent limiter"
+        );
+
+        let audit = fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+        assert!(audit.contains("web://rate-limit/session/session-a"));
+        assert!(audit.contains("web://rate-limit/session/session-b"));
+        assert!(audit.contains("min_interval_ms=50"));
+        assert!(audit.contains("waited_ms="));
     }
 
     /// Pre-fix: `preview_args` byte-sliced skill drafts and panicked on emoji.

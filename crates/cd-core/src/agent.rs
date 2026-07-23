@@ -232,6 +232,66 @@ impl EventCollector<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PendingWebCitation {
+    source_id: String,
+    label: String,
+    locator: Option<String>,
+}
+
+fn hold_web_search_citations(
+    events: Vec<StreamEvent>,
+    pending: &mut Vec<PendingWebCitation>,
+) -> Vec<StreamEvent> {
+    let mut passthrough = Vec::new();
+    for event in events {
+        match event {
+            StreamEvent::Citation {
+                source_id,
+                label,
+                locator,
+            } if source_id.starts_with("https://") || source_id.starts_with("http://") => {
+                if !pending
+                    .iter()
+                    .any(|candidate| candidate.source_id == source_id)
+                {
+                    pending.push(PendingWebCitation {
+                        source_id,
+                        label,
+                        locator,
+                    });
+                }
+            }
+            other => passthrough.push(other),
+        }
+    }
+    passthrough
+}
+
+fn cited_web_search_events(markdown: &str, pending: &[PendingWebCitation]) -> Vec<StreamEvent> {
+    let hits: Vec<crate::web_research::WebSearchHit> = pending
+        .iter()
+        .map(|candidate| crate::web_research::WebSearchHit {
+            title: candidate.label.clone(),
+            url: candidate.source_id.clone(),
+            snippet: String::new(),
+        })
+        .collect();
+    crate::web_research::cited_search_hits(markdown, &hits)
+        .into_iter()
+        .filter_map(|hit| {
+            pending
+                .iter()
+                .find(|candidate| candidate.source_id == hit.url)
+                .map(|candidate| StreamEvent::Citation {
+                    source_id: candidate.source_id.clone(),
+                    label: candidate.label.clone(),
+                    locator: candidate.locator.clone(),
+                })
+        })
+        .collect()
+}
+
 /// Run agent loop; returns all stream events + final messages.
 pub async fn run_agent_turn(
     backend: &dyn ChatBackend,
@@ -260,6 +320,8 @@ pub async fn run_agent_turn_with_sink(
         session_id: opts.session_id.clone(),
         model: opts.model.clone(),
     });
+    // ToolHost owns the per-session web limiter and session-context view.
+    host.set_active_session_id(Some(opts.session_id.clone()));
 
     let specs = host.specs();
     let tool_names: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
@@ -307,6 +369,7 @@ pub async fn run_agent_turn_with_sink(
         ),
     ];
     let started = Instant::now();
+    let mut pending_web_citations = Vec::new();
 
     for round in 0..opts.max_rounds {
         if cancelled(opts) {
@@ -490,6 +553,10 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 });
             }
             let assistant_text = completion.content.clone();
+            out.extend_from(cited_web_search_events(
+                &completion.content,
+                &pending_web_citations,
+            ));
             history.push(ChatMessage {
                 role: Role::Assistant,
                 content: completion.content,
@@ -533,7 +600,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
             // Tool execution errors must not kill the whole turn (e.g. HTTP 401
             // on a news site). Feed the failure back as tool content so the
             // model can try another URL or answer from search snippets.
-            let result = match host.execute(&tc.function.name, &args, None).await {
+            let mut result = match host.execute(&tc.function.name, &args, None).await {
                 Ok(r) => r,
                 Err(e) => {
                     let id = uuid::Uuid::new_v4().to_string();
@@ -562,9 +629,18 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     }
                 }
             };
-            out.extend_from(result.events);
+            let is_web_search = tc.function.name == crate::tools::names::WEB_SEARCH;
+            if is_web_search {
+                let passthrough = hold_web_search_citations(
+                    std::mem::take(&mut result.events),
+                    &mut pending_web_citations,
+                );
+                out.extend_from(passthrough);
+            } else {
+                out.extend_from(result.events);
+            }
             if let Some(path) = &result.citation_path {
-                if result.ok {
+                if result.ok && !is_web_search {
                     out.push(StreamEvent::Citation {
                         source_id: path.clone(),
                         label: path.clone(),
@@ -630,6 +706,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     text: content.clone(),
                 });
             }
+            out.extend_from(cited_web_search_events(&content, &pending_web_citations));
             history.push(ChatMessage {
                 role: Role::Assistant,
                 content,
@@ -694,6 +771,50 @@ mod tests {
     use crate::workspace::Workspace;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn web_search_chips_only_include_urls_cited_in_final_markdown() {
+        let mut pending = Vec::new();
+        let passthrough = hold_web_search_citations(
+            vec![
+                StreamEvent::Tool {
+                    id: "tool-1".into(),
+                    name: crate::tools::names::WEB_SEARCH.into(),
+                    phase: crate::events::ToolPhase::Finished,
+                    summary: "2 hits".into(),
+                    detail: None,
+                    ok: Some(true),
+                },
+                StreamEvent::Citation {
+                    source_id: "https://example.com/used".into(),
+                    label: "Used".into(),
+                    locator: Some("Used story".into()),
+                },
+                StreamEvent::Citation {
+                    source_id: "https://example.com/unused".into(),
+                    label: "Unused".into(),
+                    locator: Some("Unused story".into()),
+                },
+            ],
+            &mut pending,
+        );
+        assert_eq!(passthrough.len(), 1);
+        assert_eq!(pending.len(), 2);
+
+        let chips = cited_web_search_events(
+            "The answer is supported by [Used](https://example.com/used#section).",
+            &pending,
+        );
+        assert_eq!(chips.len(), 1);
+        assert!(matches!(
+            &chips[0],
+            StreamEvent::Citation {
+                source_id,
+                label,
+                ..
+            } if source_id == "https://example.com/used" && label == "Used"
+        ));
+    }
 
     #[tokio::test]
     async fn agent_uses_tool_then_answers() {
