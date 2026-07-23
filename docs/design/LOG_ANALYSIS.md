@@ -124,7 +124,7 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 
 1. **Event‑store engine: DuckDB — SHIPPED (#358).** DuckDB is the event-store engine for the log subsystem (memory/KB stay SQLite). MIT `duckdb` crate + `bundled`. Confined to log corpora under app cache.
 2. **HNSW library — SHIPPED pure-Rust** (`crates/cd-core/src/vector_index.rs:HnswIndex`). *Not* DuckDB `vss` (reconsidered so memory and logs share one ANN crate; events stay DuckDB-only).
-3. **Local ONNX embedder:** `fastembed-rs` behind feature `log-fastembed` (optional; downloads model on first use). Default offline tests use deterministic `ConceptEmbedBackend`. Cloud embed is per-corpus opt-in with explicit “log content leaves this machine” confirm (`LogEmbedPolicy`). Host may also pass Ollama embeddings.
+3. **Local ONNX embedder — product default:** `fastembed-rs` (`AllMiniLML6V2`) via feature `log-fastembed`, **enabled on the desktop host**. Downloads the small model once at first use. Offline `cargo test` (feature off) uses deterministic `ConceptEmbedBackend`. Cloud embed is per-corpus opt-in with explicit “log content leaves this machine” confirm (`LogEmbedPolicy`). Memory hybrid may still use Ollama; log templates prefer the dedicated log ONNX backend (`ToolHost::log_embed_backend`).
 4. **Corpus retention: keep-until-discarded** under app cache (`log_corpora/{id}`).
 
 ## 11. Phasing
