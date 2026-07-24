@@ -127,6 +127,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     let audit_log = state.audit_log.clone();
     let mut host = ToolHost::new(ws, index, audit_log);
     host.set_router_budget(cfg.router.clone());
+    host.set_model_context_budgets(cfg.model_context_budgets.clone());
     host.attach_connectors(&cfg.connectors);
     apply_host_connectors(&mut host, &cfg, state);
     // Durable memory (MEMORY.md Phase 1) — product seam; without this, tools stay
@@ -326,6 +327,7 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
         host.set_x_search(false, None);
     }
     host.set_router_budget(cfg.router.clone());
+    host.set_model_context_budgets(cfg.model_context_budgets.clone());
     // #127–#131: connector registry → dynamic tools (secrets from keychain only).
     let mut pg_passwords = std::collections::HashMap::new();
     let mut http_bearers = std::collections::HashMap::new();
@@ -2608,6 +2610,7 @@ async fn agent_turn(
     }
 
     // #327: gateway rejected tools — persist chat-only so next turns skip tools.
+    // Also persist per-model context budgets learned from context-length failures.
     if let Ok(ref events) = result {
         if cd_core::providers::events_indicate_tools_unsupported(events)
             && profile.capabilities.tools
@@ -2617,6 +2620,48 @@ async fn agent_turn(
                 if let Ok(path) = config_path(&state.branding) {
                     let _ = save_config(&path, &cfg);
                     *state.config.lock().expect("config") = cfg;
+                }
+            }
+        }
+        let mut learned_any = false;
+        let mut cfg = state.config.lock().expect("config").clone();
+        for e in events {
+            if let cd_core::events::StreamEvent::Error { code, message } = e {
+                if code == "context_budget_learned" {
+                    // message: model=… chars_sent=N note=…
+                    let model = message
+                        .split_whitespace()
+                        .find_map(|p| p.strip_prefix("model="))
+                        .unwrap_or(profile.chat_model.as_str());
+                    let chars_sent = message
+                        .split_whitespace()
+                        .find_map(|p| p.strip_prefix("chars_sent="))
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let note = message
+                        .split_once("note=")
+                        .map(|(_, n)| n)
+                        .unwrap_or("context_length");
+                    if chars_sent > 0
+                        && cfg
+                            .model_context_budgets
+                            .learn_from_context_error(Some(model), chars_sent, note)
+                            .is_some()
+                    {
+                        learned_any = true;
+                    }
+                }
+            }
+        }
+        if learned_any {
+            if let Ok(path) = config_path(&state.branding) {
+                let _ = save_config(&path, &cfg);
+                *state.config.lock().expect("config") = cfg.clone();
+            }
+            // Keep live host budgets in sync.
+            if let Ok(mut hg) = state.host.lock() {
+                if let Some(h) = hg.as_mut() {
+                    h.set_model_context_budgets(cfg.model_context_budgets.clone());
                 }
             }
         }
@@ -2964,7 +3009,29 @@ async fn probe_ai_gateway_cmd(
             .or_else(|| resolve_draft_api_key(&state, ProviderKind::Anthropic, None))
     };
     let probe_local = req.probe_local.unwrap_or(true);
-    Ok(cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await)
+    let result =
+        cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
+    // Persist catalog-declared context windows when present.
+    let mut any = false;
+    let mut cfg = state.config.lock().expect("config").clone();
+    for m in result.models.iter().chain(result.chat_candidates.iter()) {
+        if let Some(tok) = m.context_tokens {
+            cfg.model_context_budgets.note_declared_tokens(&m.id, tok);
+            any = true;
+        }
+    }
+    if any {
+        if let Ok(path) = config_path(&state.branding) {
+            let _ = save_config(&path, &cfg);
+            *state.config.lock().expect("config") = cfg.clone();
+        }
+        if let Ok(mut hg) = state.host.lock() {
+            if let Some(h) = hg.as_mut() {
+                h.set_model_context_budgets(cfg.model_context_budgets);
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

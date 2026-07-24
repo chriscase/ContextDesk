@@ -88,6 +88,8 @@ pub struct AgentOptions {
     pub compact_keep_last: usize,
     /// Ambient durable-memory injection (MEMORY.md §10.1 default ON).
     pub ambient_recall_enabled: bool,
+    /// Hard character budget for model-facing context (per model when known).
+    pub context_char_budget: usize,
 }
 
 impl Default for AgentOptions {
@@ -102,6 +104,7 @@ impl Default for AgentOptions {
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
             ambient_recall_enabled: true,
+            context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
         }
     }
 }
@@ -123,7 +126,14 @@ impl AgentOptions {
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
             ambient_recall_enabled: true,
+            context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
         }
+    }
+
+    /// Effective char budget (never below floor).
+    pub fn effective_context_char_budget(&self) -> usize {
+        self.context_char_budget
+            .max(crate::model_context::MIN_CONTEXT_CHAR_BUDGET)
     }
 }
 
@@ -215,15 +225,19 @@ pub use crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET;
 /// re-fit model-facing bodies and refuse if still over the hard budget.
 ///
 /// Without this, ambient (~1.5k) or prefetch can push a near-ceiling context
-/// over `DEFAULT_CONTEXT_CHAR_BUDGET` after the initial gate.
-fn enforce_hard_context_budget(model_ctx: &mut Vec<ChatMessage>) -> Result<(), String> {
-    match crate::sessions::fit_model_context_to_budget(model_ctx, DEFAULT_CONTEXT_CHAR_BUDGET) {
+/// over the effective budget after the initial gate.
+fn enforce_hard_context_budget(
+    model_ctx: &mut Vec<ChatMessage>,
+    budget: usize,
+) -> Result<(), String> {
+    let budget = budget.max(crate::model_context::MIN_CONTEXT_CHAR_BUDGET);
+    match crate::sessions::fit_model_context_to_budget(model_ctx, budget) {
         Ok(fitted) => {
             *model_ctx = fitted;
             let est = estimate_context_chars(model_ctx);
-            if est > DEFAULT_CONTEXT_CHAR_BUDGET {
+            if est > budget {
                 return Err(format!(
-                    "model context still over budget after fit ({est} > {DEFAULT_CONTEXT_CHAR_BUDGET})"
+                    "model context still over budget after fit ({est} > {budget})"
                 ));
             }
             Ok(())
@@ -433,12 +447,13 @@ pub async fn run_agent_turn_with_sink(
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
+        let char_budget = opts.effective_context_char_budget();
         // #33/#112/#113: hard total model-context budget via production helper.
         // Full transcript is never mutated; only the model-facing view is bounded.
         let prepared = match crate::sessions::prepare_model_context(
             history,
             opts.compact_keep_last.max(1),
-            DEFAULT_CONTEXT_CHAR_BUDGET,
+            char_budget,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -466,7 +481,7 @@ pub async fn run_agent_turn_with_sink(
             });
         }
         // Invariant: never call the provider with an over-budget context.
-        if estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET {
+        if estimate_context_chars(&model_ctx) > char_budget {
             return terminal_context_too_long(
                 out,
                 "Model context still exceeds the hard budget after preparation.",
@@ -512,7 +527,7 @@ pub async fn run_agent_turn_with_sink(
                             });
                         }
                         trail.push(format!("ambient_recall:{} hits", inj.count));
-                        if let Err(e) = enforce_hard_context_budget(&mut model_ctx) {
+                        if let Err(e) = enforce_hard_context_budget(&mut model_ctx, char_budget) {
                             return terminal_context_too_long(
                                 out,
                                 format!(
@@ -531,7 +546,7 @@ pub async fn run_agent_turn_with_sink(
         let completion = loop {
             // Final gate immediately before every provider request (covers ambient,
             // tools-disabled prefetch, and reactive re-prepare).
-            if estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET {
+            if estimate_context_chars(&model_ctx) > char_budget {
                 return terminal_context_too_long(
                     out,
                     "Model context exceeds the hard budget immediately before provider request.",
@@ -578,7 +593,8 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                                 tool_calls: None,
                             });
                             trail.push("prefetch:search_kb".into());
-                            if let Err(e) = enforce_hard_context_budget(&mut model_ctx) {
+                            if let Err(e) = enforce_hard_context_budget(&mut model_ctx, char_budget)
+                            {
                                 return terminal_context_too_long(
                                     out,
                                     format!(
@@ -592,13 +608,31 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 }
                 Err(e) if attempt == 0 && classify_context_error(&e) => {
                     // Reactive: harder compact + single retry (#113).
+                    // Learn a tighter per-model budget from the oversize send.
+                    let sent = estimate_context_chars(&model_ctx);
+                    let err_s = e.to_string();
+                    out.push(StreamEvent::SearchTrail {
+                        steps: vec![format!(
+                            "context_budget_learn:model={}:chars_sent={sent}",
+                            opts.model.as_deref().unwrap_or(""),
+                        )],
+                    });
+                    // Host persists via trail parse; also encode budget hint for UI.
+                    out.push(StreamEvent::Error {
+                        code: "context_budget_learned".into(),
+                        message: format!(
+                            "model={} chars_sent={sent} note={}",
+                            opts.model.as_deref().unwrap_or(""),
+                            err_s.chars().take(120).collect::<String>()
+                        ),
+                    });
+                    let _ = err_s;
                     attempt = 1;
                     keep = (keep / 2).max(2);
-                    match crate::sessions::prepare_model_context(
-                        history,
-                        keep,
-                        DEFAULT_CONTEXT_CHAR_BUDGET,
-                    ) {
+                    let tighter = (sent.saturating_mul(80) / 100)
+                        .max(crate::model_context::MIN_CONTEXT_CHAR_BUDGET)
+                        .min(char_budget);
+                    match crate::sessions::prepare_model_context(history, keep, tighter) {
                         Ok(p) => {
                             keep = p.keep;
                             model_ctx = p.messages;
@@ -622,6 +656,15 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     continue;
                 }
                 Err(e) if attempt >= 1 && classify_context_error(&e) => {
+                    let sent = estimate_context_chars(&model_ctx);
+                    out.push(StreamEvent::Error {
+                        code: "context_budget_learned".into(),
+                        message: format!(
+                            "model={} chars_sent={sent} note={}",
+                            opts.model.as_deref().unwrap_or(""),
+                            e.to_string().chars().take(120).collect::<String>()
+                        ),
+                    });
                     out.push(StreamEvent::Error {
                         code: "context_too_long".into(),
                         message: "This chat is too long for the model even after compaction. Start a new chat or remove older messages."
@@ -805,7 +848,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
     let model_ctx = match crate::sessions::prepare_model_context(
         history,
         opts.compact_keep_last.max(1),
-        DEFAULT_CONTEXT_CHAR_BUDGET,
+        opts.effective_context_char_budget(),
     ) {
         Ok(p) => p.messages,
         Err(e) => {
@@ -1756,7 +1799,8 @@ mod tests {
             over > DEFAULT_CONTEXT_CHAR_BUDGET,
             "setup must exceed budget before enforce: {over}"
         );
-        enforce_hard_context_budget(&mut ctx).expect("must re-fit under budget");
+        enforce_hard_context_budget(&mut ctx, DEFAULT_CONTEXT_CHAR_BUDGET)
+            .expect("must re-fit under budget");
         assert!(estimate_context_chars(&ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET);
     }
 
@@ -1779,7 +1823,7 @@ mod tests {
             tool_calls: None,
         });
         assert!(estimate_context_chars(&ctx) > DEFAULT_CONTEXT_CHAR_BUDGET);
-        enforce_hard_context_budget(&mut ctx).unwrap();
+        enforce_hard_context_budget(&mut ctx, DEFAULT_CONTEXT_CHAR_BUDGET).unwrap();
         assert!(estimate_context_chars(&ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET);
     }
 

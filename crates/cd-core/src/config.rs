@@ -171,6 +171,9 @@ pub struct AppConfig {
     #[cfg(feature = "s3-object-store")]
     #[serde(default)]
     pub s3_backup: Option<crate::s3_object_store::S3ObjectStoreConfig>,
+    /// Per-model context char budgets (declared from catalogs + learned from errors).
+    #[serde(default)]
+    pub model_context_budgets: crate::model_context::ModelContextBudgets,
 }
 
 fn default_index_max_files() -> usize {
