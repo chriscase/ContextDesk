@@ -139,9 +139,27 @@ pub fn pairing_safe_start(messages: &[ChatMessage], keep: usize) -> usize {
     start
 }
 
+/// Hard cap for the **summary** portion of compact context (#33).
+///
+/// Independent of transcript length so shrinking `keep` cannot explode
+/// model-facing context by dumping every older message at 160 chars each.
+pub const COMPACT_SUMMARY_CHAR_BUDGET: usize = 8_000;
+
 /// Build a compact summary string from messages older than the keep window.
 /// Returns `None` when nothing is older than keep.
+///
+/// The result is hard-capped at [`COMPACT_SUMMARY_CHAR_BUDGET`] characters
+/// (newest-of-the-old first, then truncated) so long histories stay bounded.
 pub fn recompact_chat_history(messages: &[ChatMessage], keep: usize) -> Option<String> {
+    recompact_chat_history_budgeted(messages, keep, COMPACT_SUMMARY_CHAR_BUDGET)
+}
+
+/// Like [`recompact_chat_history`] with an explicit summary budget (tests).
+pub fn recompact_chat_history_budgeted(
+    messages: &[ChatMessage],
+    keep: usize,
+    summary_budget: usize,
+) -> Option<String> {
     if messages.len() <= keep {
         return None;
     }
@@ -150,12 +168,28 @@ pub fn recompact_chat_history(messages: &[ChatMessage], keep: usize) -> Option<S
         return None;
     }
     let older = &messages[..start];
-    let mut lines = Vec::new();
-    for m in older {
-        let snippet: String = m.content.chars().take(160).collect();
-        lines.push(format!("- {:?}: {snippet}", m.role));
+    // Prefer more recent older turns when budget is tight (walk reverse).
+    let mut lines_rev: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    let budget = summary_budget.max(64);
+    for m in older.iter().rev() {
+        let snippet: String = m.content.chars().take(120).collect();
+        let line = format!("- {:?}: {snippet}", m.role);
+        let add = line.chars().count() + if lines_rev.is_empty() { 0 } else { 1 };
+        if used + add > budget {
+            break;
+        }
+        used += add;
+        lines_rev.push(line);
     }
-    Some(lines.join("\n"))
+    if lines_rev.is_empty() {
+        // Still emit a single truncated line so the model knows history existed.
+        let m = &older[older.len() - 1];
+        let snippet: String = m.content.chars().take(80).collect();
+        return Some(format!("- {:?}: {snippet}…", m.role));
+    }
+    lines_rev.reverse();
+    Some(lines_rev.join("\n"))
 }
 
 /// Model-facing context: optional summary + pairing-safe last N (full history unchanged).
@@ -770,6 +804,111 @@ mod tests {
         assert!(ctx.iter().any(|m| m.content.contains("Compacted")));
     }
 
+    /// #33: summary must not grow linearly with transcript; shrink-keep stays bounded.
+    #[test]
+    fn recompact_summary_hard_budget_long_history() {
+        use crate::chat::{FunctionCall, Role, ToolCallMsg};
+        let long = "x".repeat(400);
+        let mut hist = Vec::new();
+        hist.push(ChatMessage {
+            role: Role::System,
+            content: "policy system message".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        for i in 0..500 {
+            hist.push(ChatMessage {
+                role: Role::User,
+                content: format!("turn {i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: format!("c{i}"),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            });
+            hist.push(ChatMessage {
+                role: Role::Tool,
+                content: format!("result {i} {long}"),
+                tool_call_id: Some(format!("c{i}")),
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("answer {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let sum_wide = recompact_chat_history(&hist, 20).unwrap();
+        let sum_narrow = recompact_chat_history(&hist, 4).unwrap();
+        assert!(
+            sum_wide.chars().count() <= COMPACT_SUMMARY_CHAR_BUDGET,
+            "wide keep summary too large: {}",
+            sum_wide.chars().count()
+        );
+        assert!(
+            sum_narrow.chars().count() <= COMPACT_SUMMARY_CHAR_BUDGET,
+            "narrow keep summary too large: {}",
+            sum_narrow.chars().count()
+        );
+        // Shrinking keep must not explode the summary (old bug: more lines in).
+        assert!(
+            sum_narrow.chars().count() <= sum_wide.chars().count() + 200,
+            "narrow summary grew vs wide: {} vs {}",
+            sum_narrow.chars().count(),
+            sum_wide.chars().count()
+        );
+        // Full model context helper: budgeted summary + keep tail.
+        let ctx = context_chat_messages(&hist, Some(&sum_narrow), 4);
+        let est: usize = ctx.iter().map(|m| m.content.len()).sum();
+        assert!(
+            est < 120_000,
+            "model context estimate should stay under product budget: {est}"
+        );
+        // No orphan tool: if a tool is in ctx, its assistant parent should be too
+        // (pairing_safe_start). Count tools vs assistants-with-tools in tail.
+        let tools = ctx.iter().filter(|m| m.role == Role::Tool).count();
+        let asst_tools = ctx
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+            .count();
+        assert!(
+            tools <= asst_tools + 1,
+            "orphan tool results likely: tools={tools} asst_tools={asst_tools}"
+        );
+        assert_eq!(
+            expand_full_history(&{
+                let mut s = Session::new("x");
+                s.messages = hist
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| StoredMessage {
+                        id: format!("m{i}"),
+                        role: format!("{:?}", m.role).to_ascii_lowercase(),
+                        content: m.content.clone(),
+                        tools: None,
+                        citations: None,
+                        trail: None,
+                        meta: None,
+                    })
+                    .collect();
+                s
+            })
+            .len(),
+            hist.len()
+        );
+    }
+
     /// #112: keep window that would orphan a tool result extends left to the pair.
     #[test]
     fn pairing_safe_keep_includes_tool_parent() {
@@ -846,6 +985,21 @@ mod tests {
             tool_calls: None,
         });
         assert_eq!(hist.len(), 6);
+    }
+
+    #[test]
+    fn pinned_skill_id_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut s = Session::new("pin-test");
+        s.pinned_skill_id = Some("log-triage".into());
+        store.save(&s).unwrap();
+        let loaded = store.load(&s.id).unwrap();
+        assert_eq!(loaded.pinned_skill_id.as_deref(), Some("log-triage"));
+        s.pinned_skill_id = None;
+        store.save(&s).unwrap();
+        let loaded2 = store.load(&s.id).unwrap();
+        assert!(loaded2.pinned_skill_id.is_none());
     }
 
     #[test]

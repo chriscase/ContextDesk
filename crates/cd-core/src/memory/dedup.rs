@@ -205,14 +205,23 @@ mod tests {
             propose_supersede_of: None,
         };
         let p = detect_dedup(&cand, &actives, Some(&backend), 0.5).unwrap();
-        // Concept geometry should link postgres phrases; allow Novel if too weak.
+        // Concept geometry links postgres / PostgreSQL phrases — must propose supersede.
         match p {
-            DedupProposal::NearMatch { existing_id, .. }
-            | DedupProposal::ExactDuplicate { existing_id } => {
+            DedupProposal::NearMatch {
+                existing_id,
+                similarity,
+            } => {
+                assert_eq!(existing_id, id);
+                assert!(
+                    similarity >= 0.5,
+                    "near-match similarity too low: {similarity}"
+                );
+            }
+            DedupProposal::ExactDuplicate { existing_id } => {
                 assert_eq!(existing_id, id);
             }
             DedupProposal::Novel => {
-                // Still ok if threshold high — ensure function is pure/offline
+                panic!("semantic near-match must not be Novel for postgres paraphrases");
             }
         }
     }

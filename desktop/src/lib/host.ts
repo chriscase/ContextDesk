@@ -264,13 +264,17 @@ export async function hostListHarvests(limit = 100): Promise<HarvestRowDto[]> {
 /** Source-run git status for guided update (#340). */
 export type SourceGitStatusDto = {
   isGitRepo: boolean;
+  path?: string | null;
   remote?: string | null;
+  remoteUrl?: string | null;
   branch?: string | null;
   ahead: number;
   behind: number;
   dirty: boolean;
   summary: string;
   rebuildHint: string;
+  /** False when not a proven ContextDesk product checkout. */
+  fetchAllowed: boolean;
 };
 
 export async function hostSourceGitStatus(): Promise<SourceGitStatusDto | null> {

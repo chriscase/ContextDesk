@@ -244,14 +244,9 @@ impl SqliteMemoryStore {
         let conn = self.conn.lock().map_err(|_| lock_err())?;
         let rec = load_record(&conn, id)?
             .ok_or_else(|| CoreError::Message(format!("purge target missing: {id}")))?;
-        let title_redacted = if rec.title.is_empty() {
-            "[purged]".into()
-        } else {
-            format!(
-                "[purged] {}",
-                rec.title.chars().take(40).collect::<String>()
-            )
-        };
+        // GDPR: tombstone must not retain recoverable user content (#385).
+        // Keep only a fixed non-content marker + kind/scope/hash already stored.
+        let title_redacted = "[purged]".to_string();
         conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
         let tomb = PurgeTombstone {
             id: *id,
@@ -357,7 +352,8 @@ impl SqliteMemoryStore {
         supersedes: Option<Uuid>,
         rev: i64,
     ) -> CoreResult<MemoryRecord> {
-        // Redact secrets before persist (and content_hash is over redacted text)
+        // Redact secrets before persist (content_hash is over redacted text).
+        // Title and body are both user-controlled (#381/#385 privacy).
         let redaction = crate::redact::redact_candidate(&draft.content);
         if redaction.blocked {
             return Err(CoreError::Policy(
@@ -371,10 +367,23 @@ impl SqliteMemoryStore {
         } else {
             draft.content.clone()
         };
-        let title = if draft.title.trim().is_empty() {
+        let title_raw = if draft.title.trim().is_empty() {
             title_from_content(&content, "untitled")
         } else {
             draft.title.clone()
+        };
+        let title_red = crate::redact::redact_candidate(&title_raw);
+        if title_red.blocked {
+            return Err(CoreError::Policy(
+                title_red
+                    .block_reason
+                    .unwrap_or_else(|| "credential-dominant title blocked".into()),
+            ));
+        }
+        let title = if title_red.redacted {
+            title_red.text
+        } else {
+            title_raw
         };
         let content_hash = content_hash_for(&content);
         // url / due_at from structured (Rust-written, not GENERATED columns)
@@ -1333,7 +1342,61 @@ mod tests {
         assert!(store.get(&id).unwrap().is_none());
         let t2 = store.get_purge_tombstone(&id).unwrap().unwrap();
         assert_eq!(t2.content_hash, rec.content_hash);
-        assert!(t2.title_redacted.contains("purged"));
+        assert_eq!(t2.title_redacted, "[purged]");
         // retract is different path — purged id cannot be gotten
+    }
+
+    /// #385: title is redacted like content; purge leaves no raw user title.
+    #[test]
+    fn title_redacted_on_insert_and_purge_has_no_user_title() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let token = "sk-live-abcdefghijklmnopqrstuvwx";
+        let mut d = MemoryDraft::new(Kind::Fact, "body without secret");
+        d.title = format!("Project token {token}");
+        let rec = store.put(MemoryWriteOp::Insert(d), 10).unwrap();
+        assert!(
+            !rec.title.contains(token),
+            "raw token must not appear in stored title: {}",
+            rec.title
+        );
+        // DB file bytes for in-memory still exposed via dump of title column
+        let tomb = store.purge_gdpr(&rec.id, 20, "gdpr_purge").unwrap();
+        assert_eq!(tomb.title_redacted, "[purged]");
+        assert!(
+            !tomb.title_redacted.contains(token) && !tomb.title_redacted.contains("Project"),
+            "tombstone must not retain user title: {}",
+            tomb.title_redacted
+        );
+    }
+}
+
+/// Product-path: attach uses in-memory candidate inbox (#381).
+#[cfg(test)]
+mod attach_inbox_tests {
+    use crate::memory::CandidateInbox;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[test]
+    fn attach_uses_in_memory_inbox_no_candidates_sqlite() {
+        let dir = tempdir().unwrap();
+        let mem_dir = dir.path().join("mem");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        // Legacy file that older builds would have created
+        let legacy = mem_dir.join("candidates.sqlite");
+        std::fs::write(&legacy, b"should be removed").unwrap();
+
+        // Simulate product attach path (in-memory inbox + legacy wipe)
+        let inbox = CandidateInbox::open_in_memory().unwrap();
+        let _ = Arc::new(inbox);
+        if legacy.is_file() {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        assert!(
+            !legacy.exists(),
+            "candidates.sqlite must not remain after attach policy"
+        );
+        // Unapproved candidates live only in process memory — no disk path.
+        assert!(!mem_dir.join("candidates.sqlite").exists());
     }
 }

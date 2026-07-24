@@ -45,15 +45,16 @@ Workflow: `.github/workflows/release.yml` (#172).
 1. Bump `version` in `desktop/src-tauri/tauri.conf.json` (keep `cd-core` / package versions aligned when shipping).
 2. Ensure main is green under the full gate (`cargo test --workspace`, desktop tsc/build, CI).
 3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`  
-   **Or dry-run without a permanent tag:** Actions → **release** → **Run workflow** → enter a tag name (e.g. `v0.1.0-rc1`). Uses `workflow_dispatch` in `release.yml`.
+   **Or** Actions → **release** → **Run workflow** (`workflow_dispatch`) with a tag name (e.g. `v0.1.0-rc1`).  
+   **Honesty:** `tauri-action` with `tagName`/`releaseName` **creates or uses a GitHub Release for that tag** — this is **not** a no-tag dry run. Prefer an `rc` / pre-release tag for experiments; do not claim “without a permanent tag.”
 4. Wait for the **release** workflow; open the **draft** GitHub Release; smoke-test one installer per OS.
 5. Publish the release when ready.
 6. **Signing / notarization** (Apple, Windows Authenticode) remains operator-owned — no secrets in the repo. Wire secrets only via GitHub Actions settings if you add signing later.
-7. Auto-updater / `latest.json` is **#173** (not this workflow). Requires `TAURI_SIGNING_PRIVATE_KEY` secret for updater artifacts; unsigned installers still land in `bundle/` for local smoke.
+7. Auto-updater / `latest.json` is **#173**. Requires repo secret `TAURI_SIGNING_PRIVATE_KEY` for updater signing. **Local** `tauri build`: unsigned installers may already exist under `bundle/` even when the final updater-signing step fails without the private key — see “Unsigned local bundle” above. **CI** matrix success without that secret may still fail at updater-artifact signing; do not claim multi-OS CI artifacts until a green run lists them.
 
 #### Honesty: CLAIMS “Proven multi-OS installers”
 
-Do **not** mark multi-OS installers **Shipped** in `docs/CLAIMS.md` until a real tag (or dispatch) run has produced downloadable artifacts on a GitHub Release. Until then keep the Roadmap residual (#172 / #55).
+Do **not** mark multi-OS installers **Shipped** in `docs/CLAIMS.md` until a **real green matrix run** has produced downloadable artifacts (release assets or Actions artifacts). Until then keep the Roadmap residual (#172 / #55).
 
 Expected artifacts (via `tauri-apps/tauri-action`, `targets: all`):
 

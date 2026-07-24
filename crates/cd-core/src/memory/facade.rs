@@ -222,13 +222,22 @@ pub fn attach_durable_memory_to_host(
             }
         }
     }
-    // Phase-2 inbox + edges co-located with workspace memory dir.
+    // Phase-2 inbox: **in-memory only** (#381) — unapproved candidates must not
+    // survive restart or land on disk as raw title/content/excerpts.
+    // Edges co-located with workspace memory dir (durable graph metadata).
     let mem_dir = ws_path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| ws_path.clone());
-    if let Ok(inbox) = super::CandidateInbox::open(mem_dir.join("candidates.sqlite")) {
+    if let Ok(inbox) = super::CandidateInbox::open_in_memory() {
         host.set_candidate_inbox(Some(std::sync::Arc::new(inbox)));
+    }
+    // Remove any legacy on-disk inbox left by older builds (best-effort).
+    let legacy_inbox = mem_dir.join("candidates.sqlite");
+    if legacy_inbox.is_file() {
+        let _ = std::fs::remove_file(&legacy_inbox);
+        let _ = std::fs::remove_file(format!("{}-wal", legacy_inbox.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", legacy_inbox.display()));
     }
     if let Ok(edges) = super::EdgeStore::open(mem_dir.join("edges.sqlite")) {
         host.set_edge_store(Some(std::sync::Arc::new(edges)));

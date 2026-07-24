@@ -198,21 +198,35 @@ export function GeneralSection({
       ) : (
         <p className="field__hint">Git status unavailable outside Tauri.</p>
       )}
-      {gitStatus?.isGitRepo ? (
+      {gitStatus?.isGitRepo && gitStatus.fetchAllowed ? (
         <>
+          {gitStatus.path ? (
+            <p className="field__hint">
+              Checkout: <code>{gitStatus.path}</code>
+              {gitStatus.remoteUrl ? (
+                <>
+                  {" "}
+                  · remote <code>{gitStatus.remoteUrl}</code>
+                </>
+              ) : null}
+            </p>
+          ) : null}
           <pre className="tool-row__detail">{gitStatus.rebuildHint}</pre>
           <div className="workspace-root-actions">
             <button
               type="button"
               className="btn btn--ghost"
-              disabled={gitBusy}
+              disabled={gitBusy || !gitStatus.fetchAllowed}
+              title="Fetches only the product upstream remote (not --all)"
               onClick={() => {
                 setGitBusy(true);
                 setGitNote(null);
                 void hostSourceGitFetch()
                   .then((s) => {
                     setGitStatus(s);
-                    setGitNote("Fetched remotes. Review ahead/behind above.");
+                    setGitNote(
+                      `Fetched ${s.remote ?? "origin"} only. Review ahead/behind above.`,
+                    );
                   })
                   .catch((e) => {
                     setGitNote(
@@ -222,7 +236,7 @@ export function GeneralSection({
                   .finally(() => setGitBusy(false));
               }}
             >
-              {gitBusy ? "Fetching…" : "Fetch remotes"}
+              {gitBusy ? "Fetching…" : "Fetch upstream"}
             </button>
             <button
               type="button"
@@ -242,6 +256,11 @@ export function GeneralSection({
             </div>
           ) : null}
         </>
+      ) : gitStatus && !gitStatus.fetchAllowed ? (
+        <p className="field__hint" role="status">
+          Fetch disabled — not a proven ContextDesk product source checkout
+          (active workspace roots are never used for this operation).
+        </p>
       ) : null}
       {gitNote ? <p className="field__hint">{gitNote}</p> : null}
 
