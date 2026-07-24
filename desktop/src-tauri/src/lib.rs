@@ -2642,14 +2642,13 @@ async fn agent_turn(
                         .split_once("note=")
                         .map(|(_, n)| n)
                         .unwrap_or("context_length");
-                    if chars_sent > 0 {
-                        if cfg
+                    if chars_sent > 0
+                        && cfg
                             .model_context_budgets
                             .learn_from_context_error(Some(model), chars_sent, note)
                             .is_some()
-                        {
-                            learned_any = true;
-                        }
+                    {
+                        learned_any = true;
                     }
                 }
             }
