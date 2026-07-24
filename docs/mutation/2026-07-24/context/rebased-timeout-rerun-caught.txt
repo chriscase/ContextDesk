@@ -1,0 +1,4 @@
+crates/cd-core/src/sessions.rs:350:19: replace -= with /= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:462:55: replace && with || in prepare_model_context
+crates/cd-core/src/sessions.rs:462:63: replace > with == in prepare_model_context
+crates/cd-core/src/sessions.rs:462:63: replace > with >= in prepare_model_context
