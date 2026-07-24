@@ -145,6 +145,16 @@ pub fn pairing_safe_start(messages: &[ChatMessage], keep: usize) -> usize {
 /// model-facing context by dumping every older message at 160 chars each.
 pub const COMPACT_SUMMARY_CHAR_BUDGET: usize = 8_000;
 
+/// Hard cap for the **complete** model-facing context (system + summary + tail).
+///
+/// This is the production budget enforced by [`prepare_model_context`] and the
+/// agent path immediately before a provider request. Summary-only caps are not
+/// sufficient: the pairing-safe tail can still exceed this alone.
+pub const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 120_000;
+
+/// Explicit marker appended when a single message's model-facing body is truncated.
+pub const MODEL_CONTEXT_TRUNCATE_MARKER: &str = "…[truncated for model context budget]";
+
 /// Build a compact summary string from messages older than the keep window.
 /// Returns `None` when nothing is older than keep.
 ///
@@ -242,6 +252,238 @@ pub fn context_chat_messages(
     }
     out.extend(tail.iter().cloned());
     out
+}
+
+/// Cheap char estimate shared with the agent path (#33 / #113).
+pub fn estimate_context_chars(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(|m| m.content.len()).sum()
+}
+
+/// Result of preparing model-facing context under a hard total budget.
+#[derive(Debug, Clone)]
+pub struct PreparedModelContext {
+    /// Messages actually safe to send to the provider (≤ budget).
+    pub messages: Vec<ChatMessage>,
+    /// Keep window used after shrink.
+    pub keep: usize,
+    /// True when keep was reduced or history was summarized.
+    pub compacted: bool,
+    /// True when individual model-facing bodies were truncated with the marker.
+    pub truncated: bool,
+}
+
+/// Failure when context cannot be forced under budget (budget smaller than
+/// irreducible policy + newest-turn floor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBudgetError {
+    /// Estimated chars after all compaction/truncation attempts.
+    pub estimate: usize,
+    /// Configured budget.
+    pub budget: usize,
+}
+
+impl std::fmt::Display for ContextBudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "model context still over budget after compaction ({} > {} chars)",
+            self.estimate, self.budget
+        )
+    }
+}
+
+impl std::error::Error for ContextBudgetError {}
+
+/// Truncate a single message's **model-facing** content to at most `max_chars`,
+/// appending [`MODEL_CONTEXT_TRUNCATE_MARKER`] when shortened. Structure
+/// (role, tool_call_id, tool_calls) is preserved; the stored transcript is never
+/// touched by this helper.
+pub fn truncate_message_for_model(msg: &ChatMessage, max_chars: usize) -> ChatMessage {
+    let mut out = msg.clone();
+    if max_chars == 0 {
+        out.content = MODEL_CONTEXT_TRUNCATE_MARKER.to_string();
+        return out;
+    }
+    if out.content.chars().count() <= max_chars {
+        return out;
+    }
+    let marker = MODEL_CONTEXT_TRUNCATE_MARKER;
+    let marker_len = marker.chars().count();
+    let body_budget = max_chars.saturating_sub(marker_len).max(1);
+    let body: String = out.content.chars().take(body_budget).collect();
+    out.content = format!("{body}{marker}");
+    out
+}
+
+/// Force `messages` under `budget` by deterministic model-facing truncation.
+///
+/// Priority: preserve the first system/policy message and the newest useful
+/// turn (last message, and its tool-call parent when the last is a tool result).
+/// Shrink older tail bodies first. Pairing structure is kept (no orphan tool
+/// results; tool_call_id / tool_calls fields are not dropped).
+pub fn fit_model_context_to_budget(
+    messages: &[ChatMessage],
+    budget: usize,
+) -> Result<Vec<ChatMessage>, ContextBudgetError> {
+    let budget = budget.max(64);
+    let mut out = messages.to_vec();
+    if estimate_context_chars(&out) <= budget {
+        return Ok(out);
+    }
+
+    // Identify protected indices: first system, and newest turn (+ tool parent).
+    let mut protected: Vec<usize> = Vec::new();
+    if let Some((i, _)) = out
+        .iter()
+        .enumerate()
+        .find(|(_, m)| matches!(m.role, Role::System))
+    {
+        protected.push(i);
+    }
+    if !out.is_empty() {
+        let last = out.len() - 1;
+        protected.push(last);
+        if matches!(out[last].role, Role::Tool) {
+            // Walk left to assistant-with-tools parent.
+            let mut j = last;
+            while j > 0 {
+                j -= 1;
+                if matches!(out[j].role, Role::Assistant) && out[j].tool_calls.is_some() {
+                    protected.push(j);
+                    break;
+                }
+                if !matches!(out[j].role, Role::Tool) {
+                    break;
+                }
+            }
+        }
+    }
+    protected.sort_unstable();
+    protected.dedup();
+
+    // Pass 1: shrink non-protected messages from oldest, largest first.
+    for _ in 0..64 {
+        if estimate_context_chars(&out) <= budget {
+            return Ok(out);
+        }
+        let overflow = estimate_context_chars(&out).saturating_sub(budget);
+        // Pick oldest non-protected message with the most content.
+        let mut best: Option<(usize, usize)> = None; // (idx, content_len)
+        for (i, m) in out.iter().enumerate() {
+            if protected.contains(&i) {
+                continue;
+            }
+            let len = m.content.len();
+            if len <= MODEL_CONTEXT_TRUNCATE_MARKER.len() + 8 {
+                continue;
+            }
+            match best {
+                None => best = Some((i, len)),
+                Some((_, bl)) if len > bl => best = Some((i, len)),
+                Some((bi, bl)) if len == bl && i < bi => best = Some((i, len)),
+                _ => {}
+            }
+        }
+        let Some((idx, len)) = best else {
+            break;
+        };
+        // Cut enough to remove overflow, but leave a useful stub.
+        let target = len
+            .saturating_sub(overflow + MODEL_CONTEXT_TRUNCATE_MARKER.len())
+            .max(32);
+        out[idx] = truncate_message_for_model(&out[idx], target);
+    }
+
+    // Pass 2: if still over, shrink protected bodies (newest first after system).
+    if estimate_context_chars(&out) > budget {
+        let mut order = protected.clone();
+        // Truncate newest-protected first among non-system, then system last.
+        order.sort_by_key(|&i| {
+            let is_sys = matches!(out[i].role, Role::System);
+            (if is_sys { 1 } else { 0 }, usize::MAX - i)
+        });
+        for idx in order {
+            if estimate_context_chars(&out) <= budget {
+                break;
+            }
+            let overflow = estimate_context_chars(&out).saturating_sub(budget);
+            let len = out[idx].content.len();
+            if len <= MODEL_CONTEXT_TRUNCATE_MARKER.len() + 4 {
+                continue;
+            }
+            let target = len
+                .saturating_sub(overflow + MODEL_CONTEXT_TRUNCATE_MARKER.len())
+                .max(16);
+            out[idx] = truncate_message_for_model(&out[idx], target);
+        }
+    }
+
+    // Pass 3: hard clamp every message proportionally if still over (pathological).
+    if estimate_context_chars(&out) > budget {
+        let n = out.len().max(1);
+        let per = (budget / n).max(MODEL_CONTEXT_TRUNCATE_MARKER.len() + 1);
+        for m in &mut out {
+            if m.content.len() > per {
+                *m = truncate_message_for_model(m, per);
+            }
+        }
+    }
+
+    let est = estimate_context_chars(&out);
+    if est > budget {
+        return Err(ContextBudgetError {
+            estimate: est,
+            budget,
+        });
+    }
+    Ok(out)
+}
+
+/// Production helper used immediately before a provider request (#33).
+///
+/// 1. Build summary + pairing-safe tail via [`context_chat_messages`].
+/// 2. Shrink `keep` while over budget (floor 2).
+/// 3. Fit remaining bodies with explicit truncation markers.
+/// 4. Return [`ContextBudgetError`] if still over budget (agent must terminal-error).
+///
+/// **Never** mutates the caller's stored transcript — only the returned model view.
+pub fn prepare_model_context(
+    history: &[ChatMessage],
+    initial_keep: usize,
+    budget: usize,
+) -> Result<PreparedModelContext, ContextBudgetError> {
+    let budget = budget.max(64);
+    let mut keep = initial_keep.max(1);
+    let mut compacted = false;
+    let mut summary = recompact_chat_history(history, keep);
+    let mut model_ctx = context_chat_messages(history, summary.as_deref(), keep);
+
+    // Shrink keep window (pairing-safe) until under budget or floor.
+    while estimate_context_chars(&model_ctx) > budget && keep > 2 {
+        keep = (keep / 2).max(2);
+        summary = recompact_chat_history(history, keep);
+        model_ctx = context_chat_messages(history, summary.as_deref(), keep);
+        compacted = true;
+    }
+
+    let before_fit = estimate_context_chars(&model_ctx);
+    let fitted = fit_model_context_to_budget(&model_ctx, budget)?;
+    let truncated = estimate_context_chars(&fitted) < before_fit
+        || fitted
+            .iter()
+            .any(|m| m.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER));
+    if estimate_context_chars(&fitted) > budget {
+        return Err(ContextBudgetError {
+            estimate: estimate_context_chars(&fitted),
+            budget,
+        });
+    }
+    Ok(PreparedModelContext {
+        messages: fitted,
+        keep,
+        compacted: compacted || summary.is_some(),
+        truncated,
+    })
 }
 
 /// One stored message (desktop transcript).
@@ -802,6 +1044,320 @@ mod tests {
         let ctx = s.context_messages();
         assert!(ctx.len() < 6);
         assert!(ctx.iter().any(|m| m.content.contains("Compacted")));
+    }
+
+    /// #33: complete model context (not summary alone) is hard-bounded.
+    #[test]
+    fn prepare_model_context_thousands_of_long_messages() {
+        let long = "w".repeat(800);
+        let mut hist = vec![ChatMessage {
+            role: Role::System,
+            content: "policy system message for tools".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..2000 {
+            hist.push(ChatMessage {
+                role: Role::User,
+                content: format!("user {i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("asst {i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let persisted: Vec<_> = hist.iter().map(|m| m.content.clone()).collect();
+        let prep = prepare_model_context(&hist, 40, DEFAULT_CONTEXT_CHAR_BUDGET).expect("must fit");
+        assert!(
+            estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET,
+            "est={}",
+            estimate_context_chars(&prep.messages)
+        );
+        assert!(
+            prep.messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.contains("policy")),
+            "system policy preserved"
+        );
+        // Newest turn retained (possibly truncated).
+        let last_user = hist.iter().rev().find(|m| m.role == Role::User).unwrap();
+        assert!(
+            prep.messages.iter().any(|m| {
+                m.role == Role::User
+                    && (m.content.contains("user 1999")
+                        || m.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER))
+            }),
+            "newest useful turn should appear in model ctx"
+        );
+        let _ = last_user;
+        // Persisted history byte-for-byte unchanged.
+        for (i, m) in hist.iter().enumerate() {
+            assert_eq!(m.content, persisted[i], "history mutated at {i}");
+        }
+    }
+
+    /// #33: thousands of assistant/tool-call/result groups stay under budget + pairing-safe.
+    #[test]
+    fn prepare_model_context_thousands_of_tool_groups() {
+        use crate::chat::{FunctionCall, ToolCallMsg};
+        let long = "t".repeat(300);
+        let mut hist = vec![ChatMessage {
+            role: Role::System,
+            content: "policy".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..1500 {
+            hist.push(ChatMessage {
+                role: Role::User,
+                content: format!("q{i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: format!("c{i}"),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            });
+            hist.push(ChatMessage {
+                role: Role::Tool,
+                content: format!("result {i} {long}"),
+                tool_call_id: Some(format!("c{i}")),
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("done {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let prep = prepare_model_context(&hist, 30, DEFAULT_CONTEXT_CHAR_BUDGET).expect("must fit");
+        assert!(estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        // Pairing: every tool result in model ctx has a parent assistant with tool_calls
+        // or is allowed only if we kept structure (tool_call_id present).
+        let tools: Vec<_> = prep
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        for t in &tools {
+            assert!(t.tool_call_id.is_some(), "tool must keep call id");
+        }
+        let asst_tools = prep
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+            .count();
+        assert!(
+            tools.len() <= asst_tools + 1,
+            "orphan tool risk: tools={} asst_tools={}",
+            tools.len(),
+            asst_tools
+        );
+    }
+
+    /// #33: two recent messages whose combined size alone exceeds the budget.
+    #[test]
+    fn prepare_model_context_two_oversize_recent_messages() {
+        let huge = "H".repeat(DEFAULT_CONTEXT_CHAR_BUDGET);
+        let hist = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: format!("first {huge}"),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: format!("second {huge}"),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let before = hist[1].content.clone();
+        let prep = prepare_model_context(&hist, 4, DEFAULT_CONTEXT_CHAR_BUDGET).expect("must fit");
+        assert!(estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        assert!(
+            prep.truncated
+                || prep
+                    .messages
+                    .iter()
+                    .any(|m| m.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER))
+        );
+        assert_eq!(hist[1].content, before, "persisted must not change");
+        assert!(
+            prep.messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.contains("policy")),
+            "system preserved"
+        );
+    }
+
+    /// #33: one enormous tool result near the transcript tail.
+    #[test]
+    fn prepare_model_context_enormous_tool_result_tail() {
+        use crate::chat::{FunctionCall, ToolCallMsg};
+        let huge = "R".repeat(DEFAULT_CONTEXT_CHAR_BUDGET + 50_000);
+        let hist = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "search please".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: huge.clone(),
+                tool_call_id: Some("c1".into()),
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "now answer".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let tool_before = hist[3].content.clone();
+        let prep = prepare_model_context(&hist, 8, DEFAULT_CONTEXT_CHAR_BUDGET).expect("must fit");
+        assert!(estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        assert_eq!(hist[3].content, tool_before);
+        // Tool result model-facing form truncated with marker; call id retained if present.
+        let tool_in_ctx = prep.messages.iter().find(|m| m.role == Role::Tool);
+        if let Some(t) = tool_in_ctx {
+            assert!(
+                t.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER) || t.content.len() < huge.len()
+            );
+            assert_eq!(t.tool_call_id.as_deref(), Some("c1"));
+        }
+        assert!(
+            prep.messages
+                .iter()
+                .any(|m| m.role == Role::User && m.content.contains("now answer")),
+            "newest turn preserved"
+        );
+    }
+
+    /// #33: pairing-safe truncation of a large tool-call group.
+    #[test]
+    fn prepare_model_context_pairing_safe_tool_group_truncation() {
+        use crate::chat::{FunctionCall, ToolCallMsg};
+        let big = "X".repeat(80_000);
+        let hist = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "t9".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: r#"{"q":"x"}"#.into(),
+                    },
+                }]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: big,
+                tool_call_id: Some("t9".into()),
+                tool_calls: None,
+            },
+        ];
+        let prep = prepare_model_context(&hist, 2, DEFAULT_CONTEXT_CHAR_BUDGET).expect("must fit");
+        assert!(estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        let has_tool = prep.messages.iter().any(|m| m.role == Role::Tool);
+        let has_asst = prep
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.tool_calls.is_some());
+        if has_tool {
+            assert!(has_asst, "tool result must not orphan from assistant call");
+        }
+    }
+
+    /// #33: shrinking keep converges — successive smaller keeps do not grow context.
+    #[test]
+    fn prepare_model_context_monotonic_convergence() {
+        let long = "m".repeat(500);
+        let mut hist = vec![ChatMessage {
+            role: Role::System,
+            content: "policy".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..200 {
+            hist.push(ChatMessage {
+                role: Role::User,
+                content: format!("{i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("a{i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let mut prev: Option<usize> = None;
+        for keep in [64usize, 32, 16, 8, 4, 2] {
+            let prep = prepare_model_context(&hist, keep, DEFAULT_CONTEXT_CHAR_BUDGET).unwrap();
+            let est = estimate_context_chars(&prep.messages);
+            assert!(est <= DEFAULT_CONTEXT_CHAR_BUDGET);
+            // Non-increasing across decreasing keep (allow small marker noise ≤ 256).
+            if let Some(p) = prev {
+                assert!(
+                    est <= p.saturating_add(256),
+                    "keep={keep} grew context: {est} > prev {p}"
+                );
+            }
+            prev = Some(est);
+        }
     }
 
     /// #33: summary must not grow linearly with transcript; shrink-keep stays bounded.
