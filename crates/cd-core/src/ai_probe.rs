@@ -345,13 +345,26 @@ pub async fn probe_ai_gateway(
     let mut effective = base_trim.clone();
     let mut ok = false;
 
+    // Prefer the user-entered base first, then alternate shapes only if needed.
+    // Fan-out without early-stop causes corp gateways to return HTTP 429 storms.
     let candidates = expand_base_candidates(&base_trim);
     notes.push(format!(
-        "Trying {} URL shape(s) via native HTTP (TriageTool-parity)…",
+        "Checking gateway (up to {} URL shape(s); stops on success or rate-limit)…",
         candidates.len()
     ));
 
-    'roots: for root in &candidates {
+    let mut rate_limited = false;
+    let mut saw_auth_fail = false;
+
+    'roots: for (idx, root) in candidates.iter().enumerate() {
+        if rate_limited {
+            break;
+        }
+        // Small pause between alternate shapes after the first attempt.
+        if idx > 0 {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+
         let tags_url = format!("{root}/api/tags");
         if let Ok((status, json)) = get_json(
             &client,
@@ -415,7 +428,15 @@ pub async fn probe_ai_gateway(
                     }
                 }
                 Ok((status, _)) if status == 401 || status == 403 => {
+                    saw_auth_fail = true;
                     errors.push(format!("{path}: auth failed ({status}) — check API key"));
+                }
+                Ok((status, _)) if status == 429 => {
+                    rate_limited = true;
+                    errors.push(format!(
+                        "{path}: HTTP 429 rate limited — gateway is throttling list requests. Wait and retry; we stopped trying alternate URL shapes."
+                    ));
+                    break 'roots;
                 }
                 Ok((status, _)) => {
                     errors.push(format!("{path}: HTTP {status}"));
@@ -423,7 +444,10 @@ pub async fn probe_ai_gateway(
                 Err(e) => errors.push(e),
             }
 
-            // Anthropic-style headers
+            // Anthropic-style headers (skip if we already hit rate limit).
+            if rate_limited {
+                break 'roots;
+            }
             match get_json(&client, &path, anthropic_headers(key)).await {
                 Ok((status, json)) if (200..300).contains(&status) => {
                     let list = parse_openai_models(&json, &path);
@@ -440,7 +464,15 @@ pub async fn probe_ai_gateway(
                     }
                 }
                 Ok((status, _)) if status == 401 || status == 403 => {
+                    saw_auth_fail = true;
                     errors.push(format!("{path}: auth failed ({status}) with x-api-key"));
+                }
+                Ok((status, _)) if status == 429 => {
+                    rate_limited = true;
+                    errors.push(format!(
+                        "{path}: HTTP 429 rate limited — stopped expanding URL shapes."
+                    ));
+                    break 'roots;
                 }
                 Err(e) if !errors.iter().any(|x| x == &e) => {
                     errors.push(e);
@@ -472,10 +504,20 @@ pub async fn probe_ai_gateway(
         notes.push("No embedding models listed (chat-only is fine for ContextDesk).".into());
     }
     if !ok {
-        notes.push(
-            "Could not list models. Check URL, API key, VPN, and that the host is reachable from this machine.".into(),
-        );
-        if key.is_empty() {
+        if rate_limited {
+            notes.push(
+                "Gateway rate-limited model listing (HTTP 429). Wait 30–60s, then retry once. A single successful path is enough — you can also type a known model id manually in Advanced.".into(),
+            );
+        } else if saw_auth_fail {
+            notes.push(
+                "Gateway rejected the API key (401/403). Confirm the key in the OS keychain or paste a fresh one.".into(),
+            );
+        } else {
+            notes.push(
+                "Could not list models. Check URL, API key, VPN, and that the host is reachable from this machine.".into(),
+            );
+        }
+        if key.is_empty() && !rate_limited {
             notes.push("No API key provided — many gateways require a key to list models.".into());
         }
     }

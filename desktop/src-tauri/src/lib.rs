@@ -4417,6 +4417,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // Opt-in signed updates (#173). Check/install only via Settings — never silent.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            // Dark window/webview fill before React mounts (avoids white flash).
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let dark = tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff);
+                let _ = win.set_background_color(Some(dark));
+            }
+            Ok(())
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_branding,

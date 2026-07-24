@@ -3,9 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
     <title>ContextDesk</title>
-    <!-- Pre-paint theme before CSS/JS paint (#152). Served from 'self' — not inline. -->
+    <!-- Pre-paint theme + dark window fill before React/CSS bundle (#152 / startup FOUC). -->
     <script src="/theme-init.js"></script>
+    <link rel="stylesheet" href="/critical-boot.css" />
   </head>
   <body>
     <div id="root"></div>
