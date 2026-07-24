@@ -3309,12 +3309,16 @@ fn ingest_log_path(
     let cache = log_cache_dir(&state)?;
     let host = state.host.lock().expect("host");
     let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-    let report = cd_core::log_analysis::ingest_path(
+    // #359: product path uses policy-enforcing ingest (local default; cloud opt-in
+    // requires explicit confirm args — UI does not pass cloud without confirm).
+    let policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
+    let backend = host.log_embed_backend();
+    let report = cd_core::log_analysis::ingest_path_with_policy(
         &cache,
         std::path::Path::new(&path),
         name.as_deref().unwrap_or("corpus"),
-        host.log_embed_backend().as_deref(),
-        host.log_embed_model(),
+        &policy,
+        backend,
     )
     .map_err(|e| e.to_string())?;
     Ok(LogIngestReportDto {
@@ -3441,163 +3445,74 @@ struct HarvestRowDto {
 #[serde(rename_all = "camelCase")]
 struct SourceGitStatusDto {
     is_git_repo: bool,
+    path: Option<String>,
     remote: Option<String>,
+    remote_url: Option<String>,
     branch: Option<String>,
     ahead: u32,
     behind: u32,
     dirty: bool,
     summary: String,
     rebuild_hint: String,
+    fetch_allowed: bool,
 }
 
-fn source_git_root(state: &AppState) -> Option<std::path::PathBuf> {
-    let cfg = state.config.lock().expect("config").clone();
-    if let Some(ws) = workspace_from_cfg(&cfg) {
-        if let Some(r) = ws.roots.first() {
-            return Some(r.clone());
-        }
-    }
-    std::env::current_dir().ok()
-}
-
-fn run_git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-/// Inspect git checkout for source-run update UI (#340). Never hard-resets.
-#[tauri::command]
-fn source_git_status(state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
-    let Some(root) = source_git_root(&state) else {
-        let s = cd_core::git_source::SourceGitStatus::not_repo();
-        return Ok(SourceGitStatusDto {
-            is_git_repo: s.is_git_repo,
-            remote: s.remote,
-            branch: s.branch,
-            ahead: s.ahead,
-            behind: s.behind,
-            dirty: s.dirty,
-            summary: s.summary,
-            rebuild_hint: s.rebuild_hint,
-        });
-    };
-    let git_dir = root.join(".git");
-    if !git_dir.exists() {
-        // Walk up for monorepo / worktree
-        let mut cur = root.as_path();
-        let mut found = None;
-        for _ in 0..6 {
-            if cur.join(".git").exists() {
-                found = Some(cur.to_path_buf());
-                break;
-            }
-            cur = match cur.parent() {
-                Some(p) => p,
-                None => break,
-            };
-        }
-        if found.is_none() {
-            let s = cd_core::git_source::SourceGitStatus::not_repo();
-            return Ok(SourceGitStatusDto {
-                is_git_repo: false,
-                remote: None,
-                branch: None,
-                ahead: 0,
-                behind: 0,
-                dirty: false,
-                summary: s.summary,
-                rebuild_hint: s.rebuild_hint,
-            });
-        }
-    }
-    let cwd = {
-        let mut cur = root.as_path();
-        let mut found = root.clone();
-        for _ in 0..8 {
-            if cur.join(".git").exists() {
-                found = cur.to_path_buf();
-                break;
-            }
-            if let Some(p) = cur.parent() {
-                cur = p;
-            } else {
-                break;
-            }
-        }
-        found
-    };
-    let branch = run_git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "HEAD");
-    let remote = run_git(&cwd, &["remote"]).ok().and_then(|s| {
-        s.lines()
-            .next()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-    });
-    let porcelain = run_git(&cwd, &["status", "--porcelain"]).unwrap_or_default();
-    let dirty = cd_core::git_source::porcelain_is_dirty(&porcelain);
-    let (ahead, behind) = match run_git(
-        &cwd,
-        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-    ) {
-        Ok(raw) => cd_core::git_source::parse_ahead_behind(&raw),
-        Err(_) => (0, 0),
-    };
-    // Product rule: this path never hard-resets.
-    let _ = cd_core::git_source::must_not_hard_reset(dirty);
-    let s = cd_core::git_source::build_source_git_status(
-        true,
-        remote.as_deref(),
-        branch.as_deref(),
-        ahead,
-        behind,
-        dirty,
-    );
-    Ok(SourceGitStatusDto {
+fn dto_from_source(s: cd_core::git_source::SourceGitStatus) -> SourceGitStatusDto {
+    SourceGitStatusDto {
         is_git_repo: s.is_git_repo,
+        path: s.path,
         remote: s.remote,
+        remote_url: s.remote_url,
         branch: s.branch,
         ahead: s.ahead,
         behind: s.behind,
         dirty: s.dirty,
         summary: s.summary,
         rebuild_hint: s.rebuild_hint,
-    })
+        fetch_allowed: s.fetch_allowed,
+    }
 }
 
-/// Explicit fetch only (#340). Never pull or reset.
+/// Resolve **product** source checkout — never the active user workspace (#340).
+fn resolve_product_source_root() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok();
+    let env = std::env::var("CONTEXTDESK_SOURCE_ROOT").ok();
+    let exe = std::env::current_exe().ok();
+    let cands = cd_core::git_source::resolve_product_source_candidates(
+        cwd.as_deref(),
+        env.as_deref(),
+        exe.as_deref(),
+    );
+    cd_core::git_source::select_product_source(&cands)
+}
+
+/// Inspect ContextDesk **product** source checkout (#340). Never hard-resets.
 #[tauri::command]
-fn source_git_fetch(state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
-    let root = source_git_root(&state).ok_or_else(|| "no workspace root".to_string())?;
-    let mut cwd = root.clone();
-    let mut cur = root.as_path();
-    for _ in 0..8 {
-        if cur.join(".git").exists() {
-            cwd = cur.to_path_buf();
-            break;
-        }
-        if let Some(p) = cur.parent() {
-            cur = p;
-        } else {
-            break;
-        }
+fn source_git_status(_state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
+    let Some(root) = resolve_product_source_root() else {
+        return Ok(dto_from_source(
+            cd_core::git_source::SourceGitStatus::not_repo(),
+        ));
+    };
+    Ok(dto_from_source(
+        cd_core::git_source::inspect_product_source(&root),
+    ))
+}
+
+/// Explicit fetch of the product upstream only (#340). Never pull/reset/`--all`.
+#[tauri::command]
+fn source_git_fetch(_state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
+    let root = resolve_product_source_root()
+        .ok_or_else(|| "not a ContextDesk source checkout".to_string())?;
+    let st = cd_core::git_source::inspect_product_source(&root);
+    if !st.fetch_allowed {
+        return Err(st.summary);
     }
-    if !cwd.join(".git").exists() {
-        return Err("not a git repository".into());
-    }
-    // fetch only — never pull/reset
-    let _ = run_git(&cwd, &["fetch", "--all", "--prune"]).map_err(|e| format!("git fetch: {e}"))?;
-    source_git_status(state)
+    let remote = st.remote.as_deref().unwrap_or("origin");
+    cd_core::git_source::fetch_product_source(&root, remote)?;
+    Ok(dto_from_source(
+        cd_core::git_source::inspect_product_source(&root),
+    ))
 }
 
 /// List harvest provenance rows (co-located with workspace memory).

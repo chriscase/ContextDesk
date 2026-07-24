@@ -274,6 +274,16 @@ mod tests {
         assert!(report.stats.templates < report.stats.lines as usize / 10);
         assert!(report.stats.reduction_ratio > 10.0);
         assert!(report.stats.embedded > 0);
+        // #359: unconfirmed cloud must not run (no backend required if policy fails first).
+        let blocked = ingest_path_with_policy(
+            dir.path(),
+            &logs,
+            "cloud-blocked",
+            &crate::log_analysis::LogEmbedPolicy::cloud_opt_in("https://api.example.com", false),
+            None,
+        );
+        assert!(blocked.is_err(), "unconfirmed cloud must fail before embed");
+
         eprintln!(
             "ingest_fixture lines={} templates={} ratio={:.1} embedded={}",
             report.stats.lines,
