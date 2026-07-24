@@ -2378,7 +2378,7 @@ impl ToolHost {
             .clone();
         if cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for harvest (add space keys in Settings)".into(),
+                "Confluence harvest needs a space allowlist. Open Settings → Connectors → Confluence and add space keys (e.g. ENG, DOCS), then try again.".into(),
             ));
         }
         let pat = self

@@ -39,7 +39,7 @@ pub fn harvest_page_to_memory(
     if !space_permitted(cfg, space, true) {
         if cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for harvest (add space keys in Settings)".into(),
+                "Confluence harvest needs a space allowlist. Open Settings → Connectors → Confluence and add space keys (e.g. ENG, DOCS), then try again.".into(),
             ));
         }
         return Err(CoreError::Policy(format!(
@@ -148,7 +148,7 @@ pub fn harvest_page_to_file(
     if !space_permitted(cfg, space, true) {
         if cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for harvest (add space keys in Settings)".into(),
+                "Confluence harvest needs a space allowlist. Open Settings → Connectors → Confluence and add space keys (e.g. ENG, DOCS), then try again.".into(),
             ));
         }
         return Err(CoreError::Policy(format!(
@@ -367,7 +367,11 @@ mod tests {
             100,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("allowlist required"));
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("space allowlist")
+                || err.to_string().to_ascii_lowercase().contains("allowlist"),
+            "{err}"
+        );
     }
 
     #[test]
