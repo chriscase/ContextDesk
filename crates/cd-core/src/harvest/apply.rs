@@ -368,7 +368,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().to_ascii_lowercase().contains("space allowlist")
+            err.to_string()
+                .to_ascii_lowercase()
+                .contains("space allowlist")
                 || err.to_string().to_ascii_lowercase().contains("allowlist"),
             "{err}"
         );
