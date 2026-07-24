@@ -504,6 +504,8 @@ dependencies = [
  "duckdb",
  "fastembed",
  "futures-util",
+ "http-body",
+ "http-body-util",
  "keyring",
  "notify",
  "object_store",

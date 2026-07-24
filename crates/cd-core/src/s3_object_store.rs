@@ -15,9 +15,11 @@ use crate::ssrf::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use http_body_util::{BodyExt, Limited};
 use object_store_sdk::aws::{AmazonS3, AmazonS3Builder};
 use object_store_sdk::client::{
-    ClientOptions, HttpClient, HttpConnector, HttpError, HttpErrorKind,
+    ClientOptions, HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
+    HttpResponseBody, HttpService,
 };
 use object_store_sdk::list::{PaginatedListOptions, PaginatedListStore};
 use object_store_sdk::path::Path as SdkPath;
@@ -40,7 +42,12 @@ use url::Url;
 /// 5 MiB for every non-final part; 8 MiB stays compatible while bounding RAM.
 pub const S3_MULTIPART_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
+/// Maximum buffered XML/control response. Object downloads bypass this cap and
+/// remain streaming; non-success bodies are discarded without being polled.
+pub const S3_CONTROL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
 const CONTENT_HASH_METADATA: &str = "contextdesk-sha256";
+const SCRUBBED_ERROR_BODY: &str = "[upstream error body omitted]";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
@@ -205,7 +212,49 @@ impl fmt::Debug for PinnedReqwestConnector {
 
 impl HttpConnector for PinnedReqwestConnector {
     fn connect(&self, _options: &ClientOptions) -> object_store_sdk::Result<HttpClient> {
-        Ok(HttpClient::new(self.client.clone()))
+        Ok(HttpClient::new(BoundedResponseService {
+            inner: HttpClient::new(self.client.clone()),
+            control_body_limit: S3_CONTROL_RESPONSE_BYTES,
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BoundedResponseService {
+    inner: HttpClient,
+    control_body_limit: usize,
+}
+
+#[async_trait]
+impl HttpService for BoundedResponseService {
+    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        // Plain GETs are object downloads and must remain streaming. S3 list
+        // requests have a query string and are bounded control-plane XML.
+        let streaming_object_get =
+            request.method().as_str() == "GET" && request.uri().query().is_none();
+        let response = self.inner.execute(request).await?;
+
+        if !response.status().is_success() {
+            // Do not poll an untrusted error body at all. The SDK still sees
+            // the status and headers needed for typed error classification.
+            let (parts, _untrusted_body) = response.into_parts();
+            return Ok(HttpResponse::from_parts(
+                parts,
+                HttpResponseBody::from(SCRUBBED_ERROR_BODY.to_string()),
+            ));
+        }
+
+        if streaming_object_get {
+            return Ok(response);
+        }
+
+        let (parts, body) = response.into_parts();
+        let limited = Limited::new(body, self.control_body_limit)
+            .map_err(|error| HttpError::new_boxed(HttpErrorKind::Decode, error));
+        Ok(HttpResponse::from_parts(
+            parts,
+            HttpResponseBody::new(limited),
+        ))
     }
 }
 
@@ -929,7 +978,11 @@ mod tests {
     use super::*;
     use crate::object_store::ObjectCancellation;
     use crate::ssrf::MapResolver;
+    use object_store_sdk::client::HttpRequestBody;
     use std::io::Cursor;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
     use tokio::time::sleep;
     use wiremock::matchers::{header, header_regex, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -975,6 +1028,51 @@ mod tests {
             "authorization",
             "^AWS4-HMAC-SHA256 Credential=DUMMYACCESS123/",
         )
+    }
+
+    #[derive(Clone, Debug)]
+    struct LazyFixtureService {
+        status: u16,
+        chunk: Bytes,
+        polls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct LazyFixtureBody {
+        chunk: Option<Bytes>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl http_body::Body for LazyFixtureBody {
+        type Data = Bytes;
+        type Error = HttpError;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.chunk.take().map(http_body::Frame::data).map(Ok))
+        }
+    }
+
+    #[async_trait]
+    impl HttpService for LazyFixtureService {
+        async fn call(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+            let mut response = HttpResponse::new(HttpResponseBody::new(LazyFixtureBody {
+                chunk: Some(self.chunk.clone()),
+                polls: Arc::clone(&self.polls),
+            }));
+            *response.status_mut() = self.status.try_into().unwrap();
+            Ok(response)
+        }
+    }
+
+    fn fixture_request(method: &str, uri: &str) -> HttpRequest {
+        let mut request = HttpRequest::new(HttpRequestBody::empty());
+        *request.method_mut() = method.parse().unwrap();
+        *request.uri_mut() = uri.parse().unwrap();
+        request
     }
 
     #[test]
@@ -1268,6 +1366,75 @@ mod tests {
             assert!(!diagnostic.contains(secret), "{diagnostic}");
         }
         assert!(!diagnostic.contains("upstream exploded"), "{diagnostic}");
+    }
+
+    #[tokio::test]
+    async fn error_bodies_are_not_polled_and_control_responses_are_bounded() {
+        let error_polls = Arc::new(AtomicUsize::new(0));
+        let error_service = BoundedResponseService {
+            inner: HttpClient::new(LazyFixtureService {
+                status: 500,
+                chunk: Bytes::from(format!("{ACCESS}:{SECRET}:{TOKEN}")),
+                polls: Arc::clone(&error_polls),
+            }),
+            control_body_limit: 8,
+        };
+        let response = error_service
+            .call(fixture_request(
+                "HEAD",
+                "https://objects.example.com/bucket/key",
+            ))
+            .await
+            .unwrap();
+        let body = response.into_body().bytes().await.unwrap();
+        assert_eq!(body.as_ref(), SCRUBBED_ERROR_BODY.as_bytes());
+        assert_eq!(error_polls.load(Ordering::SeqCst), 0);
+
+        let control_polls = Arc::new(AtomicUsize::new(0));
+        let control_service = BoundedResponseService {
+            inner: HttpClient::new(LazyFixtureService {
+                status: 200,
+                chunk: Bytes::from_static(b"123456789"),
+                polls: Arc::clone(&control_polls),
+            }),
+            control_body_limit: 8,
+        };
+        let error = control_service
+            .call(fixture_request(
+                "GET",
+                "https://objects.example.com/bucket?list-type=2",
+            ))
+            .await
+            .unwrap()
+            .into_body()
+            .bytes()
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), HttpErrorKind::Decode);
+        assert_eq!(control_polls.load(Ordering::SeqCst), 1);
+
+        let download_polls = Arc::new(AtomicUsize::new(0));
+        let download_service = BoundedResponseService {
+            inner: HttpClient::new(LazyFixtureService {
+                status: 200,
+                chunk: Bytes::from_static(b"123456789"),
+                polls: Arc::clone(&download_polls),
+            }),
+            control_body_limit: 8,
+        };
+        let body = download_service
+            .call(fixture_request(
+                "GET",
+                "https://objects.example.com/bucket/key",
+            ))
+            .await
+            .unwrap()
+            .into_body()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"123456789");
+        assert_eq!(download_polls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
