@@ -3,7 +3,7 @@
  * Path → give us something to look at → narrow options → pick model → apply draft.
  * Mirrors TriageTool’s discover flow via hostProbeAiGateway (plain HTTP, multi-path).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   resolveGatewayUrlPrefill,
   saveLastGatewayUrl,
@@ -14,6 +14,7 @@ import {
   type LocalCandidateDto,
 } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
+import { ProbeDiagnostics } from "../launch/ProbeDiagnostics";
 import { SecretField, SelectField, TextField } from "../forms";
 
 type WizardStep = "start" | "configure" | "results";
@@ -55,6 +56,11 @@ type Props = {
   /** Apply + persist host profile/keychain (TriageTool one-shot save). */
   onApplyAndSave?: (payload: WizardApplyPayload) => void | Promise<void>;
   onOpenAdvanced?: () => void;
+  /**
+   * When true, automatically run Discover once if a provider URL (and key for
+   * remote) is already configured — user should not need to press Discover.
+   */
+  autoDiscover?: boolean;
 };
 
 const GATEWAY_PRESETS: { id: string; label: string; base: string; hint: string }[] = [
@@ -129,6 +135,7 @@ export function AiSetupWizard({
   onApplied,
   onApplyAndSave,
   onOpenAdvanced,
+  autoDiscover = false,
 }: Props) {
   // Prefill from host-hydrated draft / last gateway URL so users do not re-paste.
   const initialPath = initialWizardPath(draft);
@@ -153,6 +160,8 @@ export function AiSetupWizard({
   const [options, setOptions] = useState<DiscoveredOption[]>([]);
   const [pickedKind, setPickedKind] = useState<AppSetupState["providerKind"]>("none");
   const [pickedModel, setPickedModel] = useState("");
+  const [autoRan, setAutoRan] = useState(false);
+  const autoDiscoverOnce = useRef(false);
 
   const grokCandidate = candidates.find(
     (c) => c.kind === "xai_grok_build" || c.id.includes("grok"),
@@ -370,11 +379,20 @@ export function AiSetupWizard({
               });
             }
           } else if (!result.ok) {
-            errBuf.push(
-              key || draft.hasApiKey
-                ? "Gateway did not return a model list. Check URL path, key, and VPN."
-                : "No models listed. Paste the gateway API key (or Save one first) and Discover again.",
+            const rateLimited = [...result.errors, ...result.notes].some((s) =>
+              /429|rate.?limit/i.test(s),
             );
+            if (rateLimited) {
+              errBuf.push(
+                "Gateway rate-limited model listing (HTTP 429). Wait, then press Retry check once.",
+              );
+            } else {
+              errBuf.push(
+                key || draft.hasApiKey
+                  ? "Gateway did not return a model list. Check URL path, key, and VPN."
+                  : "No models listed. Paste the gateway API key (or Save one first) and Discover again.",
+              );
+            }
           }
         }
       }
@@ -396,6 +414,33 @@ export function AiSetupWizard({
       setBusy(false);
     }
   }, [path, probeUrl, probeKey, grokCandidate, draft.hasApiKey, draft.chatModel]);
+
+  // Auto-discover when provider is already configured (pre-launch / returning users).
+  useEffect(() => {
+    if (!autoDiscover || autoDiscoverOnce.current) return;
+    if (step !== "configure") return;
+    const readyGateway =
+      path === "gateway" &&
+      Boolean(probeUrl.trim()) &&
+      (Boolean(probeKey.trim()) || draft.hasApiKey);
+    const readyOllama = path === "ollama" && Boolean(probeUrl.trim());
+    const readyGrok =
+      path === "grok" &&
+      (draft.hasApiKey || Boolean(grokCandidate?.credentials_present));
+    if (!readyGateway && !readyOllama && !readyGrok) return;
+    autoDiscoverOnce.current = true;
+    setAutoRan(true);
+    void runDiscover();
+  }, [
+    autoDiscover,
+    step,
+    path,
+    probeUrl,
+    probeKey,
+    draft.hasApiKey,
+    grokCandidate?.credentials_present,
+    runDiscover,
+  ]);
 
   const activeOption =
     options.find((o) => o.kind === pickedKind) ?? options[0] ?? null;
@@ -464,9 +509,9 @@ export function AiSetupWizard({
   return (
     <div className="ai-wizard">
       <p className="section-lead">
-        Setup wizard — same discovery as TriageTool (native multi-path probe).
-        Gateway URL is remembered after Discover; the API key lives in the OS
-        keychain after <strong>Apply &amp; Save</strong>.
+        {autoDiscover
+          ? "Configured providers are checked automatically. Adjust URL/key only if needed, then Apply & Save."
+          : "Same discovery as TriageTool (native multi-path probe). Gateway URL is remembered after Discover; the API key lives in the OS keychain after Apply & Save."}
       </p>
 
       <div className="ai-wizard__mode-row">
@@ -635,19 +680,28 @@ export function AiSetupWizard({
               disabled={busy}
               onClick={() => void runDiscover()}
             >
-              {busy ? "Discovering…" : "Discover options"}
+              {busy
+                ? autoRan
+                  ? "Checking gateway…"
+                  : "Discovering…"
+                : autoRan
+                  ? "Retry check"
+                  : "Discover options"}
             </button>
+            {autoDiscover && !busy && !options.length ? (
+              <span className="field__hint">
+                {autoRan
+                  ? "Auto-check finished — retry if you fixed URL/key."
+                  : "Will check automatically when URL and key are ready."}
+              </span>
+            ) : null}
           </div>
-          {errors.map((e) => (
-            <p key={e} className="field__error" role="alert">
-              {e}
-            </p>
-          ))}
-          {notes.map((n) => (
-            <p key={n} className="field__hint" role="status">
-              {n}
-            </p>
-          ))}
+          <ProbeDiagnostics
+            errors={errors}
+            notes={notes}
+            busy={busy}
+            autoRan={autoRan}
+          />
         </div>
       ) : null}
 
@@ -661,16 +715,7 @@ export function AiSetupWizard({
             ← Adjust URL / key
           </button>
 
-          {notes.map((n) => (
-            <p key={n} className="field__hint" role="status">
-              {n}
-            </p>
-          ))}
-          {errors.map((e) => (
-            <p key={e} className="field__error" role="alert">
-              {e}
-            </p>
-          ))}
+          <ProbeDiagnostics errors={errors} notes={notes} autoRan={autoRan} />
 
           {options.length > 1 ? (
             <div className="field">
