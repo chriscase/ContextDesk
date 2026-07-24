@@ -38,6 +38,7 @@ pub mod memory;
 pub mod memory_fs;
 pub mod module_registry;
 pub mod modules;
+pub mod object_store;
 pub mod paths;
 pub mod permissions;
 pub mod preflight;
