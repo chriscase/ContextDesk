@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 430" role="img" aria-labelledby="title desc">
+  <title id="title">ContextDesk post-mortem log analysis pipeline</title>
+  <desc id="desc">A local log dump is ingested, parsed, redacted, grouped into Drain templates, stored as events in DuckDB, embedded by template, and queried by search, timeline, clustering, correlation, anomaly, and trace tools.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <text x="560" y="34" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="23" font-weight="700">Post-mortem log corpus</text>
+  <g font-family="system-ui, sans-serif">
+    <rect x="22" y="74" width="130" height="78" rx="14" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+    <text x="87" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">1 · Ingest</text>
+    <text x="87" y="130" text-anchor="middle" fill="#9ca3af" font-size="12">file or directory</text>
+    <path d="M156 113H185" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="195" y="74" width="130" height="78" rx="14" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+    <text x="260" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">2 · Parse</text>
+    <text x="260" y="130" text-anchor="middle" fill="#9ca3af" font-size="12">time · level · service</text>
+    <path d="M329 113H358" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="368" y="74" width="130" height="78" rx="14" fill="#4c0519" stroke="#fb7185" stroke-width="2"/>
+    <text x="433" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">3 · Redact</text>
+    <text x="433" y="130" text-anchor="middle" fill="#ffe4e6" font-size="12">before store / embed</text>
+    <path d="M502 113H531" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="541" y="74" width="130" height="78" rx="14" fill="#111827" stroke="#fbbf24" stroke-width="2"/>
+    <text x="606" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">4 · Drain</text>
+    <text x="606" y="130" text-anchor="middle" fill="#fef3c7" font-size="12">stable templates</text>
+    <path d="M675 113H704" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="714" y="74" width="160" height="78" rx="14" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+    <text x="794" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">5 · DuckDB</text>
+    <text x="794" y="130" text-anchor="middle" fill="#9ca3af" font-size="12">events + aggregates</text>
+    <path d="M878 113H907" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <rect x="917" y="74" width="180" height="78" rx="14" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
+    <text x="1007" y="107" text-anchor="middle" fill="#e5e7eb" font-size="16" font-weight="700">6 · Template vectors</text>
+    <text x="1007" y="130" text-anchor="middle" fill="#bae6fd" font-size="12">local embed by default</text>
+    <path d="M794 157V206H560V242" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+    <path d="M1007 157V206H560" fill="none" stroke="#38bdf8" stroke-width="4"/>
+    <rect x="310" y="252" width="500" height="142" rx="20" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+    <text x="560" y="286" text-anchor="middle" fill="#e5e7eb" font-size="19" font-weight="700">7 · Analysis tools</text>
+    <rect x="334" y="310" width="132" height="40" rx="9" fill="#022c22" stroke="#34d399"/>
+    <text x="400" y="335" text-anchor="middle" fill="#d1fae5" font-size="13">search</text>
+    <rect x="480" y="310" width="132" height="40" rx="9" fill="#022c22" stroke="#34d399"/>
+    <text x="546" y="335" text-anchor="middle" fill="#d1fae5" font-size="13">timeline</text>
+    <rect x="626" y="310" width="160" height="40" rx="9" fill="#022c22" stroke="#34d399"/>
+    <text x="706" y="335" text-anchor="middle" fill="#d1fae5" font-size="13">problem clusters</text>
+    <text x="560" y="376" text-anchor="middle" fill="#d1fae5" font-size="13">correlate · anomalies · trace</text>
+  </g>
+  <text x="560" y="420" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Batch analysis is shipped; live tailing and remote log-source connectors are not.</text>
+</svg>

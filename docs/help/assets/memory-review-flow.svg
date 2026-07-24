@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 340" role="img" aria-labelledby="title desc">
+  <title id="title">Durable memory review and recall flow</title>
+  <desc id="desc">Explicit saves and rule-based cues enter a review step, approved and redacted records enter durable memory with embeddings, and bounded recall returns citations to later chats.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="24" y="62" width="180" height="210" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="114" y="98" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Capture</text>
+  <rect x="48" y="122" width="132" height="48" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="114" y="151" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Explicit save</text>
+  <rect x="48" y="190" width="132" height="48" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="114" y="219" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Rule-based cue</text>
+  <path d="M208 167H257" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="267" y="62" width="200" height="210" rx="18" fill="#451a03" stroke="#fbbf24" stroke-width="3"/>
+  <text x="367" y="98" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Review</text>
+  <text x="367" y="132" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Preview redaction</text>
+  <text x="367" y="158" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Detect duplicate</text>
+  <text x="367" y="184" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Edit candidate</text>
+  <rect x="298" y="210" width="138" height="38" rx="9" fill="#78350f" stroke="#fbbf24"/>
+  <text x="367" y="234" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Approve or discard</text>
+  <path d="M471 167H520" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="530" y="62" width="210" height="210" rx="18" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <text x="635" y="98" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Durable store</text>
+  <text x="635" y="134" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Typed record + scope</text>
+  <text x="635" y="160" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Keyword index</text>
+  <text x="635" y="186" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Stored vector</text>
+  <text x="635" y="212" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Edges + lifecycle</text>
+  <path d="M744 167H793" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="803" y="62" width="193" height="210" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="900" y="98" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Recall</text>
+  <text x="900" y="134" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Keyword + semantic</text>
+  <text x="900" y="160" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Current active view</text>
+  <text x="900" y="186" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Bounded ambient set</text>
+  <rect x="833" y="210" width="134" height="38" rx="9" fill="#082f49" stroke="#38bdf8"/>
+  <text x="900" y="234" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Memory citations</text>
+  <text x="510" y="316" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Unapproved candidates do not enter durable or ambient recall.</text>
+</svg>

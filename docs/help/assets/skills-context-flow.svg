@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 360" role="img" aria-labelledby="title desc">
+  <title id="title">Skills and session context pack flow</title>
+  <desc id="desc">Bounded files or a ZIP enter one session context pack, a pinned or one-shot skill supplies a playbook, both join the agent turn, and the normal permission gate remains unchanged.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="24" y="36" width="210" height="116" rx="17" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="129" y="72" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Files or ZIP</text>
+  <text x="129" y="102" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Traversal + size checks</text>
+  <text x="129" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Copied for one chat</text>
+  <rect x="24" y="208" width="210" height="116" rx="17" fill="#111827" stroke="#fbbf24" stroke-width="2"/>
+  <text x="129" y="244" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Skill playbook</text>
+  <text x="129" y="274" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Pinned for the chat</text>
+  <text x="129" y="298" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">or /skill for one turn</text>
+  <path d="M238 94H315V154" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <path d="M238 266H315V206" fill="none" stroke="#fbbf24" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="325" y="90" width="230" height="178" rx="19" fill="#111827" stroke="#38bdf8" stroke-width="3"/>
+  <text x="440" y="128" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Bounded agent turn</text>
+  <text x="440" y="166" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Search session overlay</text>
+  <text x="440" y="194" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Apply playbook method</text>
+  <text x="440" y="222" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Fit model context</text>
+  <path d="M559 179H608" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <polygon points="700,88 791,179 700,270 609,179" fill="#451a03" stroke="#fbbf24" stroke-width="3"/>
+  <text x="700" y="164" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="17" font-weight="700">Normal tool</text>
+  <text x="700" y="188" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="17" font-weight="700">permission tier</text>
+  <path d="M795 179H844" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="854" y="120" width="122" height="118" rx="17" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <text x="915" y="159" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Answer</text>
+  <text x="915" y="190" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">with citations</text>
+  <text x="915" y="214" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">and proposals</text>
+  <text x="500" y="342" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Neither a session file nor a skill expands the workspace allowlist or grants writes.</text>
+</svg>

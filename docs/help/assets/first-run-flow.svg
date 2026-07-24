@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 250" role="img" aria-labelledby="title desc">
+  <title id="title">ContextDesk first-run flow</title>
+  <desc id="desc">The user chooses workspace roots, configures an AI provider, reviews prelaunch health, and enters a ready chat.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="20" y="54" width="200" height="138" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="58" cy="86" r="18" fill="#082f49" stroke="#38bdf8"/>
+  <text x="58" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">1</text>
+  <text x="120" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Workspace</text>
+  <text x="120" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Choose allowed roots</text>
+  <text x="120" y="150" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Index within boundaries</text>
+  <path d="M224 123H265" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="275" y="54" width="200" height="138" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <circle cx="313" cy="86" r="18" fill="#082f49" stroke="#38bdf8"/>
+  <text x="313" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">2</text>
+  <text x="375" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">AI provider</text>
+  <text x="375" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Select provider and model</text>
+  <text x="375" y="150" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Probe without exposing keys</text>
+  <path d="M479 123H520" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="530" y="54" width="200" height="138" rx="18" fill="#111827" stroke="#fbbf24" stroke-width="2"/>
+  <circle cx="568" cy="86" r="18" fill="#451a03" stroke="#fbbf24"/>
+  <text x="568" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">3</text>
+  <text x="630" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Prelaunch</text>
+  <text x="630" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Read health categories</text>
+  <text x="630" y="150" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Resolve blocking items</text>
+  <path d="M734 123H775" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="785" y="54" width="155" height="138" rx="18" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <circle cx="823" cy="86" r="18" fill="#022c22" stroke="#34d399"/>
+  <text x="823" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">4</text>
+  <text x="863" y="123" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="20" font-weight="700">Ready</text>
+  <text x="863" y="151" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="14">Ask a grounded</text>
+  <text x="863" y="171" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="14">question</text>
+  <text x="480" y="226" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Settings remains available after launch; setup is re-checkable.</text>
+</svg>

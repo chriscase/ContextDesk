@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 310" role="img" aria-labelledby="title desc">
+  <title id="title">Grounded chat and context-budget flow</title>
+  <desc id="desc">A question combines bounded history and selected context, retrieves evidence through tools, fits the model budget, and returns an answer with search trail and citations.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="22" y="100" width="150" height="92" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="97" y="138" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Question</text>
+  <text x="97" y="164" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Active chat</text>
+  <path d="M176 146H225" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="235" y="34" width="210" height="224" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="340" y="68" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Assemble context</text>
+  <text x="340" y="104" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Recent turns</text>
+  <text x="340" y="132" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Compacted history</text>
+  <text x="340" y="160" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Pinned skill / session pack</text>
+  <text x="340" y="188" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Bounded memory recall</text>
+  <rect x="270" y="211" width="140" height="28" rx="8" fill="#451a03" stroke="#fbbf24"/>
+  <text x="340" y="230" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="12">Hard budget enforced</text>
+  <path d="M449 146H498" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="508" y="34" width="190" height="224" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="603" y="68" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Search and tools</text>
+  <rect x="536" y="91" width="134" height="36" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="603" y="114" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Workspace / memory</text>
+  <rect x="536" y="140" width="134" height="36" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="603" y="163" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Logs / connectors</text>
+  <rect x="536" y="189" width="134" height="36" rx="9" fill="#082f49" stroke="#38bdf8"/>
+  <text x="603" y="212" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Product Help</text>
+  <path d="M702 146H751" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="761" y="34" width="197" height="224" rx="18" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+  <text x="860" y="70" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Answer</text>
+  <text x="860" y="110" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="14">Streaming markdown</text>
+  <rect x="790" y="135" width="140" height="36" rx="9" fill="#022c22" stroke="#34d399"/>
+  <text x="860" y="158" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Search trail</text>
+  <rect x="790" y="187" width="140" height="36" rx="9" fill="#022c22" stroke="#34d399"/>
+  <text x="860" y="210" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Citation chips</text>
+  <text x="490" y="292" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Stored messages remain durable even when the model-only view is compacted.</text>
+</svg>

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 390" role="img" aria-labelledby="title desc">
+  <title id="title">Tool permission tier flow</title>
+  <desc id="desc">The Rust host classifies a tool request as Read, SoftWrite, or HardWrite; reads may run under policy while writes wait for user confirmation before execution and audit.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="28" y="140" width="160" height="90" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="108" y="176" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Tool request</text>
+  <text x="108" y="204" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Arguments are untrusted</text>
+  <path d="M192 185H246" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <polygon points="335,96 424,185 335,274 246,185" fill="#111827" stroke="#38bdf8" stroke-width="3"/>
+  <text x="335" y="176" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="17" font-weight="700">Host-owned</text>
+  <text x="335" y="199" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="17" font-weight="700">classification</text>
+  <path d="M380 135C445 70 485 62 540 62" fill="none" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
+  <path d="M424 185H540" fill="none" stroke="#fbbf24" stroke-width="4" marker-end="url(#arrow)"/>
+  <path d="M380 235C445 306 485 314 540 314" fill="none" stroke="#fb7185" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="550" y="24" width="196" height="78" rx="15" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
+  <text x="648" y="55" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">Read</text>
+  <text x="648" y="80" text-anchor="middle" fill="#d1fae5" font-family="system-ui, sans-serif" font-size="13">Run if policy allows</text>
+  <rect x="550" y="146" width="196" height="78" rx="15" fill="#451a03" stroke="#fbbf24" stroke-width="2"/>
+  <text x="648" y="177" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">SoftWrite</text>
+  <text x="648" y="202" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Preview → Accept / Discard</text>
+  <rect x="550" y="276" width="196" height="78" rx="15" fill="#4c0519" stroke="#fb7185" stroke-width="2"/>
+  <text x="648" y="307" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="18" font-weight="700">HardWrite</text>
+  <text x="648" y="332" text-anchor="middle" fill="#ffe4e6" font-family="system-ui, sans-serif" font-size="13">Explicit / typed confirmation</text>
+  <path d="M750 63H805V185" fill="none" stroke="#34d399" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M750 185H805" fill="none" stroke="#fbbf24" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M750 315H805V185" fill="none" stroke="#fb7185" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="815" y="132" width="140" height="106" rx="16" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="885" y="169" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="17" font-weight="700">Execute or deny</text>
+  <text x="885" y="196" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Revalidate target</text>
+  <text x="885" y="218" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Record audit outcome</text>
+  <text x="490" y="378" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Model text and retrieved documents cannot manufacture a user grant.</text>
+</svg>
