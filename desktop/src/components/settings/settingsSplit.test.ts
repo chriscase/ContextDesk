@@ -14,6 +14,7 @@ const controllerPath = join(here, "useSettingsController.ts");
 const SECTION_FILES = [
   "PreflightSection.tsx",
   "WorkspaceSection.tsx",
+  "BackupSection.tsx",
   "AiSection.tsx",
   "ConnectorsSection.tsx",
   "ModulesSection.tsx",

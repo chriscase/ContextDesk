@@ -24,16 +24,28 @@ use cd_core::sessions::{
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
 use cd_core::workspace::Workspace;
+use cd_core::workspace_backup::{
+    BackupConfirmationGate, BackupDestination, BackupExclusionReason, BackupPlanOptions,
+    BackupPlanSummary, BackupProgress, BackupProgressObserver, BackupProgressPhase,
+    BackupRunStatus, BackupRunSummary,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Emitter, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+const S3_ACCESS_KEY_REF: &str = "s3/default/access_key";
+const S3_SECRET_KEY_REF: &str = "s3/default/secret_key";
+const S3_SESSION_TOKEN_REF: &str = "s3/default/session_token";
 
 struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
     secrets: KeychainSecretStore,
+    /// Shared hash-chain state for host/tool/backup audit writes.
+    audit_log: Option<cd_core::audit::AuditLog>,
     /// Session id -> chat history
     histories: Mutex<HashMap<String, Vec<ChatMessage>>>,
     /// Live tool host (rebuilt when workspace changes). Arc so the index
@@ -41,6 +53,8 @@ struct AppState {
     host: Arc<Mutex<Option<ToolHost>>>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// At most one trusted workspace backup is active.
+    backup_cancel: Mutex<Option<cd_core::object_store::ObjectCancellation>>,
     /// Debounced FS watcher for incremental index refresh (#116).
     index_watch: Mutex<Option<cd_core::index_watch::IndexWatchHandle>>,
     /// Background index lifecycle (#117) — search works while Indexing.
@@ -96,9 +110,6 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
         prev.stop();
     }
-    let audit = ensure_config_dir(&state.branding)
-        .ok()
-        .map(|d| d.join("audit.jsonl"));
     let index_cache = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("index"));
@@ -113,7 +124,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
         Some(cfg.index_max_bytes),
     )
     .map_err(|e| e.to_string())?;
-    let audit_log = audit.map(cd_core::audit::AuditLog::new);
+    let audit_log = state.audit_log.clone();
     let mut host = ToolHost::new(ws, index, audit_log);
     host.set_router_budget(cfg.router.clone());
     host.attach_connectors(&cfg.connectors);
@@ -526,6 +537,402 @@ fn save_app_config(state: State<'_, AppState>, cfg: AppConfig) -> Result<(), Str
     // rebuild host
     let _ = ensure_host(&state);
     Ok(())
+}
+
+/// Non-secret S3 backup settings and keychain presence for Settings.
+#[derive(Clone, Serialize)]
+struct S3BackupSettingsDto {
+    enabled: bool,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    path_style: bool,
+    allow_private_network: bool,
+    credentials_present: bool,
+    keychain_service: String,
+    access_key_ref: String,
+    secret_key_ref: String,
+    session_token_ref: String,
+}
+
+/// Webview-saveable fields. There is intentionally no credential field.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveS3BackupSettings {
+    enabled: bool,
+    endpoint: String,
+    region: String,
+    bucket: String,
+    prefix: String,
+    path_style: bool,
+    allow_private_network: bool,
+}
+
+fn s3_backup_plan_options(
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+    workspace_data_dir_name: &str,
+    dry_run: bool,
+) -> Result<BackupPlanOptions, String> {
+    Ok(BackupPlanOptions {
+        destination: BackupDestination {
+            endpoint_host: config.endpoint_host().map_err(|e| e.to_string())?,
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            prefix: config.prefix.clone(),
+        },
+        // The S3 adapter applies the configured prefix exactly once.
+        object_prefix: String::new(),
+        workspace_data_dir_name: workspace_data_dir_name.to_string(),
+        dry_run,
+    })
+}
+
+async fn plan_s3_workspace_backup(
+    workspace: &Workspace,
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+    workspace_data_dir_name: &str,
+    dry_run: bool,
+    cancellation: cd_core::object_store::ObjectCancellation,
+) -> Result<cd_core::workspace_backup::WorkspaceBackupPlan, String> {
+    // The real command and focused host regression share this seam so endpoint
+    // policy cannot be bypassed while reaching the core planner.
+    config.validate_for_save().map_err(|e| e.to_string())?;
+    cd_core::workspace_backup::plan_workspace_backup(
+        workspace,
+        s3_backup_plan_options(config, workspace_data_dir_name, dry_run)?,
+        cancellation,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+fn s3_keychain_refs() -> Result<
+    (
+        cd_core::s3_object_store::S3KeychainRef,
+        cd_core::s3_object_store::S3KeychainRef,
+        cd_core::s3_object_store::S3KeychainRef,
+    ),
+    String,
+> {
+    Ok((
+        cd_core::s3_object_store::S3KeychainRef::parse(S3_ACCESS_KEY_REF)
+            .map_err(|e| e.to_string())?,
+        cd_core::s3_object_store::S3KeychainRef::parse(S3_SECRET_KEY_REF)
+            .map_err(|e| e.to_string())?,
+        cd_core::s3_object_store::S3KeychainRef::parse(S3_SESSION_TOKEN_REF)
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+fn s3_settings_dto(state: &AppState) -> S3BackupSettingsDto {
+    let cfg = state.config.lock().expect("config lock");
+    let configured = cfg.s3_backup.as_ref();
+    let credentials_present = configured.is_some()
+        && state.secrets.has(S3_ACCESS_KEY_REF).unwrap_or(false)
+        && state.secrets.has(S3_SECRET_KEY_REF).unwrap_or(false);
+    S3BackupSettingsDto {
+        enabled: configured.is_some_and(|s3| s3.enabled),
+        endpoint: configured.map(|s3| s3.endpoint.clone()).unwrap_or_default(),
+        region: configured
+            .map(|s3| s3.region.clone())
+            .unwrap_or_else(|| "us-east-1".into()),
+        bucket: configured.map(|s3| s3.bucket.clone()).unwrap_or_default(),
+        prefix: configured.map(|s3| s3.prefix.clone()).unwrap_or_default(),
+        path_style: configured.is_some_and(|s3| s3.path_style),
+        allow_private_network: configured.is_some_and(|s3| s3.allow_private_network),
+        credentials_present,
+        keychain_service: state.secrets.service_name().to_string(),
+        access_key_ref: S3_ACCESS_KEY_REF.into(),
+        secret_key_ref: S3_SECRET_KEY_REF.into(),
+        session_token_ref: S3_SESSION_TOKEN_REF.into(),
+    }
+}
+
+#[tauri::command]
+fn get_s3_backup_settings(state: State<'_, AppState>) -> S3BackupSettingsDto {
+    s3_settings_dto(&state)
+}
+
+#[tauri::command]
+fn save_s3_backup_settings(
+    state: State<'_, AppState>,
+    req: SaveS3BackupSettings,
+) -> Result<S3BackupSettingsDto, String> {
+    let (access_key_ref, secret_key_ref, session_token_ref) = s3_keychain_refs()?;
+    let config = cd_core::s3_object_store::S3ObjectStoreConfig {
+        enabled: req.enabled,
+        endpoint: req.endpoint.trim().trim_end_matches('/').to_string(),
+        region: req.region.trim().to_string(),
+        bucket: req.bucket.trim().to_string(),
+        prefix: req.prefix.trim().trim_matches('/').to_string(),
+        path_style: req.path_style,
+        allow_private_network: req.allow_private_network,
+        access_key_ref,
+        secret_key_ref,
+        session_token_ref: Some(session_token_ref),
+    };
+    // Endpoint policy is checked on save and S3ObjectStore::new checks it again
+    // immediately before any request.
+    config.validate_for_save().map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock().expect("config lock").clone();
+    cfg.s3_backup = Some(config);
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config lock") = cfg;
+    Ok(s3_settings_dto(&state))
+}
+
+fn resolve_s3_credentials(
+    store: &dyn SecretStore,
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+) -> Result<cd_core::object_store::ObjectCredentials, String> {
+    let access_key = store
+        .get(config.access_key_ref.as_str())
+        .map_err(|_| "could not read S3 access key from OS keychain".to_string())?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "S3 access key is missing from the OS keychain".to_string())?;
+    let secret_key = store
+        .get(config.secret_key_ref.as_str())
+        .map_err(|_| "could not read S3 secret key from OS keychain".to_string())?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "S3 secret key is missing from the OS keychain".to_string())?;
+    let session_token = match &config.session_token_ref {
+        Some(reference) => store
+            .get(reference.as_str())
+            .map_err(|_| "could not read S3 session token from OS keychain".to_string())?
+            .filter(|value| !value.trim().is_empty()),
+        None => None,
+    };
+    cd_core::object_store::ObjectCredentials::new(access_key, secret_key, session_token)
+        .map_err(|e| e.to_string())
+}
+
+fn build_backup_store(
+    dry_run: bool,
+    secrets: &dyn SecretStore,
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+) -> Result<Arc<dyn cd_core::object_store::ObjectStore>, String> {
+    if dry_run {
+        // A dry run has no transport capable of remote writes and remains
+        // useful before credential provisioning.
+        return Ok(Arc::new(
+            cd_core::object_store::InMemoryObjectStore::default(),
+        ));
+    }
+    let credentials = resolve_s3_credentials(secrets, config)?;
+    Ok(Arc::new(
+        cd_core::s3_object_store::S3ObjectStore::new(config.clone(), credentials)
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+fn backup_confirmation_message(summary: &BackupPlanSummary) -> String {
+    let roots = summary
+        .roots
+        .iter()
+        .map(|root| format!("  • {}", root.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mode = if summary.dry_run {
+        "DRY RUN — no remote writes"
+    } else {
+        "REAL UPLOAD"
+    };
+    let mut exclusion_counts = std::collections::BTreeMap::<BackupExclusionReason, u64>::new();
+    for exclusion in &summary.exclusions {
+        *exclusion_counts.entry(exclusion.reason).or_default() += exclusion.entries;
+    }
+    let exclusion_detail = if exclusion_counts.is_empty() {
+        "  • none".to_string()
+    } else {
+        exclusion_counts
+            .into_iter()
+            .map(|(reason, count)| format!("  • {reason}: {count}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "{mode}\n\nWorkspace: {}\nExact roots:\n{}\n\nDestination:\n  Host: {}\n  Bucket: {}\n  Region: {}\n  Prefix: {}\n\nSelected workspace content will leave this machine.\n\nIncluded: {} files ({} bytes)\nExcluded/unreadable: {} entries ({} known bytes)\nReasons:\n{}\n\nContinue?",
+        summary.workspace_name,
+        roots,
+        summary.destination.endpoint_host,
+        summary.destination.bucket,
+        summary.destination.region,
+        if summary.destination.prefix.is_empty() {
+            "(bucket root)"
+        } else {
+            &summary.destination.prefix
+        },
+        summary.file_count,
+        summary.bytes,
+        summary.excluded_count,
+        summary.excluded_bytes,
+        exclusion_detail,
+    )
+}
+
+struct NativeBackupConfirmation {
+    app: tauri::AppHandle,
+}
+
+#[async_trait::async_trait]
+impl BackupConfirmationGate for NativeBackupConfirmation {
+    async fn confirm(&self, summary: &BackupPlanSummary) -> bool {
+        let app = self.app.clone();
+        let message = backup_confirmation_message(summary);
+        tokio::task::spawn_blocking(move || {
+            app.dialog()
+                .message(message)
+                .title("Confirm workspace backup/export")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Continue".into(),
+                    "Cancel".into(),
+                ))
+                .blocking_show()
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+struct TauriBackupProgress {
+    app: tauri::AppHandle,
+}
+
+impl BackupProgressObserver for TauriBackupProgress {
+    fn progress(&self, update: BackupProgress) {
+        let _ = self.app.emit("s3-backup-progress", update);
+    }
+}
+
+fn audit_s3_backup(
+    state: &AppState,
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+    summary: &BackupRunSummary,
+) {
+    let Ok((target, detail)) = s3_backup_audit_fields(config, summary) else {
+        return;
+    };
+    let Some(audit_log) = state.audit_log.as_ref() else {
+        return;
+    };
+    let outcome = match summary.status {
+        BackupRunStatus::Completed | BackupRunStatus::DryRun => cd_core::audit::outcomes::ALLOWED,
+        BackupRunStatus::Declined => cd_core::audit::outcomes::DENIED,
+        BackupRunStatus::Failed | BackupRunStatus::Cancelled => cd_core::audit::outcomes::ERROR,
+    };
+    let _ = audit_log.log(
+        "s3_workspace_backup",
+        cd_core::tools::ToolSideEffect::HardWrite,
+        &target,
+        outcome,
+        &detail,
+        summary.uploaded_bytes,
+    );
+}
+
+fn s3_backup_audit_fields(
+    config: &cd_core::s3_object_store::S3ObjectStoreConfig,
+    summary: &BackupRunSummary,
+) -> Result<(String, String), String> {
+    let host = config.endpoint_host().map_err(|e| e.to_string())?;
+    let detail = format!(
+        "status={:?} uploaded_files={} uploaded_bytes={} skipped_files={} excluded_files={} failed_files={}",
+        summary.status,
+        summary.uploaded_files,
+        summary.uploaded_bytes,
+        summary.skipped_files,
+        summary.excluded_files,
+        summary.failed_files
+    );
+    Ok((format!("s3-backup://{host}/{}", config.bucket), detail))
+}
+
+#[tauri::command]
+async fn run_s3_workspace_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    dry_run: bool,
+) -> Result<BackupRunSummary, String> {
+    let config = state
+        .config
+        .lock()
+        .expect("config lock")
+        .s3_backup
+        .clone()
+        .ok_or_else(|| "S3 backup destination is not configured".to_string())?;
+    if !config.enabled {
+        return Err("S3 backup destination is disabled".into());
+    }
+    let workspace = state
+        .config
+        .lock()
+        .expect("config lock")
+        .workspace
+        .clone()
+        .map(WorkspaceConfig::into_workspace)
+        .ok_or_else(|| "no workspace configured".to_string())?;
+    let cancellation = cd_core::object_store::ObjectCancellation::default();
+    {
+        let mut active = state.backup_cancel.lock().expect("backup cancel");
+        if active.is_some() {
+            return Err("a workspace backup is already running".into());
+        }
+        *active = Some(cancellation.clone());
+    }
+
+    let result = async {
+        let _ = app.emit(
+            "s3-backup-progress",
+            BackupProgress {
+                phase: BackupProgressPhase::Planning,
+                completed_files: 0,
+                total_files: 0,
+                completed_bytes: 0,
+                total_bytes: 0,
+            },
+        );
+        let plan = plan_s3_workspace_backup(
+            &workspace,
+            &config,
+            &state.branding.workspace_dir_name,
+            dry_run,
+            cancellation.clone(),
+        )
+        .await?;
+        let store = build_backup_store(dry_run, &state.secrets, &config)?;
+        let confirmation = NativeBackupConfirmation { app: app.clone() };
+        let progress = TauriBackupProgress { app: app.clone() };
+        Ok::<_, String>(
+            cd_core::workspace_backup::run_confirmed_workspace_backup(
+                store,
+                plan,
+                &confirmation,
+                &progress,
+                cancellation,
+            )
+            .await,
+        )
+    }
+    .await;
+    *state.backup_cancel.lock().expect("backup cancel") = None;
+    if let Ok(summary) = &result {
+        audit_s3_backup(&state, &config, summary);
+    }
+    result
+}
+
+#[tauri::command]
+fn cancel_s3_workspace_backup(state: State<'_, AppState>) -> bool {
+    let cancellation = state.backup_cancel.lock().expect("backup cancel").clone();
+    if let Some(cancellation) = cancellation {
+        cancellation.cancel();
+        true
+    } else {
+        false
+    }
 }
 
 /// Connector row for Settings (#127). No secrets.
@@ -3984,14 +4391,19 @@ pub fn run() {
     if config.providers.profiles.is_empty() {
         config.providers = ProviderConfig::with_local_ollama();
     }
+    let audit_log = ensure_config_dir(&branding)
+        .ok()
+        .map(|dir| cd_core::audit::AuditLog::new(dir.join("audit.jsonl")));
 
     let state = AppState {
         branding,
         config: Mutex::new(config),
         secrets: KeychainSecretStore::new(),
+        audit_log,
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),
         cancels: Mutex::new(HashMap::new()),
+        backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
         index_status: Arc::new(Mutex::new(cd_core::index::IndexStatus {
             phase: cd_core::index::IndexPhase::Idle,
@@ -4016,6 +4428,10 @@ pub fn run() {
             session_context_purge,
             get_config,
             save_app_config,
+            get_s3_backup_settings,
+            save_s3_backup_settings,
+            run_s3_workspace_backup,
+            cancel_s3_workspace_backup,
             list_connectors,
             list_connector_kinds,
             save_connectors,
@@ -4117,3 +4533,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running ContextDesk");
 }
+
+#[cfg(test)]
+mod s3_backup_host_tests;

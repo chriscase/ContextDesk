@@ -62,6 +62,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Launch splash + pre-launch shell | Shipped | desktop/src/components/launch/SplashScreen.tsx:SplashScreen | #391–#394 |
 | Work-context preflight categories | Shipped | crates/cd-core/src/preflight.rs:work_context_items | #395 |
 | Settings IA groups (Health demoted) | Shipped | desktop/src/components/SettingsModal.tsx:NAV | #396 |
+| Human-confirmed S3-compatible workspace backup/export (Phase A) | Shipped | desktop/src-tauri/src/lib.rs:run_s3_workspace_backup | #292 #419, ADR 0006 |
+| S3-backed index source (Phase B) | Roadmap | docs/adr/0006-s3-object-storage.md:Phase B | #292 #420 |
 
 ## Human checklist
 

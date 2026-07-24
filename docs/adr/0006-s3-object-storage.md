@@ -1,13 +1,14 @@
 # ADR 0006: S3-compatible object storage for workspace files
 
-**Status:** Accepted; Phase A foundation and transport implemented
+**Status:** Accepted; Phase A product path implemented, Phase B open
 **Date:** 2026-07-18  
 **Issue:** #281 (epic #276)  
 **Implementation epic:** #292 (spawned)
 
 ## Context
 
-No object storage today. Index abstracts chunks; owner may want cloud files as backup and/or indexed source.
+The product originally had no object storage. Index abstracts chunks; the owner
+wants cloud files as an optional backup/export and, separately, an indexed source.
 
 ## Decision
 
@@ -21,6 +22,17 @@ No object storage today. Index abstracts chunks; owner may want cloud files as b
   are rejected. Private-network endpoints require explicit opt-in; plain HTTP
   is limited to opted-in private/loopback destinations.
 - Not a replacement for local workspace roots in v1.
+- Product path: Settings → Backup is explicitly user-triggered. The Rust host
+  owns keychain lookup, endpoint validation, traversal, native confirmation,
+  execution/cancellation, progress, and redacted audit. The webview receives
+  only non-secret settings, presence flags, progress, and aggregate results.
+- Selection: Phase A never follows symlinks and excludes `.git`, ContextDesk
+  internals, secret/credential-shaped files, databases/logs, and common
+  build/dependency output. Dry run hashes and reports without remote writes.
+- Layout: file bodies are content-addressed beneath a stable workspace identity.
+  `manifests/latest.json` is replaced only after all required bodies succeed.
+  Unchanged reruns upload zero file bodies; partial retries reuse bodies and
+  cannot replace the previous completed manifest.
 
 ### Dependency audit (Phase A)
 
@@ -48,9 +60,11 @@ References: [Apache object_store project](https://github.com/apache/arrow-rs-obj
 [object_store 0.14.1 documentation](https://docs.rs/object_store/0.14.1/object_store/),
 and [`AmazonS3Builder` API](https://docs.rs/object_store/0.14.1/object_store/aws/struct.AmazonS3Builder.html).
 
-Phase A remains explicitly user-triggered backup/export. Local workspace roots
-remain authoritative. Restore, remote deletion, bidirectional sync, and the
-Phase B S3 index source are out of scope and remain unimplemented.
+Phase A is explicitly user-triggered backup/export. Local workspace roots remain
+authoritative. It does not claim backup encryption beyond configured TLS and
+server-side properties. Restore, remote deletion, bidirectional sync, lifecycle
+management, and the Phase B S3 index source are out of scope and remain
+unimplemented.
 
 ## Rejected alternatives
 

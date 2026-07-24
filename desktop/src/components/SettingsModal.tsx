@@ -7,6 +7,7 @@ import type { AppSetupState, PreflightReport } from "../lib/preflight";
 import type { SkinId } from "../lib/skins";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { AiSection } from "./settings/AiSection";
+import { BackupSection } from "./settings/BackupSection";
 import { ConnectorsSection } from "./settings/ConnectorsSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { ModulesSection } from "./settings/ModulesSection";
@@ -54,6 +55,7 @@ const NAV: {
   group: string;
 }[] = [
   { id: "workspace", label: "Workspace", icon: <IconWorkspace />, group: "Core" },
+  { id: "backup", label: "Backup", icon: <IconWorkspace />, group: "Core" },
   { id: "ai", label: "AI / Models", icon: <IconAi />, group: "Core" },
   {
     id: "connectors",
@@ -177,6 +179,8 @@ export function SettingsModal({
                 applyDefaultWorkspace={c.applyDefaultWorkspace}
               />
             ) : null}
+
+            {c.section === "backup" ? <BackupSection /> : null}
 
             {c.section === "ai" ? (
               <AiSection
