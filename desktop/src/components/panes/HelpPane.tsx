@@ -101,7 +101,9 @@ export function HelpPane({ request }: Props) {
             .flatMap((section) => section.pages)
             .find((candidate) => candidate.id === "product-overview") ??
           listed[0]?.pages[0];
-        if (initial && !request?.pageId && !request?.query) {
+        // Skip auto-open when palette hands off Search Help (focusSearch) so
+        // the search box keeps focus instead of the article title.
+        if (initial && !request?.pageId && !request?.query && !request?.focusSearch) {
           void openPage(initial.id);
         } else if (!initial && !request?.pageId && !request?.query) {
           setError("Bundled Help is unavailable in this installation.");
@@ -116,7 +118,7 @@ export function HelpPane({ request }: Props) {
     return () => {
       current = false;
     };
-  }, [openPage, request?.pageId, request?.query]);
+  }, [openPage, request?.pageId, request?.query, request?.focusSearch]);
 
   useEffect(() => {
     if (!request || requestHandledRef.current === request.requestId) return;

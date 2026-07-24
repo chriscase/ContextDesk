@@ -22,6 +22,7 @@ export async function openDirectoryDialog(
 /** Open a file picker; returns absolute path or null. */
 export async function openFileDialog(
   title = "Choose file",
+  filters?: Array<{ name: string; extensions: string[] }>,
 ): Promise<string | null> {
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -29,11 +30,33 @@ export async function openFileDialog(
       directory: false,
       multiple: false,
       title,
+      filters,
     });
     if (typeof selected === "string") return selected;
     return null;
   } catch {
     console.warn("[dialogs] file picker unavailable");
+    return null;
+  }
+}
+
+/** Save-file picker; returns absolute path or null. */
+export async function saveFileDialog(
+  title = "Save file",
+  defaultPath?: string,
+  filters?: Array<{ name: string; extensions: string[] }>,
+): Promise<string | null> {
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const selected = await save({
+      title,
+      defaultPath,
+      filters,
+    });
+    if (typeof selected === "string") return selected;
+    return null;
+  } catch {
+    console.warn("[dialogs] save picker unavailable");
     return null;
   }
 }

@@ -445,8 +445,30 @@ fn session_context_import_path(
     )
     .map_err(|e| e.to_string())?;
     let progress = TauriProcessProgress { app };
+    let p = std::path::Path::new(&path);
+    // Wizard "both"/session_context with a .zip must extract entries (not store the archive blob).
+    let is_zip = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    if is_zip && p.is_file() {
+        let data = std::fs::read(p).map_err(|e| format!("read zip: {e}"))?;
+        let entries = store
+            .import_zip_bytes_with_progress(
+                &data,
+                cd_core::session_context::DEFAULT_MAX_ZIP_NEST,
+                &progress,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        return entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| "zip contained no extractable entries".to_string());
+    }
     store
-        .import_file_with_progress(std::path::Path::new(&path), None, &progress, None)
+        .import_file_with_progress(p, None, &progress, None)
         .map_err(|e| e.to_string())
 }
 
@@ -3791,6 +3813,31 @@ impl From<&cd_core::memory::MemoryRecord> for DurableMemoryDto {
 
 // ── Log analysis surface (#362) — no secrets over IPC ─────────────────────
 
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LogCorpusStatsDto {
+    files: u64,
+    lines: u64,
+    templates: u64,
+    reduction_ratio: f64,
+    embedded: u64,
+    source_bytes: u64,
+    corpus_bytes: u64,
+    level_counts: std::collections::BTreeMap<String, u64>,
+    ts_min: Option<i64>,
+    ts_max: Option<i64>,
+    format_counts: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LogTopTemplateDto {
+    id: u64,
+    pattern: String,
+    count: u64,
+    severity: u8,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogCorpusSummaryDto {
@@ -3799,6 +3846,10 @@ struct LogCorpusSummaryDto {
     event_count: u64,
     template_count: u64,
     engine: String,
+    created_at: i64,
+    source_label: Option<String>,
+    stats: Option<LogCorpusStatsDto>,
+    top_templates: Vec<LogTopTemplateDto>,
 }
 
 #[derive(serde::Serialize)]
@@ -3841,6 +3892,31 @@ struct LogIngestReportDto {
     templates: u64,
     reduction_ratio: f64,
     embedded: u64,
+    files: u64,
+    source_bytes: u64,
+    corpus_bytes: u64,
+    level_counts: std::collections::BTreeMap<String, u64>,
+    ts_min: Option<i64>,
+    ts_max: Option<i64>,
+    format_counts: std::collections::BTreeMap<String, u64>,
+    top_templates: Vec<LogTopTemplateDto>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogPackageImportDto {
+    corpus_id: String,
+    name: String,
+    origin_corpus_id: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogTemplateRowDto {
+    id: u64,
+    pattern: String,
+    count: u64,
+    severity: u8,
 }
 
 fn log_cache_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
@@ -3850,24 +3926,138 @@ fn log_cache_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
     Ok(cache)
 }
 
+fn stats_dto(s: &cd_core::log_analysis::CorpusStats) -> LogCorpusStatsDto {
+    LogCorpusStatsDto {
+        files: s.files,
+        lines: s.lines,
+        templates: s.templates,
+        reduction_ratio: s.reduction_ratio,
+        embedded: s.embedded,
+        source_bytes: s.source_bytes,
+        corpus_bytes: s.corpus_bytes,
+        level_counts: s.level_counts.clone(),
+        ts_min: s.ts_min,
+        ts_max: s.ts_max,
+        format_counts: s.format_counts.clone(),
+    }
+}
+
+fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
+    let meta = c.meta().ok();
+    let s = c.summary();
+    let top = meta
+        .as_ref()
+        .map(|m| {
+            m.top_templates
+                .iter()
+                .map(|t| LogTopTemplateDto {
+                    id: t.id,
+                    pattern: t.pattern.clone(),
+                    count: t.count,
+                    severity: t.severity,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    LogCorpusSummaryDto {
+        id: s.id,
+        name: s.name,
+        event_count: s.event_count,
+        template_count: s.template_count,
+        engine: s.engine,
+        created_at: s.created_at,
+        source_label: s.source_label,
+        stats: s.stats.as_ref().map(stats_dto),
+        top_templates: top,
+    }
+}
+
 /// List disposable log corpora under app cache.
 #[tauri::command]
 fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let ids = cd_core::log_analysis::LogCorpus::list_ids(&cache).map_err(|e| e.to_string())?;
+    let summaries =
+        cd_core::log_analysis::LogCorpus::list_summaries(&cache).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for id in ids {
-        if let Ok(c) = cd_core::log_analysis::LogCorpus::open(&cache, &id) {
-            out.push(LogCorpusSummaryDto {
-                id: c.id().to_string(),
-                name: c.name().to_string(),
-                event_count: c.event_count() as u64,
-                template_count: c.template_count() as u64,
-                engine: c.event_engine().to_string(),
-            });
+    for s in summaries {
+        if let Ok(c) = cd_core::log_analysis::LogCorpus::open(&cache, &s.id) {
+            out.push(summary_dto(&c));
         }
     }
     Ok(out)
+}
+
+/// Full summary for one corpus (detail header).
+#[tauri::command]
+fn get_log_corpus(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<LogCorpusSummaryDto, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    Ok(summary_dto(&c))
+}
+
+/// List templates for a corpus (UI table).
+#[tauri::command]
+fn list_log_templates(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<LogTemplateRowDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(200) as usize;
+    let mut rows = c.list_templates();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.info.count));
+    Ok(rows
+        .into_iter()
+        .take(lim)
+        .map(|r| LogTemplateRowDto {
+            id: r.info.template_id,
+            pattern: r.info.pattern,
+            count: r.info.count,
+            severity: r.info.severity,
+        })
+        .collect())
+}
+
+/// Export a corpus package zip to a user path (full analysis package).
+#[tauri::command]
+fn export_log_corpus_package(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    path: String,
+) -> Result<String, String> {
+    let cache = log_cache_dir(&state)?;
+    let man =
+        cd_core::log_analysis::export_corpus_zip(&cache, &corpus_id, std::path::Path::new(&path))
+            .map_err(|e| e.to_string())?;
+    Ok(man.format_version)
+}
+
+/// Import a portable package zip (SoftWrite — creates disposable corpus).
+#[tauri::command]
+fn import_log_corpus_package_path(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<LogPackageImportDto, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let report = cd_core::log_analysis::import_corpus_zip_path(&cache, std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            h.set_active_log_corpus(Some(report.corpus_id.clone()));
+        }
+    }
+    Ok(LogPackageImportDto {
+        corpus_id: report.corpus_id,
+        name: report.name,
+        origin_corpus_id: report.origin_corpus_id,
+    })
 }
 
 /// Emits redacted multi-phase progress for long host ops (#445).
@@ -3892,12 +4082,14 @@ fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let host = state.host.lock().expect("host");
-    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
     // #359: product path uses policy-enforcing ingest (local default; cloud opt-in
     // requires explicit confirm args — UI does not pass cloud without confirm).
     let policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
-    let backend = host.log_embed_backend();
+    let backend = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        host.log_embed_backend()
+    };
     let progress = TauriProcessProgress { app };
     let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
         &cache,
@@ -3909,12 +4101,36 @@ fn ingest_log_path(
         None,
     )
     .map_err(|e| e.to_string())?;
+    // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
+    // the model (or user) to re-type the id.
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            h.set_active_log_corpus(Some(report.corpus_id.clone()));
+        }
+    }
     Ok(LogIngestReportDto {
         corpus_id: report.corpus_id,
         lines: report.stats.lines,
         templates: report.stats.templates as u64,
         reduction_ratio: report.stats.reduction_ratio,
         embedded: report.stats.embedded as u64,
+        files: report.stats.files as u64,
+        source_bytes: report.stats.source_bytes,
+        corpus_bytes: report.stats.corpus_bytes,
+        level_counts: report.stats.level_counts.clone(),
+        ts_min: report.stats.ts_min,
+        ts_max: report.stats.ts_max,
+        format_counts: report.stats.format_counts.clone(),
+        top_templates: report
+            .top_templates
+            .into_iter()
+            .map(|(id, pattern, count, severity)| LogTopTemplateDto {
+                id,
+                pattern,
+                count,
+                severity,
+            })
+            .collect(),
     })
 }
 
@@ -4006,7 +4222,37 @@ fn log_search(
 #[tauri::command]
 fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
+    // Clear active default if it pointed at this corpus.
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            if h.active_log_corpus() == Some(corpus_id.as_str()) {
+                h.set_active_log_corpus(None);
+            }
+        }
+    }
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
+}
+
+/// Set the host default log corpus so agent log tools can omit `corpus=` (wizard handoff).
+#[tauri::command]
+fn set_active_log_corpus(
+    state: State<'_, AppState>,
+    corpus_id: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_host(&state)?;
+    let mut host = state.host.lock().expect("host");
+    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
+    host.set_active_log_corpus(corpus_id);
+    Ok(host.active_log_corpus().map(|s| s.to_string()))
+}
+
+/// Current host default log corpus id (if any).
+#[tauri::command]
+fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    Ok(host.active_log_corpus().map(|s| s.to_string()))
 }
 
 /// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
@@ -4806,11 +5052,17 @@ pub fn run() {
             batch_approve_memory_candidates,
             purge_memory_gdpr,
             list_log_corpora,
+            get_log_corpus,
+            list_log_templates,
             ingest_log_path,
             log_cluster_problems,
             log_timeline,
             log_search,
             discard_log_corpus,
+            set_active_log_corpus,
+            get_active_log_corpus,
+            export_log_corpus_package,
+            import_log_corpus_package_path,
             write_memory_note,
             sql_ro_query,
             get_confluence_settings,

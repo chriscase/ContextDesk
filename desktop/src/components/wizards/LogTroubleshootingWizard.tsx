@@ -7,12 +7,20 @@ import {
   hostIngestLogPath,
   hostListenProcessProgress,
   hostSessionContextImportPath,
+  hostSetActiveLogCorpus,
+  type LogIngestReportDto,
   type ProcessProgressDto as HostProcessProgressDto,
 } from "../../lib/host";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
+import {
+  formatBytes,
+  formatReduction,
+  levelEntries,
+  statsBlurb,
+} from "../../lib/logStats";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
 import {
-  LOG_TRIAGE_STARTER_PROMPT,
+  buildLogTriageStarterPrompt,
   LOG_TROUBLESHOOTING_WIZARD,
 } from "./registry";
 import { SessionWizardShell } from "./SessionWizardShell";
@@ -57,6 +65,9 @@ export function LogTroubleshootingWizard({
     cancellable: p.cancellable,
   });
   const [corpusId, setCorpusId] = useState<string | null>(null);
+  const [ingestReport, setIngestReport] = useState<LogIngestReportDto | null>(
+    null,
+  );
   const [runDone, setRunDone] = useState(false);
 
   useEffect(() => {
@@ -89,11 +100,19 @@ export function LogTroubleshootingWizard({
     try {
       let cid: string | null = null;
       if (mode === "corpus" || mode === "both") {
+        // Host extract-and-ingest handles .zip paths (binary zip is not a log file).
         const report = await hostIngestLogPath(path, corpusName.trim() || "incident");
         cid = report.corpusId;
         setCorpusId(cid);
+        setIngestReport(report);
+        try {
+          await hostSetActiveLogCorpus(cid);
+        } catch {
+          // Non-fatal: seed prompt still carries corpus id.
+        }
       }
       if (mode === "session_context" || mode === "both") {
+        // Host path import extracts .zip into session context (does not store the archive as one blob).
         await hostSessionContextImportPath(sessionId, path);
       }
       setRunDone(true);
@@ -140,9 +159,14 @@ export function LogTroubleshootingWizard({
       return;
     }
     if (step.id === "ready") {
+      const seed = buildLogTriageStarterPrompt({
+        corpusId,
+        sessionContext: mode === "session_context" || mode === "both",
+        statsLine: ingestReport ? statsBlurb(ingestReport) : null,
+      });
       onComplete({
         wizardId: wizard.id,
-        composerSeed: LOG_TRIAGE_STARTER_PROMPT,
+        composerSeed: seed,
         skillPinId: wizard.skillPinId ?? "log-triage",
         corpusId,
         sessionId,
@@ -153,9 +177,14 @@ export function LogTroubleshootingWizard({
     }
     // welcome, mode, etc.
     if (stepIndex >= wizard.steps.length - 1) {
+      const seed = buildLogTriageStarterPrompt({
+        corpusId,
+        sessionContext: mode === "session_context" || mode === "both",
+        statsLine: ingestReport ? statsBlurb(ingestReport) : null,
+      });
       onComplete({
         wizardId: wizard.id,
-        composerSeed: LOG_TRIAGE_STARTER_PROMPT,
+        composerSeed: seed,
         skillPinId: wizard.skillPinId ?? "log-triage",
         corpusId,
         sessionId,
@@ -322,16 +351,21 @@ export function LogTroubleshootingWizard({
             error={error}
           />
           {runDone ? (
-            <p className="wizard-success">
-              Import finished
-              {corpusId ? (
-                <>
-                  {" "}
-                  — corpus <code>{corpusId}</code>
-                </>
+            <>
+              <p className="wizard-success">
+                Import finished
+                {corpusId ? (
+                  <>
+                    {" "}
+                    — corpus <code>{corpusId}</code>
+                  </>
+                ) : null}
+                .
+              </p>
+              {ingestReport ? (
+                <IngestStatsHero report={ingestReport} />
               ) : null}
-              .
-            </p>
+            </>
           ) : (
             <p className="muted">
               {busy
@@ -354,8 +388,69 @@ export function LogTroubleshootingWizard({
               Corpus id: <code>{corpusId}</code> (also available in the Logs pane).
             </p>
           ) : null}
+          {ingestReport ? <IngestStatsHero report={ingestReport} /> : null}
         </div>
       ) : null}
     </SessionWizardShell>
+  );
+}
+
+/** Post-ingest stats hero (run success + ready). */
+function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
+  const levels = levelEntries(report.levelCounts);
+  const tops = report.topTemplates?.slice(0, 6) ?? [];
+  return (
+    <div className="wizard-stats" data-testid="wizard-ingest-stats">
+      <p className="wizard-stats__blurb">{statsBlurb(report)}</p>
+      <dl className="process-progress__stats wizard-stats__grid">
+        <div>
+          <dt>Lines</dt>
+          <dd>{report.lines.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Templates</dt>
+          <dd>{report.templates.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Reduction</dt>
+          <dd>{formatReduction(report.reductionRatio)}</dd>
+        </div>
+        <div>
+          <dt>Files</dt>
+          <dd>{report.files?.toLocaleString?.() ?? report.files ?? "—"}</dd>
+        </div>
+        <div>
+          <dt>Source size</dt>
+          <dd>{formatBytes(report.sourceBytes)}</dd>
+        </div>
+        <div>
+          <dt>Corpus footprint</dt>
+          <dd>{formatBytes(report.corpusBytes)}</dd>
+        </div>
+        <div>
+          <dt>Embedded</dt>
+          <dd>{report.embedded?.toLocaleString?.() ?? report.embedded ?? "—"}</dd>
+        </div>
+      </dl>
+      {levels.length > 0 ? (
+        <div className="wizard-stats__levels" aria-label="Level mix">
+          {levels.map(({ level, count }) => (
+            <span key={level} className={`chip chip--level chip--${level}`}>
+              {level} {count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {tops.length > 0 ? (
+        <ul className="wizard-stats__tops" aria-label="Top templates">
+          {tops.map((t) => (
+            <li key={t.id}>
+              <span className="muted">sev={t.severity} n={t.count}</span>{" "}
+              <code>{t.pattern}</code>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
