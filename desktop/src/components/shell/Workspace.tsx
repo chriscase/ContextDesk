@@ -46,6 +46,7 @@ type Props = {
   source: { path: string | null; content: string } | null;
   todosKey: string | null;
   helpRequest?: HelpOpenRequest | null;
+  onOpenHelp?: (pageId: string) => void;
 };
 
 /** Workspace pane host (#146). */
@@ -59,6 +60,7 @@ export function Workspace({
   source,
   todosKey,
   helpRequest,
+  onOpenHelp,
 }: Props) {
   return (
     <div className="workspace">
@@ -81,7 +83,7 @@ export function Workspace({
           aria-labelledby="pane-tab-memory"
           className="pane-panel"
         >
-          <MemoryPane {...memory} />
+          <MemoryPane {...memory} onOpenHelp={onOpenHelp} />
         </div>
       ) : null}
       {pane === "compose" && compose ? (
@@ -111,7 +113,7 @@ export function Workspace({
           aria-labelledby="pane-tab-logs"
           className="pane-panel"
         >
-          <LogPane />
+          <LogPane onOpenHelp={onOpenHelp} />
         </div>
       ) : null}
       {pane === "harvest" ? (

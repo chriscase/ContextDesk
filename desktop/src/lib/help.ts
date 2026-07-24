@@ -8,6 +8,7 @@ export type HelpOpenRequest = {
   pageId?: string;
   anchor?: string;
   query?: string;
+  focusSearch?: boolean;
 };
 
 /** Parse only canonical in-app Help locators; never treat them as URLs or paths. */
@@ -21,12 +22,29 @@ export function parseHelpLocator(value: string): HelpLocation | null {
 
 export function helpOpenRequest(
   requestId: number,
-  location: { pageId?: string; anchor?: string; query?: string },
+  location: {
+    pageId?: string;
+    anchor?: string;
+    query?: string;
+    focusSearch?: boolean;
+  },
 ): HelpOpenRequest {
   return {
     requestId,
     pageId: location.pageId,
     anchor: location.anchor,
     query: location.query,
+    focusSearch: location.focusSearch,
   };
+}
+
+/** Stable contextual Help target for each Settings family. */
+export function helpPageForSettingsSection(section: string): string {
+  if (section === "ai" || section === "workspace" || section === "health") {
+    return "first-run";
+  }
+  if (section === "skills" || section === "modules") {
+    return "skills-context-packs";
+  }
+  return "product-overview";
 }

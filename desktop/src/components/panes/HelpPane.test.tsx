@@ -171,4 +171,17 @@ describe("HelpPane product path (#438)", () => {
     ).toBeTruthy();
     expect(hostGetHelpPage).toHaveBeenCalledWith("log-analysis-pipeline");
   });
+
+  it("focuses local search when the palette hands off Search Help", async () => {
+    render(
+      <HelpPane
+        request={{
+          requestId: 8,
+          focusSearch: true,
+        }}
+      />,
+    );
+    const search = screen.getByRole("searchbox", { name: "Search Help" });
+    await waitFor(() => expect(document.activeElement).toBe(search));
+  });
 });

@@ -5,6 +5,7 @@
 import type { ReactNode } from "react";
 import type { AppSetupState, PreflightReport } from "../lib/preflight";
 import type { SkinId } from "../lib/skins";
+import { helpPageForSettingsSection } from "../lib/help";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { AiSection } from "./settings/AiSection";
 import { BackupSection } from "./settings/BackupSection";
@@ -45,6 +46,8 @@ type Props = {
   onSaveSetup: (next: AppSetupState) => void;
   onRecheckHost?: () => void | Promise<void>;
   hostReport?: PreflightReport | null;
+  /** Leave Settings and open a contextual bundled Help page. */
+  onOpenHelp?: (pageId: string) => void;
 };
 
 /** Grouped IA (#396): Core / Sources / Extensions / Preferences / System / Health */
@@ -92,6 +95,7 @@ export function SettingsModal({
   onSaveSetup,
   onRecheckHost,
   hostReport,
+  onOpenHelp,
 }: Props) {
   const c = useSettingsController({
     open,
@@ -144,14 +148,27 @@ export function SettingsModal({
             <div className="settings-header__title">
               {NAV.find((n) => n.id === c.section)?.label}
             </div>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={c.requestClose}
-              title="Close"
-            >
-              <IconClose />
-            </button>
+            <div className="settings-header__actions">
+              {onOpenHelp ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  onClick={() =>
+                    onOpenHelp(helpPageForSettingsSection(c.section))
+                  }
+                >
+                  Learn more
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={c.requestClose}
+                title="Close"
+              >
+                <IconClose />
+              </button>
+            </div>
           </header>
           <div className="settings-content">
             {c.section === "health" || c.section === "preflight" ? (

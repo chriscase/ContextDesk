@@ -10,14 +10,14 @@ export const LOG_TROUBLESHOOTING_WIZARD: WizardDef = {
   description:
     "Point at a dump, ingest or attach logs, pin the triage skill, and start a ready chat.",
   thumbnailSvgId: "pipeline",
-  helpPageId: "logs-pipeline",
+  helpPageId: "log-analysis-pipeline",
   skillPinId: "log-triage",
   steps: [
     {
       id: "welcome",
       title: "Welcome",
       stageSvgId: "pipeline",
-      helpPageId: "logs-pipeline",
+      helpPageId: "log-analysis-pipeline",
       body: "info",
       allowSkip: true,
     },

@@ -118,13 +118,19 @@ export function App() {
     typeof helpOpenRequest
   > | null>(null);
   const openHelp = useCallback(
-    (location: Partial<HelpLocation> & { query?: string } = {}) => {
+    (
+      location: Partial<HelpLocation> & {
+        query?: string;
+        focusSearch?: boolean;
+      } = {},
+    ) => {
       helpRequestSequence.current += 1;
       setHelpRequest(
         helpOpenRequest(helpRequestSequence.current, {
           pageId: location.pageId,
           anchor: location.anchor,
           query: location.query,
+          focusSearch: location.focusSearch,
         }),
       );
       setShellPane("help");
@@ -299,25 +305,12 @@ export function App() {
       } else if (outcome.openPane === "logs") {
         shell.setPane("logs");
       } else if (outcome.openPane === "help") {
-        // Feature-detect Help pane (#434) — fall back to chat.
-        const helpOk =
-          typeof (shell as { setPane: (p: string) => void }).setPane ===
-          "function";
-        if (helpOk) {
-          try {
-            // PaneId may not include help yet — only open when type allows.
-            shell.setPane("chat");
-          } catch {
-            shell.setPane("chat");
-          }
-        } else {
-          shell.setPane("chat");
-        }
+        openHelp({ pageId: outcome.helpPageId ?? "product-overview" });
       } else {
         shell.setPane("chat");
       }
     },
-    [persistSession, setSessions, shell],
+    [openHelp, persistSession, setSessions, shell],
   );
 
   const paletteItems: PaletteItem[] = useMemo(() => {
@@ -344,6 +337,18 @@ export function App() {
         id: "action:settings",
         label: "Open Settings",
         keywords: [",", "health"],
+        group: "action",
+      },
+      {
+        id: "action:open-help",
+        label: "Open Help",
+        keywords: ["documentation", "guide", "support", "shortcut"],
+        group: "action",
+      },
+      {
+        id: "action:search-help",
+        label: "Search Help…",
+        keywords: ["documentation", "find", "guide", "support"],
         group: "action",
       },
       {
@@ -389,6 +394,14 @@ export function App() {
         shell.openSettings("health", chatScrollRef.current);
         return;
       }
+      if (id === "action:open-help") {
+        openHelp({ pageId: "product-overview" });
+        return;
+      }
+      if (id === "action:search-help") {
+        openHelp({ focusSearch: true });
+        return;
+      }
       if (id === "action:rename" && activeSession) {
         setRenameTarget({ id: activeSession.id, title: activeSession.title });
         return;
@@ -411,6 +424,7 @@ export function App() {
       setActiveSessionId,
       ensureActiveSession,
       startWizard,
+      openHelp,
     ],
   );
 
@@ -420,6 +434,7 @@ export function App() {
       shell.setPane("chat");
     },
     onOpenPalette: openPalette,
+    onOpenHelp: () => openHelp({ pageId: "product-overview" }),
     onOpenSettings: () =>
       shell.openSettings("health", chatScrollRef.current),
     onPrevSession: () => switchSessionByDelta(-1),
@@ -440,6 +455,13 @@ export function App() {
     paletteOpen,
     settingsOpen: shell.settingsOpen,
     permissionOpen: Boolean(turn.permission),
+    modalOpen:
+      paletteOpen ||
+      shell.settingsOpen ||
+      Boolean(turn.permission) ||
+      wizardCatalogOpen ||
+      Boolean(activeWizardId) ||
+      Boolean(renameTarget),
   });
 
   const applyAiFromLaunch = async (payload: WizardApplyPayload) => {
@@ -581,6 +603,10 @@ export function App() {
           onSaveSetup={shell.onSaveSetup}
           onRecheckHost={shell.refreshHostPreflight}
           hostReport={shell.hostPreflightReport}
+          onOpenHelp={(pageId) => {
+            shell.closeSettings(() => {});
+            openHelp({ pageId });
+          }}
         />
       ) : (
         <div className="app-chrome">
@@ -846,6 +872,7 @@ export function App() {
                 }}
                 todosKey={sessionId ? `cd-todos-${sessionId}` : null}
                 helpRequest={helpRequest}
+                onOpenHelp={(pageId) => openHelp({ pageId })}
               />
             </div>
           </div>
@@ -886,12 +913,11 @@ export function App() {
             setWizardSessionId(null);
           }}
           onComplete={onWizardComplete}
-          helpAvailable={false}
-          onLearnMore={() => {
-            // Help Center (#434) not required — keep chat usable.
+          helpAvailable
+          onLearnMore={(pageId) => {
             setActiveWizardId(null);
             setWizardSessionId(null);
-            shell.setPane("chat");
+            openHelp({ pageId });
           }}
         />
       ) : null}
@@ -904,7 +930,12 @@ export function App() {
             setWizardSessionId(null);
           }}
           onComplete={onWizardComplete}
-          helpAvailable={false}
+          helpAvailable
+          onLearnMore={(pageId) => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+            openHelp({ pageId });
+          }}
         />
       ) : null}
       <PermissionModal

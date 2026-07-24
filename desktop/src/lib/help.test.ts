@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { helpOpenRequest, parseHelpLocator } from "./help";
+import {
+  helpOpenRequest,
+  helpPageForSettingsSection,
+  parseHelpLocator,
+} from "./help";
 
 describe("canonical Help deep links (#439)", () => {
   it("accepts stable page and anchor ids only", () => {
@@ -33,6 +37,13 @@ describe("canonical Help deep links (#439)", () => {
       pageId: "permission-tiers",
       anchor: "tier-matrix",
       query: undefined,
+      focusSearch: undefined,
     });
+  });
+
+  it("routes Settings families to real contextual pages", () => {
+    expect(helpPageForSettingsSection("ai")).toBe("first-run");
+    expect(helpPageForSettingsSection("skills")).toBe("skills-context-packs");
+    expect(helpPageForSettingsSection("appearance")).toBe("product-overview");
   });
 });

@@ -52,6 +52,18 @@ webview.
 > A remote model can receive the context selected for a turn. Review the
 > provider and workspace before asking about sensitive material.
 
+## Open Help from anywhere
+
+Use the **Help** workspace tab, choose **Open Help** or **Search Help…** from the
+command palette, or press **Command+Shift+/** on macOS and **Ctrl+Shift+/** on
+Windows or Linux. The shortcut is ignored while a modal workflow owns focus.
+
+| Entry point | Result |
+| --- | --- |
+| Open Help | Opens this bundled overview |
+| Search Help… | Opens Help with the search box focused |
+| Learn more | Opens the page for the current Logs, Memory, Settings, or wizard context |
+
 ## What to do next
 
 Start with help://first-run, then read help://chat-citations-context to

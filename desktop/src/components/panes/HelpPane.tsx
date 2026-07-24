@@ -51,6 +51,7 @@ export function HelpPane({ request }: Props) {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const requestHandledRef = useRef<number | null>(null);
 
   const pageSummaries = useMemo(
@@ -120,6 +121,9 @@ export function HelpPane({ request }: Props) {
   useEffect(() => {
     if (!request || requestHandledRef.current === request.requestId) return;
     requestHandledRef.current = request.requestId;
+    if (request.focusSearch) {
+      window.requestAnimationFrame(() => searchRef.current?.focus());
+    }
     if (request.query?.trim()) {
       setQuery(request.query.trim());
       return;
@@ -216,6 +220,7 @@ export function HelpPane({ request }: Props) {
           <div className="help-search__control">
             <span aria-hidden>⌕</span>
             <input
+              ref={searchRef}
               id="help-search-input"
               type="search"
               value={query}
