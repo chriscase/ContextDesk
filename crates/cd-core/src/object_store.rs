@@ -388,7 +388,7 @@ impl ObjectOperation {
         self.deadline
     }
 
-    async fn read(
+    pub(crate) async fn read(
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),
         buffer: &mut [u8],
@@ -410,7 +410,7 @@ impl ObjectOperation {
         }
     }
 
-    async fn write_all(
+    pub(crate) async fn write_all(
         &self,
         writer: &mut (dyn AsyncWrite + Unpin + Send),
         bytes: &[u8],
@@ -432,7 +432,7 @@ impl ObjectOperation {
         }
     }
 
-    async fn flush(
+    pub(crate) async fn flush(
         &self,
         writer: &mut (dyn AsyncWrite + Unpin + Send),
     ) -> Result<(), ObjectStoreError> {

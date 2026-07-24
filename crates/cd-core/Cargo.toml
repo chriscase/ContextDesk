@@ -43,11 +43,26 @@ fastembed = { version = "5", optional = true, default-features = false, features
   "ort-download-binaries-rustls-tls",
   "hf-hub-rustls-tls",
 ] }
+# Optional S3-compatible transport (#418). Defaults are disabled so the SDK's
+# unrelated local-filesystem backend is not compiled. The implementation uses
+# `AmazonS3Builder::new` with explicit runtime credentials and never invokes
+# its environment/instance-metadata loaders.
+object_store_sdk = { package = "object_store", version = "0.14.1", optional = true, default-features = false, features = [
+  "aws-base",
+  "reqwest",
+  "ring",
+] }
+reqwest13 = { package = "reqwest", version = "0.13.4", optional = true, default-features = false, features = [
+  "rustls-no-provider",
+  "stream",
+] }
 
 [features]
 default = []
 # Local ONNX template embeddings via fastembed-rs (downloads model on first use).
 log-fastembed = ["dep:fastembed"]
+# Explicit runtime credentials + SSRF-pinned S3-compatible requests.
+s3-object-store = ["dep:object_store_sdk", "dep:reqwest13"]
 
 [dev-dependencies]
 tempfile = "3"
