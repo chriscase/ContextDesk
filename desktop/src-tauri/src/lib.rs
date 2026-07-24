@@ -3017,8 +3017,7 @@ async fn probe_ai_gateway_cmd(
     let mut cfg = state.config.lock().expect("config").clone();
     for m in result.models.iter().chain(result.chat_candidates.iter()) {
         if let Some(tok) = m.context_tokens {
-            cfg.model_context_budgets
-                .note_declared_tokens(&m.id, tok);
+            cfg.model_context_budgets.note_declared_tokens(&m.id, tok);
             any = true;
         }
     }
