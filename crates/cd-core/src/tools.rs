@@ -50,6 +50,8 @@ pub mod names {
     pub const CONFLUENCE_GET_PAGE: &str = "confluence_get_page";
     /// Confluence child pages or space roots (read-only). #326
     pub const CONFLUENCE_LIST_CHILDREN: &str = "confluence_list_children";
+    /// Confluence space discovery (read-only). #452
+    pub const CONFLUENCE_LIST_SPACES: &str = "confluence_list_spaces";
     /// Confluence ancestors breadcrumb (read-only). #326
     pub const CONFLUENCE_GET_ANCESTORS: &str = "confluence_get_ancestors";
     /// Confluence attachment metadata (read-only). #326
@@ -169,7 +171,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::CONFLUENCE_LIST_CHILDREN.into(),
-            description: "List Confluence child pages of a page_id, or space root pages when `space` is a space key (e.g. ENG). Read-only tree browse. Prefer this after confluence_search. Space keys come from Settings → Connectors → Confluence allowlist (empty allowlist still allows read if the PAT can access the space)."
+            description: "List Confluence child pages of a page_id, or space root pages when `space` is a space key (e.g. ENG). Read-only tree browse. Prefer this after confluence_search or confluence_list_spaces. Space keys come from Settings → Connectors → Confluence allowlist (empty allowlist still allows read if the PAT can access the space)."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
@@ -179,6 +181,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "space": { "type": "string", "description": "Space key — list root pages when page_id omitted" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 25 },
                     "start": { "type": "integer", "minimum": 0 }
+                }
+            }),
+        },
+        ToolSpec {
+            name: names::CONFLUENCE_LIST_SPACES.into(),
+            description: "List Confluence spaces the PAT can see (key + name, capped). Read-only discovery. Use to pick space keys before confluence_list_children or harvest. Does not change Settings allowlist."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max spaces (default 50)" }
                 }
             }),
         },

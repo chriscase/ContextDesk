@@ -1,6 +1,9 @@
+import { useState } from "react";
 import {
   hostSaveConfluence,
   hostTestConfluence,
+  hostListConfluenceSpaces,
+  type ConfluenceSpaceDto,
   hostTestX,
   type ConnectorDto,
   type NewsSourceDto,
@@ -74,6 +77,36 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
     xStatus,
     setXStatus,
   } = props;
+  const [cfDiscovered, setCfDiscovered] = useState<ConfluenceSpaceDto[]>([]);
+  const [cfDiscoverBusy, setCfDiscoverBusy] = useState(false);
+  const [cfSelectedKeys, setCfSelectedKeys] = useState<Record<string, boolean>>(
+    {},
+  );
+
+  const mergeSpacesIntoDraft = (keys: string[]) => {
+    const existing = (draft.confluence?.spaces ?? "")
+      .split(/[,\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const set = new Set(existing.map((s) => s.toUpperCase()));
+    for (const k of keys) {
+      if (!set.has(k.toUpperCase())) {
+        existing.push(k);
+        set.add(k.toUpperCase());
+      }
+    }
+    setDraft((d) => ({
+      ...d,
+      confluence: {
+        enabled: d.confluence?.enabled ?? true,
+        baseUrl: d.confluence?.baseUrl ?? "",
+        spaces: existing.join(", "),
+        hasToken: d.confluence?.hasToken ?? false,
+        writeEnabled: d.confluence?.writeEnabled ?? false,
+      },
+    }));
+  };
+
   return (
 <div>
   <p className="section-lead">
@@ -858,8 +891,9 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
       </ol>
       <p>
         The PAT is stored only in the OS keychain. Tools:{" "}
-        <code>confluence_search</code>,{" "}
-        <code>confluence_get_page</code>.
+        <code>confluence_search</code>, <code>confluence_get_page</code>,{" "}
+        <code>confluence_list_children</code>,{" "}
+        <code>confluence_list_spaces</code>.
       </p>
     </HelpTitle>
   <ToggleField
@@ -990,8 +1024,8 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
   />
   <TextField
     id={`${baseId}-cf-spaces`}
-    label="Space keys (optional allowlist)"
-    hint="Comma-separated, e.g. ENG, DOCS. Empty = no extra filter."
+    label="Space keys (allowlist)"
+    hint="Comma-separated keys, e.g. ENG, DOCS. Empty = product does not filter RO search/browse; harvest and writes still require keys. Discover spaces below to add keys, then Save."
     value={draft.confluence?.spaces ?? ""}
     onChange={(e) =>
       setDraft((d) => ({
@@ -1001,6 +1035,7 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
           baseUrl: d.confluence?.baseUrl ?? "",
           spaces: e.target.value,
           hasToken: d.confluence?.hasToken ?? false,
+          writeEnabled: d.confluence?.writeEnabled ?? false,
         },
       }))
     }
@@ -1049,9 +1084,94 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
         })();
       }}
     >
-      Test configuration
+      Test connection
+    </button>
+    <button
+      type="button"
+      className="btn btn--ghost"
+      disabled={cfDiscoverBusy}
+      onClick={() => {
+        void (async () => {
+          setCfDiscoverBusy(true);
+          setCfStatus(null);
+          try {
+            await hostSaveConfluence({
+              enabled: draft.confluence?.enabled ?? false,
+              baseUrl: draft.confluence?.baseUrl ?? "",
+              spaces: draft.confluence?.spaces ?? "",
+              pat: cfTokenDraft.trim() || undefined,
+              writeEnabled: draft.confluence?.writeEnabled ?? false,
+            });
+            const list = await hostListConfluenceSpaces(50);
+            setCfDiscovered(list);
+            const sel: Record<string, boolean> = {};
+            for (const s of list) sel[s.key] = false;
+            setCfSelectedKeys(sel);
+            setCfStatus(
+              list.length
+                ? `Found ${list.length} space(s). Select keys to add, then Add to allowlist and Save.`
+                : "No spaces returned — check PAT scopes.",
+            );
+          } catch (e) {
+            setCfStatus(e instanceof Error ? e.message : String(e));
+            setCfDiscovered([]);
+          } finally {
+            setCfDiscoverBusy(false);
+          }
+        })();
+      }}
+    >
+      {cfDiscoverBusy ? "Discovering…" : "Discover spaces"}
     </button>
   </div>
+  {cfDiscovered.length > 0 ? (
+    <div className="settings-connector-block" aria-label="Discovered Confluence spaces">
+      <p className="field__hint">
+        Remote spaces (not yet saved). Select keys to merge into the allowlist
+        field, then Save settings.
+      </p>
+      <ul className="connector-space-list">
+        {cfDiscovered.map((s) => (
+          <li key={s.key}>
+            <label className="wizard-check">
+              <input
+                type="checkbox"
+                checked={Boolean(cfSelectedKeys[s.key])}
+                onChange={(e) =>
+                  setCfSelectedKeys((prev) => ({
+                    ...prev,
+                    [s.key]: e.target.checked,
+                  }))
+                }
+              />
+              <span>
+                <code>{s.key}</code> — {s.name}
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <button
+        type="button"
+        className="btn btn--ghost"
+        onClick={() => {
+          const keys = Object.entries(cfSelectedKeys)
+            .filter(([, on]) => on)
+            .map(([k]) => k);
+          if (keys.length === 0) {
+            setCfStatus("Select at least one space key.");
+            return;
+          }
+          mergeSpacesIntoDraft(keys);
+          setCfStatus(
+            `Added ${keys.join(", ")} to allowlist draft — click Save to persist.`,
+          );
+        }}
+      >
+        Add selected to allowlist
+      </button>
+    </div>
+  ) : null}
   {cfStatus ? (
     <p className="section-lead" role="status">
       {cfStatus}

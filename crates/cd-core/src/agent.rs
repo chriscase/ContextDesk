@@ -379,7 +379,11 @@ pub async fn run_agent_turn_with_sink(
 
     let specs = host.specs();
     let tool_names: Vec<&str> = specs.iter().map(|t| t.name.as_str()).collect();
-    let system_content = system_policy_with_tools(&tool_names);
+    let mut system_content = system_policy_with_tools(&tool_names);
+    // #452 / #458: bounded Confluence guidance when connector + PAT present (no secrets).
+    if let Some(hint) = host.confluence_agent_hint() {
+        system_content.push_str(&hint);
+    }
 
     if history.is_empty() {
         history.push(ChatMessage {

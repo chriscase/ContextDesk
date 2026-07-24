@@ -57,6 +57,11 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Session process wizard shell | Shipped | desktop/src/components/wizards/SessionWizardShell.tsx:SessionWizardShell | #444 #442 |
 | Log troubleshooting guided wizard | Shipped | desktop/src/components/wizards/LogTroubleshootingWizard.tsx:LogTroubleshootingWizard | #446 #442 |
 | Optional guided-setup catalog entry | Shipped | desktop/src/components/wizards/WizardCatalog.tsx:WizardCatalog | #447 #442 |
+| Confluence error taxonomy | Shipped | crates/cd-core/src/confluence_ro.rs:classify_confluence_http | #457 #452 |
+| Confluence list spaces (RO) | Shipped | crates/cd-core/src/confluence_ro.rs:list_spaces | #456 #452 |
+| Confluence connection probe | Shipped | crates/cd-core/src/confluence_ro.rs:probe_connection | #455 #452 |
+| Confluence agent enablement hint | Shipped | crates/cd-core/src/tool_host.rs:confluence_agent_hint | #458 #452 |
+| Confluence 429 retry | Shipped | crates/cd-core/src/confluence_ro.rs:confluence_get_json_with_retry | #459 #452 |
 | Memory Phase-2 rule-based cue extract | Shipped | crates/cd-core/src/memory/cue.rs:CueExtractor | #381 |
 | Memory candidate review inbox | Shipped | crates/cd-core/src/memory/candidates.rs:CandidateInbox | #382 |
 | Memory salience/confidence + dedup proposals | Shipped | crates/cd-core/src/memory/score.rs:score_candidate | #383 |
