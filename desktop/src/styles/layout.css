@@ -499,12 +499,15 @@ html[data-platform="macos"] .titlebar {
   display: flex;
   gap: 2px;
   padding: 0 var(--space-3);
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg-panel);
 }
 
 .pane-tabs button {
   position: relative;
+  flex: 0 0 auto;
   padding: 7px 11px 6px;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   font-size: var(--text-xs);
@@ -874,5 +877,4 @@ button.citation-chip:hover {
 .tool-row__detail--tall {
   max-height: 60vh;
 }
-
 

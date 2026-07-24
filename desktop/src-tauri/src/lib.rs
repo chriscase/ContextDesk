@@ -7,6 +7,7 @@ use cd_core::config::{
     WorkspaceConfig, XSettings, CONFLUENCE_PAT_REF, X_API_KEY_REF,
 };
 use cd_core::discovery::{discover_local, ollama_reachable, LocalCandidate};
+use cd_core::help::{HelpIndex, HelpPage, HelpSearchHit, HelpSection};
 use cd_core::keychain_store::{
     key_ref_confluence_pat, key_ref_for_profile, key_ref_x_api_key, looks_like_raw_secret,
     KeychainSecretStore, SecretStore,
@@ -59,6 +60,8 @@ struct AppState {
     index_watch: Mutex<Option<cd_core::index_watch::IndexWatchHandle>>,
     /// Background index lifecycle (#117) — search works while Indexing.
     index_status: Arc<Mutex<cd_core::index::IndexStatus>>,
+    /// Validated, bundled product Help. This never points at a workspace root.
+    help: Mutex<Option<Arc<HelpIndex>>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -4479,6 +4482,105 @@ fn sql_ro_query(
     cd_core::sql_ro::execute_sqlite_ro(&path, &sql).map_err(|e| e.to_string())
 }
 
+// ── Bundled product Help (#438) ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct HelpAssetDto {
+    mime: String,
+    data_url: String,
+}
+
+fn load_bundled_help(app: &tauri::App) -> Option<Arc<HelpIndex>> {
+    use tauri::Manager;
+
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("help"));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("docs")
+                .join("help"),
+        );
+    }
+    candidates
+        .into_iter()
+        .find_map(|root| HelpIndex::load(root).ok().map(Arc::new))
+}
+
+fn help_index(state: &AppState) -> Result<Arc<HelpIndex>, String> {
+    state
+        .help
+        .lock()
+        .map_err(|_| "Bundled Help is temporarily unavailable.".to_string())?
+        .clone()
+        .ok_or_else(|| "Bundled Help is unavailable in this installation.".to_string())
+}
+
+#[tauri::command]
+fn list_help_sections(state: State<'_, AppState>) -> Result<Vec<HelpSection>, String> {
+    Ok(help_index(&state)?.sections())
+}
+
+#[tauri::command]
+fn get_help_page(state: State<'_, AppState>, id: String) -> Result<HelpPage, String> {
+    help_index(&state)?
+        .page(&id)
+        .map_err(|_| "That Help page is unavailable.".to_string())
+}
+
+#[tauri::command]
+fn search_help_pages(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<HelpSearchHit>, String> {
+    let index = help_index(&state)?;
+    Ok(index.search_keyword(&query, limit.unwrap_or(8)))
+}
+
+#[tauri::command]
+fn get_help_asset(
+    state: State<'_, AppState>,
+    page_id: String,
+    path: String,
+) -> Result<HelpAssetDto, String> {
+    let (mime, bytes) = help_index(&state)?
+        .asset(&page_id, &path)
+        .map_err(|_| "That Help illustration is unavailable.".to_string())?;
+    let encoded = base64_standard(&bytes);
+    Ok(HelpAssetDto {
+        data_url: format!("data:{mime};base64,{encoded}"),
+        mime,
+    })
+}
+
+fn base64_standard(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPHABET[(a >> 2) as usize] as char);
+        out.push(ALPHABET[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(c & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -4509,6 +4611,7 @@ pub fn run() {
             message: "Index not started".into(),
             ..Default::default()
         })),
+        help: Mutex::new(None),
     };
     let _ = ensure_host(&state);
 
@@ -4516,6 +4619,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // Opt-in signed updates (#173). Check/install only via Settings — never silent.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(state)
         .setup(|app| {
             // Dark window/webview fill before React mounts (avoids white flash).
             use tauri::Manager;
@@ -4523,11 +4627,19 @@ pub fn run() {
                 let dark = tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff);
                 let _ = win.set_background_color(Some(dark));
             }
+            let help = load_bundled_help(app);
+            if help.is_none() {
+                tracing::warn!("bundled Help corpus unavailable");
+            }
+            *app.state::<AppState>().help.lock().expect("help") = help;
             Ok(())
         })
-        .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_branding,
+            list_help_sections,
+            get_help_page,
+            search_help_pages,
+            get_help_asset,
             session_context_list,
             session_context_import_path,
             session_context_import_bytes,
@@ -4644,3 +4756,40 @@ pub fn run() {
 
 #[cfg(test)]
 mod s3_backup_host_tests;
+
+#[cfg(test)]
+mod help_host_tests {
+    use super::*;
+
+    #[test]
+    fn help_asset_data_url_encoding_is_standard_and_bounded_to_svg_bytes() {
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(base64_standard(b"f"), "Zg==");
+        assert_eq!(base64_standard(b"fo"), "Zm8=");
+        assert_eq!(base64_standard(b"<svg/>"), "PHN2Zy8+");
+    }
+
+    #[test]
+    fn help_packaging_maps_a_validated_corpus_to_the_installed_resource() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config");
+        assert_eq!(
+            config["bundle"]["resources"]["../../docs/help"],
+            serde_json::json!("help")
+        );
+
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs")
+            .join("help");
+        let index = HelpIndex::load(source_root).expect("checked-in corpus");
+        assert!(index.len() >= 7);
+        assert_eq!(
+            index
+                .search_keyword("log analysis", 1)
+                .first()
+                .map(|hit| hit.page_id.as_str()),
+            Some("log-analysis-pipeline")
+        );
+    }
+}
