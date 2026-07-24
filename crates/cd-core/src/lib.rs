@@ -63,6 +63,7 @@ pub mod tools;
 pub mod vector_index;
 pub mod web_research;
 pub mod workspace;
+pub mod workspace_backup;
 pub mod x_search;
 
 pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
