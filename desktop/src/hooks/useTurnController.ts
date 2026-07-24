@@ -141,6 +141,7 @@ export function useTurnController(args: Args) {
       const sess = sessions.find((s) => s.id === sid) ?? target;
       const sessionModel = sess?.chatModel ?? null;
       const sessionProvider = sess?.providerProfileId ?? null;
+      const pinnedSkillId = sess?.pinnedSkillId ?? null;
       const metaAtSend: MessageMetaDto = snapshotMessageMeta({
         sessionModel,
         sessionProvider,
@@ -251,6 +252,7 @@ export function useTurnController(args: Args) {
               return all.map((s) => (s.id === sid ? updated : s));
             });
           },
+          pinnedSkillId,
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);

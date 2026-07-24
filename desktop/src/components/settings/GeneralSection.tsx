@@ -7,8 +7,11 @@ import {
   hostInstallUpdate,
   hostSetAmbientRecallEnabled,
   hostSetHybridRetrieval,
+  hostSourceGitFetch,
+  hostSourceGitStatus,
   type BrandingDto,
   type RouterBudgetDto,
+  type SourceGitStatusDto,
 } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
 import { TextField } from "../forms";
@@ -35,6 +38,9 @@ export function GeneralSection({
   const [identity, setIdentity] = useState<BrandingDto | null>(null);
   const [pollEnabled, setPollEnabled] = useState(false);
   const [pollHours, setPollHours] = useState(24);
+  const [gitStatus, setGitStatus] = useState<SourceGitStatusDto | null>(null);
+  const [gitBusy, setGitBusy] = useState(false);
+  const [gitNote, setGitNote] = useState<string | null>(null);
 
   useEffect(() => {
     void hostGetHybridRetrieval().then((v) => {
@@ -49,6 +55,7 @@ export function GeneralSection({
       setPollEnabled(p.enabled);
       setPollHours(p.intervalHours);
     });
+    void hostSourceGitStatus().then((s) => setGitStatus(s));
   }, []);
 
   const onCheckUpdates = async () => {
@@ -175,6 +182,69 @@ export function GeneralSection({
         </button>
       </div>
       {updateNote ? <p className="field__hint">{updateNote}</p> : null}
+
+      <h3 className="settings-connector-block__title">
+        Source-run update (git checkout)
+      </h3>
+      <p className="field__hint" data-testid="source-git-update">
+        For developers running from a clone — <strong>not</strong> the signed
+        installer updater above. Never hard-resets a dirty tree; fetch is
+        explicit only.
+      </p>
+      {gitStatus ? (
+        <p className="field__hint" role="status">
+          {gitStatus.summary}
+        </p>
+      ) : (
+        <p className="field__hint">Git status unavailable outside Tauri.</p>
+      )}
+      {gitStatus?.isGitRepo ? (
+        <>
+          <pre className="tool-row__detail">{gitStatus.rebuildHint}</pre>
+          <div className="workspace-root-actions">
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={gitBusy}
+              onClick={() => {
+                setGitBusy(true);
+                setGitNote(null);
+                void hostSourceGitFetch()
+                  .then((s) => {
+                    setGitStatus(s);
+                    setGitNote("Fetched remotes. Review ahead/behind above.");
+                  })
+                  .catch((e) => {
+                    setGitNote(
+                      e instanceof Error ? e.message : "git fetch failed",
+                    );
+                  })
+                  .finally(() => setGitBusy(false));
+              }}
+            >
+              {gitBusy ? "Fetching…" : "Fetch remotes"}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={gitBusy}
+              onClick={() => {
+                void hostSourceGitStatus().then((s) => setGitStatus(s));
+              }}
+            >
+              Refresh status
+            </button>
+          </div>
+          {gitStatus.dirty ? (
+            <div className="callout callout--warn" role="status">
+              Working tree is dirty — stash or commit before <code>git pull</code>
+              . This UI will not hard-reset.
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {gitNote ? <p className="field__hint">{gitNote}</p> : null}
+
       <h3 className="settings-connector-block__title">Hybrid retrieval</h3>
       <p className="field__hint">
         Opt-in hybrid scoring for <code>search_kb</code> (keyword + recency +

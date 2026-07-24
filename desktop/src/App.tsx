@@ -35,7 +35,7 @@ import {
 } from "./lib/host";
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
-import { foldPreview } from "./lib/session";
+import { foldPreview, nowIso } from "./lib/session";
 import { nextSkinId } from "./lib/skins";
 import { SplashScreen } from "./components/launch/SplashScreen";
 import { ContextDeskMark } from "./components/launch/ContextDeskMark";
@@ -568,6 +568,20 @@ export function App() {
                     shell.openSettings(s ?? "health", chatScrollRef.current),
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
+                  pinnedSkillId: activeSession?.pinnedSkillId ?? null,
+                  onPinnedSkillChange: (skillId) => {
+                    if (!resolvedSessionId) return;
+                    setSessions((all) => {
+                      const next = all.map((s) =>
+                        s.id === resolvedSessionId
+                          ? { ...s, pinnedSkillId: skillId, updatedAt: nowIso() }
+                          : s,
+                      );
+                      const cur = next.find((s) => s.id === resolvedSessionId);
+                      if (cur) void persistSession(cur);
+                      return next;
+                    });
+                  },
                   setMemoryPath: shell.setMemoryPath,
                   openCompositionFromMemoryId: (sourceId) => {
                     const id = sourceId.replace(/^memory:/, "");

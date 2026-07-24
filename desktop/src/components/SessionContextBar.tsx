@@ -1,25 +1,36 @@
 /**
- * Session-scoped context pack drop zone (#341).
+ * Session-scoped context pack drop zone (#341) + skill pin (#343).
  * Files land under workspace/.contextdesk/sessions/<id>/context — not permanent roots.
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  hostListSkills,
   hostSessionContextImportBytes,
   hostSessionContextImportZip,
   hostSessionContextList,
   hostSessionContextRemove,
   type SessionContextEntryDto,
+  type SkillDto,
 } from "../lib/host";
 
 type Props = {
   sessionId: string | null;
   disabled?: boolean;
+  /** Session-pinned skill id (#343). */
+  pinnedSkillId?: string | null;
+  onPinnedSkillChange?: (skillId: string | null) => void;
 };
 
-export function SessionContextBar({ sessionId, disabled }: Props) {
+export function SessionContextBar({
+  sessionId,
+  disabled,
+  pinnedSkillId = null,
+  onPinnedSkillChange,
+}: Props) {
   const [entries, setEntries] = useState<SessionContextEntryDto[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [skills, setSkills] = useState<SkillDto[]>([]);
 
   const refresh = useCallback(async () => {
     if (!sessionId) {
@@ -37,6 +48,12 @@ export function SessionContextBar({ sessionId, disabled }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void hostListSkills()
+      .then((list) => setSkills(list.filter((s) => !s.disabled)))
+      .catch(() => setSkills([]));
+  }, []);
 
   const onFiles = async (files: FileList | File[]) => {
     if (!sessionId || disabled) return;
@@ -87,6 +104,34 @@ export function SessionContextBar({ sessionId, disabled }: Props) {
           — drop files (session-only; not permanent workspace)
         </span>
       </div>
+      {onPinnedSkillChange ? (
+        <div className="session-context-bar__skill-pin" data-testid="skill-pin">
+          <label className="field__label" htmlFor="session-skill-pin">
+            Skill pin
+          </label>
+          <select
+            id="session-skill-pin"
+            className="field__control"
+            disabled={disabled}
+            value={pinnedSkillId ?? ""}
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              onPinnedSkillChange(v ? v : null);
+            }}
+            title="Inject this skill playbook on every turn (cannot elevate write grants)"
+          >
+            <option value="">None</option>
+            {skills.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name || s.id}
+              </option>
+            ))}
+          </select>
+          <span className="field__hint">
+            or <code>/skill id</code> once · see docs/SKILLS.md
+          </span>
+        </div>
+      ) : null}
       <div className="session-context-bar__chips">
         {entries.map((e) => (
           <span key={e.rel_path} className="composer__chip" title={e.rel_path}>

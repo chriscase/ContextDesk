@@ -150,6 +150,37 @@ pub fn skill_context(skill: &Skill) -> String {
     wrap_skill(&skill.id, &skill.body)
 }
 
+/// Prepend a pinned skill playbook to the user turn text (#343).
+///
+/// Slash `/skill <id>` still wins when present (explicit turn override).
+/// Skills never alter permission side effects — host policy still applies.
+pub fn apply_pinned_skill_to_user_text(
+    user_text: &str,
+    pinned_skill_id: Option<&str>,
+    skills: &[Skill],
+) -> String {
+    let text = user_text.trim();
+    // Explicit slash skill takes precedence.
+    if parse_skill_slash(text).is_some() {
+        return user_text.to_string();
+    }
+    let Some(pid) = pinned_skill_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return user_text.to_string();
+    };
+    let Some(sk) = find_skill(skills, pid) else {
+        return user_text.to_string();
+    };
+    if sk.disabled {
+        return user_text.to_string();
+    }
+    let ctx = skill_context(sk);
+    if text.is_empty() {
+        format!("{ctx}\n\nApply this skill to the workspace / session context.")
+    } else {
+        format!("{ctx}\n\nUser question: {text}")
+    }
+}
+
 /// Find skill by id (case-insensitive).
 pub fn find_skill<'a>(skills: &'a [Skill], id: &str) -> Option<&'a Skill> {
     let id = id.trim().to_ascii_lowercase();
@@ -188,6 +219,11 @@ pub fn default_skill_dirs(config_dir: Option<&Path>, workspace_roots: &[PathBuf]
     }
     for r in workspace_roots {
         dirs.push(workspace_skills_dir(r));
+        // Repo checkout: discover example skills (e.g. examples/skills/log-triage).
+        let examples = r.join("examples").join("skills");
+        if examples.is_dir() {
+            dirs.push(examples);
+        }
     }
     dirs
 }
@@ -375,6 +411,49 @@ mod tests {
         assert_eq!(id, "auth-trace");
         assert!(rest.contains("login"));
         assert!(parse_skill_slash("no slash").is_none());
+    }
+
+    #[test]
+    fn pinned_skill_injected_without_raising_write() {
+        let sk = Skill {
+            id: "log-triage".into(),
+            name: "Log triage".into(),
+            description: "Triage logs".into(),
+            body: "List symptoms then correlate.".into(),
+            path: PathBuf::new(),
+            disabled: false,
+            allows_write: false,
+        };
+        assert!(!sk.allows_write);
+        let out = apply_pinned_skill_to_user_text("why did auth fail?", Some("log-triage"), &[sk]);
+        assert!(out.contains("List symptoms"), "{out}");
+        assert!(out.contains("User question: why did auth fail?"), "{out}");
+        // Playbook is wrapped for injection; privileges still host-enforced
+        // (wrapper may *mention* HardWrite as a prohibition).
+        assert!(
+            out.contains("cannot grant HardWrite") || out.contains("SKILL:"),
+            "expected skill wrap: {out}"
+        );
+    }
+
+    #[test]
+    fn slash_skill_overrides_pin() {
+        let sk = Skill {
+            id: "log-triage".into(),
+            name: "Log triage".into(),
+            description: "Triage logs".into(),
+            body: "PINNED BODY".into(),
+            path: PathBuf::new(),
+            disabled: false,
+            allows_write: false,
+        };
+        let out =
+            apply_pinned_skill_to_user_text("/skill other do work", Some("log-triage"), &[sk]);
+        assert!(
+            !out.contains("PINNED BODY"),
+            "slash path must not get pin pre-injected: {out}"
+        );
+        assert_eq!(out, "/skill other do work");
     }
 
     #[test]

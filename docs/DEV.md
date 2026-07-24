@@ -18,6 +18,12 @@ Build outputs (`target/`, `node_modules/`, `dist/`, `*.tsbuildinfo`, Vite/ESLint
 | `desktop/src-tauri/tauri.conf.json` | `gen-tauri-conf.mjs` on every `tauri dev`/`build` | Should be **idempotent** (no diff if branding unchanged). If dirty, commit intentional branding/CSP changes only |
 | `desktop/src-tauri/gen/schemas/*` | Tauri CLI schema dump | Tracked for offline/CI; only commit when Tauri version bumps intentionally |
 
+### Source-run update (Settings → General)
+
+From a git checkout, **Settings → General → Source-run update** shows ahead/behind/dirty
+and **Fetch remotes** only (never hard-reset, never auto-pull). Rebuild steps are shown in-app
+and differ from the **signed installer** channel (`Check for updates` / `CD_CHANNEL=installed`).
+
 If `git pull` fails with local modifications, check `git status` first:
 
 ```sh
