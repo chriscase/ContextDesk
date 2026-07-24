@@ -1789,7 +1789,9 @@ fn test_x_config(state: State<'_, AppState>) -> Result<String, String> {
 fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> {
     let cfg = state.config.lock().expect("config").confluence.clone();
     if !cfg.enabled {
-        return Ok("Confluence disabled — enable it under Settings → Connectors → Confluence.".into());
+        return Ok(
+            "Confluence disabled — enable it under Settings → Connectors → Confluence.".into(),
+        );
     }
     if cfg.base_url.trim().is_empty() {
         return Err(format!(
@@ -1820,17 +1822,13 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
     let handle = tokio::runtime::Handle::try_current();
     let probe = if let Ok(h) = handle {
         h.block_on(cd_core::confluence_ro::probe_connection(
-            &ro,
-            &auth,
-            &policy,
+            &ro, &auth, &policy,
         ))
         .map_err(|e| e.to_string())?
     } else {
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
         rt.block_on(cd_core::confluence_ro::probe_connection(
-            &ro,
-            &auth,
-            &policy,
+            &ro, &auth, &policy,
         ))
         .map_err(|e| e.to_string())?
     };
