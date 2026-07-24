@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { buildErrorReport } from "../../lib/errorReport";
+import { hostOpenExternalUrl } from "../../lib/host";
 
 type Props = {
   setupIncomplete: boolean;
@@ -59,9 +60,37 @@ export function Banners({
     }
   };
 
-  const openGitHubIssue = () => {
+  const openGitHubIssue = async () => {
     if (!report) return;
-    window.open(report.githubNewIssueUrl, "_blank", "noopener,noreferrer");
+    // Long prefilled bodies often break OS URL handlers; always copy first so
+    // the user has the report even if the browser open is blocked/truncated.
+    try {
+      await navigator.clipboard.writeText(report.reportMarkdown);
+    } catch {
+      /* clipboard may be denied — still try open */
+    }
+    try {
+      // Tauri webview ignores window.open — must use host open_external_url.
+      await hostOpenExternalUrl(report.githubNewIssueUrl);
+      setCopyNote("Opened GitHub · redacted report also copied");
+      window.setTimeout(() => setCopyNote(null), 3500);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Short new-issue URL without body as last resort.
+      try {
+        await hostOpenExternalUrl(
+          "https://github.com/chriscase/ContextDesk/issues/new",
+        );
+        setCopyNote(
+          `Opened blank issue form · paste the copied report (${msg})`,
+        );
+      } catch {
+        setCopyNote(
+          `Could not open browser (${msg}). Use Copy report, then open github.com/chriscase/ContextDesk/issues/new`,
+        );
+      }
+      window.setTimeout(() => setCopyNote(null), 7000);
+    }
   };
 
   return (
@@ -127,7 +156,7 @@ export function Banners({
             <button
               type="button"
               className="btn btn--primary btn--sm"
-              onClick={openGitHubIssue}
+              onClick={() => void openGitHubIssue()}
             >
               Report on GitHub
             </button>

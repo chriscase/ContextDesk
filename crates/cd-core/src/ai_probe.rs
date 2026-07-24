@@ -431,7 +431,7 @@ pub async fn probe_ai_gateway(
                     saw_auth_fail = true;
                     errors.push(format!("{path}: auth failed ({status}) — check API key"));
                 }
-                Ok((status, _)) if status == 429 => {
+                Ok((429, _)) => {
                     rate_limited = true;
                     errors.push(format!(
                         "{path}: HTTP 429 rate limited — gateway is throttling list requests. Wait and retry; we stopped trying alternate URL shapes."
@@ -467,7 +467,7 @@ pub async fn probe_ai_gateway(
                     saw_auth_fail = true;
                     errors.push(format!("{path}: auth failed ({status}) with x-api-key"));
                 }
-                Ok((status, _)) if status == 429 => {
+                Ok((429, _)) => {
                     rate_limited = true;
                     errors.push(format!(
                         "{path}: HTTP 429 rate limited — stopped expanding URL shapes."

@@ -1539,9 +1539,9 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        // `start` treats the first quoted arg as window title.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // Prefer rundll32 — `cmd /C start` breaks on long GitHub issue URLs (`&` / length).
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()
             .map_err(|e| format!("failed to open browser: {e}"))?;
         Ok(())

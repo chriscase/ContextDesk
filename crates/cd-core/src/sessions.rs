@@ -481,7 +481,9 @@ pub fn prepare_model_context(
     Ok(PreparedModelContext {
         messages: fitted,
         keep,
-        compacted: compacted || summary.is_some(),
+        // Only true when keep was reduced for budget — mere presence of a
+        // compact summary for long transcripts is normal and must not spam UI.
+        compacted,
         truncated,
     })
 }
@@ -1358,6 +1360,39 @@ mod tests {
             }
             prev = Some(est);
         }
+    }
+
+    /// Mere presence of a compact summary must not set `compacted` (UI spam).
+    #[test]
+    fn prepare_model_context_compacted_only_when_keep_shrinks() {
+        let mut hist = vec![ChatMessage {
+            role: Role::System,
+            content: "policy".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..30 {
+            hist.push(ChatMessage {
+                role: Role::User,
+                content: format!("short user {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            hist.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("short asst {i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        let prep = prepare_model_context(&hist, 20, DEFAULT_CONTEXT_CHAR_BUDGET).unwrap();
+        // History > keep → summary exists, but keep need not shrink under large budget.
+        assert!(
+            !prep.compacted,
+            "compacted must be false when keep was not reduced for budget"
+        );
+        assert!(!prep.truncated);
+        assert!(estimate_context_chars(&prep.messages) <= DEFAULT_CONTEXT_CHAR_BUDGET);
     }
 
     /// #33: summary must not grow linearly with transcript; shrink-keep stays bounded.
