@@ -533,6 +533,82 @@ mod tests {
         assert!(!host2.ambient_recall_enabled());
     }
 
+    /// #381 product path: attach must not leave candidates.sqlite; unapproved
+    /// token-shaped candidates never hit durable store or ambient recall.
+    #[test]
+    fn attach_non_durable_candidates_no_disk_no_ambient() {
+        use crate::memory::cue::{CandidateStatus, MemoryCandidate};
+        use crate::memory::{Kind, Scope};
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        // Plant legacy on-disk inbox that older builds would create under workspace memory dir.
+        let mem_dir = root.join(&branding.workspace_dir_name).join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        let legacy = mem_dir.join("candidates.sqlite");
+        std::fs::write(&legacy, b"legacy-raw-secret-should-be-wiped").unwrap();
+
+        let ws = crate::workspace::Workspace {
+            id: format!("cand-{}", Uuid::now_v7()),
+            name: "c".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = crate::tool_host::ToolHost::new(ws, idx, None);
+        attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+
+        // Product attach removes legacy disk inbox.
+        assert!(
+            !legacy.exists(),
+            "attach_durable_memory_to_host must remove candidates.sqlite"
+        );
+
+        // Propose a token-shaped unapproved candidate into the host inbox.
+        let token = "sk-live-productpathtesttoken12345";
+        let inbox = host.candidate_inbox().expect("inbox attached").clone();
+        let c = MemoryCandidate {
+            id: Uuid::now_v7(),
+            kind: Kind::Fact,
+            title: format!("secret {token}"),
+            content: format!("api key is {token}"),
+            scope: Scope::Workspace,
+            salience: 0.9,
+            confidence: 0.9,
+            content_hash: crate::memory::content_hash_for(&format!("api key is {token}")),
+            origin_session_id: None,
+            cue: "test".into(),
+            source_excerpt: format!("excerpt {token}"),
+            created_at: 1,
+            status: CandidateStatus::Pending,
+            propose_supersede_of: None,
+        };
+        inbox.put(&c).unwrap();
+
+        // Durable store still empty of that secret.
+        let store = host.durable_memory_store().expect("store");
+        let hits = store
+            .recall(
+                &crate::memory::RecallQuery::new(token),
+                None,
+                crate::embed::HybridWeights::default(),
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+        assert!(
+            hits.iter()
+                .all(|h| !h.record.content.contains(token) && !h.record.title.contains(token)),
+            "unapproved candidate must not ambient/durable-recall"
+        );
+        // No candidates.sqlite under workspace after attach + put.
+        assert!(!mem_dir.join("candidates.sqlite").exists());
+        // Pending exists only in process inbox.
+        assert_eq!(inbox.list(false, 10).unwrap().len(), 1);
+        let _ = Arc::strong_count(&inbox);
+    }
+
     /// #346: attach must wire embed before memory_fs import so imported notes get vectors.
     #[test]
     fn attach_imports_with_embed_backend_before_migration() {

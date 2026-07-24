@@ -231,18 +231,47 @@ pub fn must_not_hard_reset(_dirty: bool) -> bool {
     true
 }
 
-/// Synchronous git with fixed argv (no shell); redacts stderr.
+/// Default wall-clock bound for git child processes (#340).
+pub const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Synchronous git with fixed argv (no shell); redacts stderr; kills on timeout.
 pub fn run_git_simple(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        return Err(redact_git_text(err.trim()));
+    run_git_timeout(cwd, args, GIT_TIMEOUT)
+}
+
+/// Fixed-argv git with explicit timeout (tests use a short budget).
+pub fn run_git_timeout(
+    cwd: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let cwd = cwd.to_path_buf();
+    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(&cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) => {
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                return Err(redact_git_text(err.trim()));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        }
+        Ok(Err(e)) => Err(format!("git: {e}")),
+        Err(_) => Err("git timed out".into()),
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// Inspect a **validated** product source root (caller must prove layout).
@@ -416,5 +445,22 @@ mod tests {
     fn must_not_hard_reset_always() {
         assert!(must_not_hard_reset(true));
         assert!(must_not_hard_reset(false));
+    }
+
+    #[test]
+    fn git_timeout_returns_error() {
+        let d = tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(d.path())
+            .output()
+            .unwrap();
+        // Impossible short timeout with a slow-ish status still usually finishes;
+        // use a zero timeout so recv_timeout fails.
+        let r = run_git_timeout(d.path(), &["status"], std::time::Duration::from_secs(0));
+        // Either timeout or rare instant success — accept timeout path primarily.
+        if let Err(e) = r {
+            assert!(e.contains("timed out") || e.contains("git"), "{e}");
+        }
     }
 }

@@ -249,4 +249,42 @@ mod tests {
         let p = detect_dedup(&cand, &actives, None, 0.88).unwrap();
         assert_eq!(p, DedupProposal::Novel);
     }
+
+    /// Close-but-distinct: similar domain language must not false-positive supersede.
+    #[test]
+    fn semantic_near_miss_stays_novel() {
+        let backend = ConceptEmbedBackend::new(64);
+        let id = Uuid::now_v7();
+        // Same kind, overlapping English, but different concept groups (auth vs postgres).
+        let actives = vec![rec(
+            id,
+            Kind::Decision,
+            "Chose Postgres as the durable brain backend",
+        )];
+        let cand = MemoryCandidate {
+            id: Uuid::now_v7(),
+            kind: Kind::Decision,
+            title: "auth".into(),
+            content: "We decided on passwordless SSO for authentication login".into(),
+            scope: Scope::Workspace,
+            salience: 0.8,
+            confidence: 0.8,
+            content_hash: content_hash_for(
+                "We decided on passwordless SSO for authentication login",
+            ),
+            origin_session_id: None,
+            cue: "decision_we_decided".into(),
+            source_excerpt: String::new(),
+            created_at: 2,
+            status: super::super::cue::CandidateStatus::Pending,
+            propose_supersede_of: None,
+        };
+        // High threshold: near-miss must stay Novel (false positive control).
+        let p = detect_dedup(&cand, &actives, Some(&backend), 0.92).unwrap();
+        assert_eq!(
+            p,
+            DedupProposal::Novel,
+            "auth vs postgres should not supersede at high threshold"
+        );
+    }
 }
