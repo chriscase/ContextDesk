@@ -4,6 +4,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  hostGetLogCorpus,
+  hostImportLogCorpusPackagePath,
   hostIngestLogPath,
   hostListenProcessProgress,
   hostSessionContextImportPath,
@@ -27,6 +29,8 @@ import { SessionWizardShell } from "./SessionWizardShell";
 import type { ProcessProgressDto, WizardOutcome } from "./types";
 
 export type LogMode = "corpus" | "session_context" | "both";
+/** Raw dump ingest vs portable analysis package (.cdlog.zip). */
+export type SourceKind = "raw" | "package";
 
 type Props = {
   sessionId: string;
@@ -46,6 +50,7 @@ export function LogTroubleshootingWizard({
   const wizard = LOG_TROUBLESHOOTING_WIZARD;
   const [stepIndex, setStepIndex] = useState(0);
   const [path, setPath] = useState("");
+  const [sourceKind, setSourceKind] = useState<SourceKind>("raw");
   const [mode, setMode] = useState<LogMode>("corpus");
   const [corpusName, setCorpusName] = useState("incident");
   const [softWriteAccepted, setSoftWriteAccepted] = useState(false);
@@ -84,12 +89,32 @@ export function LogTroubleshootingWizard({
 
   const pickDir = async () => {
     const p = await openDirectoryDialog("Choose log directory");
-    if (p) setPath(p);
+    if (p) {
+      setSourceKind("raw");
+      setPath(p);
+    }
   };
 
   const pickFile = async () => {
-    const p = await openFileDialog("Choose log file");
-    if (p) setPath(p);
+    const p = await openFileDialog("Choose log file", [
+      { name: "Logs", extensions: ["log", "txt", "json", "jsonl", "zip"] },
+    ]);
+    if (p) {
+      setSourceKind("raw");
+      setPath(p);
+    }
+  };
+
+  const pickPackage = async () => {
+    const p = await openFileDialog("Import log corpus package", [
+      { name: "ContextDesk package", extensions: ["zip", "cdlog"] },
+    ]);
+    if (p) {
+      setSourceKind("package");
+      setPath(p);
+      // Package already is a finished analysis corpus.
+      setMode("corpus");
+    }
   };
 
   const runImport = useCallback(async () => {
@@ -99,21 +124,62 @@ export function LogTroubleshootingWizard({
     setRunDone(false);
     try {
       let cid: string | null = null;
-      if (mode === "corpus" || mode === "both") {
-        // Host extract-and-ingest handles .zip paths (binary zip is not a log file).
-        const report = await hostIngestLogPath(path, corpusName.trim() || "incident");
-        cid = report.corpusId;
+
+      if (sourceKind === "package") {
+        // SoftWrite portable package → new local corpus (versioned import).
+        const imp = await hostImportLogCorpusPackagePath(path);
+        cid = imp.corpusId;
         setCorpusId(cid);
-        setIngestReport(report);
         try {
           await hostSetActiveLogCorpus(cid);
         } catch {
-          // Non-fatal: seed prompt still carries corpus id.
+          /* non-fatal */
         }
-      }
-      if (mode === "session_context" || mode === "both") {
-        // Host path import extracts .zip into session context (does not store the archive as one blob).
-        await hostSessionContextImportPath(sessionId, path);
+        // Surface persisted stats from the imported package for the hero UI.
+        try {
+          const summary = await hostGetLogCorpus(cid);
+          if (summary?.stats) {
+            setIngestReport({
+              corpusId: cid,
+              lines: summary.stats.lines,
+              templates: summary.stats.templates,
+              reductionRatio: summary.stats.reductionRatio,
+              embedded: summary.stats.embedded,
+              files: summary.stats.files,
+              sourceBytes: summary.stats.sourceBytes,
+              corpusBytes: summary.stats.corpusBytes,
+              levelCounts: summary.stats.levelCounts ?? {},
+              tsMin: summary.stats.tsMin,
+              tsMax: summary.stats.tsMax,
+              formatCounts: summary.stats.formatCounts ?? {},
+              topTemplates: summary.topTemplates ?? [],
+            });
+          } else {
+            setIngestReport(null);
+          }
+        } catch {
+          setIngestReport(null);
+        }
+      } else {
+        if (mode === "corpus" || mode === "both") {
+          // Host extract-and-ingest handles .zip paths (binary zip is not a log file).
+          const report = await hostIngestLogPath(
+            path,
+            corpusName.trim() || "incident",
+          );
+          cid = report.corpusId;
+          setCorpusId(cid);
+          setIngestReport(report);
+          try {
+            await hostSetActiveLogCorpus(cid);
+          } catch {
+            // Non-fatal: seed prompt still carries corpus id.
+          }
+        }
+        if (mode === "session_context" || mode === "both") {
+          // Host path import extracts .zip into session context.
+          await hostSessionContextImportPath(sessionId, path);
+        }
       }
       setRunDone(true);
       setStepIndex((i) => Math.min(i + 1, wizard.steps.length - 1));
@@ -122,7 +188,7 @@ export function LogTroubleshootingWizard({
     } finally {
       setBusy(false);
     }
-  }, [corpusName, mode, path, sessionId, wizard.steps.length]);
+  }, [corpusName, mode, path, sessionId, sourceKind, wizard.steps.length]);
 
   const onContinue = async () => {
     setError(null);
@@ -246,7 +312,10 @@ export function LogTroubleshootingWizard({
 
       {step?.id === "source" ? (
         <div className="wizard-copy">
-          <p>Select a log file or a directory dump (basename only is shown in progress).</p>
+          <p>
+            Select a log dump to ingest, or import a portable analysis package
+            from another ContextDesk user (basename only is shown in progress).
+          </p>
           <div className="wizard-actions-row">
             <button type="button" onClick={() => void pickDir()}>
               Choose directory…
@@ -254,28 +323,53 @@ export function LogTroubleshootingWizard({
             <button type="button" onClick={() => void pickFile()}>
               Choose file…
             </button>
+            <button
+              type="button"
+              data-testid="wizard-import-package"
+              onClick={() => void pickPackage()}
+            >
+              Import package…
+            </button>
           </div>
           {path ? (
             <p className="wizard-path">
               Selected: <code>{basename}</code>
+              {sourceKind === "package" ? (
+                <span className="muted"> (portable package)</span>
+              ) : null}
             </p>
           ) : (
             <p className="muted">No path selected yet.</p>
           )}
-          <label className="wizard-field">
-            Corpus name
-            <input
-              value={corpusName}
-              onChange={(e) => setCorpusName(e.target.value)}
-              placeholder="incident"
-            />
-          </label>
+          {sourceKind === "raw" ? (
+            <label className="wizard-field">
+              Corpus name
+              <input
+                value={corpusName}
+                onChange={(e) => setCorpusName(e.target.value)}
+                placeholder="incident"
+              />
+            </label>
+          ) : (
+            <p className="muted">
+              Package import creates a new disposable corpus (SoftWrite). Version
+              mismatches surface as clear errors.
+            </p>
+          )}
         </div>
       ) : null}
 
       {step?.id === "mode" ? (
         <div className="wizard-copy">
-          <p>Choose how logs enter the system:</p>
+          {sourceKind === "package" ? (
+            <p>
+              Portable packages already contain the finished analysis corpus.
+              Import loads it under a <strong>new</strong> local corpus id
+              (origin id preserved for provenance).
+            </p>
+          ) : (
+            <p>Choose how logs enter the system:</p>
+          )}
           <label className="wizard-radio">
             <input
               type="radio"
@@ -287,28 +381,32 @@ export function LogTroubleshootingWizard({
               <strong>Log corpus</strong> — full pipeline for clusters, timeline, and log tools
             </span>
           </label>
-          <label className="wizard-radio">
-            <input
-              type="radio"
-              name="log-mode"
-              checked={mode === "session_context"}
-              onChange={() => setMode("session_context")}
-            />
-            <span>
-              <strong>Session context only</strong> — attach to this chat (lighter)
-            </span>
-          </label>
-          <label className="wizard-radio">
-            <input
-              type="radio"
-              name="log-mode"
-              checked={mode === "both"}
-              onChange={() => setMode("both")}
-            />
-            <span>
-              <strong>Both</strong> — corpus analysis + chat attachments
-            </span>
-          </label>
+          {sourceKind === "raw" ? (
+            <>
+              <label className="wizard-radio">
+                <input
+                  type="radio"
+                  name="log-mode"
+                  checked={mode === "session_context"}
+                  onChange={() => setMode("session_context")}
+                />
+                <span>
+                  <strong>Session context only</strong> — attach to this chat (lighter)
+                </span>
+              </label>
+              <label className="wizard-radio">
+                <input
+                  type="radio"
+                  name="log-mode"
+                  checked={mode === "both"}
+                  onChange={() => setMode("both")}
+                />
+                <span>
+                  <strong>Both</strong> — corpus analysis + chat attachments
+                </span>
+              </label>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -322,9 +420,10 @@ export function LogTroubleshootingWizard({
           <ul>
             <li>
               Source: <code>{basename || "(none)"}</code>
+              {sourceKind === "package" ? " (portable package)" : ""}
             </li>
             <li>Mode: {mode.replace("_", " ")}</li>
-            {(mode === "corpus" || mode === "both") && (
+            {sourceKind === "raw" && (mode === "corpus" || mode === "both") && (
               <li>
                 Corpus name: <code>{corpusName || "incident"}</code>
               </li>
