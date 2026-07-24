@@ -1,5 +1,6 @@
 //! ContextDesk headless server — localhost by default, API key auth, research + SSE.
 
+mod jira;
 mod telegram;
 mod watchers;
 
@@ -25,6 +26,7 @@ use cd_core::research::{
     build_host_with_connectors, event_to_dto, events_to_dto, grant_and_execute, research_local,
     research_turn, research_turn_with_cancel,
 };
+use cd_core::ssrf::SystemResolver;
 use cd_core::tool_host::ToolHost;
 use cd_core::tools::ToolSideEffect;
 use cd_core::workspace::Workspace;
@@ -258,6 +260,8 @@ struct WorkspaceData {
     index: KeywordIndex,
     /// Generic connector definitions attached to every workspace ToolHost.
     connectors: Arc<Vec<ConnectorConfig>>,
+    /// Connector id → child-only environment values resolved from keychain.
+    mcp_env: Arc<jira::McpConnectorEnv>,
     /// Compatibility mirror for the original #167 `/v1/memory/*` wire.
     memory_path: PathBuf,
     /// Server-authoritative workspace memory store (#287).
@@ -476,6 +480,7 @@ struct ResolvedWorkspace {
     roots: Vec<PathBuf>,
     watchers_enabled: bool,
     connectors: Vec<ConnectorConfig>,
+    mcp_env: jira::McpConnectorEnv,
     /// (api-key-hash, role) pairs authorized on this workspace.
     keys: Vec<([u8; 32], Role)>,
 }
@@ -565,6 +570,7 @@ fn resolve_config_workspaces(cfg: &ServerConfig) -> Result<Vec<ResolvedWorkspace
             roots: ws.roots.clone(),
             watchers_enabled: ws.watchers_enabled,
             connectors: ws.connectors.clone(),
+            mcp_env: HashMap::new(),
             keys,
         });
     }
@@ -758,6 +764,7 @@ fn build_state(
                 workspace: ws,
                 index,
                 connectors: Arc::new(rw.connectors),
+                mcp_env: Arc::new(rw.mcp_env),
                 memory_path,
                 sync_memory,
                 sync_journal_path,
@@ -793,6 +800,7 @@ fn build_state(
 fn build_authoritative_host(
     workspace: Workspace,
     connectors: &[ConnectorConfig],
+    mcp_env: &jira::McpConnectorEnv,
     sync_memory: Arc<SqliteMemoryStore>,
     sync_clock: Arc<Mutex<i64>>,
     audit_path: PathBuf,
@@ -800,16 +808,10 @@ fn build_authoritative_host(
     // Server workspaces are keyed by the configured name; `Workspace::id` is a
     // locally generated filesystem identity and is not the sync protocol id.
     let workspace_id = workspace.name.clone();
-    let mut host = build_host_with_connectors(
-        workspace,
-        Some(audit_path),
-        None,
-        None,
-        None,
-        None,
-        connectors,
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut host =
+        build_host_with_connectors(workspace, Some(audit_path), None, None, None, None, &[])
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    host.attach_connectors_with_mcp_secrets(connectors, &HashMap::new(), &HashMap::new(), mcp_env);
     let store: Arc<dyn MemoryStore> = Arc::new(AuthoritativeWorkspaceStore {
         workspace_id,
         inner: sync_memory,
@@ -1070,7 +1072,7 @@ async fn research(
     Json(body): Json<ResearchBody>,
 ) -> Result<impl IntoResponse, StatusCode> {
     authorize(&headers, &state, &body.workspace_id)?;
-    let (ws, connectors, sync_memory, sync_clock) = {
+    let (ws, connectors, mcp_env, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1079,6 +1081,7 @@ async fn research(
         (
             data.workspace.clone(),
             data.connectors.clone(),
+            data.mcp_env.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
@@ -1086,6 +1089,7 @@ async fn research(
     let mut host = build_authoritative_host(
         ws,
         &connectors,
+        &mcp_env,
         sync_memory,
         sync_clock,
         state.audit.path().to_path_buf(),
@@ -1135,7 +1139,7 @@ async fn research_sse(
     Query(q): Query<StreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     authorize(&headers, &state, &q.workspace_id)?;
-    let (ws, connectors, sync_memory, sync_clock) = {
+    let (ws, connectors, mcp_env, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1144,6 +1148,7 @@ async fn research_sse(
         (
             data.workspace.clone(),
             data.connectors.clone(),
+            data.mcp_env.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
@@ -1159,9 +1164,14 @@ async fn research_sse(
     let cancel_task = cancel.clone();
 
     tokio::spawn(async move {
-        let Ok(mut host) =
-            build_authoritative_host(ws, &connectors, sync_memory, sync_clock, audit_path)
-        else {
+        let Ok(mut host) = build_authoritative_host(
+            ws,
+            &connectors,
+            &mcp_env,
+            sync_memory,
+            sync_clock,
+            audit_path,
+        ) else {
             let _ = tx.send(StreamEvent::Error {
                 code: "host_build".into(),
                 message: "failed to build tool host".into(),
@@ -1291,7 +1301,7 @@ async fn ensure_session_host(
         }
         return Ok(());
     }
-    let (ws, connectors, sync_memory, sync_clock) = {
+    let (ws, connectors, mcp_env, sync_memory, sync_clock) = {
         let map = state
             .workspaces
             .lock()
@@ -1300,6 +1310,7 @@ async fn ensure_session_host(
         (
             data.workspace.clone(),
             data.connectors.clone(),
+            data.mcp_env.clone(),
             data.sync_memory.clone(),
             data.sync_clock.clone(),
         )
@@ -1307,6 +1318,7 @@ async fn ensure_session_host(
     let host = build_authoritative_host(
         ws,
         &connectors,
+        &mcp_env,
         sync_memory,
         sync_clock,
         state.audit.path().to_path_buf(),
@@ -3155,9 +3167,26 @@ async fn main() {
                 roots: vec![root],
                 watchers_enabled: true,
                 connectors: Vec::new(),
+                mcp_env: HashMap::new(),
                 keys: legacy_hashes.iter().map(|h| (*h, Role::Admin)).collect(),
             });
         }
+    }
+
+    // Normalize opted-in Atlassian Rovo MCP presets and resolve API tokens
+    // directly from the OS keychain into child-only environment maps.
+    let secret_store = KeychainSecretStore::new();
+    for workspace in &mut resolved {
+        let prepared =
+            match jira::prepare_connectors(&workspace.connectors, &secret_store, &SystemResolver) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    eprintln!("{message}");
+                    std::process::exit(2);
+                }
+            };
+        workspace.connectors = prepared.connectors;
+        workspace.mcp_env = prepared.mcp_env;
     }
 
     // Total distinct auth keys across every workspace — drives the exposure guard.
@@ -3473,6 +3502,7 @@ mod tests {
                 roots: vec![root.join("a")],
                 watchers_enabled: true,
                 connectors: Vec::new(),
+                mcp_env: HashMap::new(),
                 keys: ws_keys.remove("ws-a").unwrap_or_default(),
             },
             ResolvedWorkspace {
@@ -3480,6 +3510,7 @@ mod tests {
                 roots: vec![root.join("b")],
                 watchers_enabled: true,
                 connectors: Vec::new(),
+                mcp_env: HashMap::new(),
                 keys: ws_keys.remove("ws-b").unwrap_or_default(),
             },
         ];
@@ -3525,6 +3556,30 @@ mod tests {
                 text: Some(text.into()),
             }),
         }
+    }
+
+    fn jira_fixture_paths() -> Option<(PathBuf, PathBuf)> {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jira_mcp_server.py");
+        if !script.is_file() {
+            return None;
+        }
+        let python = std::env::var_os("PYTHON")
+            .map(PathBuf::from)
+            .or_else(|| {
+                for name in ["python3", "python", "python.exe"] {
+                    let path = std::env::var_os("PATH")?;
+                    for directory in std::env::split_paths(&path) {
+                        let candidate = directory.join(name);
+                        if candidate.is_file() {
+                            return std::fs::canonicalize(&candidate).ok().or(Some(candidate));
+                        }
+                    }
+                }
+                None
+            })
+            .filter(|path| path.is_absolute())?;
+        Some((python, script))
     }
 
     #[tokio::test]
@@ -3700,6 +3755,15 @@ mod tests {
               { key = "admin-token", role = "admin" },
               { key = "member-token", role = "member" },
             ]
+            [[workspaces.connectors]]
+            id = "jira"
+            kind = "mcp"
+            enabled = true
+            [workspaces.connectors.settings]
+            preset = "atlassian_rovo"
+            command = "/opt/local/bin/mcp-remote"
+            api_key_ref = "connector/jira/api_key"
+            auth_kind = "service_bearer"
         "#;
         let cfg: ServerConfig = toml::from_str(toml_src).unwrap();
         assert_eq!(cfg.workspaces.len(), 1);
@@ -3707,7 +3771,11 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].keys.len(), 2);
         assert!(resolved[0].watchers_enabled);
-        assert!(resolved[0].connectors.is_empty());
+        assert_eq!(resolved[0].connectors.len(), 1);
+        assert_eq!(
+            resolved[0].connectors[0].settings["preset"],
+            "atlassian_rovo"
+        );
         assert_eq!(resolved[0].keys[0].1, Role::Admin);
         assert_eq!(resolved[0].keys[1].1, Role::Member);
         let telegram = cfg.telegram.as_ref().unwrap();
@@ -4855,6 +4923,183 @@ mod tests {
             sent.lock().unwrap().len(),
             1,
             "duplicate update was processed"
+        );
+    }
+
+    #[tokio::test]
+    async fn jira_mcp_read_uses_keychain_and_create_requires_hardwrite_confirmation() {
+        use cd_core::keychain_store::MemorySecretStore;
+        use cd_core::ssrf::MapResolver;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let Some((python, script)) = jira_fixture_paths() else {
+            eprintln!("skip Jira MCP fixture: no absolute Python interpreter on PATH");
+            return;
+        };
+        let secrets = MemorySecretStore::new();
+        secrets
+            .set("connector/jira/api_key", "fixture-service-token")
+            .unwrap();
+        let config = ConnectorConfig {
+            id: "jira".into(),
+            kind: "mcp".into(),
+            enabled: true,
+            settings: serde_json::json!({
+                "preset": jira::ATLASSIAN_ROVO_PRESET,
+                "command": python,
+                "api_key_ref": "connector/jira/api_key",
+                "auth_kind": "service_bearer"
+            }),
+        };
+        let resolver = MapResolver::from_pairs([(
+            "mcp.atlassian.com",
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        )]);
+        let mut prepared = jira::prepare_connectors(&[config], &secrets, &resolver).unwrap();
+        // The production preset launches the locally installed mcp-remote
+        // executable against the fixed official endpoint. The hermetic test
+        // substitutes only its argv with a Jira-shaped stdio fixture.
+        prepared.connectors[0].settings["args"] = serde_json::json!([script.to_string_lossy()]);
+
+        let dir = tempdir().unwrap();
+        let state = test_state(dir.path().to_path_buf(), &[]);
+        {
+            let mut workspaces = state.workspaces.lock().unwrap();
+            let workspace = workspaces.get_mut("ws-a").unwrap();
+            workspace.connectors = Arc::new(prepared.connectors);
+            workspace.mcp_env = Arc::new(prepared.mcp_env);
+        }
+        ensure_session_host(
+            &state,
+            "ws-a",
+            "jira-fixture-session",
+            SessionOrigin::TrustedClient,
+        )
+        .await
+        .unwrap();
+        let mut sessions = state.sessions.lock().await;
+        let host = &mut sessions.get_mut("jira-fixture-session").unwrap().host;
+
+        let read_name = "mcp__jira__getJiraIssue";
+        let create_name = "mcp__jira__createJiraIssue";
+        assert_eq!(host.side_effect_for(read_name), ToolSideEffect::Read);
+        assert_eq!(host.side_effect_for(create_name), ToolSideEffect::HardWrite);
+
+        let read_pending = host
+            .execute(
+                read_name,
+                &serde_json::json!({"issueIdOrKey":"PROJ-1"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!read_pending.ok, "MCP Read must retain first-use approval");
+        let read_request = read_pending
+            .events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        host.complete_permission(&read_request, PermissionDecision::AllowOnce, None)
+            .unwrap();
+        let read = host
+            .execute(
+                read_name,
+                &serde_json::json!({"issueIdOrKey":"PROJ-1"}),
+                Some(&read_request),
+            )
+            .await
+            .unwrap();
+        assert!(read.ok, "Jira fixture Read failed: {}", read.detail_raw);
+        assert!(
+            read.detail_raw.contains("auth_present") && read.detail_raw.contains("true"),
+            "Jira fixture did not receive child-only auth: {}",
+            read.detail_raw
+        );
+        assert!(
+            read.detail_raw.contains("getJiraIssue"),
+            "wrong Jira read tool result: {}",
+            read.detail_raw
+        );
+        assert!(
+            !read.detail_raw.contains("fixture-service-token"),
+            "keychain token leaked into tool output"
+        );
+
+        let create_pending = host
+            .execute(
+                create_name,
+                &serde_json::json!({"projectKey":"PROJ","summary":"Fixture story"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!create_pending.ok);
+        assert_eq!(create_pending.detail_raw, "permission required");
+        let create_request = create_pending
+            .events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::PermissionRequired {
+                    request_id, risk, ..
+                } if risk == "destructive" => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("createJiraIssue must emit destructive permission request");
+        let session_grant = host.complete_permission(
+            &create_request,
+            PermissionDecision::AllowSessionPath,
+            Some("WRITE"),
+        );
+        assert!(
+            session_grant
+                .unwrap_err()
+                .to_string()
+                .contains("fresh AllowOnce"),
+            "MCP HardWrite must reject session-wide permission"
+        );
+        assert!(
+            host.has_pending(&create_request),
+            "rejected session grant must leave the write retryable"
+        );
+        host.complete_permission(
+            &create_request,
+            PermissionDecision::AllowOnce,
+            Some("WRITE"),
+        )
+        .unwrap();
+        let created = host
+            .execute(
+                create_name,
+                &serde_json::json!({"projectKey":"PROJ","summary":"Fixture story"}),
+                Some(&create_request),
+            )
+            .await
+            .unwrap();
+        assert!(
+            created.ok
+                && created.detail_raw.contains("createJiraIssue")
+                && created.detail_raw.contains("auth_present"),
+            "confirmed Jira create did not execute: {}",
+            created.detail_raw
+        );
+        let second_create = host
+            .execute(
+                create_name,
+                &serde_json::json!({"projectKey":"PROJ","summary":"Second fixture story"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !second_create.ok
+                && second_create
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::PermissionRequired { .. })),
+            "a prior Jira create approval must not auto-authorize the next write"
         );
     }
 

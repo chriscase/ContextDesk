@@ -253,6 +253,24 @@ impl ToolHost {
         postgres_passwords: &std::collections::HashMap<String, String>,
         http_bearers: &std::collections::HashMap<String, String>,
     ) {
+        self.attach_connectors_with_mcp_secrets(
+            configs,
+            postgres_passwords,
+            http_bearers,
+            &std::collections::HashMap::new(),
+        );
+    }
+
+    /// Full connector attach plus per-MCP-child environment resolved by the
+    /// host from keychain refs. Raw values remain process-local and are never
+    /// read from connector JSON or exposed through tool DTOs.
+    pub fn attach_connectors_with_mcp_secrets(
+        &mut self,
+        configs: &[crate::connectors::ConnectorConfig],
+        postgres_passwords: &std::collections::HashMap<String, String>,
+        http_bearers: &std::collections::HashMap<String, String>,
+        mcp_env: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    ) {
         self.connector_configs = configs.to_vec();
         // Drop previous dynamic tools, MCP children, SQL, and HTTP presets.
         self.dynamic_tools.clear();
@@ -306,7 +324,7 @@ impl ToolHost {
             }
 
             if c.kind == "mcp" {
-                if let Err(e) = self.attach_mcp_connector(c) {
+                if let Err(e) = self.attach_mcp_connector(c, mcp_env.get(&c.id)) {
                     tracing::error!(
                         connector_id = %c.id,
                         error = %e,
@@ -452,9 +470,20 @@ impl ToolHost {
         Ok(())
     }
 
-    fn attach_mcp_connector(&mut self, c: &crate::connectors::ConnectorConfig) -> CoreResult<()> {
+    fn attach_mcp_connector(
+        &mut self,
+        c: &crate::connectors::ConnectorConfig,
+        extra_env: Option<&std::collections::HashMap<String, String>>,
+    ) -> CoreResult<()> {
         let mcp_cfg = mcp_server_config_from_connector(c)?;
-        let mut session = crate::mcp_client::McpSession::spawn(&mcp_cfg)?;
+        let mut session = crate::mcp_client::McpSession::spawn_with(
+            &mcp_cfg,
+            crate::mcp_client::McpSpawnOptions {
+                cwd: None,
+                extra_env: extra_env.cloned().unwrap_or_default(),
+                request_timeout: None,
+            },
+        )?;
         self.register_mcp_session(mcp_cfg.name.clone(), &mut session)?;
         self.mcp_sessions.insert(mcp_cfg.name.clone(), session);
         Ok(())
@@ -927,6 +956,18 @@ impl ToolHost {
         decision: PermissionDecision,
         typed: Option<&str>,
     ) -> CoreResult<(PermissionRequest, PermissionDecision)> {
+        if matches!(decision, PermissionDecision::AllowSessionPath) {
+            let pending = self
+                .pending
+                .get(request_id)
+                .ok_or_else(|| CoreError::Policy("unknown or expired permission request".into()))?;
+            if pending.tool_name.starts_with("mcp__") && pending.side_effect != ToolSideEffect::Read
+            {
+                return Err(CoreError::Policy(
+                    "MCP write tools require a fresh AllowOnce confirmation per action".into(),
+                ));
+            }
+        }
         let req = self
             .pending
             .remove(request_id)
@@ -1055,7 +1096,7 @@ impl ToolHost {
                     ));
                 }
                 // First-use: promote AllowOnce to session tool grant for allowlisted Read MCP.
-                if name.starts_with("mcp__") {
+                if name.starts_with("mcp__") && side == ToolSideEffect::Read {
                     self.permissions.allow_session_tool(name);
                 }
             } else {

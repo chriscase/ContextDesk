@@ -395,6 +395,47 @@ fingerprint before dispatch, so an unchanged query/poll result or repeated sched
 fire twice across ticks or restart. Use `POST /v1/watchers/{id}/run` for an authenticated manual
 evaluation; deduplication still applies.
 
+### Jira through the Atlassian Rovo MCP preset (#291)
+
+The recommended Jira path is Atlassian's official
+[Rovo MCP server](https://developer.atlassian.com/cloud/rovo-mcp/), reached through a separately
+installed local [`mcp-remote`](https://github.com/geelen/mcp-remote) executable. ContextDesk does
+not auto-install packages or embed a native Jira client. Configure the preset on a workspace:
+
+```toml
+[[workspaces.connectors]]
+id = "jira"
+kind = "mcp"
+enabled = true
+
+[workspaces.connectors.settings]
+preset = "atlassian_rovo"
+command = "/absolute/path/to/mcp-remote"
+api_key_ref = "connector/jira/api_key"
+auth_kind = "service_bearer" # or "personal_basic"
+# email = "person@example.com" # required only for personal_basic
+```
+
+Provision only the token value under `api_key_ref` in the OS keychain service
+`{branding.slug}-secrets`; never put it, an encoded Basic credential, or an Authorization header
+in TOML. `service_bearer` is for an Atlassian service-account API key. `personal_basic` combines
+the non-secret configured email with the keychain token in memory. Atlassian must enable API-token
+authentication for the organization; OAuth 2.1 remains Atlassian's recommendation for interactive
+clients. See Atlassian's
+[API-token MCP guide](https://developer.atlassian.com/cloud/rovo-mcp/guides/configuring-authentication-via-api-token).
+
+The preset fixes the remote endpoint to `https://mcp.atlassian.com/v1/mcp`, rejects a configurable
+replacement, DNS-vets it with the outbound SSRF policy, and launches `mcp-remote` in HTTP-only mode.
+The Authorization value exists only in the cleared child environment and is referenced from the
+proxy header argument; it is absent from connector JSON, argv, logs, tool results, and HTTP DTOs.
+
+Host classification follows Atlassian's
+[supported Jira tools](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/):
+issue/project metadata and JQL search are `Read`; comment/worklog/create/edit/transition are
+`HardWrite`; every unlisted remote tool also defaults to `HardWrite`. MCP Reads retain the existing
+first-use approval. Jira writes reject session-wide grants and require a fresh UI-originated
+AllowOnce plus exact `WRITE` confirmation for every action.
+
 Platform keychain / path matrix: `docs/PLATFORMS.md` (#178).
 
 ## Secrets

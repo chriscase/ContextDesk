@@ -143,7 +143,7 @@ impl PermissionState {
     pub fn may_execute_without_prompt(&self, side_effect: ToolSideEffect, target: &str) -> bool {
         // target may be path or tool name for MCP (see tool_host resolve).
         if target.starts_with("mcp__") {
-            return self.session_tool_allowed(target);
+            return side_effect == ToolSideEffect::Read && self.session_tool_allowed(target);
         }
         // Destructive durable-memory ops: never session-auto (#270).
         if is_destructive_memory_target(target) {
@@ -245,6 +245,18 @@ mod tests {
         let st = PermissionState::default();
         assert!(st.may_execute_without_prompt(ToolSideEffect::Read, "/x"));
         assert!(!st.may_execute_without_prompt(ToolSideEffect::HardWrite, "/x"));
+    }
+
+    #[test]
+    fn mcp_session_grant_applies_only_to_read_tools() {
+        let mut state = PermissionState::default();
+        let tool = "mcp__jira__createJiraIssue";
+        state.allow_session_tool(tool);
+        assert!(state.may_execute_without_prompt(ToolSideEffect::Read, tool));
+        assert!(
+            !state.may_execute_without_prompt(ToolSideEffect::HardWrite, tool),
+            "MCP HardWrite must require a fresh per-action confirmation"
+        );
     }
 
     #[test]
