@@ -302,7 +302,7 @@ fn ingest_path_inner(
         }
         files_done += 1;
         let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
-        if files_done == 1 || files_done == file_count || files_done % 5 == 0 {
+        if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
             emit(
                 progress,
                 ProcessProgress::phase(

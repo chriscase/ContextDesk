@@ -442,12 +442,7 @@ fn session_context_import_path(
     .map_err(|e| e.to_string())?;
     let progress = TauriProcessProgress { app };
     store
-        .import_file_with_progress(
-            std::path::Path::new(&path),
-            None,
-            &progress,
-            None,
-        )
+        .import_file_with_progress(std::path::Path::new(&path), None, &progress, None)
         .map_err(|e| e.to_string())
 }
 
