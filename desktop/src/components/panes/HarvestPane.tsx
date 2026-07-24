@@ -251,7 +251,10 @@ export function HarvestPane() {
             <div className="empty-state__title">No harvests yet</div>
             <p className="empty-state__body">
               Use agent tool <code>harvest_from_source</code> with Confluence
-              page ids (space allowlist required).
+              page ids. Harvest needs a non-empty space allowlist — open{" "}
+              <strong>Settings → Connectors → Confluence</strong>, use{" "}
+              <strong>Discover spaces</strong> (or type keys like{" "}
+              <code>ENG</code>), then Save before harvesting.
             </p>
           </li>
         ) : (

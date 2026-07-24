@@ -2414,12 +2414,12 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let spaces = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
+        let (spaces, retry_notes) = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
         let lines: Vec<String> = spaces
             .iter()
             .map(|s| format!("- {} — {}", s.key, s.name))
             .collect();
-        let raw = if lines.is_empty() {
+        let mut raw = if lines.is_empty() {
             format!(
                 "No spaces returned. Check PAT scopes under {}. Empty product allowlist does not hide remote spaces.",
                 confluence_ro::CONFLUENCE_SETTINGS_PATH
@@ -2431,12 +2431,20 @@ impl ToolHost {
                 confluence_ro::CONFLUENCE_SETTINGS_PATH
             )
         };
-        Ok((
-            true,
-            format!("{} Confluence space(s)", spaces.len()),
-            raw,
-            None,
-        ))
+        if !retry_notes.is_empty() {
+            raw.push_str("\n\n");
+            raw.push_str(&retry_notes.join("\n"));
+        }
+        let summary = if retry_notes.is_empty() {
+            format!("{} Confluence space(s)", spaces.len())
+        } else {
+            format!(
+                "{} Confluence space(s) ({})",
+                spaces.len(),
+                retry_notes.last().map(|s| s.as_str()).unwrap_or("retried")
+            )
+        };
+        Ok((true, summary, raw, None))
     }
 
     async fn tool_confluence_list_children(

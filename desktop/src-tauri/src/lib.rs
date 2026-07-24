@@ -1869,7 +1869,7 @@ fn list_confluence_spaces(
     let ro = cfg.to_ro_config();
     let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
     let lim = limit.unwrap_or(50).min(100) as usize;
-    let spaces = {
+    let (spaces, _retry_notes) = {
         let run = async {
             cd_core::confluence_ro::list_spaces(&ro, &auth, &policy, lim)
                 .await
