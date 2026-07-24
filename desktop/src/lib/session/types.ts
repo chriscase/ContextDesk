@@ -41,6 +41,8 @@ export type ChatSession = {
   providerProfileId: string | null;
   /** Last message id scrolled into view / marked read. */
   lastReadMessageId: string | null;
+  /** Pinned skill id for this chat (#343); null = none. */
+  pinnedSkillId: string | null;
 };
 
 export type UiScale = "90" | "100" | "110";

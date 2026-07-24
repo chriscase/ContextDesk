@@ -39,6 +39,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Confluence Desktop Publish (HardWrite UI) | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #403 PR8 |
 | Confluence publish converter gate (K16) | Shipped | crates/cd-core/src/harvest/publish.rs:gate_publish | #326 #403 |
 | Harvest Browser pane | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #401 |
+| Session skill pin (playbook inject) | Shipped | crates/cd-core/src/skills.rs:apply_pinned_skill_to_user_text | #343 |
+| Source-run git update guide | Shipped | crates/cd-core/src/git_source.rs:build_source_git_status | #340 |
+| Chat history recompact (agent context) | Shipped | crates/cd-core/src/sessions.rs:recompact_chat_history | #33 #112 |
 | Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |

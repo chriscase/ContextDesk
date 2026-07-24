@@ -97,6 +97,9 @@ pub struct Session {
     /// Last message id the user has scrolled into view / marked read.
     #[serde(default)]
     pub last_read_message_id: Option<String>,
+    /// Pinned skill id for this chat (#343) — injected each turn until cleared.
+    #[serde(default)]
+    pub pinned_skill_id: Option<String>,
 }
 
 fn default_keep_last() -> usize {
@@ -251,6 +254,7 @@ impl Session {
             chat_model: None,
             provider_profile_id: None,
             last_read_message_id: None,
+            pinned_skill_id: None,
         }
     }
 

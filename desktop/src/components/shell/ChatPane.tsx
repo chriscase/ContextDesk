@@ -65,6 +65,9 @@ export type ChatPaneProps = {
   openSettings: (section?: "health" | "workspace" | "ai") => void;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
+  /** Session skill pin (#343). */
+  pinnedSkillId?: string | null;
+  onPinnedSkillChange?: (skillId: string | null) => void;
 };
 
 /** Chat tabpanel: session tabs + transcript + composer (#146). */
@@ -98,6 +101,8 @@ export function ChatPane(props: ChatPaneProps) {
     setAppDefaultModel,
     onSubmit,
     onStop,
+    pinnedSkillId = null,
+    onPinnedSkillChange,
     preflightBlocking,
     openSettings,
     setSourcePath,
@@ -368,6 +373,8 @@ export function ChatPane(props: ChatPaneProps) {
                 <SessionContextBar
                   sessionId={resolvedSessionId || null}
                   disabled={busy}
+                  pinnedSkillId={pinnedSkillId}
+                  onPinnedSkillChange={onPinnedSkillChange}
                 />
                 <Composer
                   onSubmit={onSubmit}

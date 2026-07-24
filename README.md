@@ -59,7 +59,9 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - MCP stdio tools and HTTP/OpenAPI presets wired as agent tools (`tool_host.rs:attach_mcp_connector`, `http_preset.rs`)
 - Durable chat sessions + keyword archive search; hybrid embed scoring available as a core/opt-in retrieval path (`index.rs:search_hybrid`, #119)
 - Optional headless server: incremental **SSE research endpoint** on `main` (`crates/cd-server/src/main.rs:research_sse`)
-- Opt-in signed desktop updater (config + Settings UI)
+- Opt-in signed desktop updater (config + Settings UI); **source-run git fetch/status** guide in Settings (never hard-reset) — #340
+- **Skills:** pin a playbook on a chat (`examples/skills/log-triage`) or `/skill id` — never elevates SoftWrite/HardWrite — `docs/SKILLS.md`, #343
+- Chat UI **folds older turns** (full history retained); agent uses recompacted context (#33)
 
 **Roadmap / partial (do not treat as done):**
 

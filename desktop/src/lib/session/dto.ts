@@ -30,6 +30,7 @@ export function newSession(
     chatModel,
     providerProfileId: null,
     lastReadMessageId: null,
+    pinnedSkillId: null,
   };
 }
 
@@ -99,6 +100,7 @@ export function sessionFromDto(dto: ChatSessionDto): ChatSession {
     chatModel: dto.chat_model ?? null,
     providerProfileId: dto.provider_profile_id ?? null,
     lastReadMessageId: dto.last_read_message_id ?? null,
+    pinnedSkillId: dto.pinned_skill_id ?? null,
   };
 }
 
@@ -127,6 +129,7 @@ export function sessionToDto(s: ChatSession): ChatSessionDto {
     chat_model: s.chatModel,
     provider_profile_id: s.providerProfileId,
     last_read_message_id: s.lastReadMessageId,
+    pinned_skill_id: s.pinnedSkillId,
   };
 }
 

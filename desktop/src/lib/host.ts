@@ -151,6 +151,7 @@ export async function agentTurn(
   chatModel?: string | null,
   providerProfileId?: string | null,
   onEvent?: (ev: EventDto) => void,
+  pinnedSkillId?: string | null,
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -158,6 +159,7 @@ export async function agentTurn(
     force_local: forceLocal,
     chat_model: chatModel?.trim() || null,
     provider_profile_id: providerProfileId?.trim() || null,
+    pinned_skill_id: pinnedSkillId?.trim() || null,
   };
 
   if (!isTauri()) {
@@ -257,6 +259,31 @@ export type HarvestRowDto = {
 export async function hostListHarvests(limit = 100): Promise<HarvestRowDto[]> {
   if (!isTauri()) return [];
   return invoke<HarvestRowDto[]>("list_harvests", { limit });
+}
+
+/** Source-run git status for guided update (#340). */
+export type SourceGitStatusDto = {
+  isGitRepo: boolean;
+  remote?: string | null;
+  branch?: string | null;
+  ahead: number;
+  behind: number;
+  dirty: boolean;
+  summary: string;
+  rebuildHint: string;
+};
+
+export async function hostSourceGitStatus(): Promise<SourceGitStatusDto | null> {
+  if (!isTauri()) return null;
+  return invoke<SourceGitStatusDto>("source_git_status");
+}
+
+/** Explicit fetch only — never pull/reset (#340). */
+export async function hostSourceGitFetch(): Promise<SourceGitStatusDto> {
+  if (!isTauri()) {
+    throw new Error("Source git fetch requires Tauri host");
+  }
+  return invoke<SourceGitStatusDto>("source_git_fetch");
 }
 
 /**
@@ -638,6 +665,8 @@ export type ChatSessionDto = {
   chat_model?: string | null;
   provider_profile_id?: string | null;
   last_read_message_id?: string | null;
+  /** Session-pinned skill id (#343). */
+  pinned_skill_id?: string | null;
 };
 
 export type ModelOptionDto = {

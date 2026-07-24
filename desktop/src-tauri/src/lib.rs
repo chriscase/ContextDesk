@@ -1495,6 +1495,9 @@ struct AgentTurnReq {
     /// Optional provider profile id when model is chosen from a non-active source.
     #[serde(default)]
     provider_profile_id: Option<String>,
+    /// Session-pinned skill id (#343); inject playbook when set.
+    #[serde(default)]
+    pinned_skill_id: Option<String>,
 }
 
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
@@ -2069,9 +2072,16 @@ async fn agent_turn(
     let cfg = state.config.lock().expect("config").clone();
     let skill_dirs = skill_dirs_for(&state, &cfg);
     let mut user_text = req.text.clone();
-    // Inject skill playbook into the query prefix for agent context (cannot elevate grants).
-    if let Some((sid, rest)) = cd_core::skills::parse_skill_slash(&user_text) {
-        if let Ok(skills) = cd_core::skills::discover_skills(&skill_dirs) {
+    // Inject skill playbook (slash or session pin #343). Skills cannot elevate grants.
+    if let Ok(skills) = cd_core::skills::discover_skills(&skill_dirs) {
+        // Prefer pure helper so pin + slash share one path.
+        user_text = cd_core::skills::apply_pinned_skill_to_user_text(
+            &user_text,
+            req.pinned_skill_id.as_deref(),
+            &skills,
+        );
+        // Slash still needs full inject when present (apply_pinned leaves slash text alone).
+        if let Some((sid, rest)) = cd_core::skills::parse_skill_slash(&user_text) {
             if let Some(sk) = cd_core::skills::find_skill(&skills, &sid) {
                 if !sk.disabled {
                     let ctx = cd_core::skills::skill_context(sk);
@@ -3426,6 +3436,170 @@ struct HarvestRowDto {
     can_publish_from_local: bool,
 }
 
+/// DTO for guided source-run git update (#340).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceGitStatusDto {
+    is_git_repo: bool,
+    remote: Option<String>,
+    branch: Option<String>,
+    ahead: u32,
+    behind: u32,
+    dirty: bool,
+    summary: String,
+    rebuild_hint: String,
+}
+
+fn source_git_root(state: &AppState) -> Option<std::path::PathBuf> {
+    let cfg = state.config.lock().expect("config").clone();
+    if let Some(ws) = workspace_from_cfg(&cfg) {
+        if let Some(r) = ws.roots.first() {
+            return Some(r.clone());
+        }
+    }
+    std::env::current_dir().ok()
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(err.trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Inspect git checkout for source-run update UI (#340). Never hard-resets.
+#[tauri::command]
+fn source_git_status(state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
+    let Some(root) = source_git_root(&state) else {
+        let s = cd_core::git_source::SourceGitStatus::not_repo();
+        return Ok(SourceGitStatusDto {
+            is_git_repo: s.is_git_repo,
+            remote: s.remote,
+            branch: s.branch,
+            ahead: s.ahead,
+            behind: s.behind,
+            dirty: s.dirty,
+            summary: s.summary,
+            rebuild_hint: s.rebuild_hint,
+        });
+    };
+    let git_dir = root.join(".git");
+    if !git_dir.exists() {
+        // Walk up for monorepo / worktree
+        let mut cur = root.as_path();
+        let mut found = None;
+        for _ in 0..6 {
+            if cur.join(".git").exists() {
+                found = Some(cur.to_path_buf());
+                break;
+            }
+            cur = match cur.parent() {
+                Some(p) => p,
+                None => break,
+            };
+        }
+        if found.is_none() {
+            let s = cd_core::git_source::SourceGitStatus::not_repo();
+            return Ok(SourceGitStatusDto {
+                is_git_repo: false,
+                remote: None,
+                branch: None,
+                ahead: 0,
+                behind: 0,
+                dirty: false,
+                summary: s.summary,
+                rebuild_hint: s.rebuild_hint,
+            });
+        }
+    }
+    let cwd = {
+        let mut cur = root.as_path();
+        let mut found = root.clone();
+        for _ in 0..8 {
+            if cur.join(".git").exists() {
+                found = cur.to_path_buf();
+                break;
+            }
+            if let Some(p) = cur.parent() {
+                cur = p;
+            } else {
+                break;
+            }
+        }
+        found
+    };
+    let branch = run_git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD");
+    let remote = run_git(&cwd, &["remote"]).ok().and_then(|s| {
+        s.lines()
+            .next()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+    });
+    let porcelain = run_git(&cwd, &["status", "--porcelain"]).unwrap_or_default();
+    let dirty = cd_core::git_source::porcelain_is_dirty(&porcelain);
+    let (ahead, behind) = match run_git(
+        &cwd,
+        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+    ) {
+        Ok(raw) => cd_core::git_source::parse_ahead_behind(&raw),
+        Err(_) => (0, 0),
+    };
+    // Product rule: this path never hard-resets.
+    let _ = cd_core::git_source::must_not_hard_reset(dirty);
+    let s = cd_core::git_source::build_source_git_status(
+        true,
+        remote.as_deref(),
+        branch.as_deref(),
+        ahead,
+        behind,
+        dirty,
+    );
+    Ok(SourceGitStatusDto {
+        is_git_repo: s.is_git_repo,
+        remote: s.remote,
+        branch: s.branch,
+        ahead: s.ahead,
+        behind: s.behind,
+        dirty: s.dirty,
+        summary: s.summary,
+        rebuild_hint: s.rebuild_hint,
+    })
+}
+
+/// Explicit fetch only (#340). Never pull or reset.
+#[tauri::command]
+fn source_git_fetch(state: State<'_, AppState>) -> Result<SourceGitStatusDto, String> {
+    let root = source_git_root(&state).ok_or_else(|| "no workspace root".to_string())?;
+    let mut cwd = root.clone();
+    let mut cur = root.as_path();
+    for _ in 0..8 {
+        if cur.join(".git").exists() {
+            cwd = cur.to_path_buf();
+            break;
+        }
+        if let Some(p) = cur.parent() {
+            cur = p;
+        } else {
+            break;
+        }
+    }
+    if !cwd.join(".git").exists() {
+        return Err("not a git repository".into());
+    }
+    // fetch only — never pull/reset
+    let _ = run_git(&cwd, &["fetch", "--all", "--prune"]).map_err(|e| format!("git fetch: {e}"))?;
+    source_git_status(state)
+}
+
 /// List harvest provenance rows (co-located with workspace memory).
 #[tauri::command]
 fn list_harvests(
@@ -3985,6 +4159,8 @@ pub fn run() {
             read_workspace_file_cmd,
             list_memory_notes,
             list_harvests,
+            source_git_status,
+            source_git_fetch,
             list_durable_memories,
             get_durable_memory,
             save_composition_draft,
