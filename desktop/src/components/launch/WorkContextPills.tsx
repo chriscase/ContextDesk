@@ -6,19 +6,27 @@ import { filterWorkContextItems } from "../../lib/preflightCategories";
 type Props = {
   items: PreflightItem[];
   onFix?: (fixAction?: string) => void;
+  /** grid = multi-column on wide screens; list = single column */
+  layout?: "grid" | "list";
 };
 
-export function WorkContextPills({ items, onFix }: Props) {
+export function WorkContextPills({ items, onFix, layout = "list" }: Props) {
   const work = filterWorkContextItems(items);
   if (!work.length) {
     return (
-      <p className="launch-ready__empty">No work-context rows yet — recheck after setup.</p>
+      <p className="launch-ready__empty">
+        No work-context rows yet — recheck after setup.
+      </p>
     );
   }
+  const listClass =
+    layout === "grid"
+      ? "launch-status-grid launch-status-grid--dense"
+      : "launch-pills";
   return (
-    <ul className="launch-pills" aria-label="Work context sources">
+    <ul className={listClass} aria-label="Work context sources">
       {work.map((i) => (
-        <li key={i.id} className="launch-pills__item" data-level={i.level}>
+        <li key={i.id} data-level={i.level} className="launch-pills__item">
           <span className="launch-pills__status" aria-hidden>
             {i.level === "pass"
               ? "●"

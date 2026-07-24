@@ -5,16 +5,18 @@
   position: fixed;
   inset: 0;
   z-index: 10000;
+  /* Always opaque dark — never start transparent (white FOUC under splash). */
   background: #0a0a0a;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: opacity 0.9s ease-out;
-  opacity: 0;
+  opacity: 1;
 }
 
 .splash-screen--enter {
-  animation: splash-fadeIn 0.9s ease-out forwards;
+  /* Content elements animate in; the shell stays solid dark. */
+  opacity: 1;
 }
 
 .splash-screen--hold {

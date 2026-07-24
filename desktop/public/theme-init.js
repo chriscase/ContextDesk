@@ -6,14 +6,28 @@
 (function () {
   // Allow-list must match SkinId in desktop/src/lib/skins.ts
   var KNOWN = { dark: 1, light: 1, slate: 1, sand: 1, forest: 1 };
+  var LIGHT = { light: 1, sand: 1 };
+  var t = "dark";
   try {
-    var t = localStorage.getItem("cd-theme");
-    if (!t || !KNOWN[t]) {
-      t = "dark";
+    var stored = localStorage.getItem("cd-theme");
+    if (stored && KNOWN[stored]) {
+      t = stored;
     }
-    document.documentElement.setAttribute("data-theme", t);
   } catch (_) {
-    document.documentElement.setAttribute("data-theme", "dark");
+    /* ignore */
+  }
+  document.documentElement.setAttribute("data-theme", t);
+  // Immediate paint colors (before critical-boot.css / theme bundles).
+  var bg = LIGHT[t] ? "#f4f5f7" : "#0b0c0e";
+  if (t === "sand") bg = "#f3efe6";
+  document.documentElement.style.backgroundColor = bg;
+  document.documentElement.style.colorScheme = LIGHT[t] ? "light" : "dark";
+  try {
+    if (document.body) {
+      document.body.style.backgroundColor = bg;
+    }
+  } catch (_) {
+    /* ignore */
   }
   // Platform class for chrome padding (macOS traffic-light inset, #153).
   try {

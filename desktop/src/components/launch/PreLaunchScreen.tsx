@@ -1,6 +1,7 @@
 /**
  * Real pre-launch before main chrome (#394 / #395).
- * Steps: Workspace → AI → Ready (work-context pills).
+ * Steps: Workspace → AI → Ready (work-context status).
+ * Wide layout + explicit primary CTAs; auto gateway check when configured.
  */
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
@@ -35,6 +36,13 @@ type Props = {
   onEnterApp: () => void;
   onOpenSettings?: (section?: string) => void;
 };
+
+function statusGlyph(level: string): string {
+  if (level === "pass") return "●";
+  if (level === "warn") return "!";
+  if (level === "off") return "○";
+  return "×";
+}
 
 export function PreLaunchScreen({
   productName,
@@ -86,6 +94,18 @@ export function PreLaunchScreen({
     }
   }, [setup.workspaceRoots, setup.workspaceName, step]);
 
+  // Auto-skip to AI when workspace is already set (clear path through setup).
+  useEffect(() => {
+    if (
+      step === "workspace" &&
+      setup.workspaceRoots.length > 0 &&
+      setup.workspaceName
+    ) {
+      // Stay on workspace only if user hasn't completed it yet — still show
+      // Continue; do not force-skip so they can re-confirm path.
+    }
+  }, [step, setup.workspaceRoots.length, setup.workspaceName]);
+
   const markDone = useCallback((s: LaunchStepId) => {
     setCompleted((c) => (c.includes(s) ? c : [...c, s]));
   }, []);
@@ -116,6 +136,17 @@ export function PreLaunchScreen({
     }
   };
 
+  const goAi = () => {
+    markDone("workspace");
+    setStep("ai");
+  };
+
+  const goReady = () => {
+    markDone("ai");
+    setStep("ready");
+    void onRecheck();
+  };
+
   const launchCritical = useMemo(
     () =>
       preflight.items.filter(
@@ -127,6 +158,35 @@ export function PreLaunchScreen({
       ),
     [preflight.items],
   );
+
+  const hasWorkspace = setup.workspaceRoots.length > 0;
+  const hasAi =
+    setup.providerKind !== "none" && Boolean(setup.chatModel?.trim());
+
+  const asideCopy =
+    step === "workspace"
+      ? {
+          title: "Workspace folder",
+          body: "Allowlist a folder for files and project memory. Use the OS default under Documents, or continue if you already set one.",
+          next: hasWorkspace
+            ? "Primary action: Continue to AI setup"
+            : "Primary action: Use default folder",
+        }
+      : step === "ai"
+        ? {
+            title: "AI provider",
+            body: "If a gateway or Ollama is already configured, we check it automatically. Confirm the model, then continue.",
+            next: hasAi
+              ? "Primary action: Continue to Ready"
+              : "Primary action: Discover / Apply & Save in the panel, then Continue",
+          }
+        : {
+            title: "Ready to enter",
+            body: "Launch-critical checks must pass. Work-context rows are informational — warnings do not block Enter.",
+            next: canEnter
+              ? "Primary action: Enter app"
+              : "Fix launch-critical failures (workspace + AI), then Enter app",
+          };
 
   return (
     <div className="launch-root">
@@ -141,171 +201,197 @@ export function PreLaunchScreen({
 
         <WizardStepIndicator active={step} completed={completed} />
 
-        {step === "workspace" ? (
-          <div className="launch-card">
-            <h2>Workspace folder</h2>
-            <p>
-              Allowlist a folder for files and project memory. You can use the
-              OS default under Documents, or pick folders later in Settings.
-            </p>
-            {setup.workspaceRoots.length > 0 ? (
-              <p>
-                Current: <strong>{setup.workspaceName}</strong> —{" "}
-                {setup.workspaceRoots.length} root(s).
-              </p>
-            ) : null}
-            {defaultWs?.path ? (
-              <p className="launch-shell__sub">Suggested: {defaultWs.path}</p>
-            ) : null}
-            {note ? (
-              <div className="callout callout--warn" role="alert">
-                {note}
-              </div>
-            ) : null}
-            <div className="launch-card__actions">
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={busy}
-                onClick={() => void acceptDefault()}
-              >
-                Use default folder
-              </button>
-              {setup.workspaceRoots.length > 0 ? (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => {
-                    markDone("workspace");
-                    setStep("ai");
-                  }}
-                >
-                  Continue
-                </button>
-              ) : null}
+        <div className="launch-body">
+          <aside className="launch-aside">
+            <div className="launch-aside__copy">
+              <h2>{asideCopy.title}</h2>
+              <p>{asideCopy.body}</p>
             </div>
-          </div>
-        ) : null}
-
-        {step === "ai" ? (
-          <div className="launch-card">
-            <h2>AI provider</h2>
-            <p>
-              Local Ollama is enough for open-source first launch. Grok Build
-              session and gateways are optional.
+            <p className="launch-next-hint" role="status">
+              <strong>What to press:</strong> {asideCopy.next}
             </p>
-            <AiSetupWizard
-              baseId={`${baseId}-ai`}
-              draft={draft}
-              setDraft={setDraft}
-              apiKeyDraft={apiKeyDraft}
-              setApiKeyDraft={setApiKeyDraft}
-              candidates={candidates}
-              onApplyAndSave={async (payload) => {
-                await onApplyAi(payload);
-                markDone("ai");
-                setStep("ready");
-                await onRecheck();
-              }}
-            />
-            <div className="launch-card__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setStep("workspace")}
-              >
-                Back
-              </button>
-              {setup.providerKind !== "none" && setup.chatModel ? (
-                <button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => {
+          </aside>
+
+          <div className="launch-panel">
+            {step === "workspace" ? (
+              <>
+                {hasWorkspace ? (
+                  <p>
+                    Current: <strong>{setup.workspaceName}</strong> —{" "}
+                    {setup.workspaceRoots.length} root(s).
+                  </p>
+                ) : (
+                  <p>
+                    No workspace yet. Use the default folder or configure one in
+                    Settings later.
+                  </p>
+                )}
+                {defaultWs?.path ? (
+                  <p className="launch-shell__sub">Suggested: {defaultWs.path}</p>
+                ) : null}
+                {note ? (
+                  <div className="callout callout--warn" role="alert">
+                    {note}
+                  </div>
+                ) : null}
+                <div className="launch-cta">
+                  {hasWorkspace ? (
+                    <button
+                      type="button"
+                      className="btn btn--primary launch-cta__primary"
+                      onClick={goAi}
+                    >
+                      Continue to AI setup →
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn--primary launch-cta__primary"
+                      disabled={busy}
+                      onClick={() => void acceptDefault()}
+                    >
+                      {busy ? "Creating…" : "Use default folder"}
+                    </button>
+                  )}
+                  {hasWorkspace ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost launch-cta__secondary"
+                      disabled={busy}
+                      onClick={() => void acceptDefault()}
+                    >
+                      Reset to default folder
+                    </button>
+                  ) : null}
+                  <p className="launch-cta__hint">
+                    {hasWorkspace
+                      ? "You already have a workspace — press Continue."
+                      : "One click creates the suggested folder and moves on."}
+                  </p>
+                </div>
+              </>
+            ) : null}
+
+            {step === "ai" ? (
+              <>
+                <AiSetupWizard
+                  baseId={`${baseId}-ai`}
+                  draft={draft}
+                  setDraft={setDraft}
+                  apiKeyDraft={apiKeyDraft}
+                  setApiKeyDraft={setApiKeyDraft}
+                  candidates={candidates}
+                  autoDiscover
+                  onApplyAndSave={async (payload) => {
+                    await onApplyAi(payload);
                     markDone("ai");
                     setStep("ready");
-                    void onRecheck();
+                    await onRecheck();
                   }}
-                >
-                  Skip to ready
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
-        {step === "ready" ? (
-          <div className="launch-card">
-            <h2>Ready</h2>
-            <p>
-              Launch-critical checks must pass. Work context (files, memory,
-              databases, Confluence, MCP) shows status — warnings do not block
-              Enter.
-            </p>
-
-            <p className="launch-section-title">Launch-critical</p>
-            <ul className="launch-pills" aria-label="Launch-critical">
-              {launchCritical
-                .filter(
-                  (i) =>
-                    !i.id.startsWith("confluence.") &&
-                    !i.id.startsWith("connector.") &&
-                    i.id !== "memory.store",
-                )
-                .slice(0, 8)
-                .map((i) => (
-                  <li
-                    key={i.id}
-                    className="launch-pills__item"
-                    data-level={i.level}
+                />
+                <div className="launch-cta">
+                  <button
+                    type="button"
+                    className="btn btn--ghost launch-cta__secondary"
+                    onClick={() => setStep("workspace")}
                   >
-                    <span className="launch-pills__status">
-                      {i.level === "pass" ? "●" : i.level === "fail" ? "×" : "!"}
-                    </span>
-                    <div className="launch-pills__body">
-                      <div className="launch-pills__title">{i.title}</div>
-                      <div className="launch-pills__detail">{i.detail}</div>
-                    </div>
-                  </li>
-                ))}
-            </ul>
+                    ← Back
+                  </button>
+                  {hasAi || draft.providerKind !== "none" ? (
+                    <button
+                      type="button"
+                      className="btn btn--primary launch-cta__primary"
+                      onClick={goReady}
+                    >
+                      Continue to Ready →
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn--primary launch-cta__primary"
+                      disabled
+                      title="Discover and apply a provider first"
+                    >
+                      Continue to Ready →
+                    </button>
+                  )}
+                  <p className="launch-cta__hint">
+                    {hasAi
+                      ? "Provider looks configured — Continue checks status on Ready."
+                      : "Use Discover / Apply & Save above, or Continue after a model is set."}
+                  </p>
+                </div>
+              </>
+            ) : null}
 
-            <p className="launch-section-title">Work context</p>
-            <WorkContextPills
-              items={preflight.items}
-              onFix={(sec) => onOpenSettings?.(sec ?? "connectors")}
-            />
+            {step === "ready" ? (
+              <>
+                <p className="launch-section-title">Launch-critical</p>
+                <ul
+                  className="launch-status-grid"
+                  aria-label="Launch-critical checks"
+                >
+                  {launchCritical
+                    .filter(
+                      (i) =>
+                        !i.id.startsWith("confluence.") &&
+                        !i.id.startsWith("connector.") &&
+                        i.id !== "memory.store",
+                    )
+                    .slice(0, 8)
+                    .map((i) => (
+                      <li key={i.id} data-level={i.level}>
+                        <span className="launch-pills__status" aria-hidden>
+                          {statusGlyph(i.level)}
+                        </span>
+                        <div className="launch-pills__body">
+                          <div className="launch-pills__title">{i.title}</div>
+                          <div className="launch-pills__detail">{i.detail}</div>
+                        </div>
+                      </li>
+                    ))}
+                </ul>
 
-            <div className="launch-card__actions">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setStep("ai")}
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => void onRecheck()}
-              >
-                Recheck
-              </button>
-              <button
-                type="button"
-                className="btn btn--primary"
-                disabled={!canEnter}
-                onClick={onEnterApp}
-              >
-                Enter app
-              </button>
-            </div>
-            {!canEnter ? (
-              <p className="launch-shell__sub">
-                Fix launch-critical failures (workspace + AI) before entering.
-              </p>
+                <p className="launch-section-title">Work context</p>
+                <WorkContextPills
+                  items={preflight.items}
+                  onFix={(sec) => onOpenSettings?.(sec ?? "connectors")}
+                  layout="grid"
+                />
+
+                <div className="launch-cta">
+                  <button
+                    type="button"
+                    className="btn btn--ghost launch-cta__secondary"
+                    onClick={() => setStep("ai")}
+                  >
+                    ← Back
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--ghost launch-cta__secondary"
+                    onClick={() => void onRecheck()}
+                  >
+                    Recheck
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--primary launch-cta__primary"
+                    disabled={!canEnter}
+                    onClick={onEnterApp}
+                  >
+                    Enter app
+                  </button>
+                  <p className="launch-cta__hint">
+                    {canEnter
+                      ? "All clear — press Enter app to open the main workspace."
+                      : "Fix red launch-critical items (workspace + AI), then Enter app enables."}
+                  </p>
+                </div>
+              </>
             ) : null}
           </div>
-        ) : null}
+        </div>
       </div>
     </div>
   );

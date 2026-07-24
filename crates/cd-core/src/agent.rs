@@ -410,6 +410,8 @@ pub async fn run_agent_turn_with_sink(
     ];
     let started = Instant::now();
     let mut pending_web_citations = Vec::new();
+    // UI notice for hard-budget compaction — once per user turn only.
+    let mut compact_notice_sent = false;
 
     for round in 0..opts.max_rounds {
         if cancelled(opts) {
@@ -454,7 +456,9 @@ pub async fn run_agent_turn_with_sink(
         };
         let mut keep = prepared.keep;
         let mut model_ctx = prepared.messages;
-        if prepared.compacted || prepared.truncated {
+        // Notify at most once per user turn (multi-round tool loops re-prepare each round).
+        if (prepared.compacted || prepared.truncated) && !compact_notice_sent {
+            compact_notice_sent = true;
             out.push(StreamEvent::Error {
                 code: "context_compacted".into(),
                 message: "Conversation grew large — older turns were compacted for the model. Full history is still saved."
@@ -731,6 +735,11 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     }
                 }
             };
+            let awaiting_permission = result
+                .events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::PermissionRequired { .. }))
+                || result.summary == "permission required";
             let is_web_search = tc.function.name == crate::tools::names::WEB_SEARCH;
             if is_web_search {
                 let passthrough = hold_web_search_citations(
@@ -739,7 +748,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                 );
                 out.extend_from(passthrough);
             } else {
-                out.extend_from(result.events);
+                out.extend_from(std::mem::take(&mut result.events));
             }
             if let Some(path) = &result.citation_path {
                 if result.ok && !is_web_search {
@@ -749,6 +758,20 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                         locator: None,
                     });
                 }
+            }
+            // SoftWrite/HardWrite without grant: stop the agent loop so we do not
+            // continue the model with "permission required" as a failed tool and
+            // claim the write failed while the UI modal is still open.
+            if awaiting_permission {
+                if !trail.is_empty() {
+                    out.push(StreamEvent::SearchTrail {
+                        steps: trail.clone(),
+                    });
+                }
+                out.push(StreamEvent::TurnCompleted {
+                    reason: "awaiting_permission".into(),
+                });
+                return Ok(out.into_events());
             }
             history.push(ChatMessage {
                 role: Role::Tool,
