@@ -428,6 +428,7 @@ fn session_context_list(
 
 #[tauri::command]
 fn session_context_import_path(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     path: String,
@@ -439,13 +440,20 @@ fn session_context_import_path(
         cd_core::session_context::SessionContextCaps::default(),
     )
     .map_err(|e| e.to_string())?;
+    let progress = TauriProcessProgress { app };
     store
-        .import_file(std::path::Path::new(&path), None)
+        .import_file_with_progress(
+            std::path::Path::new(&path),
+            None,
+            &progress,
+            None,
+        )
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn session_context_import_bytes(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     name: String,
@@ -468,8 +476,14 @@ fn session_context_import_bytes(
             }
         })
         .collect();
+    let progress = TauriProcessProgress { app };
     store
-        .import_bytes(if safe.is_empty() { "file.bin" } else { &safe }, &data)
+        .import_bytes_with_progress(
+            if safe.is_empty() { "file.bin" } else { &safe },
+            &data,
+            &progress,
+            None,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -503,6 +517,7 @@ fn session_context_purge(state: State<'_, AppState>, session_id: String) -> Resu
 
 #[tauri::command]
 fn session_context_import_zip(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     data: Vec<u8>,
@@ -514,8 +529,14 @@ fn session_context_import_zip(
         cd_core::session_context::SessionContextCaps::default(),
     )
     .map_err(|e| e.to_string())?;
+    let progress = TauriProcessProgress { app };
     store
-        .import_zip_bytes(&data, cd_core::session_context::DEFAULT_MAX_ZIP_NEST)
+        .import_zip_bytes_with_progress(
+            &data,
+            cd_core::session_context::DEFAULT_MAX_ZIP_NEST,
+            &progress,
+            None,
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -3772,9 +3793,22 @@ fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDt
     Ok(out)
 }
 
+/// Emits redacted multi-phase progress for long host ops (#445).
+struct TauriProcessProgress {
+    app: tauri::AppHandle,
+}
+
+impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress {
+    fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
+        let _ = self.app.emit("process-progress", update);
+    }
+}
+
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
+/// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
 #[tauri::command]
 fn ingest_log_path(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
     name: Option<String>,
@@ -3787,12 +3821,15 @@ fn ingest_log_path(
     // requires explicit confirm args — UI does not pass cloud without confirm).
     let policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
     let backend = host.log_embed_backend();
-    let report = cd_core::log_analysis::ingest_path_with_policy(
+    let progress = TauriProcessProgress { app };
+    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
         &cache,
         std::path::Path::new(&path),
         name.as_deref().unwrap_or("corpus"),
         &policy,
         backend,
+        &progress,
+        None,
     )
     .map_err(|e| e.to_string())?;
     Ok(LogIngestReportDto {

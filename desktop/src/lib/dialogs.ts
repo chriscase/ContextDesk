@@ -1,5 +1,43 @@
 /** Async dialogs via Tauri plugin (WKWebView-safe). Never use blocking browser dialogs. */
 
+/** Open a directory picker; returns absolute path or null. */
+export async function openDirectoryDialog(
+  title = "Choose directory",
+): Promise<string | null> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title,
+    });
+    if (typeof selected === "string") return selected;
+    return null;
+  } catch {
+    console.warn("[dialogs] directory picker unavailable");
+    return null;
+  }
+}
+
+/** Open a file picker; returns absolute path or null. */
+export async function openFileDialog(
+  title = "Choose file",
+): Promise<string | null> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      title,
+    });
+    if (typeof selected === "string") return selected;
+    return null;
+  } catch {
+    console.warn("[dialogs] file picker unavailable");
+    return null;
+  }
+}
+
 export async function dialogConfirm(
   message: string,
   opts?: { title?: string; kind?: "info" | "warning" | "error" },

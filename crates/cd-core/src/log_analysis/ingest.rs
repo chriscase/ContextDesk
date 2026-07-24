@@ -1,4 +1,4 @@
-//! Path/dir ingest orchestration (#355–#359, #362 core).
+//! Path/dir ingest orchestration (#355–#359, #362 core) + multi-phase progress (#445).
 
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
@@ -8,6 +8,10 @@ use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
+use crate::process_progress::{
+    progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
+    ProcessProgressObserver, ProcessProgressPhase,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -48,7 +52,28 @@ pub fn ingest_path(
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
 ) -> CoreResult<IngestReport> {
-    ingest_path_inner(cache_root, path, name, embed, embed_model)
+    ingest_path_with_observer(
+        cache_root,
+        path,
+        name,
+        embed,
+        embed_model,
+        &NoopProcessProgress,
+        None,
+    )
+}
+
+/// Ingest with multi-phase progress and optional cancel (#445).
+pub fn ingest_path_with_observer(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<IngestReport> {
+    ingest_path_inner(cache_root, path, name, embed, embed_model, progress, cancel)
 }
 
 /// Ingest with an explicit [`LogEmbedPolicy`] (#359).
@@ -63,6 +88,27 @@ pub fn ingest_path_with_policy(
     name: &str,
     policy: &LogEmbedPolicy,
     embed: Option<Arc<dyn EmbedBackend>>,
+) -> CoreResult<IngestReport> {
+    ingest_path_with_policy_and_observer(
+        cache_root,
+        path,
+        name,
+        policy,
+        embed,
+        &NoopProcessProgress,
+        None,
+    )
+}
+
+/// Policy ingest with progress observer (#445).
+pub fn ingest_path_with_policy_and_observer(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
     policy.assert_embed_allowed()?;
     let backend = match policy.mode {
@@ -80,7 +126,17 @@ pub fn ingest_path_with_policy(
         name,
         backend.as_deref(),
         policy.model_id.as_str(),
+        progress,
+        cancel,
     )
+}
+
+fn cancelled(cancel: Option<&CancelFlag>) -> bool {
+    cancel.map(|c| c.is_cancelled()).unwrap_or(false)
+}
+
+fn emit(progress: &dyn ProcessProgressObserver, update: ProcessProgress) {
+    progress.progress(update);
 }
 
 fn ingest_path_inner(
@@ -89,10 +145,64 @@ fn ingest_path_inner(
     name: &str,
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
     let _ = embed_model;
+    let kind = ProcessProgressKind::LogIngest;
+    let source_label = progress_basename(path);
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Starting,
+            format!("starting ingest of {source_label}"),
+            true,
+        )
+        .with_fraction(0.0),
+    );
+
+    if cancelled(cancel) {
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Cancelled,
+                "ingest cancelled before scan",
+                false,
+            ),
+        );
+        return Err(CoreError::Message("ingest cancelled".into()));
+    }
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Scan,
+            format!("scanning {source_label}"),
+            true,
+        )
+        .with_fraction(0.05),
+    );
+
     let corpus = LogCorpus::create(cache_root, name)?;
     let files = collect_log_files(path)?;
+    let file_count = files.len() as u64;
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Scan,
+            format!("found {file_count} file(s)"),
+            true,
+        )
+        .with_fraction(0.1)
+        .with_files(file_count),
+    );
+
     let mut miner = DrainMiner::default();
     let mut stats = IngestStats {
         files: files.len(),
@@ -101,14 +211,48 @@ fn ingest_path_inner(
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut format_hint: Option<LogFormat> = None;
+    let mut files_done = 0u64;
+
+    // Combined parse + template + redact per line (phases reported at file boundaries).
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Parse,
+            "parsing and templating lines",
+            true,
+        )
+        .with_fraction(0.15)
+        .with_files(file_count),
+    );
 
     for file in &files {
+        if cancelled(cancel) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Cancelled,
+                    "ingest cancelled during parse",
+                    false,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done),
+            );
+            // Best-effort discard: drop corpus dir if API allows — LogCorpus has no delete;
+            // leave disposable cache entry; UI notes cancel.
+            return Err(CoreError::Message("ingest cancelled".into()));
+        }
+
         let text = std::fs::read_to_string(file).unwrap_or_default();
         let rel = file
             .strip_prefix(path)
             .unwrap_or(file.as_path())
             .to_string_lossy()
             .to_string();
+        // Never put full absolute path in progress — basename only.
+        let _file_base = progress_basename(file);
+
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -117,6 +261,7 @@ fn ingest_path_inner(
                 format_hint = Some(detect_format(line, Some(file)));
             }
             let parsed = parse_line(line, format_hint, seq);
+            // Redact is part of the pipeline; report phase periodically.
             let msg = redact_message(&parsed.message);
             let ts = parsed.ts.unwrap_or(seq as i64);
             let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
@@ -136,16 +281,100 @@ fn ingest_path_inner(
             seq += 1;
             stats.lines += 1;
             if batch.len() >= 256 {
+                // Store phase begins once we flush batches.
+                if files_done == 0 && stats.lines <= 256 {
+                    emit(
+                        progress,
+                        ProcessProgress::phase(
+                            kind,
+                            ProcessProgressPhase::Store,
+                            "writing event batches",
+                            true,
+                        )
+                        .with_fraction(0.45)
+                        .with_lines(stats.lines)
+                        .with_files(files_done),
+                    );
+                }
                 corpus.push_events(&batch)?;
                 batch.clear();
             }
         }
+        files_done += 1;
+        let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
+        if files_done == 1 || files_done == file_count || files_done % 5 == 0 {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Template,
+                    "Drain templating + redaction",
+                    true,
+                )
+                .with_fraction(frac)
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_templates(miner.templates().len() as u64),
+            );
+        }
     }
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Redact,
+            "redaction complete for parsed messages",
+            true,
+        )
+        .with_fraction(0.62)
+        .with_lines(stats.lines)
+        .with_files(files_done),
+    );
+
     if !batch.is_empty() {
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Store,
+                "flushing remaining events",
+                // After first store, cancel is less clean; still allow between template persist.
+                true,
+            )
+            .with_fraction(0.7)
+            .with_lines(stats.lines),
+        );
         corpus.push_events(&batch)?;
     }
 
+    if cancelled(cancel) {
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Cancelled,
+                "ingest cancelled before template persist",
+                false,
+            )
+            .with_lines(stats.lines),
+        );
+        return Err(CoreError::Message("ingest cancelled".into()));
+    }
+
     // Persist templates
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Store,
+            "persisting template table",
+            false, // flush in progress — not cleanly cancellable mid-upsert
+        )
+        .with_fraction(0.78)
+        .with_lines(stats.lines),
+    );
+
     let mut rows = Vec::new();
     for t in miner.templates() {
         rows.push(TemplateRow {
@@ -159,10 +388,22 @@ fn ingest_path_inner(
     // Embed templates only (#359)
     let mut embedded = 0usize;
     if let Some(backend) = embed {
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Embed,
+                "embedding templates",
+                false,
+            )
+            .with_fraction(0.85)
+            .with_templates(corpus.template_count() as u64),
+        );
         let templates = corpus.list_templates();
+        let total_t = templates.len().max(1) as f32;
         let mut hash_cache: std::collections::HashMap<String, Vec<f32>> =
             std::collections::HashMap::new();
-        for row in templates {
+        for (i, row) in templates.into_iter().enumerate() {
             if let Some(v) = hash_cache.get(&row.content_hash) {
                 corpus.set_template_vector(row.info.template_id, v.clone())?;
                 embedded += 1;
@@ -172,6 +413,19 @@ fn ingest_path_inner(
                 hash_cache.insert(row.content_hash.clone(), v.clone());
                 corpus.set_template_vector(row.info.template_id, v)?;
                 embedded += 1;
+            }
+            if i % 8 == 0 {
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Embed,
+                        "embedding templates",
+                        false,
+                    )
+                    .with_fraction(0.85 + 0.12 * (i as f32 / total_t))
+                    .with_templates(embedded as u64),
+                );
             }
         }
     }
@@ -200,6 +454,24 @@ fn ingest_path_inner(
     top.truncate(10);
 
     corpus.flush()?;
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Completed,
+            format!(
+                "ingested {} lines → {} templates",
+                stats.lines, stats.templates
+            ),
+            false,
+        )
+        .with_fraction(1.0)
+        .with_lines(stats.lines)
+        .with_files(file_count)
+        .with_templates(stats.templates as u64),
+    );
+
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
@@ -242,6 +514,7 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> CoreResult<()> {
 mod tests {
     use super::*;
     use crate::embed::ConceptEmbedBackend;
+    use crate::process_progress::{CancelFlag, ProcessProgressPhase, RecordingProcessProgress};
     use std::io::Write;
 
     #[test]
@@ -325,5 +598,92 @@ mod tests {
             "one embed per distinct template (content-hash keyed)"
         );
         assert!(report.stats.templates < 5);
+    }
+
+    #[test]
+    fn ingest_emits_multi_phase_progress_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("app.log")).unwrap();
+        for i in 0..80 {
+            writeln!(f, "error connection refused host-{i}").unwrap();
+        }
+        let backend = ConceptEmbedBackend::new(32);
+        let recorder = RecordingProcessProgress::default();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "progress-fixture",
+            Some(&backend),
+            "concept",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        assert!(report.stats.lines >= 80);
+        let phases = recorder.phases();
+        assert!(
+            phases.contains(&ProcessProgressPhase::Starting),
+            "phases={phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Scan),
+            "phases={phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Parse)
+                || phases.contains(&ProcessProgressPhase::Template),
+            "phases={phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Store)
+                || phases.contains(&ProcessProgressPhase::Redact),
+            "phases={phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Embed),
+            "phases={phases:?}"
+        );
+        assert_eq!(
+            phases.last().copied(),
+            Some(ProcessProgressPhase::Completed)
+        );
+        // No home-style absolute paths in messages
+        for u in recorder.updates.lock().unwrap().iter() {
+            assert!(
+                !u.message.contains("/Users/"),
+                "leaked path in message: {}",
+                u.message
+            );
+            assert!(
+                !u.message.contains("secret"),
+                "unexpected secret token: {}",
+                u.message
+            );
+        }
+    }
+
+    #[test]
+    fn ingest_cancel_before_work_reports_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("a.log"), "error x\n").unwrap();
+        let recorder = RecordingProcessProgress::default();
+        let flag = CancelFlag::new();
+        flag.cancel();
+        let err = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "cancel-me",
+            None,
+            "concept",
+            &recorder,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
+        assert!(recorder.phases().contains(&ProcessProgressPhase::Cancelled));
     }
 }

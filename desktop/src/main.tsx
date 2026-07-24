@@ -19,6 +19,7 @@ import "./styles/components/settings.css";
 import "./styles/components/command-palette.css";
 import "./styles/components/composition.css";
 import "./styles/components/panes.css";
+import "./styles/components/session-wizard.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

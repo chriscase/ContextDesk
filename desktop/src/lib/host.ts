@@ -1407,6 +1407,37 @@ export async function hostIngestLogPath(
   return invoke<LogIngestReportDto>("ingest_log_path", { path, name: name ?? null });
 }
 
+/** Multi-phase process progress (#445) — redacted; no full home paths. */
+export type ProcessProgressDto = {
+  kind: "log_ingest" | "session_context_import";
+  phase: string;
+  message: string;
+  fraction: number | null;
+  lines_processed: number | null;
+  files_processed: number | null;
+  bytes_processed: number | null;
+  templates: number | null;
+  cancellable: boolean;
+};
+
+export async function hostListenProcessProgress(
+  onEvent: (p: ProcessProgressDto) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<ProcessProgressDto>("process-progress", (event) => {
+    onEvent(event.payload);
+  });
+}
+
+export async function hostSessionContextImportPath(
+  sessionId: string,
+  path: string,
+): Promise<unknown> {
+  if (!isTauri()) throw new Error("Session context requires Tauri host");
+  return invoke("session_context_import_path", { sessionId, path });
+}
+
 export async function hostLogClusterProblems(
   corpusId: string,
   maxClusters?: number,

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   hostListSkills,
+  hostListenProcessProgress,
   hostSessionContextImportBytes,
   hostSessionContextImportZip,
   hostSessionContextList,
@@ -31,6 +32,7 @@ export function SessionContextBar({
   const [note, setNote] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [skills, setSkills] = useState<SkillDto[]>([]);
+  const [importPhase, setImportPhase] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!sessionId) {
@@ -55,9 +57,22 @@ export function SessionContextBar({
       .catch(() => setSkills([]));
   }, []);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void hostListenProcessProgress((p) => {
+      if (p.kind === "session_context_import") {
+        setImportPhase(p.message || p.phase);
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
   const onFiles = async (files: FileList | File[]) => {
     if (!sessionId || disabled) return;
     setNote(null);
+    setImportPhase("importing…");
     const list = Array.from(files);
     for (const f of list) {
       try {
@@ -71,6 +86,7 @@ export function SessionContextBar({
         setNote(e instanceof Error ? e.message : `Failed: ${f.name}`);
       }
     }
+    setImportPhase(null);
     await refresh();
   };
 
@@ -102,6 +118,7 @@ export function SessionContextBar({
         <span className="field__hint">
           {" "}
           — drop files (session-only; not permanent workspace)
+          {importPhase ? ` · ${importPhase}` : null}
         </span>
       </div>
       {onPinnedSkillChange ? (

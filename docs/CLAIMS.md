@@ -53,6 +53,10 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Log why-tools (correlate/anomalies/trace) | Shipped | crates/cd-core/src/log_analysis/why.rs:correlate | #363 |
 | Log desktop surface | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #362 |
 | Log template embed (local ONNX default) | Shipped | crates/cd-core/src/embed.rs:default_log_embed_backend | #359 |
+| Process progress (log ingest + session import) | Shipped | crates/cd-core/src/process_progress.rs:ProcessProgress | #445 #442 |
+| Session process wizard shell | Shipped | desktop/src/components/wizards/SessionWizardShell.tsx:SessionWizardShell | #444 #442 |
+| Log troubleshooting guided wizard | Shipped | desktop/src/components/wizards/LogTroubleshootingWizard.tsx:LogTroubleshootingWizard | #446 #442 |
+| Optional guided-setup catalog entry | Shipped | desktop/src/components/wizards/WizardCatalog.tsx:WizardCatalog | #447 #442 |
 | Memory Phase-2 rule-based cue extract | Shipped | crates/cd-core/src/memory/cue.rs:CueExtractor | #381 |
 | Memory candidate review inbox | Shipped | crates/cd-core/src/memory/candidates.rs:CandidateInbox | #382 |
 | Memory salience/confidence + dedup proposals | Shipped | crates/cd-core/src/memory/score.rs:score_candidate | #383 |
