@@ -58,7 +58,8 @@ does not embed every raw line.
 1. In the Logs pane, ingest a copied incident dump into a named corpus.
 2. Inspect detected services, levels, time range, and parse/redaction counts.
 3. Open problem clusters and a timeline to identify the incident window.
-4. Search a symptom or template, then run correlation or anomaly analysis.
+4. Search a symptom or template—for example, a `connection refused`
+   incident—then run correlation or anomaly analysis.
 5. Follow a trace id when one exists.
 6. Cite the concrete templates and exemplars in the explanation.
 7. If a conclusion should become durable knowledge, propose a memory through

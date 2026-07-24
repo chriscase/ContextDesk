@@ -5,7 +5,9 @@ summary: Learn which tools run under policy and which changes wait for an explic
 section: permissions
 tags:
   - permissions
-  - writes
+  - soft
+  - hard
+  - write
   - confirmation
   - security
   - process

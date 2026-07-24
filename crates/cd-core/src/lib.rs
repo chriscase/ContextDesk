@@ -25,6 +25,7 @@ pub mod events;
 pub mod git_source;
 pub mod grok_auth;
 pub mod harvest;
+pub mod help;
 pub mod home_source;
 pub mod http_preset;
 pub mod index;
