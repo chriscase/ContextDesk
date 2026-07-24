@@ -1455,12 +1455,37 @@ export async function hostGetAmbientRecallEnabled(): Promise<boolean | null> {
 
 // ── Log analysis (#362) — no secrets ──────────────────────────────────────
 
+export type LogCorpusStatsDto = {
+  files: number;
+  lines: number;
+  templates: number;
+  reductionRatio: number;
+  embedded: number;
+  sourceBytes: number;
+  corpusBytes: number;
+  levelCounts: Record<string, number>;
+  tsMin: number | null;
+  tsMax: number | null;
+  formatCounts: Record<string, number>;
+};
+
+export type LogTopTemplateDto = {
+  id: number;
+  pattern: string;
+  count: number;
+  severity: number;
+};
+
 export type LogCorpusSummaryDto = {
   id: string;
   name: string;
   eventCount: number;
   templateCount: number;
   engine: string;
+  createdAt: number;
+  sourceLabel: string | null;
+  stats: LogCorpusStatsDto | null;
+  topTemplates: LogTopTemplateDto[];
 };
 
 export type LogIngestReportDto = {
@@ -1469,6 +1494,27 @@ export type LogIngestReportDto = {
   templates: number;
   reductionRatio: number;
   embedded: number;
+  files: number;
+  sourceBytes: number;
+  corpusBytes: number;
+  levelCounts: Record<string, number>;
+  tsMin: number | null;
+  tsMax: number | null;
+  formatCounts: Record<string, number>;
+  topTemplates: LogTopTemplateDto[];
+};
+
+export type LogPackageImportDto = {
+  corpusId: string;
+  name: string;
+  originCorpusId: string;
+};
+
+export type LogTemplateRowDto = {
+  id: number;
+  pattern: string;
+  count: number;
+  severity: number;
 };
 
 export type LogClusterDto = {
@@ -1598,6 +1644,43 @@ export async function hostSetActiveLogCorpus(
 export async function hostGetActiveLogCorpus(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string | null>("get_active_log_corpus");
+}
+
+export async function hostGetLogCorpus(
+  corpusId: string,
+): Promise<LogCorpusSummaryDto | null> {
+  if (!isTauri()) return null;
+  return invoke<LogCorpusSummaryDto>("get_log_corpus", { corpusId });
+}
+
+export async function hostListLogTemplates(
+  corpusId: string,
+  limit?: number,
+): Promise<LogTemplateRowDto[] | null> {
+  if (!isTauri()) return [];
+  return invoke<LogTemplateRowDto[]>("list_log_templates", {
+    corpusId,
+    limit: limit ?? null,
+  });
+}
+
+/** Export full analysis package (.cdlog.zip) to a filesystem path. */
+export async function hostExportLogCorpusPackage(
+  corpusId: string,
+  path: string,
+): Promise<string> {
+  if (!isTauri()) throw new Error("Export requires Tauri host");
+  return invoke<string>("export_log_corpus_package", { corpusId, path });
+}
+
+/** Import portable package (SoftWrite — new disposable corpus). */
+export async function hostImportLogCorpusPackagePath(
+  path: string,
+): Promise<LogPackageImportDto> {
+  if (!isTauri()) throw new Error("Import package requires Tauri host");
+  return invoke<LogPackageImportDto>("import_log_corpus_package_path", {
+    path,
+  });
 }
 
 export async function hostSetAmbientRecallEnabled(

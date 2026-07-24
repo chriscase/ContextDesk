@@ -103,6 +103,8 @@ export const LOG_TRIAGE_STARTER_PROMPT =
 export function buildLogTriageStarterPrompt(opts: {
   corpusId?: string | null;
   sessionContext?: boolean;
+  /** Optional one-line stats blurb from ingest report. */
+  statsLine?: string | null;
 }): string {
   const parts: string[] = [];
   if (opts.corpusId) {
@@ -110,6 +112,9 @@ export function buildLogTriageStarterPrompt(opts: {
       `Logs were ingested into analysis corpus \`${opts.corpusId}\`. ` +
         `Use log tools with corpus="${opts.corpusId}" (or omit corpus — the host default is this corpus).`,
     );
+  }
+  if (opts.statsLine?.trim()) {
+    parts.push(`Ingest summary: ${opts.statsLine.trim()}.`);
   }
   if (opts.sessionContext) {
     parts.push(

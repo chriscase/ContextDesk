@@ -575,3 +575,259 @@
 .todo-row__remove:focus-visible {
   opacity: 1;
 }
+
+/* ——— Logs list | detail (#467) ——— */
+.pane__split--logs {
+  grid-template-columns: minmax(14rem, 17rem) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  align-items: stretch;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.log-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-2);
+}
+
+.log-pane__note {
+  margin: 0;
+}
+
+.log-list {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border-soft);
+  padding-right: var(--space-2);
+}
+
+.log-list__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.log-list__items > li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-panel, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.log-card[data-active="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.log-card__name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.log-card__meta,
+.log-card__size {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.log-detail {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.log-detail__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.log-detail__header h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.log-detail__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: var(--space-2);
+}
+
+.log-detail__tabs button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.log-detail__tabs button[data-active="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.log-detail__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.log-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.log-stat-grid dt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.log-stat-grid dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip--level {
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 16%, transparent);
+}
+
+.chip--error,
+.chip--fatal {
+  background: color-mix(in srgb, #e11 22%, transparent);
+}
+
+.chip--warn {
+  background: color-mix(in srgb, #c90 22%, transparent);
+}
+
+.log-timeline-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.log-timeline-bars li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-timeline-bars__fill {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  opacity: 0.75;
+  min-width: 4px;
+}
+
+.log-timeline-bars__n {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.log-table th,
+.log-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+}
+
+.log-table button {
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.log-exemplar pre {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  overflow: auto;
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+}
+
+.log-hits,
+.log-clusters,
+.log-tops {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.log-hits button,
+.log-clusters button,
+.log-tops button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-sm);
+}

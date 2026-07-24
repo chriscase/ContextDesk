@@ -10,6 +10,7 @@ pub mod analysis;
 pub mod drain;
 pub mod embed_policy;
 pub mod ingest;
+pub mod package;
 pub mod parse;
 pub mod redact_log;
 pub mod search;
@@ -24,9 +25,17 @@ pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, IngestReport, IngestStats,
 };
+pub use package::{
+    export_corpus_zip, import_corpus_zip, import_corpus_zip_path, validate_package_versions,
+    PackageImportReport, PackageManifest, PACKAGE_FORMAT_VERSION, PACKAGE_READER_VERSION,
+};
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use search::{search_logs, SearchHit, SearchLogsQuery};
-pub use store::{CorpusId, LogCorpus, LogEvent, TemplateRow, EVENT_ENGINE};
+
+pub use store::{
+    CorpusId, CorpusMeta, CorpusStats, CorpusSummary, LogCorpus, LogEvent, TemplateRow,
+    TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
+};
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,
     is_log_tool, log_tool_specs, search_logs_tool_spec, timeline_tool_spec, trace_tool_spec,

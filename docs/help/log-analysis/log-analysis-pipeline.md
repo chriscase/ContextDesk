@@ -14,6 +14,7 @@ related:
   - skills-context-packs
   - permission-tiers
   - memory-overview
+  - log-portable-package
 ---
 # How log analysis works
 
@@ -81,3 +82,7 @@ normal desktop path.
 > Redaction reduces risk but cannot prove that arbitrary logs contain no
 > sensitive information. Review the corpus and any egress choice before using
 > a remote model or embedding provider.
+
+## Share a corpus package
+
+See [Share a log analysis package](portable-package.md) for versioned export/import.

@@ -140,3 +140,34 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 - **#292 (S3 spike)** — a log source in Phase 3.
 - **#290 (watchers)** — the streaming/alerting path in Phase 4.
 - **Memory** — an analysis conclusion ("root cause was connection‑pool exhaustion in service X on 2026‑07‑12") is a natural `decision`/`fact` to save into memory. Logs feed memory; they don't live in it.
+
+## 13. Portable package + meta versioning (#467–#470)
+
+### On-disk `meta.json`
+
+- `meta_version` **2** when stats are present; **1**/missing = legacy (id, name, created_at, engine).
+- Readers **must open** older meta; missing stats → derive event/template counts from DuckDB/templates.
+- Basename-only `source_label`; optional `origin_corpus_id` after package import.
+
+### Package format `contextdesk.log_corpus.v1`
+
+Zip (flat entries):
+
+| File | Role |
+|------|------|
+| `manifest.json` | `format_version`, `min_reader_version`, `package_kind`, `engine`, SHA-256 per payload, optional `features` / `stats` |
+| `meta.json` | Corpus meta (rewritten with new id on import) |
+| `events.duckdb` | Event store |
+| `templates.json` | Templates + vectors when present |
+| `README.txt` | Human import notes |
+
+**Compat rules**
+
+1. Additive optional JSON within a major; unknown fields ignored.
+2. Breaking → new major + dual-path importer (N and N−1).
+3. `min_reader_version` > this build’s `PACKAGE_READER_VERSION` → clear error, no cache write.
+4. Import always assigns a **new** corpus id; store `origin_corpus_id`.
+5. SoftWrite import; export is user-chosen path only.
+
+Contributor checklist: changing package layout? bump `format_version` / `min_reader_version`, add fixture test, update this section.
+

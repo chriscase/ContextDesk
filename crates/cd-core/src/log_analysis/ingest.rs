@@ -4,7 +4,7 @@ use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::parse::{detect_format, parse_line, LogFormat};
 use super::redact_log::{redact_message, redact_params};
-use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow};
+use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Stats from one ingest run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IngestStats {
     /// Files read.
     pub files: usize,
@@ -28,6 +29,39 @@ pub struct IngestStats {
     pub reduction_ratio: f64,
     /// Templates newly embedded.
     pub embedded: usize,
+    /// Bytes read from source files.
+    pub source_bytes: u64,
+    /// On-disk corpus footprint after flush.
+    pub corpus_bytes: u64,
+    /// Counts by normalized level.
+    #[serde(default)]
+    pub level_counts: std::collections::BTreeMap<String, u64>,
+    /// Earliest event ts.
+    pub ts_min: Option<i64>,
+    /// Latest event ts.
+    pub ts_max: Option<i64>,
+    /// Counts by parse format.
+    #[serde(default)]
+    pub format_counts: std::collections::BTreeMap<String, u64>,
+}
+
+impl IngestStats {
+    /// Convert to persisted [`super::store::CorpusStats`].
+    pub fn to_corpus_stats(&self) -> super::store::CorpusStats {
+        super::store::CorpusStats {
+            files: self.files as u64,
+            lines: self.lines,
+            templates: self.templates as u64,
+            reduction_ratio: self.reduction_ratio,
+            embedded: self.embedded as u64,
+            source_bytes: self.source_bytes,
+            corpus_bytes: self.corpus_bytes,
+            level_counts: self.level_counts.clone(),
+            ts_min: self.ts_min,
+            ts_max: self.ts_max,
+            format_counts: self.format_counts.clone(),
+        }
+    }
 }
 
 /// Full ingest report.
@@ -292,6 +326,8 @@ fn ingest_path_inner(
             return Err(CoreError::Message("ingest cancelled".into()));
         }
 
+        let file_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        stats.source_bytes = stats.source_bytes.saturating_add(file_bytes);
         let text = std::fs::read_to_string(file).unwrap_or_default();
         let rel = file
             .strip_prefix(path)
@@ -309,9 +345,20 @@ fn ingest_path_inner(
                 format_hint = Some(detect_format(line, Some(file)));
             }
             let parsed = parse_line(line, format_hint, seq);
+            let fmt_key = match parsed.format {
+                LogFormat::Json => "json",
+                LogFormat::Logfmt => "logfmt",
+                LogFormat::Syslog => "syslog",
+                LogFormat::Plain => "plain",
+            };
+            *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
             // Redact is part of the pipeline; report phase periodically.
             let msg = redact_message(&parsed.message);
             let ts = parsed.ts.unwrap_or(seq as i64);
+            stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
+            stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
+            let level_key = parsed.level.to_ascii_lowercase();
+            *stats.level_counts.entry(level_key).or_insert(0) += 1;
             let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
             let params = redact_params(&params);
             batch.push(LogEvent {
@@ -502,6 +549,22 @@ fn ingest_path_inner(
     top.truncate(10);
 
     corpus.flush()?;
+    stats.corpus_bytes = corpus.corpus_bytes_on_disk();
+
+    let top_snap: Vec<TopTemplateSnapshot> = top
+        .iter()
+        .map(|(id, pattern, count, severity)| TopTemplateSnapshot {
+            id: *id,
+            pattern: pattern.clone(),
+            count: *count,
+            severity: *severity,
+        })
+        .collect();
+    corpus.write_ingest_summary(
+        Some(source_label.clone()),
+        stats.to_corpus_stats(),
+        top_snap,
+    )?;
 
     emit(
         progress,
@@ -509,14 +572,15 @@ fn ingest_path_inner(
             kind,
             ProcessProgressPhase::Completed,
             format!(
-                "ingested {} lines → {} templates",
-                stats.lines, stats.templates
+                "ingested {} lines → {} templates ({:.1}× reduction)",
+                stats.lines, stats.templates, stats.reduction_ratio
             ),
             false,
         )
         .with_fraction(1.0)
         .with_lines(stats.lines)
         .with_files(file_count)
+        .with_bytes(stats.corpus_bytes)
         .with_templates(stats.templates as u64),
     );
 

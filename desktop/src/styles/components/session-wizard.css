@@ -439,3 +439,44 @@
 .chat-new-split > button:hover {
   background: color-mix(in srgb, var(--cd-accent, #5b8cff) 18%, transparent);
 }
+
+/* Post-ingest stats hero (#471) */
+.wizard-stats {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.wizard-stats__blurb {
+  margin: 0 0 var(--space-2);
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.wizard-stats__grid {
+  margin-bottom: var(--space-2);
+}
+
+.wizard-stats__levels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+}
+
+.wizard-stats__tops {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wizard-stats__tops code {
+  font-size: inherit;
+  word-break: break-word;
+}
