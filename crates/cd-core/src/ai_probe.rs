@@ -16,6 +16,9 @@ pub struct AiDiscoveredModel {
     /// "chat" | "embedding" | "unknown"
     pub kind: String,
     pub source: String,
+    /// Optional context window in tokens when the catalog provides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,10 +183,12 @@ fn parse_openai_models(v: &serde_json::Value, source: &str) -> Vec<AiDiscoveredM
             if id.is_empty() {
                 continue;
             }
+            let _ctx = crate::model_context::context_tokens_from_model_json(row);
             out.push(AiDiscoveredModel {
                 kind: classify_model_id(id).to_string(),
                 id: id.to_string(),
                 source: source.to_string(),
+                context_tokens: _ctx,
             });
         }
     };
@@ -213,10 +218,12 @@ fn parse_ollama_tags(v: &serde_json::Value, source: &str) -> Vec<AiDiscoveredMod
             if id.is_empty() {
                 return None;
             }
+            let context_tokens = crate::model_context::context_tokens_from_model_json(row);
             Some(AiDiscoveredModel {
                 kind: classify_model_id(&id).to_string(),
                 id,
                 source: source.to_string(),
+                context_tokens,
             })
         })
         .collect()

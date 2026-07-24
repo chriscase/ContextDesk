@@ -745,6 +745,10 @@ pub async fn research_turn_with_cancel(
     opts.cancel = cancel;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
+    // Per-model context budget (default / declared / learned).
+    opts.context_char_budget = host
+        .model_context_budgets()
+        .resolve(Some(profile.chat_model.as_str()));
     let mut events =
         run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
     if let Some(notice) = tools_notice {

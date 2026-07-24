@@ -142,6 +142,8 @@ pub struct ToolHost {
     log_cache_dir: Option<PathBuf>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
+    /// Per-model context char budgets (declared + learned).
+    model_context_budgets: crate::model_context::ModelContextBudgets,
     /// Dynamic tools from connector registry (#127).
     dynamic_tools: std::collections::HashMap<String, crate::connectors::RegisteredTool>,
     /// Persisted connector configs (enabled entries drive future attachers).
@@ -208,6 +210,7 @@ impl ToolHost {
             log_analysis_enabled: false,
             log_cache_dir: None,
             router_budget: crate::router::RouterBudget::default(),
+            model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
             connector_configs: Vec::new(),
             mcp_sessions: std::collections::HashMap::new(),
@@ -578,6 +581,24 @@ impl ToolHost {
     /// Workspace data directory name (from branding, e.g. `.contextdesk`).
     pub fn workspace_dir_name(&self) -> &str {
         &self.workspace_dir_name
+    }
+
+    /// Load per-model context budgets from app config.
+    pub fn set_model_context_budgets(
+        &mut self,
+        budgets: crate::model_context::ModelContextBudgets,
+    ) {
+        self.model_context_budgets = budgets;
+    }
+
+    /// Borrow per-model context budgets.
+    pub fn model_context_budgets(&self) -> &crate::model_context::ModelContextBudgets {
+        &self.model_context_budgets
+    }
+
+    /// Mutable access for learning during a turn.
+    pub fn model_context_budgets_mut(&mut self) -> &mut crate::model_context::ModelContextBudgets {
+        &mut self.model_context_budgets
     }
 
     /// Set full router budget (rounds, deadline, per-source caps).
