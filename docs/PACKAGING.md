@@ -42,13 +42,18 @@ Workflow: `.github/workflows/release.yml` (#172).
 
 #### Operator release checklist
 
-1. Bump `version` in `desktop/src-tauri/tauri.conf.json` (and crates if needed).
-2. Ensure main is green under the full gate.
-3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`
+1. Bump `version` in `desktop/src-tauri/tauri.conf.json` (keep `cd-core` / package versions aligned when shipping).
+2. Ensure main is green under the full gate (`cargo test --workspace`, desktop tsc/build, CI).
+3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`  
+   **Or dry-run without a permanent tag:** Actions → **release** → **Run workflow** → enter a tag name (e.g. `v0.1.0-rc1`). Uses `workflow_dispatch` in `release.yml`.
 4. Wait for the **release** workflow; open the **draft** GitHub Release; smoke-test one installer per OS.
 5. Publish the release when ready.
 6. **Signing / notarization** (Apple, Windows Authenticode) remains operator-owned — no secrets in the repo. Wire secrets only via GitHub Actions settings if you add signing later.
-7. Auto-updater / `latest.json` is **#173** (not this workflow).
+7. Auto-updater / `latest.json` is **#173** (not this workflow). Requires `TAURI_SIGNING_PRIVATE_KEY` secret for updater artifacts; unsigned installers still land in `bundle/` for local smoke.
+
+#### Honesty: CLAIMS “Proven multi-OS installers”
+
+Do **not** mark multi-OS installers **Shipped** in `docs/CLAIMS.md` until a real tag (or dispatch) run has produced downloadable artifacts on a GitHub Release. Until then keep the Roadmap residual (#172 / #55).
 
 Expected artifacts (via `tauri-apps/tauri-action`, `targets: all`):
 
