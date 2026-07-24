@@ -37,6 +37,12 @@ fn confluence_tool_name(name: &str) -> bool {
     )
 }
 
+/// Shared connector-missing copy (Settings path for users).
+const CONFLUENCE_NOT_CONFIGURED: &str = "Confluence is not configured. Open Settings → Connectors → Confluence, set base URL and PAT (keychain), optionally add space keys, then Save.";
+
+/// Shared PAT-missing copy.
+const CONFLUENCE_PAT_MISSING: &str = "Confluence PAT missing from secure storage. Re-save the token under Settings → Connectors → Confluence.";
+
 /// Result of a tool invocation.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -1087,6 +1093,20 @@ impl ToolHost {
         self.index.is_bytes_capped()
     }
 
+    /// Resolve model-emitted tool names (strip channel tokens / junk) against the
+    /// live catalog. Falls back to normalized snake_case when still unknown so
+    /// error messages stay readable (#451).
+    pub fn resolve_execute_name(&self, raw: &str) -> String {
+        let known: Vec<String> = self
+            .specs_for_model()
+            .into_iter()
+            .map(|t| t.name)
+            .chain(self.dynamic_tools.keys().cloned())
+            .collect();
+        crate::tools::resolve_tool_name(raw, &known)
+            .unwrap_or_else(|| crate::tools::normalize_tool_name(raw))
+    }
+
     /// Execute a tool by name with JSON arguments.
     /// For Soft/Hard write without grant, returns a PermissionRequired event only.
     ///
@@ -1098,6 +1118,9 @@ impl ToolHost {
         arguments: &Value,
         granted_request_id: Option<&str>,
     ) -> CoreResult<ToolResult> {
+        // #451: models sometimes append `<|channel|>…` or other junk to tool names.
+        let resolved = self.resolve_execute_name(name);
+        let name = resolved.as_str();
         let side = self.side_effect_for(name);
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
@@ -2089,12 +2112,12 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let q = args
             .get("query")
@@ -2131,7 +2154,16 @@ impl ToolHost {
             ));
         }
         let raw = if lines.is_empty() {
-            format!("No Confluence hits for `{q}` (check spaces allowlist).")
+            let allow = if cfg.spaces.is_empty() {
+                "no space allowlist (all spaces the PAT can see)".to_string()
+            } else {
+                format!("allowlist: {}", cfg.spaces.join(", "))
+            };
+            format!(
+                "No Confluence hits for `{q}` ({allow}). \
+                 Try a broader free-text query, or CQL like `space = \"ENG\" AND type = page`. \
+                 Confirm base URL / PAT and space keys under Settings → Connectors → Confluence."
+            )
         } else {
             lines.join("\n")
         };
@@ -2150,12 +2182,12 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let page_id = args
             .get("page_id")
@@ -2203,12 +2235,12 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let page_id = args
             .get("page_id")
@@ -2270,12 +2302,12 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let page_id = args
             .get("page_id")
@@ -2315,12 +2347,12 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let page_id = args
             .get("page_id")
@@ -2374,7 +2406,7 @@ impl ToolHost {
         let cfg = self
             .confluence
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence connector not configured".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
             .clone();
         if cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
@@ -2384,7 +2416,7 @@ impl ToolHost {
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing from secure storage".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let store = self
             .durable_memory
@@ -2556,7 +2588,7 @@ impl ToolHost {
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
@@ -2636,7 +2668,7 @@ impl ToolHost {
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
@@ -2739,7 +2771,7 @@ impl ToolHost {
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
@@ -2798,7 +2830,7 @@ impl ToolHost {
         let pat = self
             .confluence_pat
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("Confluence PAT missing".into()))?
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
             .clone();
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
@@ -3189,7 +3221,27 @@ impl ToolHost {
         arguments: &Value,
     ) -> CoreResult<(bool, String, String, Option<String>)> {
         let Some(reg) = self.dynamic_tools.get(name).cloned() else {
-            return Err(CoreError::Message(format!("unknown tool `{name}`")));
+            // Helpful hint when the model asks for Confluence but the connector is off.
+            if confluence_tool_name(name)
+                || name.starts_with("confluence_")
+                || name.starts_with("harvest_")
+            {
+                if self.confluence.is_none() || self.confluence_pat.is_none() {
+                    return Err(CoreError::Policy(
+                        "Confluence tools are unavailable: open Settings → Connectors → Confluence, \
+                         set base URL + PAT (keychain), add space keys for the wikis you use, and Save. \
+                         Read tools work with an empty space list; harvest/write need a non-empty allowlist."
+                            .into(),
+                    ));
+                }
+                return Err(CoreError::Message(format!(
+                    "unknown Confluence tool `{name}` — use confluence_search, confluence_get_page, \
+                     confluence_list_children, confluence_get_ancestors, or confluence_list_attachments"
+                )));
+            }
+            return Err(CoreError::Message(format!(
+                "unknown tool `{name}` (normalized from model output if needed)"
+            )));
         };
         match reg.exec {
             crate::connectors::ConnectorExecutor::Stub { detail } => {
@@ -3920,6 +3972,63 @@ mod tests {
         assert!(
             err.to_string().contains("PAT") || err.to_string().contains("secure"),
             "{err}"
+        );
+    }
+
+    /// #451: model channel tokens must not break Confluence tool dispatch.
+    #[tokio::test]
+    async fn confluence_tool_name_strips_channel_commentary_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_confluence(
+            Some(ConfluenceRoConfig::new(
+                "https://wiki.example.com",
+                vec!["ENG".into()],
+            )),
+            Some("test-pat".into()),
+        );
+        let garbled = "confluence_list_children<|channel|>commentary";
+        assert_eq!(
+            host.resolve_execute_name(garbled),
+            names::CONFLUENCE_LIST_CHILDREN
+        );
+        let err = host.execute(garbled, &json!({}), None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("unknown tool"),
+            "garbled name must not hard-fail as unknown: {msg}"
+        );
+        assert!(
+            msg.contains("page_id") || msg.contains("space"),
+            "expected list_children validation after resolve: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn confluence_missing_connector_gives_settings_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        // No set_confluence — tools stripped from catalog, but model may still call.
+        let err = host
+            .execute(
+                names::CONFLUENCE_LIST_CHILDREN,
+                &json!({"space": "ENG"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("confluence")
+                && (msg.contains("Settings")
+                    || msg.contains("PAT")
+                    || msg.contains("unavailable")
+                    || msg.contains("not configured")),
+            "{msg}"
         );
     }
 

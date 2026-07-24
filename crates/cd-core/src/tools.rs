@@ -137,7 +137,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::CONFLUENCE_SEARCH.into(),
-            description: "Search Confluence (read-only CQL). Requires connector enabled + PAT in keychain. Space allowlist applied."
+            description: "Search Confluence via CQL or free text (read-only). Requires connector + PAT in keychain. When Settings space allowlist is non-empty, results are scoped unless the query already has space=. Empty allowlist does not block read search. Call exactly as confluence_search (no extra tokens)."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
@@ -169,7 +169,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: names::CONFLUENCE_LIST_CHILDREN.into(),
-            description: "List Confluence child pages of a page_id, or space root pages when space is set (read-only tree browse)."
+            description: "List Confluence child pages of a page_id, or space root pages when `space` is a space key (e.g. ENG). Read-only tree browse. Prefer this after confluence_search. Space keys come from Settings → Connectors → Confluence allowlist (empty allowlist still allows read if the PAT can access the space)."
                 .into(),
             side_effect: ToolSideEffect::Read,
             parameters: serde_json::json!({
@@ -339,9 +339,112 @@ pub fn may_auto_execute(side: ToolSideEffect) -> bool {
     matches!(side, ToolSideEffect::Read)
 }
 
+/// Strip model channel / control-token leakage and other junk from a tool name.
+///
+/// Some gateways/models append tokens such as `<|channel|>commentary` to the
+/// function name (seen as `confluence_list_children<|channel|>commentary`).
+/// We keep only a leading `snake_case` / `mcp__…` identifier.
+pub fn normalize_tool_name(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    // Walk chars — avoid UTF-8 mid-char indexing (clippy string_slice).
+    let mut out = String::with_capacity(s.len());
+    let mut started = false;
+    for c in s.chars() {
+        if c == '<' || c == '\n' || c == '\r' {
+            break;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+            started = true;
+        } else if started {
+            // Stop at first non-ident after the name began (whitespace, junk).
+            break;
+        }
+        // else skip leading junk before first ident char
+    }
+    out
+}
+
+/// Resolve a possibly-garbled tool name against a known catalog.
+///
+/// Prefer exact match after [`normalize_tool_name`]. Then longest known name
+/// that is a prefix of the normalized string (handles trailing junk that
+/// survived normalize). Then unique known tool of which the normalized string
+/// is a prefix (handles truncation).
+pub fn resolve_tool_name(raw: &str, known: &[impl AsRef<str>]) -> Option<String> {
+    let n = normalize_tool_name(raw);
+    if n.is_empty() {
+        return None;
+    }
+    for k in known {
+        if k.as_ref() == n {
+            return Some(n);
+        }
+    }
+    // Longest known name that is a prefix of n (e.g. n = "confluence_list_childrenXYZ").
+    let mut best: Option<&str> = None;
+    for k in known {
+        let k = k.as_ref();
+        if n.starts_with(k) && best.map(|b| k.len() > b.len()).unwrap_or(true) {
+            best = Some(k);
+        }
+    }
+    if let Some(k) = best {
+        return Some(k.to_string());
+    }
+    // Unique known tool that starts with n (truncated name).
+    let mut prefixes: Vec<&str> = known
+        .iter()
+        .map(|k| k.as_ref())
+        .filter(|k| k.starts_with(&n))
+        .collect();
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    if prefixes.len() == 1 {
+        return Some(prefixes[0].to_string());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_strips_channel_commentary_suffix() {
+        let raw = "confluence_list_children<|channel|>commentary";
+        assert_eq!(normalize_tool_name(raw), "confluence_list_children");
+        let known = [names::CONFLUENCE_LIST_CHILDREN, names::CONFLUENCE_SEARCH];
+        assert_eq!(
+            resolve_tool_name(raw, &known).as_deref(),
+            Some(names::CONFLUENCE_LIST_CHILDREN)
+        );
+    }
+
+    #[test]
+    fn normalize_handles_whitespace_and_xmlish_junk() {
+        assert_eq!(normalize_tool_name("  search_kb</tool>"), "search_kb");
+        assert_eq!(
+            normalize_tool_name("read_file_slice\nextra"),
+            "read_file_slice"
+        );
+    }
+
+    #[test]
+    fn resolve_longest_prefix_for_trailing_junk_letters() {
+        let known = [
+            names::CONFLUENCE_LIST_CHILDREN,
+            names::CONFLUENCE_LIST_ATTACHMENTS,
+        ];
+        // If normalize already cut at non-ident, this is exact; also test supers.
+        assert_eq!(
+            resolve_tool_name("confluence_list_childrenXXX", &known).as_deref(),
+            Some(names::CONFLUENCE_LIST_CHILDREN)
+        );
+    }
 
     #[test]
     fn mvp_tools_include_search_and_memory() {
