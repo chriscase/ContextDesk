@@ -96,8 +96,8 @@ export function ConnectorsSection(props: ConnectorsSectionProps) {
         keychain on Save — never pasted into config JSON.
       </p>
       <p>
-        MCP / SQL / HTTP execution arms land in follow-up issues;
-        you can still enable entries so they persist.
+        MCP, read-only SQL, and allowlisted HTTP execution are shipped.
+        Disabled or invalid entries do not register tools.
       </p>
     </HelpTitle>
     <ul className="session-list">

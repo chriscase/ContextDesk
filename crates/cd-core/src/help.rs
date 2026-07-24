@@ -37,17 +37,19 @@ pub const READ_HELP: &str = "read_help";
 const SECTION_DEFS: &[(&str, &str, u16)] = &[
     ("overview", "Overview", 10),
     ("getting-started", "Getting started", 20),
-    ("chat-context", "Chat & context", 30),
-    ("workspace-indexing", "Workspace & indexing", 40),
-    ("permissions", "Permissions & writes", 50),
-    ("memory", "Memory", 60),
-    ("log-analysis", "Log analysis", 70),
-    ("connectors", "Connectors", 80),
-    ("skills", "Skills & context packs", 90),
-    ("settings", "Settings & prelaunch", 100),
-    ("security", "Security model", 110),
-    ("troubleshooting", "Troubleshooting", 120),
-    ("reference", "Reference", 130),
+    ("providers", "AI providers", 30),
+    ("chat-context", "Chat & context", 40),
+    ("workspace-indexing", "Workspace & indexing", 50),
+    ("permissions", "Permissions & writes", 60),
+    ("memory", "Memory", 70),
+    ("log-analysis", "Log analysis", 80),
+    ("connectors", "Connectors", 90),
+    ("backup", "Backup & export", 100),
+    ("skills", "Skills & context packs", 110),
+    ("settings", "Settings & prelaunch", 120),
+    ("security", "Security model", 130),
+    ("troubleshooting", "Troubleshooting", 140),
+    ("reference", "Reference", 150),
 ];
 
 /// Agent-visible Help tools. Hosts register these only when a corpus is loaded.
@@ -1506,10 +1508,10 @@ related: []
         let index = HelpIndex::load(checked_in_root()).unwrap();
         let backend = crate::embed::ConceptEmbedBackend::default();
         assert!(
-            index.search_keyword("socket closed", 5).is_empty(),
+            index.search_keyword("econnrefused", 5).is_empty(),
             "fixture must prove semantic-only recall"
         );
-        let hits = index.search("socket closed", 5, Some(&backend)).await;
+        let hits = index.search("econnrefused", 5, Some(&backend)).await;
         assert_eq!(
             hits.first().map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline"),

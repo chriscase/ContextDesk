@@ -42,7 +42,12 @@ describe("canonical Help deep links (#439)", () => {
   });
 
   it("routes Settings families to real contextual pages", () => {
-    expect(helpPageForSettingsSection("ai")).toBe("first-run");
+    expect(helpPageForSettingsSection("ai")).toBe("provider-setup");
+    expect(helpPageForSettingsSection("workspace")).toBe("workspace-indexing");
+    expect(helpPageForSettingsSection("backup")).toBe("s3-backup");
+    expect(helpPageForSettingsSection("connectors")).toBe(
+      "connectors-and-confluence",
+    );
     expect(helpPageForSettingsSection("skills")).toBe("skills-context-packs");
     expect(helpPageForSettingsSection("appearance")).toBe("product-overview");
   });

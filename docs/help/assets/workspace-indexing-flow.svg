@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" role="img" aria-labelledby="title desc">
+  <title id="title">Workspace indexing flow</title>
+  <desc id="desc">Chosen roots pass canonical path and exclusion checks before bounded chunks enter the persistent keyword index and optional hybrid ranker.</desc>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="#38bdf8"/></marker></defs>
+  <rect x="20" y="28" width="860" height="284" rx="18" fill="#0f172a" stroke="#475569" stroke-width="2"/>
+  <text x="450" y="66" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="23" font-weight="700">Local workspace search stays inside chosen roots</text>
+  <g font-family="system-ui, sans-serif" text-anchor="middle">
+    <rect x="48" y="116" width="146" height="82" rx="12" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <text x="121" y="149" fill="#e5e7eb" font-size="16" font-weight="700">Workspace roots</text>
+    <text x="121" y="176" fill="#9ca3af" font-size="13">absolute allowlist</text>
+    <path d="M200 157H247" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="258" y="105" width="170" height="104" rx="12" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <text x="343" y="138" fill="#e5e7eb" font-size="16" font-weight="700">Path policy</text>
+    <text x="343" y="166" fill="#9ca3af" font-size="13">canonicalize + symlinks</text>
+    <text x="343" y="188" fill="#9ca3af" font-size="13">secrets + type + size</text>
+    <path d="M434 157H481" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="492" y="116" width="146" height="82" rx="12" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
+    <text x="565" y="149" fill="#e5e7eb" font-size="16" font-weight="700">Bounded chunks</text>
+    <text x="565" y="176" fill="#9ca3af" font-size="13">caps stay visible</text>
+    <path d="M644 157H691" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="702" y="105" width="150" height="104" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
+    <text x="777" y="138" fill="#e5e7eb" font-size="16" font-weight="700">Local index</text>
+    <text x="777" y="166" fill="#9ca3af" font-size="13">SQLite keyword store</text>
+    <text x="777" y="188" fill="#9ca3af" font-size="13">optional hybrid rank</text>
+  </g>
+  <rect x="258" y="244" width="380" height="42" rx="10" fill="#451a03" stroke="#fbbf24"/>
+  <text x="448" y="270" text-anchor="middle" fill="#fde68a" font-family="system-ui, sans-serif" font-size="14">Skipped files and file/byte caps are reported, never claimed as indexed.</text>
+</svg>

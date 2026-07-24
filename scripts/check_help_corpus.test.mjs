@@ -61,10 +61,17 @@ test("checked-in help corpus has valid frontmatter and asset links", () => {
       "log-analysis-pipeline",
       "memory-overview",
       "skills-context-packs",
+      "workspace-indexing",
+      "provider-setup",
+      "connectors-and-confluence",
+      "s3-backup",
+      "security-boundaries",
+      "common-problems",
+      "glossary",
     ],
   });
-  assert.ok(result.pages >= 7);
-  assert.ok(result.assets >= 7);
+  assert.ok(result.pages >= 14);
+  assert.ok(result.assets >= 12);
 });
 
 test("frontmatter parser rejects unknown fields", () => {

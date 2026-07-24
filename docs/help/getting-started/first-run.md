@@ -12,6 +12,8 @@ tags:
 order: 10
 related:
   - product-overview
+  - workspace-indexing
+  - provider-setup
   - chat-citations-context
   - permission-tiers
 ---

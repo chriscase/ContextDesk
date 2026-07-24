@@ -40,7 +40,19 @@ export function helpOpenRequest(
 
 /** Stable contextual Help target for each Settings family. */
 export function helpPageForSettingsSection(section: string): string {
-  if (section === "ai" || section === "workspace" || section === "health") {
+  if (section === "ai") {
+    return "provider-setup";
+  }
+  if (section === "workspace") {
+    return "workspace-indexing";
+  }
+  if (section === "backup") {
+    return "s3-backup";
+  }
+  if (section === "connectors") {
+    return "connectors-and-confluence";
+  }
+  if (section === "health") {
     return "first-run";
   }
   if (section === "skills" || section === "modules") {

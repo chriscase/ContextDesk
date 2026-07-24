@@ -11,8 +11,11 @@ tags:
 order: 10
 related:
   - first-run
+  - workspace-indexing
+  - provider-setup
   - chat-citations-context
   - permission-tiers
+  - security-boundaries
 ---
 # What ContextDesk does
 

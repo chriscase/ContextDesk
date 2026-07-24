@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" role="img" aria-labelledby="title desc">
+  <title id="title">ContextDesk trust boundaries</title>
+  <desc id="desc">The React webview displays redacted data while the Rust host owns secrets and policy between local sources, MCP subprocesses, and remote services.</desc>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="#38bdf8"/></marker></defs>
+  <rect x="20" y="24" width="860" height="312" rx="18" fill="#0f172a" stroke="#475569" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif" text-anchor="middle">
+    <rect x="54" y="68" width="200" height="92" rx="12" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
+    <text x="154" y="103" fill="#e5e7eb" font-size="17" font-weight="700">React webview</text>
+    <text x="154" y="132" fill="#9ca3af" font-size="13">redacted DTOs + decisions</text>
+    <rect x="54" y="206" width="200" height="74" rx="12" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <text x="154" y="236" fill="#e5e7eb" font-size="16" font-weight="700">Local sources</text>
+    <text x="154" y="260" fill="#9ca3af" font-size="13">allowlisted, untrusted content</text>
+    <path d="M260 114H326" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <path d="M260 243H296Q318 243 326 216" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="338" y="60" width="230" height="230" rx="14" fill="#082f49" stroke="#38bdf8" stroke-width="3"/>
+    <text x="453" y="96" fill="#e5e7eb" font-size="19" font-weight="700">Trusted Rust host</text>
+    <text x="453" y="134" fill="#9ca3af" font-size="14">keychain + runtime secrets</text>
+    <text x="453" y="164" fill="#9ca3af" font-size="14">path + endpoint policy</text>
+    <text x="453" y="194" fill="#9ca3af" font-size="14">permission ownership</text>
+    <text x="453" y="224" fill="#9ca3af" font-size="14">redaction + audit</text>
+    <text x="453" y="254" fill="#9ca3af" font-size="14">timeouts + bounded results</text>
+    <path d="M574 132H638" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <path d="M574 224H608Q630 224 638 246" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="650" y="72" width="196" height="90" rx="12" fill="#1e293b" stroke="#f472b6" stroke-width="2"/>
+    <text x="748" y="107" fill="#e5e7eb" font-size="16" font-weight="700">Remote services</text>
+    <text x="748" y="135" fill="#9ca3af" font-size="13">explicit egress, untrusted</text>
+    <rect x="650" y="208" width="196" height="78" rx="12" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
+    <text x="748" y="239" fill="#e5e7eb" font-size="16" font-weight="700">MCP subprocesses</text>
+    <text x="748" y="263" fill="#9ca3af" font-size="13">cleared env, still untrusted</text>
+  </g>
+</svg>
