@@ -326,24 +326,13 @@ pub fn import_corpus_zip(cache_root: &Path, zip_bytes: &[u8]) -> CoreResult<Pack
         )));
     }
 
-    for required in ["meta.json", "events.duckdb"] {
-        if !entries.contains_key(required) {
-            return Err(CoreError::Message(format!(
-                "package missing required file: {required}"
-            )));
-        }
+    // Required analysis payloads — must exist in the zip **and** have a
+    // matching SHA-256 entry in manifest.files (fail closed if files[] omits them).
+    let mut required_payloads = vec!["meta.json", "events.duckdb"];
+    if entries.contains_key("templates.json") {
+        required_payloads.push("templates.json");
     }
-    for fe in &manifest.files {
-        if let Some(data) = entries.get(&fe.path) {
-            let h = hex_sha256(data);
-            if h != fe.sha256 {
-                return Err(CoreError::Message(format!(
-                    "package hash mismatch for {}",
-                    fe.path
-                )));
-            }
-        }
-    }
+    verify_payload_hashes(&entries, &manifest.files, &required_payloads)?;
 
     let origin_id = manifest.corpus_id.clone();
     let new_id = Uuid::now_v7().to_string();
@@ -453,6 +442,51 @@ fn hex_sha256(data: &[u8]) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Ensure every required payload is present and matches `manifest.files` SHA-256.
+/// Also verifies any additional `files[]` entries that appear in the zip.
+fn verify_payload_hashes(
+    entries: &std::collections::HashMap<String, Vec<u8>>,
+    files: &[PackageFileEntry],
+    required: &[&str],
+) -> CoreResult<()> {
+    let by_path: std::collections::HashMap<&str, &PackageFileEntry> =
+        files.iter().map(|f| (f.path.as_str(), f)).collect();
+
+    for req in required {
+        let data = entries
+            .get(*req)
+            .ok_or_else(|| CoreError::Message(format!("package missing required file: {req}")))?;
+        let fe = by_path.get(*req).ok_or_else(|| {
+            CoreError::Message(format!(
+                "package hash missing for required payload `{req}` (manifest.files must list SHA-256)"
+            ))
+        })?;
+        let h = hex_sha256(data);
+        if h != fe.sha256 {
+            return Err(CoreError::Message(format!(
+                "package hash mismatch for {req}"
+            )));
+        }
+    }
+
+    // Extra manifest.files entries: if the payload is in the zip, hash must match.
+    for fe in files {
+        if required.contains(&fe.path.as_str()) {
+            continue;
+        }
+        if let Some(data) = entries.get(&fe.path) {
+            let h = hex_sha256(data);
+            if h != fe.sha256 {
+                return Err(CoreError::Message(format!(
+                    "package hash mismatch for {}",
+                    fe.path
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a zip from raw entries (tests / fixtures).
 #[cfg(test)]
 fn zip_from_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -558,6 +592,48 @@ mod tests {
         std::fs::create_dir_all(&cache2).unwrap();
         let imp = import_corpus_zip(&cache2, &zipped).unwrap();
         assert!(LogCorpus::open(&cache2, &imp.corpus_id).is_ok());
+    }
+
+    #[test]
+    fn empty_files_array_refuses_required_payloads_without_hash() {
+        // Real payloads in zip but manifest.files omits them → fail closed (no silent skip).
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(cache.join("log_corpora")).unwrap();
+        let man = serde_json::json!({
+            "formatVersion": "contextdesk.log_corpus.v1",
+            "minReaderVersion": 1,
+            "packageKind": "log_corpus",
+            "createdAt": 1,
+            "corpusId": "x",
+            "name": "n",
+            "engine": "duckdb",
+            "files": []
+        });
+        let zipped = zip_from_entries(&[
+            (
+                "manifest.json",
+                serde_json::to_vec(&man).unwrap().as_slice(),
+            ),
+            (
+                "meta.json",
+                br#"{"id":"x","name":"n","created_at":1,"engine":"duckdb"}"#,
+            ),
+            ("events.duckdb", b"fake-db-bytes"),
+        ]);
+        let err = import_corpus_zip(&cache, &zipped).unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("hash missing") || s.contains("SHA-256") || s.contains("meta.json"),
+            "{s}"
+        );
+        let orphans: Vec<_> = std::fs::read_dir(cache.join("log_corpora"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(orphans.is_empty(), "orphans: {orphans:?}");
     }
 
     #[test]
