@@ -3546,11 +3546,13 @@ fn source_git_status(state: State<'_, AppState>) -> Result<SourceGitStatusDto, S
     });
     let porcelain = run_git(&cwd, &["status", "--porcelain"]).unwrap_or_default();
     let dirty = cd_core::git_source::porcelain_is_dirty(&porcelain);
-    let (ahead, behind) =
-        match run_git(&cwd, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]) {
-            Ok(raw) => cd_core::git_source::parse_ahead_behind(&raw),
-            Err(_) => (0, 0),
-        };
+    let (ahead, behind) = match run_git(
+        &cwd,
+        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+    ) {
+        Ok(raw) => cd_core::git_source::parse_ahead_behind(&raw),
+        Err(_) => (0, 0),
+    };
     // Product rule: this path never hard-resets.
     let _ = cd_core::git_source::must_not_hard_reset(dirty);
     let s = cd_core::git_source::build_source_git_status(
