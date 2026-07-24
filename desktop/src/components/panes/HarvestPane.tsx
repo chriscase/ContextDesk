@@ -190,7 +190,8 @@ export function HarvestPane() {
         <div className="callout callout--warn" role="alert">
           {err}
           <p className="mem-detail__hint">
-            If spaces allowlist is empty, harvest is blocked — set space keys in
+            If spaces allowlist is empty, harvest is blocked — open Settings →
+            Connectors → Confluence (Discover spaces / add keys). Set space keys in
             Settings → Connectors.
           </p>
         </div>

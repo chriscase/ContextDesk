@@ -27,6 +27,7 @@ fn confluence_tool_name(name: &str) -> bool {
         names::CONFLUENCE_SEARCH
             | names::CONFLUENCE_GET_PAGE
             | names::CONFLUENCE_LIST_CHILDREN
+            | names::CONFLUENCE_LIST_SPACES
             | names::CONFLUENCE_GET_ANCESTORS
             | names::CONFLUENCE_LIST_ATTACHMENTS
             | names::HARVEST_FROM_SOURCE
@@ -634,6 +635,26 @@ impl ToolHost {
     /// Enable Confluence HardWrite tools when settings.write_enabled (default false).
     pub fn set_confluence_write_enabled(&mut self, enabled: bool) {
         self.confluence_write_enabled = enabled;
+    }
+
+    /// Bounded agent system hint when Confluence is configured (#452 / #458). No PAT.
+    pub fn confluence_agent_hint(&self) -> Option<String> {
+        if self.confluence.is_none() || self.confluence_pat.is_none() {
+            return None;
+        }
+        let cfg = self.confluence.as_ref()?;
+        let spaces = if cfg.spaces.is_empty() {
+            "space allowlist empty (RO not filtered by product; harvest/write need keys)"
+                .to_string()
+        } else {
+            let keys: Vec<&str> = cfg.spaces.iter().map(|s| s.as_str()).take(24).collect();
+            format!("space allowlist keys: {}", keys.join(", "))
+        };
+        Some(format!(
+            "\nConfluence enabled. Tools: confluence_search, confluence_get_page, \
+             confluence_list_children, confluence_list_spaces, confluence_get_ancestors, \
+             confluence_list_attachments. Use exact tool names only. {spaces}.\n"
+        ))
     }
 
     /// Whether HardWrite Confluence tools may register.
@@ -1244,6 +1265,7 @@ impl ToolHost {
             names::CONFLUENCE_LIST_CHILDREN => {
                 self.tool_confluence_list_children(arguments).await?
             }
+            names::CONFLUENCE_LIST_SPACES => self.tool_confluence_list_spaces(arguments).await?,
             names::CONFLUENCE_GET_ANCESTORS => {
                 self.tool_confluence_get_ancestors(arguments).await?
             }
@@ -2225,6 +2247,53 @@ impl ToolHost {
             format!("fetched confluence page {page_id} ({format})"),
             raw,
             cite,
+        ))
+    }
+
+    async fn tool_confluence_list_spaces(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
+        let cfg = self
+            .confluence
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_NOT_CONFIGURED.into()))?
+            .clone();
+        let pat = self
+            .confluence_pat
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy(CONFLUENCE_PAT_MISSING.into()))?
+            .clone();
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .min(100) as usize;
+        self.throttle_confluence().await?;
+        let auth = confluence_ro::ConfluenceAuth::bearer(pat);
+        let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
+        let spaces = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
+        let lines: Vec<String> = spaces
+            .iter()
+            .map(|s| format!("- {} — {}", s.key, s.name))
+            .collect();
+        let raw = if lines.is_empty() {
+            format!(
+                "No spaces returned. Check PAT scopes under {}. Empty product allowlist does not hide remote spaces.",
+                confluence_ro::CONFLUENCE_SETTINGS_PATH
+            )
+        } else {
+            format!(
+                "{}\n\nTip: add keys you need under {} for harvest/write; RO search works without an allowlist.",
+                lines.join("\n"),
+                confluence_ro::CONFLUENCE_SETTINGS_PATH
+            )
+        };
+        Ok((
+            true,
+            format!("{} Confluence space(s)", spaces.len()),
+            raw,
+            None,
         ))
     }
 
@@ -3973,6 +4042,27 @@ mod tests {
             err.to_string().contains("PAT") || err.to_string().contains("secure"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn confluence_agent_hint_present_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        assert!(host.confluence_agent_hint().is_none());
+        host.set_confluence(
+            Some(ConfluenceRoConfig::new(
+                "https://wiki.example.com",
+                vec!["ENG".into()],
+            )),
+            Some("pat".into()),
+        );
+        let hint = host.confluence_agent_hint().expect("hint");
+        assert!(hint.contains("confluence_list_spaces"));
+        assert!(hint.contains("ENG"));
+        assert!(!hint.to_ascii_lowercase().contains("pat"));
+        assert!(!hint.contains("Bearer"));
     }
 
     /// #451: model channel tokens must not break Confluence tool dispatch.

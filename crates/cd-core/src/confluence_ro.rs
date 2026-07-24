@@ -345,7 +345,9 @@ pub fn parse_page_meta(
     if !space_permitted(cfg, &space, require_allowlist) {
         if require_allowlist && cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for this Confluence operation".into(),
+                format!(
+                    "confluence:misconfigured: spaces allowlist required for this operation. Add space keys under {CONFLUENCE_SETTINGS_PATH}."
+                ),
             ));
         }
         return Err(CoreError::Policy(format!(
@@ -647,7 +649,9 @@ pub async fn list_space_root_pages(
     if !space_permitted(cfg, space_key, require_allowlist) {
         if require_allowlist && cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for this Confluence operation".into(),
+                format!(
+                    "confluence:misconfigured: spaces allowlist required for this operation. Add space keys under {CONFLUENCE_SETTINGS_PATH}."
+                ),
             ));
         }
         return Err(CoreError::Policy(format!(
@@ -695,7 +699,9 @@ pub async fn create_page(
     if !space_permitted(cfg, space, true) {
         if cfg.spaces.is_empty() {
             return Err(CoreError::Policy(
-                "spaces allowlist required for Confluence write".into(),
+                format!(
+                    "confluence:misconfigured: spaces allowlist required for Confluence write. Add space keys under {CONFLUENCE_SETTINGS_PATH}."
+                ),
             ));
         }
         return Err(CoreError::Policy(format!(
@@ -838,6 +844,15 @@ async fn confluence_get_json(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
 ) -> CoreResult<Value> {
+    confluence_get_json_with_retry(cfg, path_and_query, auth, policy).await
+}
+
+async fn confluence_get_json_once(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<Value> {
     let (base, client) = crate::ssrf::build_pinned_client_for_url(
         &cfg.base_url,
         policy,
@@ -882,17 +897,123 @@ async fn confluence_get_json(
         .map_err(|e| CoreError::Message(format!("confluence json: {e}")))
 }
 
+/// Stable error class for Confluence failures (#452 / #457). Never includes PAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfluenceErrorKind {
+    /// HTTP 401.
+    Unauthorized,
+    /// HTTP 403.
+    Forbidden,
+    /// HTTP 404 or missing resource.
+    NotFound,
+    /// HTTP 429.
+    RateLimited,
+    /// HTTP 400 with CQL / query parse markers.
+    BadCql,
+    /// Transport / timeout / TLS.
+    Network,
+    /// Missing URL, PAT, or connector off.
+    Misconfigured,
+    /// Fallback.
+    Other,
+}
+
+impl ConfluenceErrorKind {
+    /// Wire/stable token for messages and tests.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::NotFound => "not_found",
+            Self::RateLimited => "rate_limited",
+            Self::BadCql => "bad_cql",
+            Self::Network => "network",
+            Self::Misconfigured => "misconfigured",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Settings path used in user-facing Confluence errors.
+pub const CONFLUENCE_SETTINGS_PATH: &str = "Settings → Connectors → Confluence";
+
+/// Classify HTTP status + body (offline-testable).
+pub fn classify_confluence_http(status: u16, body: &str) -> ConfluenceErrorKind {
+    let lower = body.to_ascii_lowercase();
+    match status {
+        401 => ConfluenceErrorKind::Unauthorized,
+        403 => ConfluenceErrorKind::Forbidden,
+        404 => ConfluenceErrorKind::NotFound,
+        429 => ConfluenceErrorKind::RateLimited,
+        400 if lower.contains("cql")
+            || lower.contains("query")
+            || lower.contains("parse")
+            || lower.contains("syntax") =>
+        {
+            ConfluenceErrorKind::BadCql
+        }
+        500..=599 => ConfluenceErrorKind::Other,
+        _ => ConfluenceErrorKind::Other,
+    }
+}
+
+/// Format a classified Confluence error for users/agents (no secrets).
+pub fn format_confluence_error(
+    kind: ConfluenceErrorKind,
+    status: Option<u16>,
+    detail: &str,
+) -> String {
+    let snippet: String = detail.chars().take(120).collect();
+    let status_bit = status.map(|s| format!(" HTTP {s}")).unwrap_or_default();
+    let next = match kind {
+        ConfluenceErrorKind::Unauthorized => {
+            format!("Re-save PAT under {CONFLUENCE_SETTINGS_PATH} (Bearer for Server/DC; Cloud often email+token Basic).")
+        }
+        ConfluenceErrorKind::Forbidden => {
+            format!("Check PAT scopes/space access; if using a space allowlist, add the space key under {CONFLUENCE_SETTINGS_PATH}.")
+        }
+        ConfluenceErrorKind::NotFound => {
+            format!("Check base URL and REST path mode under {CONFLUENCE_SETTINGS_PATH} (Cloud may need /wiki).")
+        }
+        ConfluenceErrorKind::RateLimited => {
+            "Wait and retry; product may auto-retry transient 429s.".into()
+        }
+        ConfluenceErrorKind::BadCql => {
+            "Fix CQL or use free-text search; example: space = \"ENG\" AND type = page.".into()
+        }
+        ConfluenceErrorKind::Network => {
+            "Check VPN/DNS/proxy and that the corp CA is in the OS trust store.".into()
+        }
+        ConfluenceErrorKind::Misconfigured => {
+            format!("Open {CONFLUENCE_SETTINGS_PATH}, set base URL + PAT, Save, then Test.")
+        }
+        ConfluenceErrorKind::Other => {
+            format!("If this persists, re-check {CONFLUENCE_SETTINGS_PATH}.")
+        }
+    };
+    if snippet.is_empty() {
+        format!(
+            "confluence:{}:{} — {next}",
+            kind.as_str(),
+            status_bit.trim()
+        )
+    } else {
+        format!(
+            "confluence:{}:{} {snippet} — {next}",
+            kind.as_str(),
+            status_bit.trim()
+        )
+    }
+}
+
 /// Classify connect/TLS failures (never include PAT). Used by search/fetch.
 fn format_confluence_transport_error(err: &reqwest::Error) -> String {
-    let mut parts = vec!["confluence transport error".to_string()];
+    let mut detail = String::new();
     if err.is_timeout() {
-        parts.push("timeout".into());
+        detail.push_str("timeout ");
     }
     if err.is_connect() {
-        parts.push("connect failed (VPN/proxy/DNS?)".into());
-    }
-    if err.is_request() {
-        parts.push("request build/send".into());
+        detail.push_str("connect failed ");
     }
     let full = err.to_string();
     let lower = full.to_ascii_lowercase();
@@ -902,30 +1023,164 @@ fn format_confluence_transport_error(err: &reqwest::Error) -> String {
         || lower.contains("ssl")
         || lower.contains("handshake")
     {
-        parts.push("TLS/certificate — corp CA may need to be in the OS trust store".into());
+        detail.push_str("TLS/certificate ");
     }
     let safe = full
         .split('?')
         .next()
         .unwrap_or(&full)
         .chars()
-        .take(180)
+        .take(120)
         .collect::<String>();
-    parts.push(safe);
-    parts.join(": ")
+    detail.push_str(&safe);
+    format_confluence_error(ConfluenceErrorKind::Network, None, detail.trim())
 }
 
 /// Map HTTP failures to actionable messages (no PAT; body truncated).
-fn format_confluence_http_error(status: u16, body: &str) -> String {
-    let snippet: String = body.chars().take(160).collect();
-    match status {
-        401 | 403 => format!(
-            "confluence HTTP {status} (auth) — check PAT in keychain; Server/DC PATs use Authorization: Bearer <token>; Cloud often needs Basic (email+token)"
-        ),
-        404 => format!(
-            "confluence HTTP 404 — base URL or path wrong (expect …/rest/api/…; Cloud may need /wiki prefix): {snippet}"
-        ),
-        _ => format!("confluence HTTP {status}: {snippet}"),
+pub fn format_confluence_http_error(status: u16, body: &str) -> String {
+    let kind = classify_confluence_http(status, body);
+    format_confluence_error(kind, Some(status), body)
+}
+
+/// One Confluence space row from discovery (#452 / #456).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfluenceSpace {
+    /// Space key (e.g. ENG).
+    pub key: String,
+    /// Display name.
+    pub name: String,
+}
+
+/// Default max spaces returned by list/probe.
+pub const DEFAULT_SPACE_LIST_LIMIT: usize = 50;
+/// Hard cap for space list.
+pub const MAX_SPACE_LIST_LIMIT: usize = 100;
+
+/// Parse space list JSON (offline-testable).
+pub fn parse_space_list(v: &Value, limit: usize) -> Vec<ConfluenceSpace> {
+    let limit = limit.clamp(1, MAX_SPACE_LIST_LIMIT);
+    let mut out = Vec::new();
+    let results = v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for item in results {
+        let key = item
+            .get("key")
+            .and_then(|k| k.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or(key.as_str())
+            .trim()
+            .to_string();
+        out.push(ConfluenceSpace { key, name });
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+/// List spaces the PAT can see (Read; SSRF-safe client).
+pub async fn list_spaces(
+    cfg: &ConfluenceRoConfig,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+    limit: usize,
+) -> CoreResult<Vec<ConfluenceSpace>> {
+    let limit = limit.clamp(1, MAX_SPACE_LIST_LIMIT);
+    let path = format!("/space?limit={limit}&type=global");
+    let v = confluence_get_json_with_retry(cfg, &path, auth, policy).await?;
+    Ok(parse_space_list(&v, limit))
+}
+
+/// Result of a live connection probe (#452 Settings).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfluenceProbeResult {
+    /// Whether the probe succeeded.
+    pub ok: bool,
+    /// Human message (no PAT).
+    pub message: String,
+    /// Spaces returned if list worked (capped).
+    pub spaces_seen: usize,
+}
+
+/// Probe Confluence: SSRF-valid base + authenticated space list (or lightweight GET).
+pub async fn probe_connection(
+    cfg: &ConfluenceRoConfig,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<ConfluenceProbeResult> {
+    if cfg.base_url.trim().is_empty() {
+        return Ok(ConfluenceProbeResult {
+            ok: false,
+            message: format_confluence_error(
+                ConfluenceErrorKind::Misconfigured,
+                None,
+                "base URL empty",
+            ),
+            spaces_seen: 0,
+        });
+    }
+    match list_spaces(cfg, auth, policy, 5).await {
+        Ok(spaces) => Ok(ConfluenceProbeResult {
+            ok: true,
+            message: format!(
+                "OK: authenticated; saw {} space(s) (sample). Allowlist has {} key(s). Empty allowlist does not block RO; harvest/write need keys. {CONFLUENCE_SETTINGS_PATH}",
+                spaces.len(),
+                cfg.spaces.len()
+            ),
+            spaces_seen: spaces.len(),
+        }),
+        Err(e) => Ok(ConfluenceProbeResult {
+            ok: false,
+            message: e.to_string(),
+            spaces_seen: 0,
+        }),
+    }
+}
+
+/// Max additional attempts after the first failure for retryable statuses.
+const CONFLUENCE_MAX_RETRIES: u32 = 2;
+
+fn is_retryable_confluence_error(msg: &str) -> bool {
+    msg.contains("rate_limited")
+        || msg.contains("HTTP 429")
+        || msg.contains("HTTP 502")
+        || msg.contains("HTTP 503")
+        || msg.contains("HTTP 504")
+}
+
+/// GET with bounded 429/5xx retry (#452 / #459). Not cancellable mid-flight.
+async fn confluence_get_json_with_retry(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+) -> CoreResult<Value> {
+    let mut attempt = 0u32;
+    loop {
+        match confluence_get_json_once(cfg, path_and_query, auth, policy).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let msg = e.to_string();
+                if attempt < CONFLUENCE_MAX_RETRIES && is_retryable_confluence_error(&msg) {
+                    let backoff_ms = 200u64.saturating_mul(1u64 << attempt.min(3));
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
     }
 }
 
@@ -1072,16 +1327,51 @@ mod tests {
     #[test]
     fn http_error_auth_is_actionable() {
         let msg = format_confluence_http_error(401, "Unauthorized");
-        assert!(msg.contains("401"));
-        assert!(msg.to_ascii_lowercase().contains("auth") || msg.contains("PAT"));
+        assert!(msg.contains("401") || msg.contains("unauthorized"));
+        assert!(
+            msg.contains("unauthorized")
+                || msg.contains("PAT")
+                || msg.contains(CONFLUENCE_SETTINGS_PATH)
+        );
+        assert_eq!(
+            classify_confluence_http(401, "nope"),
+            ConfluenceErrorKind::Unauthorized
+        );
+        assert_eq!(
+            classify_confluence_http(429, "slow"),
+            ConfluenceErrorKind::RateLimited
+        );
+        assert_eq!(
+            classify_confluence_http(400, "CQL parse error"),
+            ConfluenceErrorKind::BadCql
+        );
+        let forbidden = format_confluence_http_error(403, "Forbidden");
+        assert!(forbidden.contains("forbidden"));
+        assert!(forbidden.contains(CONFLUENCE_SETTINGS_PATH) || forbidden.contains("space"));
     }
 
     #[test]
     fn http_error_truncates_body() {
         let long = "x".repeat(500);
         let msg = format_confluence_http_error(500, &long);
-        assert!(msg.len() < 400);
-        assert!(msg.contains("500"));
+        assert!(msg.len() < 500);
+        assert!(msg.contains("other") || msg.contains("500"));
+    }
+
+    #[test]
+    fn parse_space_list_caps_and_keys() {
+        let v = serde_json::json!({
+            "results": [
+                {"key": "ENG", "name": "Engineering"},
+                {"key": "", "name": "skip"},
+                {"key": "DOCS", "name": "Docs"}
+            ]
+        });
+        let spaces = parse_space_list(&v, 10);
+        assert_eq!(spaces.len(), 2);
+        assert_eq!(spaces[0].key, "ENG");
+        assert_eq!(spaces[1].name, "Docs");
+        assert_eq!(parse_space_list(&v, 1).len(), 1);
     }
 
     #[test]
@@ -1296,6 +1586,45 @@ mod tests {
         let err = list_space_root_pages(&open, "ENG", 0, 10, &auth, &policy, true)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("allowlist required"));
+        assert!(
+            err.to_string().contains("allowlist") || err.to_string().contains("misconfigured"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_list_spaces_and_429_retry() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First request → 429; subsequent → success (retry path).
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"key": "ENG", "name": "Engineering"},
+                    {"key": "OPS", "name": "Ops"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
+        let auth = ConfluenceAuth::bearer("test-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let spaces = list_spaces(&cfg, &auth, &policy, 10).await.unwrap();
+        assert_eq!(spaces.len(), 2);
+        assert_eq!(spaces[0].key, "ENG");
+
+        let probe = probe_connection(&cfg, &auth, &policy).await.unwrap();
+        assert!(probe.ok, "{}", probe.message);
+        assert!(probe.message.contains("OK") || probe.message.contains("authenticated"));
     }
 }

@@ -1242,6 +1242,23 @@ export async function hostTestConfluence(): Promise<string> {
   return invoke<string>("test_confluence_config");
 }
 
+export type ConfluenceSpaceDto = {
+  key: string;
+  name: string;
+};
+
+/** List remote spaces the PAT can see (does not change allowlist). */
+export async function hostListConfluenceSpaces(
+  limit?: number,
+): Promise<ConfluenceSpaceDto[]> {
+  if (!isTauri()) {
+    throw new Error("Confluence space list requires Tauri host");
+  }
+  return invoke<ConfluenceSpaceDto[]>("list_confluence_spaces", {
+    limit: limit ?? 50,
+  });
+}
+
 export type XSettingsDto = {
   enabled: boolean;
   api_key_ref: string | null;

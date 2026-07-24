@@ -1789,25 +1789,107 @@ fn test_x_config(state: State<'_, AppState>) -> Result<String, String> {
 fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> {
     let cfg = state.config.lock().expect("config").confluence.clone();
     if !cfg.enabled {
-        return Ok("Confluence disabled".into());
+        return Ok("Confluence disabled — enable it under Settings → Connectors → Confluence.".into());
     }
     if cfg.base_url.trim().is_empty() {
-        return Err("Base URL is required".into());
+        return Err(format!(
+            "Base URL is required. Open Settings → Connectors → Confluence."
+        ));
     }
     let has = state
         .secrets
         .has(&key_ref_confluence_pat())
         .map_err(|e| e.to_string())?;
     if !has {
-        return Err("No personal access token in secure storage".into());
+        return Err(
+            "No personal access token in secure storage. Re-save PAT under Settings → Connectors → Confluence."
+                .into(),
+        );
     }
     // SSRF check base URL
     let policy = SsrfPolicy::allow_private_networks();
     validate_provider_url(&cfg.base_url, &policy).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "OK: URL valid, token present, {} space(s) allowlisted",
-        cfg.spaces.len()
-    ))
+    let pat = state
+        .secrets
+        .get(&key_ref_confluence_pat())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "PAT missing from keychain".to_string())?;
+    let ro = cfg.to_ro_config();
+    let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
+    // Live probe (authenticated space list) — no PAT in returned message.
+    let handle = tokio::runtime::Handle::try_current();
+    let probe = if let Ok(h) = handle {
+        h.block_on(cd_core::confluence_ro::probe_connection(
+            &ro,
+            &auth,
+            &policy,
+        ))
+        .map_err(|e| e.to_string())?
+    } else {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(cd_core::confluence_ro::probe_connection(
+            &ro,
+            &auth,
+            &policy,
+        ))
+        .map_err(|e| e.to_string())?
+    };
+    if probe.ok {
+        Ok(probe.message)
+    } else {
+        Err(probe.message)
+    }
+}
+
+#[derive(Serialize)]
+struct ConfluenceSpaceDto {
+    key: String,
+    name: String,
+}
+
+/// List remote Confluence spaces (Read). Does not change allowlist.
+#[tauri::command]
+fn list_confluence_spaces(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<ConfluenceSpaceDto>, String> {
+    let cfg = state.config.lock().expect("config").confluence.clone();
+    if !cfg.enabled {
+        return Err("Confluence disabled".into());
+    }
+    if cfg.base_url.trim().is_empty() {
+        return Err("Base URL required".into());
+    }
+    let pat = state
+        .secrets
+        .get(&key_ref_confluence_pat())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "PAT missing — save under Settings → Connectors → Confluence".to_string())?;
+    let policy = SsrfPolicy::allow_private_networks();
+    let ro = cfg.to_ro_config();
+    let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
+    let lim = limit.unwrap_or(50).min(100) as usize;
+    let spaces = {
+        let run = async {
+            cd_core::confluence_ro::list_spaces(&ro, &auth, &policy, lim)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.block_on(run)
+        } else {
+            tokio::runtime::Runtime::new()
+                .map_err(|e| e.to_string())?
+                .block_on(run)
+        }
+    }?;
+    Ok(spaces
+        .into_iter()
+        .map(|s| ConfluenceSpaceDto {
+            key: s.key,
+            name: s.name,
+        })
+        .collect())
 }
 
 /// Instant path check for workspace settings UI (exists + readable directory).
@@ -4621,6 +4703,7 @@ pub fn run() {
             save_confluence_settings,
             confluence_has_token,
             test_confluence_config,
+            list_confluence_spaces,
             get_x_settings,
             save_x_settings,
             x_has_token,
