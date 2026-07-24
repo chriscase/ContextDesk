@@ -15,14 +15,8 @@ import {
   type HelpSearchHitDto,
   type HelpSectionDto,
 } from "../../lib/host";
+import type { HelpOpenRequest } from "../../lib/help";
 import { HelpMarkdown } from "./HelpMarkdown";
-
-export type HelpOpenRequest = {
-  requestId: number;
-  pageId?: string;
-  anchor?: string;
-  query?: string;
-};
 
 type Props = {
   request?: HelpOpenRequest | null;

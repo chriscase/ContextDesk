@@ -1058,6 +1058,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_answers_log_triage_with_bundled_help_citations() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("help-agent", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        let help_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs")
+            .join("help");
+        host.set_help_index(Some(std::sync::Arc::new(
+            crate::help::HelpIndex::load(help_root).expect("Help fixture"),
+        )));
+
+        let search = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "help-search".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::help::SEARCH_HELP.into(),
+                    arguments: r#"{"query":"how log triage works","limit":3}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let read = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "help-read".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::help::READ_HELP.into(),
+                    arguments: r#"{"id":"log-analysis-pipeline","anchor":"pipeline"}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let answer = ChatCompletion {
+            content: "Log triage ingests, parses, redacts, templates, stores, embeds, and then analyzes the bounded corpus."
+                .into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        };
+        let backend = ScriptedBackend::new(vec![search, read, answer]);
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "How does ContextDesk log triage work?",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .expect("agent Help turn");
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Citation { source_id, label, .. }
+                    if source_id == "help://log-analysis-pipeline#pipeline"
+                        && label == "How log analysis works"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::SearchTrail { steps }
+                    if steps.iter().any(|step| step.starts_with("Help: searched"))
+            )
+        }));
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("redacts"));
+        assert!(history.iter().any(|message| {
+            message.role == Role::Tool && message.content.contains("BUNDLED_PRODUCT_HELP")
+        }));
+    }
+
+    #[tokio::test]
     async fn agent_stops_on_cancel() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;

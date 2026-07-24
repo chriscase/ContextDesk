@@ -5,7 +5,7 @@ use crate::confluence_ro::{self, ConfluenceRoConfig};
 use crate::error::{CoreError, CoreResult};
 use crate::events::{StreamEvent, ToolPhase};
 use crate::index::KeywordIndex;
-use crate::injection::wrap_untrusted;
+use crate::injection::{wrap_bundled_help, wrap_untrusted};
 use crate::paths::resolve_allowed_path;
 use crate::permissions::{
     validate_decision, PermissionDecision, PermissionRequest, PermissionState,
@@ -52,7 +52,7 @@ pub struct ToolResult {
     pub ok: bool,
     /// Compact summary for UI.
     pub summary: String,
-    /// Full detail (untrusted wrapper applied for model).
+    /// Full detail with the source-appropriate policy wrapper applied for the model.
     pub detail_for_model: String,
     /// Raw detail for UI expand.
     pub detail_raw: String,
@@ -115,6 +115,8 @@ pub struct ToolHost {
     hybrid_retrieval: bool,
     /// Optional embed backend for hybrid semantic scores (never in default tests).
     embed_backend: Option<std::sync::Arc<dyn crate::embed::EmbedBackend>>,
+    /// Validated bundled product Help. Separate from workspace and memory indexes.
+    help_index: Option<std::sync::Arc<crate::help::HelpIndex>>,
     /// Model id keyed into `memory_embeddings` on embed-on-write (#346).
     embed_model: String,
     /// Dedicated embed backend for log templates (#359 local ONNX default).
@@ -200,6 +202,7 @@ impl ToolHost {
             max_results_per_source: crate::router::RouterBudget::default().max_results_per_source,
             hybrid_retrieval: false,
             embed_backend: None,
+            help_index: None,
             embed_model: "default".into(),
             log_embed_backend: None,
             log_embed_model: crate::embed::LOCAL_LOG_EMBED_MODEL_ID.into(),
@@ -855,6 +858,16 @@ impl ToolHost {
         self.embed_backend.clone()
     }
 
+    /// Attach or remove the validated bundled product Help corpus.
+    pub fn set_help_index(&mut self, help: Option<std::sync::Arc<crate::help::HelpIndex>>) {
+        self.help_index = help;
+    }
+
+    /// Whether the read-only Help tools are registered.
+    pub fn help_available(&self) -> bool {
+        self.help_index.is_some()
+    }
+
     /// Model id used for `memory_embeddings` / template cache keys. #346
     pub fn embed_model(&self) -> &str {
         &self.embed_model
@@ -964,6 +977,13 @@ impl ToolHost {
             for t in crate::log_analysis::log_tool_specs() {
                 if !specs.iter().any(|s| s.name == t.name) {
                     specs.push(t);
+                }
+            }
+        }
+        if self.help_index.is_some() {
+            for tool in crate::help::help_tool_specs() {
+                if !specs.iter().any(|spec| spec.name == tool.name) {
+                    specs.push(tool);
                 }
             }
         }
@@ -1238,6 +1258,18 @@ impl ToolHost {
             crate::log_analysis::CORRELATE => self.tool_correlate_logs(arguments)?,
             crate::log_analysis::ANOMALIES => self.tool_anomalies_logs(arguments)?,
             crate::log_analysis::TRACE => self.tool_trace_logs(arguments)?,
+            crate::help::SEARCH_HELP => {
+                let (ok, summary, raw, cites) = self.tool_search_help(arguments).await?;
+                web_cites = cites;
+                (ok, summary, raw, None)
+            }
+            crate::help::READ_HELP => {
+                let (ok, summary, raw, cite) = self.tool_read_help(arguments)?;
+                if let Some(cite) = cite {
+                    web_cites.push(cite);
+                }
+                (ok, summary, raw, None)
+            }
             names::SAVE_SKILL => self.tool_save_skill(arguments)?,
             names::CONFLUENCE_SEARCH => self.tool_confluence_search(arguments).await?,
             names::CONFLUENCE_GET_PAGE => self.tool_confluence_get_page(arguments).await?,
@@ -1310,6 +1342,23 @@ impl ToolHost {
                 locator: Some(path.clone()),
             });
         }
+        if name == crate::help::SEARCH_HELP {
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            events.push(StreamEvent::SearchTrail {
+                steps: vec![format!(
+                    "Help: searched \"{}\"",
+                    crate::text::truncate_bytes(query, 120)
+                )],
+            });
+        } else if name == crate::help::READ_HELP {
+            events.push(StreamEvent::SearchTrail {
+                steps: vec![format!("Help: {summary}")],
+            });
+        }
 
         self.audit_log(
             name,
@@ -1320,11 +1369,17 @@ impl ToolHost {
             raw.len() as u64,
         );
 
+        let detail_for_model = if matches!(name, crate::help::SEARCH_HELP | crate::help::READ_HELP)
+        {
+            wrap_bundled_help(&raw)
+        } else {
+            wrap_untrusted(&format!("tool:{name}"), &raw)
+        };
         Ok(ToolResult {
             name: name.into(),
             ok,
             summary,
-            detail_for_model: wrap_untrusted(&format!("tool:{name}"), &raw),
+            detail_for_model,
             detail_raw: raw,
             citation_path: citation,
             events,
@@ -1422,6 +1477,93 @@ impl ToolHost {
             format!("{total} hit(s) for `{query}` ({mode}{sess})"),
             raw,
             first_path,
+        ))
+    }
+
+    async fn tool_search_help(&self, args: &Value) -> CoreResult<ToolRunResult> {
+        let index = self
+            .help_index
+            .as_ref()
+            .ok_or_else(|| CoreError::Message("bundled Help is unavailable".into()))?;
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if query.is_empty() {
+            return Err(CoreError::Message("search_help requires query".into()));
+        }
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(8)
+            .clamp(1, 8) as usize;
+        let hits = index
+            .search(query, limit, self.embed_backend.as_deref())
+            .await;
+        let mode = if hits
+            .iter()
+            .any(|hit| hit.mode == crate::help::HelpSearchMode::Hybrid)
+        {
+            "hybrid"
+        } else {
+            "keyword"
+        };
+        let citations = hits
+            .iter()
+            .map(|hit| {
+                (
+                    hit.citation.clone(),
+                    hit.title.clone(),
+                    Some(hit.title.clone()),
+                )
+            })
+            .collect();
+        let raw = serde_json::to_string_pretty(&hits)
+            .map_err(|_| CoreError::Message("Help results could not be formatted".into()))?;
+        Ok((
+            true,
+            format!("{} Help hit(s) ({mode})", hits.len()),
+            raw,
+            citations,
+        ))
+    }
+
+    fn tool_read_help(&self, args: &Value) -> CoreResult<ToolRunResultOne> {
+        let index = self
+            .help_index
+            .as_ref()
+            .ok_or_else(|| CoreError::Message("bundled Help is unavailable".into()))?;
+        let id = args.get("id").and_then(Value::as_str).unwrap_or("").trim();
+        if id.is_empty() {
+            return Err(CoreError::Message("read_help requires id".into()));
+        }
+        let anchor = args
+            .get("anchor")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let page = index.page(id)?;
+        let (body, title) = help_body_at_anchor(&page, anchor)?;
+        let citation = match anchor {
+            Some(anchor) => format!("help://{id}#{anchor}"),
+            None => format!("help://{id}"),
+        };
+        let (raw, truncated) = bounded_help_read_detail(&page.meta.title, &citation, &body);
+        let summary = if truncated {
+            format!("read {} (truncated)", page.meta.title)
+        } else {
+            format!("read {}", page.meta.title)
+        };
+        Ok((
+            true,
+            summary,
+            raw,
+            Some((
+                citation,
+                page.meta.title,
+                Some(crate::text::truncate_bytes(&title, 120).to_string()),
+            )),
         ))
     }
 
@@ -3208,6 +3350,12 @@ impl ToolHost {
         {
             return t.side_effect;
         }
+        if let Some(tool) = crate::help::help_tool_specs()
+            .into_iter()
+            .find(|tool| tool.name == name)
+        {
+            return tool.side_effect;
+        }
         mvp_tool_specs()
             .into_iter()
             .find(|t| t.name == name)
@@ -3631,6 +3779,82 @@ fn citation_display_label(path: &str) -> String {
         .to_string()
 }
 
+fn help_body_at_anchor(
+    page: &crate::help::HelpPage,
+    anchor: Option<&str>,
+) -> CoreResult<(String, String)> {
+    let Some(anchor) = anchor else {
+        return Ok((page.body.clone(), page.meta.title.clone()));
+    };
+    let target = page
+        .toc
+        .iter()
+        .find(|entry| entry.anchor == anchor)
+        .ok_or_else(|| CoreError::Message("unknown Help heading".into()))?;
+    let target_level = target.level as usize;
+    let target_title = target.title.clone();
+    let mut toc_index = 0usize;
+    let mut started = false;
+    let mut in_fence = false;
+    let mut selected = Vec::new();
+    for line in page.body.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            if started {
+                selected.push(line);
+            }
+            continue;
+        }
+        let heading = if in_fence {
+            None
+        } else {
+            help_heading_level(line)
+        };
+        if let Some(level) = heading.filter(|level| (2..=3).contains(level)) {
+            let entry = page.toc.get(toc_index);
+            toc_index += 1;
+            if started && level <= target_level {
+                break;
+            }
+            if entry.is_some_and(|entry| entry.anchor == anchor) {
+                started = true;
+            }
+        }
+        if started {
+            selected.push(line);
+        }
+    }
+    if !started {
+        return Err(CoreError::Message("unknown Help heading".into()));
+    }
+    Ok((selected.join("\n"), target_title))
+}
+
+fn help_heading_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_end();
+    let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&level) && trimmed.as_bytes().get(level) == Some(&b' ') {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+fn bounded_help_read_detail(title: &str, citation: &str, body: &str) -> (String, bool) {
+    const MAX_BYTES: usize = 12_000;
+    let false_header = format!("title: {title}\nsource: {citation}\ntruncated: false\n---\n");
+    if false_header.len() + body.len() <= MAX_BYTES {
+        return (format!("{false_header}{body}"), false);
+    }
+    let true_header = format!("title: {title}\nsource: {citation}\ntruncated: true\n---\n");
+    let suffix = "\n…";
+    let body_budget = MAX_BYTES
+        .saturating_sub(true_header.len())
+        .saturating_sub(suffix.len());
+    let body = crate::text::truncate_bytes(body, body_budget);
+    (format!("{true_header}{body}{suffix}"), true)
+}
+
 /// Serialize tool specs to OpenAI tools array.
 pub fn openai_tools_json() -> Value {
     let tools: Vec<Value> = mvp_tool_specs()
@@ -3668,6 +3892,114 @@ mod tests {
         let audit = AuditLog::new(dir.path().join("audit.jsonl"));
         let host = ToolHost::new(ws, idx, Some(audit));
         (dir, host)
+    }
+
+    fn checked_in_help() -> Arc<crate::help::HelpIndex> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("docs")
+            .join("help");
+        Arc::new(crate::help::HelpIndex::load(root).expect("checked-in Help corpus"))
+    }
+
+    #[tokio::test]
+    async fn help_tools_are_read_only_offline_and_emit_citations_and_trail() {
+        let (_dir, mut host) = host_with_docs();
+        assert!(
+            !host
+                .specs_for_model()
+                .iter()
+                .any(|tool| tool.name == crate::help::SEARCH_HELP),
+            "Help tools must not register without a validated corpus"
+        );
+        host.set_help_index(Some(checked_in_help()));
+
+        let specs = host.specs_for_model();
+        for name in [crate::help::SEARCH_HELP, crate::help::READ_HELP] {
+            let spec = specs
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("Help tool registered");
+            assert_eq!(spec.side_effect, ToolSideEffect::Read);
+            assert_eq!(host.side_effect_for(name), ToolSideEffect::Read);
+        }
+
+        let result = host
+            .execute(
+                crate::help::SEARCH_HELP,
+                &json!({"query": "log analysis", "limit": 3}),
+                None,
+            )
+            .await
+            .expect("search Help");
+        assert!(result.ok);
+        assert!(result.detail_raw.len() < 8_000);
+        assert!(result.detail_raw.contains("log-analysis-pipeline"));
+        assert!(result.detail_for_model.contains("BUNDLED_PRODUCT_HELP"));
+        assert!(!result.detail_for_model.contains("UNTRUSTED_DATA"));
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::PermissionRequired { .. })));
+        assert!(result.events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Citation { source_id, label, .. }
+                    if source_id.starts_with("help://log-analysis-pipeline")
+                        && label == "How log analysis works"
+            )
+        }));
+        assert!(result.events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::SearchTrail { steps }
+                    if steps.iter().any(|step| step == "Help: searched \"log analysis\"")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn read_help_returns_one_bounded_heading_without_workspace_access() {
+        let (_dir, mut host) = host_with_docs();
+        host.set_help_index(Some(checked_in_help()));
+        let result = host
+            .execute(
+                crate::help::READ_HELP,
+                &json!({"id": "log-analysis-pipeline", "anchor": "pipeline"}),
+                None,
+            )
+            .await
+            .expect("read Help heading");
+        assert!(result.ok);
+        assert!(result.detail_raw.len() <= 12_000);
+        assert!(result
+            .detail_raw
+            .contains("source: help://log-analysis-pipeline#pipeline"));
+        assert!(result.detail_raw.contains("## Pipeline"));
+        assert!(!result.detail_raw.contains("## Tool guide"));
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::PermissionRequired { .. })));
+        assert!(result.events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Citation { source_id, label, .. }
+                    if source_id == "help://log-analysis-pipeline#pipeline"
+                        && label == "How log analysis works"
+            )
+        }));
+    }
+
+    #[test]
+    fn read_help_detail_cap_is_utf8_safe_and_explicit() {
+        let body = "🌍 trusted product help\n".repeat(2_000);
+        let (detail, truncated) =
+            bounded_help_read_detail("Large page", "help://large-page", &body);
+        assert!(truncated);
+        assert!(detail.len() <= 12_000);
+        assert!(detail.contains("truncated: true"));
+        assert!(std::str::from_utf8(detail.as_bytes()).is_ok());
     }
 
     #[tokio::test]

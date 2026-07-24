@@ -8,6 +8,7 @@
 
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
+use crate::tools::{ToolSideEffect, ToolSpec};
 use crate::vector_index::{ExactIndex, VectorIndex};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -28,6 +29,11 @@ const MAX_SNIPPET_CHARS: usize = 320;
 const EMBED_BATCH: usize = 32;
 const EMBED_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Read-only ranked search over the bundled product guide.
+pub const SEARCH_HELP: &str = "search_help";
+/// Read one bounded page or heading from the bundled product guide.
+pub const READ_HELP: &str = "read_help";
+
 const SECTION_DEFS: &[(&str, &str, u16)] = &[
     ("overview", "Overview", 10),
     ("getting-started", "Getting started", 20),
@@ -43,6 +49,40 @@ const SECTION_DEFS: &[(&str, &str, u16)] = &[
     ("troubleshooting", "Troubleshooting", 120),
     ("reference", "Reference", 130),
 ];
+
+/// Agent-visible Help tools. Hosts register these only when a corpus is loaded.
+pub fn help_tool_specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: SEARCH_HELP.into(),
+            description: "Search the bundled ContextDesk product guide for feature behavior, setup, permissions, and troubleshooting. Returns bounded help:// citations."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 8 }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
+            name: READ_HELP.into(),
+            description: "Read one bounded page or heading from the bundled ContextDesk product guide by stable id. Use after search_help; never pass a filesystem path."
+                .into(),
+            side_effect: ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Stable Help page id" },
+                    "anchor": { "type": "string", "description": "Optional heading anchor returned by search_help" }
+                },
+                "required": ["id"]
+            }),
+        },
+    ]
+}
 
 /// Metadata declared in a Help page's frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

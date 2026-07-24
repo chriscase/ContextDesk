@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
@@ -36,6 +37,11 @@ import {
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview, nowIso } from "./lib/session";
+import {
+  helpOpenRequest,
+  parseHelpLocator,
+  type HelpLocation,
+} from "./lib/help";
 import { nextSkinId } from "./lib/skins";
 import { SplashScreen } from "./components/launch/SplashScreen";
 import { ContextDeskMark } from "./components/launch/ContextDeskMark";
@@ -54,6 +60,7 @@ import {
 
 export function App() {
   const shell = useShellState();
+  const setShellPane = shell.setPane;
 
   // Dev/screenshot: skip splash without setState during render
   useEffect(() => {
@@ -106,6 +113,31 @@ export function App() {
     id: number;
     text: string;
   } | null>(null);
+  const helpRequestSequence = useRef(0);
+  const [helpRequest, setHelpRequest] = useState<ReturnType<
+    typeof helpOpenRequest
+  > | null>(null);
+  const openHelp = useCallback(
+    (location: Partial<HelpLocation> & { query?: string } = {}) => {
+      helpRequestSequence.current += 1;
+      setHelpRequest(
+        helpOpenRequest(helpRequestSequence.current, {
+          pageId: location.pageId,
+          anchor: location.anchor,
+          query: location.query,
+        }),
+      );
+      setShellPane("help");
+    },
+    [setShellPane],
+  );
+  const openHelpCitation = useCallback(
+    (locator: string) => {
+      const location = parseHelpLocator(locator);
+      if (location) openHelp(location);
+    },
+    [openHelp],
+  );
 
   const compactKeep = activeSession?.compactKeepLast ?? 6;
   const showFullHistory = activeSession?.showFullHistory ?? false;
@@ -715,6 +747,7 @@ export function App() {
                       });
                     });
                   },
+                  onOpenHelpCitation: openHelpCitation,
                 }}
                 memory={{
                   docs: shell.memoryDocs,
@@ -812,6 +845,7 @@ export function App() {
                   content: shell.sourceContent,
                 }}
                 todosKey={sessionId ? `cd-todos-${sessionId}` : null}
+                helpRequest={helpRequest}
               />
             </div>
           </div>

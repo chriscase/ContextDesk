@@ -7,6 +7,7 @@ import type {
   HelpAssetRefDto,
   HelpTocEntryDto,
 } from "../../lib/host";
+import { parseHelpLocator } from "../../lib/help";
 
 type Props = {
   body: string;
@@ -17,16 +18,8 @@ type Props = {
   titleRef: RefObject<HTMLHeadingElement | null>;
 };
 
-type HelpLocator = { pageId: string; anchor?: string };
-
 const INLINE_TOKEN =
   /(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*|\[[^\]\n]+\]\(help:\/\/[^)\s]+\)|help:\/\/[a-z0-9-]+(?:#[a-z0-9-]+)?)/g;
-
-function parseHelpLocator(value: string): HelpLocator | null {
-  const match = value.match(/^help:\/\/([a-z0-9-]+)(?:#([a-z0-9-]+))?$/);
-  if (!match) return null;
-  return { pageId: match[1], anchor: match[2] || undefined };
-}
 
 function inlineNodes(
   text: string,

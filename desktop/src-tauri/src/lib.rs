@@ -129,6 +129,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     .map_err(|e| e.to_string())?;
     let audit_log = state.audit_log.clone();
     let mut host = ToolHost::new(ws, index, audit_log);
+    host.set_help_index(state.help.lock().expect("help").clone());
     host.set_router_budget(cfg.router.clone());
     host.set_model_context_budgets(cfg.model_context_budgets.clone());
     host.attach_connectors(&cfg.connectors);
@@ -4631,7 +4632,12 @@ pub fn run() {
             if help.is_none() {
                 tracing::warn!("bundled Help corpus unavailable");
             }
-            *app.state::<AppState>().help.lock().expect("help") = help;
+            *app.state::<AppState>().help.lock().expect("help") = help.clone();
+            if let Ok(mut host) = app.state::<AppState>().host.lock() {
+                if let Some(host) = host.as_mut() {
+                    host.set_help_index(help);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

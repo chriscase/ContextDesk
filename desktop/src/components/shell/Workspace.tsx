@@ -7,12 +7,13 @@ import {
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
 import { LogPane } from "../panes/LogPane";
 import { HarvestPane } from "../panes/HarvestPane";
-import { HelpPane, type HelpOpenRequest } from "../panes/HelpPane";
+import { HelpPane } from "../panes/HelpPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
 import { TodoPane } from "../panes/TodoPane";
 import { ChatPane, type ChatPaneProps } from "./ChatPane";
 import { PaneTabs } from "./PaneTabs";
 import type { PaneId } from "../../lib/session";
+import type { HelpOpenRequest } from "../../lib/help";
 
 type ArchiveProps = ComponentProps<typeof ChatArchivePane>;
 
