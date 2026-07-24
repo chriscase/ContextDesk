@@ -14,7 +14,8 @@ export type PaneId =
   | "source"
   | "todos"
   | "logs"
-  | "harvest";
+  | "harvest"
+  | "help";
 
 export type ChatSession = {
   id: string;

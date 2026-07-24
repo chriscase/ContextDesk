@@ -38,9 +38,11 @@ function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
 type Props = {
   /** Optional initial path from file dialog (host-supplied). */
   pickDirectory?: () => Promise<string | null>;
+  /** Open a bundled Help page from a contextual entry point. */
+  onOpenHelp?: (pageId: string) => void;
 };
 
-export function LogPane({ pickDirectory }: Props) {
+export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [corpora, setCorpora] = useState<LogCorpusSummaryDto[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [path, setPath] = useState("");
@@ -221,7 +223,18 @@ export function LogPane({ pickDirectory }: Props) {
       <section className="log-pane__corpora" aria-label="Corpora">
         <h3>Corpora</h3>
         {corpora.length === 0 ? (
-          <p className="muted">No corpora yet.</p>
+          <div>
+            <p className="muted">No corpora yet.</p>
+            {onOpenHelp ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => onOpenHelp("log-analysis-pipeline")}
+              >
+                Learn how log analysis works
+              </button>
+            ) : null}
+          </div>
         ) : (
           <ul>
             {corpora.map((c) => (

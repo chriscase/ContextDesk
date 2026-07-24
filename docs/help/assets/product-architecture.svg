@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" role="img" aria-labelledby="title desc">
+  <title id="title">ContextDesk product architecture</title>
+  <desc id="desc">Allowlisted sources flow through the trusted Rust core to the desktop and agent, which return search trails and citations.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0 0 8 4 0 8Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+  <rect x="20" y="28" width="240" height="286" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="44" y="64" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="22" font-weight="700">Sources you choose</text>
+  <rect x="44" y="88" width="192" height="42" rx="10" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="140" y="115" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Allowlisted files</text>
+  <rect x="44" y="146" width="192" height="42" rx="10" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="140" y="173" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Durable memory</text>
+  <rect x="44" y="204" width="192" height="42" rx="10" fill="#1e293b" stroke="#9ca3af"/>
+  <text x="140" y="231" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Logs and connectors</text>
+  <text x="140" y="282" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">Retrieved content is evidence,</text>
+  <text x="140" y="300" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="13">not trusted policy.</text>
+  <path d="M264 171H335" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="345" y="28" width="240" height="286" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="3"/>
+  <text x="465" y="64" text-anchor="middle" fill="#38bdf8" font-family="system-ui, sans-serif" font-size="22" font-weight="700">Trusted cd-core</text>
+  <text x="465" y="108" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Search and embeddings</text>
+  <text x="465" y="142" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Providers and agent loop</text>
+  <text x="465" y="176" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Tool permission gates</text>
+  <text x="465" y="210" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Redaction and audit</text>
+  <rect x="374" y="246" width="182" height="42" rx="10" fill="#082f49" stroke="#38bdf8"/>
+  <text x="465" y="273" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="14">Secrets stay host-side</text>
+  <path d="M589 171H660" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="670" y="28" width="210" height="286" rx="18" fill="#111827" stroke="#475569" stroke-width="2"/>
+  <text x="775" y="64" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="22" font-weight="700">Experience</text>
+  <rect x="694" y="90" width="162" height="48" rx="10" fill="#1e293b" stroke="#34d399"/>
+  <text x="775" y="120" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Desktop panes</text>
+  <rect x="694" y="156" width="162" height="48" rx="10" fill="#1e293b" stroke="#34d399"/>
+  <text x="775" y="186" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="15">Agent tools</text>
+  <rect x="694" y="222" width="162" height="62" rx="10" fill="#064e3b" stroke="#34d399"/>
+  <text x="775" y="248" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="14">Search trail</text>
+  <text x="775" y="269" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="14">and citations</text>
+</svg>

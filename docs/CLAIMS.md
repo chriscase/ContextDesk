@@ -68,6 +68,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Settings IA groups (Health demoted) | Shipped | desktop/src/components/SettingsModal.tsx:NAV | #396 |
 | Human-confirmed S3-compatible workspace backup/export (Phase A) | Shipped | desktop/src-tauri/src/lib.rs:run_s3_workspace_backup | #292 #419, ADR 0006 |
 | S3-backed index source (Phase B) | Roadmap | docs/adr/0006-s3-object-storage.md:Phase B | #292 #420 |
+| Bundled offline Help browser | Shipped | desktop/src/components/panes/HelpPane.tsx:HelpPane | #434 #438 |
+| Curated keyword/hybrid HelpIndex | Shipped | crates/cd-core/src/help.rs:HelpIndex | #434 #437 |
+| Agent search_help/read_help grounding | Shipped | crates/cd-core/src/help.rs:help_tool_specs | #434 #439 |
 
 ## Human checklist
 

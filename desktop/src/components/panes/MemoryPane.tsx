@@ -39,6 +39,8 @@ type Props = {
   }) => void;
   /** Open selected memory in Composition pane (#293). */
   onCompose?: (doc: MemoryDoc) => void;
+  /** Open a bundled Help page from a contextual entry point. */
+  onOpenHelp?: (pageId: string) => void;
 };
 
 const KIND_OPTIONS = [
@@ -75,6 +77,7 @@ export function MemoryPane({
   onCreateHint,
   onFilterChange,
   onCompose,
+  onOpenHelp,
 }: Props) {
   const [view, setView] = useState<"store" | "inbox">("store");
   const [kindFilter, setKindFilter] = useState("");
@@ -579,6 +582,15 @@ export function MemoryPane({
                     }
                   >
                     Open Compose
+                  </button>
+                ) : null}
+                {onOpenHelp ? (
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    onClick={() => onOpenHelp("memory-overview")}
+                  >
+                    Learn how Memory works
                   </button>
                 ) : null}
               </div>

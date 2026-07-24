@@ -8,6 +8,7 @@ import { hasPrimaryMod, isEditableTarget } from "../lib/commandPalette";
 export type KeyboardShortcutHandlers = {
   onNewChat: () => void;
   onOpenPalette: () => void;
+  onOpenHelp: () => void;
   onOpenSettings: () => void;
   onPrevSession: () => void;
   onNextSession: () => void;
@@ -19,6 +20,8 @@ export type KeyboardShortcutHandlers = {
   settingsOpen: boolean;
   /** When true, F2 / session keys still work; Escape left to PermissionModal. */
   permissionOpen: boolean;
+  /** Any modal workflow in which the Help shortcut must not steal input. */
+  modalOpen: boolean;
 };
 
 export function useKeyboardShortcuts(h: KeyboardShortcutHandlers) {
@@ -37,6 +40,18 @@ export function useKeyboardShortcuts(h: KeyboardShortcutHandlers) {
 
       // Permission modal owns Escape deny via capture listener (#149/#154).
       if (h.permissionOpen && e.key === "Escape") {
+        return;
+      }
+
+      // Cmd/Ctrl+Shift+/ opens Help, except while any modal workflow owns focus.
+      if (
+        primary &&
+        e.shiftKey &&
+        (e.key === "/" || e.key === "?")
+      ) {
+        if (h.modalOpen) return;
+        e.preventDefault();
+        h.onOpenHelp();
         return;
       }
 

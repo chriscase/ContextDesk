@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
@@ -36,6 +37,11 @@ import {
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview, nowIso } from "./lib/session";
+import {
+  helpOpenRequest,
+  parseHelpLocator,
+  type HelpLocation,
+} from "./lib/help";
 import { nextSkinId } from "./lib/skins";
 import { SplashScreen } from "./components/launch/SplashScreen";
 import { ContextDeskMark } from "./components/launch/ContextDeskMark";
@@ -54,6 +60,7 @@ import {
 
 export function App() {
   const shell = useShellState();
+  const setShellPane = shell.setPane;
 
   // Dev/screenshot: skip splash without setState during render
   useEffect(() => {
@@ -106,6 +113,37 @@ export function App() {
     id: number;
     text: string;
   } | null>(null);
+  const helpRequestSequence = useRef(0);
+  const [helpRequest, setHelpRequest] = useState<ReturnType<
+    typeof helpOpenRequest
+  > | null>(null);
+  const openHelp = useCallback(
+    (
+      location: Partial<HelpLocation> & {
+        query?: string;
+        focusSearch?: boolean;
+      } = {},
+    ) => {
+      helpRequestSequence.current += 1;
+      setHelpRequest(
+        helpOpenRequest(helpRequestSequence.current, {
+          pageId: location.pageId,
+          anchor: location.anchor,
+          query: location.query,
+          focusSearch: location.focusSearch,
+        }),
+      );
+      setShellPane("help");
+    },
+    [setShellPane],
+  );
+  const openHelpCitation = useCallback(
+    (locator: string) => {
+      const location = parseHelpLocator(locator);
+      if (location) openHelp(location);
+    },
+    [openHelp],
+  );
 
   const compactKeep = activeSession?.compactKeepLast ?? 6;
   const showFullHistory = activeSession?.showFullHistory ?? false;
@@ -267,25 +305,12 @@ export function App() {
       } else if (outcome.openPane === "logs") {
         shell.setPane("logs");
       } else if (outcome.openPane === "help") {
-        // Feature-detect Help pane (#434) — fall back to chat.
-        const helpOk =
-          typeof (shell as { setPane: (p: string) => void }).setPane ===
-          "function";
-        if (helpOk) {
-          try {
-            // PaneId may not include help yet — only open when type allows.
-            shell.setPane("chat");
-          } catch {
-            shell.setPane("chat");
-          }
-        } else {
-          shell.setPane("chat");
-        }
+        openHelp({ pageId: outcome.helpPageId ?? "product-overview" });
       } else {
         shell.setPane("chat");
       }
     },
-    [persistSession, setSessions, shell],
+    [openHelp, persistSession, setSessions, shell],
   );
 
   const paletteItems: PaletteItem[] = useMemo(() => {
@@ -312,6 +337,18 @@ export function App() {
         id: "action:settings",
         label: "Open Settings",
         keywords: [",", "health"],
+        group: "action",
+      },
+      {
+        id: "action:open-help",
+        label: "Open Help",
+        keywords: ["documentation", "guide", "support", "shortcut"],
+        group: "action",
+      },
+      {
+        id: "action:search-help",
+        label: "Search Help…",
+        keywords: ["documentation", "find", "guide", "support"],
         group: "action",
       },
       {
@@ -357,6 +394,14 @@ export function App() {
         shell.openSettings("health", chatScrollRef.current);
         return;
       }
+      if (id === "action:open-help") {
+        openHelp({ pageId: "product-overview" });
+        return;
+      }
+      if (id === "action:search-help") {
+        openHelp({ focusSearch: true });
+        return;
+      }
       if (id === "action:rename" && activeSession) {
         setRenameTarget({ id: activeSession.id, title: activeSession.title });
         return;
@@ -379,6 +424,7 @@ export function App() {
       setActiveSessionId,
       ensureActiveSession,
       startWizard,
+      openHelp,
     ],
   );
 
@@ -388,6 +434,7 @@ export function App() {
       shell.setPane("chat");
     },
     onOpenPalette: openPalette,
+    onOpenHelp: () => openHelp({ pageId: "product-overview" }),
     onOpenSettings: () =>
       shell.openSettings("health", chatScrollRef.current),
     onPrevSession: () => switchSessionByDelta(-1),
@@ -408,6 +455,13 @@ export function App() {
     paletteOpen,
     settingsOpen: shell.settingsOpen,
     permissionOpen: Boolean(turn.permission),
+    modalOpen:
+      paletteOpen ||
+      shell.settingsOpen ||
+      Boolean(turn.permission) ||
+      wizardCatalogOpen ||
+      Boolean(activeWizardId) ||
+      Boolean(renameTarget),
   });
 
   const applyAiFromLaunch = async (payload: WizardApplyPayload) => {
@@ -549,6 +603,10 @@ export function App() {
           onSaveSetup={shell.onSaveSetup}
           onRecheckHost={shell.refreshHostPreflight}
           hostReport={shell.hostPreflightReport}
+          onOpenHelp={(pageId) => {
+            shell.closeSettings(() => {});
+            openHelp({ pageId });
+          }}
         />
       ) : (
         <div className="app-chrome">
@@ -715,6 +773,7 @@ export function App() {
                       });
                     });
                   },
+                  onOpenHelpCitation: openHelpCitation,
                 }}
                 memory={{
                   docs: shell.memoryDocs,
@@ -812,6 +871,8 @@ export function App() {
                   content: shell.sourceContent,
                 }}
                 todosKey={sessionId ? `cd-todos-${sessionId}` : null}
+                helpRequest={helpRequest}
+                onOpenHelp={(pageId) => openHelp({ pageId })}
               />
             </div>
           </div>
@@ -852,12 +913,11 @@ export function App() {
             setWizardSessionId(null);
           }}
           onComplete={onWizardComplete}
-          helpAvailable={false}
-          onLearnMore={() => {
-            // Help Center (#434) not required — keep chat usable.
+          helpAvailable
+          onLearnMore={(pageId) => {
             setActiveWizardId(null);
             setWizardSessionId(null);
-            shell.setPane("chat");
+            openHelp({ pageId });
           }}
         />
       ) : null}
@@ -870,7 +930,12 @@ export function App() {
             setWizardSessionId(null);
           }}
           onComplete={onWizardComplete}
-          helpAvailable={false}
+          helpAvailable
+          onLearnMore={(pageId) => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+            openHelp({ pageId });
+          }}
         />
       ) : null}
       <PermissionModal

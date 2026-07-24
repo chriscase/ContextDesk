@@ -70,6 +70,92 @@ export async function hostGetBranding(): Promise<BrandingDto> {
   return invoke<BrandingDto>("get_branding");
 }
 
+/** Bundled, read-only Help metadata (#438). */
+export type HelpPageSummaryDto = {
+  id: string;
+  title: string;
+  summary: string;
+  order: number;
+  tags: string[];
+};
+
+export type HelpSectionDto = {
+  id: string;
+  title: string;
+  order: number;
+  pages: HelpPageSummaryDto[];
+};
+
+export type HelpTocEntryDto = {
+  level: 2 | 3;
+  title: string;
+  anchor: string;
+};
+
+export type HelpAssetRefDto = {
+  path: string;
+  alt: string;
+  mime: string;
+};
+
+export type HelpPageDto = {
+  meta: HelpPageSummaryDto & {
+    section: string;
+    related: string[];
+  };
+  body: string;
+  toc: HelpTocEntryDto[];
+  assets: HelpAssetRefDto[];
+};
+
+export type HelpSearchHitDto = {
+  page_id: string;
+  title: string;
+  summary: string;
+  section: string;
+  heading?: string | null;
+  anchor?: string | null;
+  snippet: string;
+  score: number;
+  mode: "keyword" | "hybrid";
+  citation: string;
+};
+
+export type HelpAssetDto = {
+  mime: string;
+  data_url: string;
+};
+
+export async function hostListHelpSections(): Promise<HelpSectionDto[]> {
+  if (!isTauri()) return [];
+  return invoke<HelpSectionDto[]>("list_help_sections");
+}
+
+export async function hostGetHelpPage(id: string): Promise<HelpPageDto> {
+  if (!isTauri()) {
+    throw new Error("Bundled Help requires the desktop app.");
+  }
+  return invoke<HelpPageDto>("get_help_page", { id });
+}
+
+export async function hostSearchHelpPages(
+  query: string,
+  limit = 8,
+): Promise<HelpSearchHitDto[]> {
+  if (!isTauri()) return [];
+  return invoke<HelpSearchHitDto[]>("search_help_pages", { query, limit });
+}
+
+export async function hostGetHelpAsset(
+  pageId: string,
+  path: string,
+): Promise<HelpAssetDto> {
+  if (!isTauri()) {
+    throw new Error("Bundled Help requires the desktop app.");
+  }
+  return invoke<HelpAssetDto>("get_help_asset", { pageId, path });
+}
+
 /** Session-scoped context pack entry (#341). */
 export type SessionContextEntryDto = {
   rel_path: string;

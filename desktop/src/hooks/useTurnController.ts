@@ -213,7 +213,7 @@ export function useTurnController(args: Args) {
               };
               if (done) {
                 const cite = merged.citations?.[0];
-                if (cite) {
+                if (cite && !cite.id.startsWith("help://")) {
                   setSourcePath(cite.id);
                   void hostReadFile(cite.id)
                     .then((body) => setSourceContent(body))

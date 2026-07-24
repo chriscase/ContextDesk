@@ -140,7 +140,8 @@ export function useShellState() {
       p === "chat" ||
       p === "archive" ||
       p === "logs" ||
-      p === "harvest"
+      p === "harvest" ||
+      p === "help"
     ) {
       return p;
     }

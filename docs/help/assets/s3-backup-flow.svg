@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 350" role="img" aria-labelledby="title desc">
+  <title id="title">S3-compatible backup Phase A flow</title>
+  <desc id="desc">Workspace files are traversed, excluded and hashed locally, then a native confirmation gates content-addressed uploads and publication of a completed manifest.</desc>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 8 4 0 8Z" fill="#38bdf8"/></marker></defs>
+  <rect x="20" y="26" width="860" height="298" rx="18" fill="#0f172a" stroke="#475569" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif" text-anchor="middle">
+    <rect x="42" y="112" width="148" height="96" rx="12" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <text x="116" y="146" fill="#e5e7eb" font-size="16" font-weight="700">Plan locally</text>
+    <text x="116" y="174" fill="#9ca3af" font-size="13">exclude + hash</text>
+    <text x="116" y="194" fill="#9ca3af" font-size="13">dry run stops here</text>
+    <path d="M196 160H247" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="258" y="100" width="166" height="120" rx="12" fill="#451a03" stroke="#fbbf24" stroke-width="2"/>
+    <text x="341" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Native confirm</text>
+    <text x="341" y="163" fill="#fde68a" font-size="13">roots + destination</text>
+    <text x="341" y="184" fill="#fde68a" font-size="13">files + bytes + exclusions</text>
+    <path d="M430 160H481" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="492" y="100" width="166" height="120" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
+    <text x="575" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Upload bodies</text>
+    <text x="575" y="163" fill="#9ca3af" font-size="13">streaming + cancellable</text>
+    <text x="575" y="184" fill="#9ca3af" font-size="13">reuse matching hashes</text>
+    <path d="M664 160H715" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
+    <rect x="726" y="100" width="132" height="120" rx="12" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
+    <text x="792" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Publish</text>
+    <text x="792" y="163" fill="#9ca3af" font-size="13">latest manifest</text>
+    <text x="792" y="184" fill="#9ca3af" font-size="13">only if complete</text>
+  </g>
+  <text x="450" y="278" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">No restore, remote deletion, bidirectional sync, or S3 indexing in Phase A.</text>
+</svg>

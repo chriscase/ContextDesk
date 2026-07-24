@@ -35,11 +35,15 @@ export type MessageRowProps = {
   effectiveChatModel: string | null | undefined;
   setSourcePath: (p: string | null) => void;
   setSourceContent: (c: string) => void;
-  setPane: (p: "archive" | "source" | "chat" | "memory" | "compose") => void;
+  setPane: (
+    p: "archive" | "source" | "chat" | "memory" | "compose" | "help",
+  ) => void;
   /** Open a durable memory citation in the Memory pane. */
   setMemoryPath?: (p: string | null) => void;
   /** Open composition for a memory citation (#293). */
   openCompositionFromMemoryId?: (sourceId: string) => void;
+  /** Open a canonical bundled Help citation without treating it as a file. */
+  onOpenHelpCitation?: (locator: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
 };
@@ -88,6 +92,7 @@ function MessageRowImpl({
   setPane,
   setMemoryPath,
   openCompositionFromMemoryId,
+  onOpenHelpCitation,
   onHeightChange,
 }: MessageRowProps) {
   const rootRef = useRef<HTMLElement | null>(null);
@@ -140,6 +145,10 @@ function MessageRowImpl({
             title: c.title,
           }))}
           onOpenFile={(path) => {
+            if (path.startsWith("help://")) {
+              onOpenHelpCitation?.(path);
+              return;
+            }
             // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
             if (path.startsWith("memory:")) {
               if (openCompositionFromMemoryId) {
@@ -192,6 +201,10 @@ function MessageRowImpl({
                   const citeEl = t.closest("[data-cite]") as HTMLElement | null;
                   const cite = citeEl?.getAttribute("data-cite");
                   if (!cite) return;
+                  if (cite.startsWith("help://")) {
+                    onOpenHelpCitation?.(cite);
+                    return;
+                  }
                   if (isHttpUrl(cite)) {
                     openExternalUrl(cite);
                     return;

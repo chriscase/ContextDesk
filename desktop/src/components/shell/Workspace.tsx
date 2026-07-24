@@ -7,11 +7,13 @@ import {
 import { MemoryPane, type MemoryDoc } from "../panes/MemoryPane";
 import { LogPane } from "../panes/LogPane";
 import { HarvestPane } from "../panes/HarvestPane";
+import { HelpPane } from "../panes/HelpPane";
 import { SourcePreviewPane } from "../panes/SourcePreviewPane";
 import { TodoPane } from "../panes/TodoPane";
 import { ChatPane, type ChatPaneProps } from "./ChatPane";
 import { PaneTabs } from "./PaneTabs";
 import type { PaneId } from "../../lib/session";
+import type { HelpOpenRequest } from "../../lib/help";
 
 type ArchiveProps = ComponentProps<typeof ChatArchivePane>;
 
@@ -43,6 +45,8 @@ type Props = {
   } | null;
   source: { path: string | null; content: string } | null;
   todosKey: string | null;
+  helpRequest?: HelpOpenRequest | null;
+  onOpenHelp?: (pageId: string) => void;
 };
 
 /** Workspace pane host (#146). */
@@ -55,6 +59,8 @@ export function Workspace({
   compose,
   source,
   todosKey,
+  helpRequest,
+  onOpenHelp,
 }: Props) {
   return (
     <div className="workspace">
@@ -77,7 +83,7 @@ export function Workspace({
           aria-labelledby="pane-tab-memory"
           className="pane-panel"
         >
-          <MemoryPane {...memory} />
+          <MemoryPane {...memory} onOpenHelp={onOpenHelp} />
         </div>
       ) : null}
       {pane === "compose" && compose ? (
@@ -107,7 +113,7 @@ export function Workspace({
           aria-labelledby="pane-tab-logs"
           className="pane-panel"
         >
-          <LogPane />
+          <LogPane onOpenHelp={onOpenHelp} />
         </div>
       ) : null}
       {pane === "harvest" ? (
@@ -128,6 +134,16 @@ export function Workspace({
           className="pane-panel"
         >
           <TodoPane storageKey={todosKey} />
+        </div>
+      ) : null}
+      {pane === "help" ? (
+        <div
+          role="tabpanel"
+          id="pane-panel-help"
+          aria-labelledby="pane-tab-help"
+          className="pane-panel"
+        >
+          <HelpPane request={helpRequest} />
         </div>
       ) : null}
     </div>

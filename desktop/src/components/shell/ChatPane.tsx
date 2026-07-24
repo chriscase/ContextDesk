@@ -45,9 +45,13 @@ export type ChatPaneProps = {
   setActiveSessionId: (id: string) => void;
   openChatCtxMenu: (e: ReactMouseEvent, id: string) => void;
   createSession: () => void;
-  setPane: (p: "archive" | "source" | "chat" | "memory" | "compose") => void;
+  setPane: (
+    p: "archive" | "source" | "chat" | "memory" | "compose" | "help",
+  ) => void;
   setMemoryPath?: (p: string | null) => void;
   openCompositionFromMemoryId?: (sourceId: string) => void;
+  /** Route a canonical help:// citation to the bundled Help pane. */
+  onOpenHelpCitation?: (locator: string) => void;
   chatScrollRef: RefObject<HTMLDivElement | null>;
   onChatScroll: () => void;
   unreadBelow: number;
@@ -115,6 +119,7 @@ export function ChatPane(props: ChatPaneProps) {
     setSourceContent,
     setMemoryPath,
     openCompositionFromMemoryId,
+    onOpenHelpCitation,
     onOpenGuidedSetup,
     onStartWizard,
     externalSeedRequest = null,
@@ -402,6 +407,7 @@ export function ChatPane(props: ChatPaneProps) {
                           openCompositionFromMemoryId={
                             openCompositionFromMemoryId
                           }
+                          onOpenHelpCitation={onOpenHelpCitation}
                           onHeightChange={
                             windowed.virtualized
                               ? windowed.onHeightChange

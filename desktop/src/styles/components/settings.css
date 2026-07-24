@@ -200,6 +200,12 @@
   letter-spacing: -0.02em;
 }
 
+.settings-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 /* Primary scroll region — must shrink (min-height:0) or Connectors never scrolls. */
 .settings-content {
   flex: 1 1 auto;
@@ -748,4 +754,3 @@
   padding: 0.75rem 0.75rem 0.25rem;
   margin-top: 0.35rem;
 }
-
