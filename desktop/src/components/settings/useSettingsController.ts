@@ -54,6 +54,7 @@ export type SettingsSection =
   | "health"
   | "preflight" // alias → health (compat)
   | "workspace"
+  | "backup"
   | "ai"
   | "connectors"
   | "modules"

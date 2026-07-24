@@ -47,7 +47,7 @@ pub struct BackupDestination {
 }
 
 /// One exclusion category surfaced by planning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupExclusionReason {
     /// Source-control internals.
@@ -93,6 +93,8 @@ pub struct BackupExclusion {
     pub relative_path: String,
     /// Why the entry was excluded.
     pub reason: BackupExclusionReason,
+    /// Number of excluded filesystem entries represented by this row.
+    pub entries: u64,
     /// Known excluded bytes, or zero when unavailable/a directory.
     pub bytes: u64,
 }
@@ -187,6 +189,8 @@ pub struct BackupManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupProgressPhase {
+    /// Trusted host is traversing and hashing the workspace.
+    Planning,
     /// Planning/hashing has completed and confirmation is next.
     AwaitingConfirmation,
     /// A content body was uploaded.
@@ -263,6 +267,8 @@ pub struct BackupRunSummary {
     pub excluded_files: u64,
     /// Known excluded bytes.
     pub excluded_bytes: u64,
+    /// Bounded exclusion totals grouped by reason; contains no local path.
+    pub exclusion_reasons: Vec<BackupExclusionAggregate>,
     /// Files that failed in this run.
     pub failed_files: u64,
     /// Bytes associated with failed files.
@@ -271,8 +277,32 @@ pub struct BackupRunSummary {
     pub failure: Option<BackupFailureKind>,
 }
 
+/// Aggregate exclusion count safe for progress/final IPC and audit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupExclusionAggregate {
+    /// Exclusion category.
+    pub reason: BackupExclusionReason,
+    /// Entries in the category.
+    pub files: u64,
+    /// Known bytes in the category.
+    pub bytes: u64,
+}
+
 impl BackupRunSummary {
     fn from_plan(plan: &WorkspaceBackupPlan, status: BackupRunStatus) -> Self {
+        let mut grouped =
+            std::collections::BTreeMap::<BackupExclusionReason, BackupExclusionAggregate>::new();
+        for exclusion in &plan.summary.exclusions {
+            let aggregate = grouped
+                .entry(exclusion.reason)
+                .or_insert(BackupExclusionAggregate {
+                    reason: exclusion.reason,
+                    files: 0,
+                    bytes: 0,
+                });
+            aggregate.files += exclusion.entries;
+            aggregate.bytes += exclusion.bytes;
+        }
         Self {
             status,
             uploaded_files: 0,
@@ -281,6 +311,7 @@ impl BackupRunSummary {
             skipped_bytes: 0,
             excluded_files: plan.summary.excluded_count,
             excluded_bytes: plan.summary.excluded_bytes,
+            exclusion_reasons: grouped.into_values().collect(),
             failed_files: 0,
             failed_bytes: 0,
             failure: None,
@@ -349,6 +380,7 @@ pub async fn plan_workspace_backup(
     let operation = ObjectOperation::new(cancellation);
     let mut files = Vec::new();
     let mut exclusions = Vec::new();
+    let mut traversal_budget = TraversalBudget::new(MAX_BACKUP_FILES);
 
     for (root_index, root) in workspace.roots.iter().enumerate() {
         operation
@@ -360,6 +392,7 @@ pub async fn plan_workspace_backup(
                 exclusions.push(BackupExclusion {
                     relative_path: format!("root-{}", root_index + 1),
                     reason: BackupExclusionReason::Unreadable,
+                    entries: 1,
                     bytes: 0,
                 });
                 continue;
@@ -374,6 +407,7 @@ pub async fn plan_workspace_backup(
             &mut candidates,
             &mut exclusions,
             &operation,
+            &mut traversal_budget,
         )?;
         candidates.sort();
         for path in candidates {
@@ -381,6 +415,7 @@ pub async fn plan_workspace_backup(
                 exclusions.push(BackupExclusion {
                     relative_path: format!("root-{}", root_index + 1),
                     reason: BackupExclusionReason::FileLimit,
+                    entries: 1,
                     bytes: 0,
                 });
                 break;
@@ -396,6 +431,7 @@ pub async fn plan_workspace_backup(
                 exclusions.push(BackupExclusion {
                     relative_path: format!("root-{}", root_index + 1),
                     reason: BackupExclusionReason::Unreadable,
+                    entries: 1,
                     bytes: 0,
                 });
                 continue;
@@ -407,6 +443,7 @@ pub async fn plan_workspace_backup(
                     exclusions.push(BackupExclusion {
                         relative_path: display_path,
                         reason: BackupExclusionReason::Unreadable,
+                        entries: 1,
                         bytes: 0,
                     });
                     continue;
@@ -421,6 +458,7 @@ pub async fn plan_workspace_backup(
                     exclusions.push(BackupExclusion {
                         relative_path: display_path,
                         reason: BackupExclusionReason::Unreadable,
+                        entries: 1,
                         bytes: before.len(),
                     });
                     continue;
@@ -432,6 +470,7 @@ pub async fn plan_workspace_backup(
                     exclusions.push(BackupExclusion {
                         relative_path: display_path,
                         reason: BackupExclusionReason::Unreadable,
+                        entries: 1,
                         bytes,
                     });
                     continue;
@@ -441,6 +480,7 @@ pub async fn plan_workspace_backup(
                 exclusions.push(BackupExclusion {
                     relative_path: display_path,
                     reason: BackupExclusionReason::Unreadable,
+                    entries: 1,
                     bytes,
                 });
                 continue;
@@ -472,7 +512,7 @@ pub async fn plan_workspace_backup(
         dry_run: options.dry_run,
         file_count: files.len() as u64,
         bytes,
-        excluded_count: exclusions.len() as u64,
+        excluded_count: exclusions.iter().map(|item| item.entries).sum(),
         excluded_bytes,
         exclusions,
     };
@@ -510,7 +550,6 @@ pub async fn run_confirmed_workspace_backup(
     }
 
     let mut summary = BackupRunSummary::from_plan(&plan, BackupRunStatus::Completed);
-    let operation = ObjectOperation::with_timeout(cancellation.clone(), BACKUP_OBJECT_TIMEOUT);
     let mut completed_files = 0_u64;
     let mut completed_bytes = 0_u64;
 
@@ -519,7 +558,9 @@ pub async fn run_confirmed_workspace_backup(
             summary.status = BackupRunStatus::Cancelled;
             return summary;
         }
-        match store.head(&file.object_key, &operation).await {
+        let head_operation =
+            ObjectOperation::with_timeout(cancellation.clone(), BACKUP_OBJECT_TIMEOUT);
+        match store.head(&file.object_key, &head_operation).await {
             Ok(metadata)
                 if metadata.content_length == file.bytes
                     && metadata
@@ -560,8 +601,10 @@ pub async fn run_confirmed_workspace_backup(
             content_sha256: Some(file.content_sha256.clone()),
             content_type: Some("application/octet-stream".into()),
         };
+        let put_operation =
+            ObjectOperation::with_timeout(cancellation.clone(), BACKUP_OBJECT_TIMEOUT);
         if let Err(error) = store
-            .put(&file.object_key, &mut body, &options, &operation)
+            .put(&file.object_key, &mut body, &options, &put_operation)
             .await
         {
             mark_failure(&mut summary, &error, file.bytes);
@@ -615,12 +658,14 @@ pub async fn run_confirmed_workspace_backup(
         content_sha256: Some(manifest_hash),
         content_type: Some("application/json".into()),
     };
+    let manifest_operation =
+        ObjectOperation::with_timeout(cancellation.clone(), BACKUP_OBJECT_TIMEOUT);
     if let Err(error) = store
         .put(
             &plan.manifest_key,
             &mut manifest_body,
             &manifest_options,
-            &operation,
+            &manifest_operation,
         )
         .await
     {
@@ -699,22 +744,39 @@ fn collect_candidates(
     candidates: &mut Vec<PathBuf>,
     exclusions: &mut Vec<BackupExclusion>,
     operation: &ObjectOperation,
+    traversal_budget: &mut TraversalBudget,
 ) -> Result<(), WorkspaceBackupError> {
     operation
         .check()
         .map_err(|_| WorkspaceBackupError::Cancelled)?;
-    let entries = match std::fs::read_dir(dir) {
+    let read_dir = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => {
             exclusions.push(BackupExclusion {
                 relative_path: display_relative(root, dir, root_index),
                 reason: BackupExclusionReason::Unreadable,
+                entries: 1,
                 bytes: 0,
             });
             return Ok(());
         }
     };
-    let mut entries = entries.flatten().collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        if !traversal_budget.consume() {
+            traversal_budget.record_limit(exclusions, root_index);
+            break;
+        }
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(_) => exclusions.push(BackupExclusion {
+                relative_path: display_relative(root, dir, root_index),
+                reason: BackupExclusionReason::Unreadable,
+                entries: 1,
+                bytes: 0,
+            }),
+        }
+    }
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         operation
@@ -728,6 +790,7 @@ fn collect_candidates(
                 exclusions.push(BackupExclusion {
                     relative_path: display,
                     reason: BackupExclusionReason::Unreadable,
+                    entries: 1,
                     bytes: 0,
                 });
                 continue;
@@ -741,6 +804,7 @@ fn collect_candidates(
             exclusions.push(BackupExclusion {
                 relative_path: display,
                 reason,
+                entries: 1,
                 bytes: 0,
             });
             continue;
@@ -750,11 +814,18 @@ fn collect_candidates(
                 &entry.file_name().to_string_lossy(),
                 workspace_data_dir_name,
             ) {
+                let (entry_count, bytes, truncated) =
+                    excluded_tree_stats(&path, operation, traversal_budget)?;
                 exclusions.push(BackupExclusion {
                     relative_path: display,
                     reason,
-                    bytes: 0,
+                    entries: entry_count.max(1),
+                    bytes,
                 });
+                if truncated {
+                    traversal_budget.record_limit(exclusions, root_index);
+                    return Ok(());
+                }
             } else {
                 collect_candidates(
                     root,
@@ -764,6 +835,7 @@ fn collect_candidates(
                     candidates,
                     exclusions,
                     operation,
+                    traversal_budget,
                 )?;
             }
             continue;
@@ -772,6 +844,7 @@ fn collect_candidates(
             exclusions.push(BackupExclusion {
                 relative_path: display,
                 reason: BackupExclusionReason::Unreadable,
+                entries: 1,
                 bytes: 0,
             });
             continue;
@@ -780,6 +853,7 @@ fn collect_candidates(
             exclusions.push(BackupExclusion {
                 relative_path: display,
                 reason,
+                entries: 1,
                 bytes: metadata.len(),
             });
         } else {
@@ -787,6 +861,93 @@ fn collect_candidates(
         }
     }
     Ok(())
+}
+
+struct TraversalBudget {
+    remaining: usize,
+    limit_reported: bool,
+}
+
+impl TraversalBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: limit,
+            limit_reported: false,
+        }
+    }
+
+    fn consume(&mut self) -> bool {
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
+    fn record_limit(&mut self, exclusions: &mut Vec<BackupExclusion>, root_index: usize) {
+        if self.limit_reported {
+            return;
+        }
+        self.limit_reported = true;
+        exclusions.push(BackupExclusion {
+            relative_path: format!("root-{}", root_index + 1),
+            reason: BackupExclusionReason::FileLimit,
+            entries: 1,
+            bytes: 0,
+        });
+    }
+}
+
+fn excluded_tree_stats(
+    directory: &Path,
+    operation: &ObjectOperation,
+    traversal_budget: &mut TraversalBudget,
+) -> Result<(u64, u64, bool), WorkspaceBackupError> {
+    let mut stack = vec![directory.to_path_buf()];
+    let mut entries = 0_u64;
+    let mut bytes = 0_u64;
+    while let Some(dir) = stack.pop() {
+        operation
+            .check()
+            .map_err(|_| WorkspaceBackupError::Cancelled)?;
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(_) => {
+                entries += 1;
+                continue;
+            }
+        };
+        for item in read_dir {
+            if !traversal_budget.consume() {
+                return Ok((entries, bytes, true));
+            }
+            operation
+                .check()
+                .map_err(|_| WorkspaceBackupError::Cancelled)?;
+            let item = match item {
+                Ok(item) => item,
+                Err(_) => {
+                    entries += 1;
+                    continue;
+                }
+            };
+            let metadata = match std::fs::symlink_metadata(item.path()) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    entries += 1;
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                entries += 1;
+            } else if metadata.is_dir() {
+                stack.push(item.path());
+            } else {
+                entries += 1;
+                bytes = bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok((entries, bytes, false))
 }
 
 fn excluded_directory_reason(
@@ -1393,5 +1554,37 @@ mod tests {
         assert!(!text.contains("session_token"));
         assert!(!text.contains("file contents"));
         let _: BackupManifest = serde_json::from_reader(Cursor::new(text)).unwrap();
+    }
+
+    #[test]
+    fn traversal_entry_budget_bounds_candidate_and_exclusion_records() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", ".env"] {
+            std::fs::write(temp.path().join(name), name).unwrap();
+        }
+        let root = temp.path().canonicalize().unwrap();
+        let mut candidates = Vec::new();
+        let mut exclusions = Vec::new();
+        let mut budget = TraversalBudget::new(2);
+        collect_candidates(
+            &root,
+            &root,
+            0,
+            ".contextdesk",
+            &mut candidates,
+            &mut exclusions,
+            &ObjectOperation::new(ObjectCancellation::default()),
+            &mut budget,
+        )
+        .unwrap();
+
+        assert!(candidates.len() + exclusions.len() <= 3);
+        assert_eq!(
+            exclusions
+                .iter()
+                .filter(|entry| entry.reason == BackupExclusionReason::FileLimit)
+                .count(),
+            1
+        );
     }
 }

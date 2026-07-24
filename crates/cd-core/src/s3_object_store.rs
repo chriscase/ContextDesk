@@ -147,6 +147,15 @@ impl fmt::Debug for S3ObjectStoreConfig {
 }
 
 impl S3ObjectStoreConfig {
+    /// Endpoint hostname for trusted confirmation and redacted destination UI.
+    pub fn endpoint_host(&self) -> Result<String, ObjectStoreError> {
+        let url = Url::parse(&self.endpoint).map_err(|_| ObjectStoreError::EndpointPolicy)?;
+        url.host_str()
+            .filter(|host| !host.is_empty())
+            .map(str::to_string)
+            .ok_or(ObjectStoreError::EndpointPolicy)
+    }
+
     /// Validate configuration with production DNS. Call this immediately before
     /// saving non-secret configuration.
     pub fn validate_for_save(&self) -> Result<(), ObjectStoreError> {

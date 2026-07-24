@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Documented outcome strings written to the audit log.
 pub mod outcomes {
@@ -53,20 +53,11 @@ pub struct AuditEntry {
 }
 
 /// JSONL audit logger with hash-chain tamper evidence.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AuditLog {
     path: PathBuf,
     /// Last written hash (hex), guarded for chain correctness.
-    tail: Mutex<String>,
-}
-
-impl Clone for AuditLog {
-    fn clone(&self) -> Self {
-        Self {
-            path: self.path.clone(),
-            tail: Mutex::new(self.tail.lock().map(|t| t.clone()).unwrap_or_default()),
-        }
-    }
+    tail: Arc<Mutex<String>>,
 }
 
 impl AuditLog {
@@ -80,7 +71,7 @@ impl AuditLog {
         let tail = load_tail_hash(&path).unwrap_or_else(|| Self::GENESIS.to_string());
         Self {
             path,
-            tail: Mutex::new(tail),
+            tail: Arc::new(Mutex::new(tail)),
         }
     }
 
@@ -228,6 +219,33 @@ mod tests {
         assert!(text.contains("allowed"));
         assert!(text.contains("prev_hash"));
         assert!(text.contains("hash"));
+        log.verify_chain().unwrap();
+    }
+
+    #[test]
+    fn cloned_loggers_share_chain_tail() {
+        let dir = tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        let clone = log.clone();
+        log.log(
+            "first",
+            ToolSideEffect::Read,
+            "one",
+            outcomes::ALLOWED,
+            "ok",
+            0,
+        )
+        .unwrap();
+        clone
+            .log(
+                "second",
+                ToolSideEffect::HardWrite,
+                "two",
+                outcomes::ALLOWED,
+                "ok",
+                0,
+            )
+            .unwrap();
         log.verify_chain().unwrap();
     }
 

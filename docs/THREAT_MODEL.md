@@ -39,6 +39,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 | Filesystem allowlist roots | Implemented (`paths` + workspace) |
 | Secret filename denylist on read | Implemented (heuristic list) |
 | Keychain for API keys | Implemented (`secrets` + Tauri commands; never over IPC) |
+| S3 backup egress gate | Implemented: Rust-owned traversal + native confirmation; keychain-only runtime credentials; save/request SSRF validation; DNS pinning; no redirects/proxies; bounded streaming; secret/internal/build exclusions; completed manifest only after full success (#292 Phase A) |
 | SSRF policy on bases & web | Implemented: literal IPs + mapped IPv6 + **DNS resolve-and-vet** + **socket pin** (`resolve_and_validate` / `build_pinned_client`, #140/#141); **per-redirect hop re-vet** on web_fetch. Residual: TOCTOU narrowed by pin; OS DNS still trusted for the resolve step. |
 | Untrusted labeling of tool results | Implemented: **per-call nonce** open/close markers + body defang of `<<<` prefixes (`injection`, #142). Fixed forgeable delimiters removed. |
 | Audit denials + tamper-evidence | Implemented: outcomes include `denied`/`granted`/`pending`/`allowed`/`error`; SHA-256 hash chain + `verify_chain` (#143). |
@@ -57,6 +58,11 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 ## Residual risks
 
 - Users may allowlist directories containing secrets  
+- S3 backup intentionally sends selected safe workspace files to the confirmed
+  endpoint. Filename heuristics cannot prove arbitrary file content is
+  non-sensitive; dry run and exclusion reporting are the user review boundary.
+  Phase A provides no restore or encrypted-backup claim beyond the configured
+  transport/server properties.
 - Remote models will see whatever tools return (nonce labeling reduces instruction-following risk; does not eliminate model-level injection)  
 - OIDC session reuse has ToS and token-theft residual risk  
 - DNS resolve step still trusts the OS resolver (pinning limits rebinding after connect; does not replace a resolver that lies)  

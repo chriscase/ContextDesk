@@ -60,6 +60,12 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - Durable chat sessions + keyword archive search; hybrid embed scoring available as a core/opt-in retrieval path (`index.rs:search_hybrid`, #119)
 - Optional headless server: incremental **SSE research endpoint** on `main` (`crates/cd-server/src/main.rs:research_sse`)
 - Opt-in signed desktop updater (config + Settings UI); **source-run git fetch/status** guide in Settings (never hard-reset) — #340
+- **Optional S3-compatible backup/export:** Settings → Backup performs a dry run
+  or an explicitly confirmed upload from allowlisted workspace roots. The Rust
+  host owns traversal, endpoint policy, keychain credential retrieval,
+  cancellation, and audit; secret/internal/build files are excluded and
+  reported. Content-addressed objects plus a completed-manifest pointer make
+  unchanged retries idempotent. Local roots remain authoritative (#292 Phase A).
 - **Skills:** pin a playbook on a chat (`examples/skills/log-triage`) or `/skill id` — never elevates SoftWrite/HardWrite — `docs/SKILLS.md`, #343
 - Chat UI **folds older turns** (full history retained); agent uses recompacted context (#33)
 
@@ -71,6 +77,8 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Semantic** chat-archive search (#79) — archive search today is keyword-based
 - Log **live streaming** / multi-source connectors (Phase 3–4; tracker #363) — batch post-mortem is shipped
 - Proven multi-OS release installers (#172)
+- S3 restore, remote deletion, bidirectional sync, lifecycle management, and
+  the Phase B S3 index source (#420)
 
 ---
 

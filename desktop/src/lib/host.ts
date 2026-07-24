@@ -334,6 +334,107 @@ export async function hostGetConfig(): Promise<HostConfigDto | null> {
   return invoke<HostConfigDto>("get_config");
 }
 
+/** Non-secret S3-compatible backup settings. Credential values never cross IPC. */
+export type S3BackupSettingsDto = {
+  enabled: boolean;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  path_style: boolean;
+  allow_private_network: boolean;
+  credentials_present: boolean;
+  keychain_service: string;
+  access_key_ref: string;
+  secret_key_ref: string;
+  session_token_ref: string;
+};
+
+export type S3BackupProgressDto = {
+  phase: "planning" | "awaiting_confirmation" | "uploaded" | "skipped" | "manifest_published";
+  completed_files: number;
+  total_files: number;
+  completed_bytes: number;
+  total_bytes: number;
+};
+
+export type S3BackupRunSummaryDto = {
+  status: "declined" | "dry_run" | "completed" | "failed" | "cancelled";
+  uploaded_files: number;
+  uploaded_bytes: number;
+  skipped_files: number;
+  skipped_bytes: number;
+  excluded_files: number;
+  excluded_bytes: number;
+  exclusion_reasons: {
+    reason:
+      | "git_internal"
+      | "build_output"
+      | "context_desk_internal"
+      | "secret_or_credential"
+      | "internal_store_or_log"
+      | "symlink"
+      | "symlink_escape"
+      | "unreadable"
+      | "file_limit";
+    files: number;
+    bytes: number;
+  }[];
+  failed_files: number;
+  failed_bytes: number;
+  failure:
+    | "authorization"
+    | "endpoint_policy"
+    | "timeout"
+    | "transport"
+    | "local_io"
+    | "invalid_input"
+    | null;
+};
+
+export async function hostGetS3BackupSettings(): Promise<S3BackupSettingsDto | null> {
+  if (!isTauri()) return null;
+  return invoke<S3BackupSettingsDto>("get_s3_backup_settings");
+}
+
+export async function hostSaveS3BackupSettings(
+  req: Pick<
+    S3BackupSettingsDto,
+    | "enabled"
+    | "endpoint"
+    | "region"
+    | "bucket"
+    | "prefix"
+    | "path_style"
+    | "allow_private_network"
+  >,
+): Promise<S3BackupSettingsDto> {
+  if (!isTauri()) throw new Error("S3 backup settings require the desktop app");
+  return invoke<S3BackupSettingsDto>("save_s3_backup_settings", { req });
+}
+
+export async function hostRunS3WorkspaceBackup(
+  dryRun: boolean,
+): Promise<S3BackupRunSummaryDto> {
+  if (!isTauri()) throw new Error("S3 workspace backup requires the desktop app");
+  return invoke<S3BackupRunSummaryDto>("run_s3_workspace_backup", { dryRun });
+}
+
+export async function hostCancelS3WorkspaceBackup(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_s3_workspace_backup");
+}
+
+export async function hostListenS3BackupProgress(
+  onProgress: (progress: S3BackupProgressDto) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => undefined;
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<S3BackupProgressDto>("s3-backup-progress", (event) =>
+    onProgress(event.payload),
+  );
+}
+
 /** Workspace connector registry entry (#127). No secrets. */
 export type ConnectorDto = {
   id: string;

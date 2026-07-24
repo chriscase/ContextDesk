@@ -167,6 +167,10 @@ pub struct AppConfig {
     /// Durable memory + ambient recall settings (MEMORY.md §10 defaults).
     #[serde(default)]
     pub memory: crate::memory::MemoryConfig,
+    /// Optional S3-compatible backup destination. Secrets remain keychain-only.
+    #[cfg(feature = "s3-object-store")]
+    #[serde(default)]
+    pub s3_backup: Option<crate::s3_object_store::S3ObjectStoreConfig>,
 }
 
 fn default_index_max_files() -> usize {
@@ -250,6 +254,23 @@ fn refuse_raw_secret_refs(cfg: &AppConfig) -> CoreResult<()> {
             return Err(CoreError::Config(
                 "refusing config that embeds raw X secrets in api_key_ref".into(),
             ));
+        }
+    }
+    #[cfg(feature = "s3-object-store")]
+    if let Some(s3) = &cfg.s3_backup {
+        for reference in [
+            Some(&s3.access_key_ref),
+            Some(&s3.secret_key_ref),
+            s3.session_token_ref.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if looks_like_raw_secret(reference.as_str()) {
+                return Err(CoreError::Config(
+                    "refusing config that embeds raw S3 credentials".into(),
+                ));
+            }
         }
     }
     Ok(())
