@@ -987,17 +987,47 @@ fn load_tags(conn: &Connection, id: &Uuid) -> CoreResult<Vec<String>> {
     Ok(tags)
 }
 
-fn replace_tags(conn: &Connection, id: &Uuid, tags: &[String]) -> CoreResult<()> {
-    conn.execute(
-        "DELETE FROM memory_tags WHERE memory_id = ?1",
-        params![id.to_string()],
-    )
-    .map_err(sqlite_err)?;
+/// Apply the same secret-redaction / credential-dominance policy used for other
+/// user-controlled memory fields to a tag list (#385/#275).
+///
+/// Credential-dominant tags are rejected before any write. Mixed content is
+/// redacted; empty residual after redaction is dropped. Normal tags pass through.
+pub(crate) fn sanitize_memory_tags(tags: &[String]) -> CoreResult<Vec<String>> {
+    let mut out = Vec::with_capacity(tags.len());
     for tag in tags {
         let t = tag.trim();
         if t.is_empty() {
             continue;
         }
+        let r = crate::redact::redact_candidate(t);
+        if r.blocked {
+            return Err(CoreError::Policy(r.block_reason.unwrap_or_else(|| {
+                "credential-dominant tag blocked; refuse to store".into()
+            })));
+        }
+        let cleaned = if r.redacted {
+            r.text.trim().to_string()
+        } else {
+            t.to_string()
+        };
+        if cleaned.is_empty() {
+            continue;
+        }
+        out.push(cleaned);
+    }
+    Ok(out)
+}
+
+fn replace_tags(conn: &Connection, id: &Uuid, tags: &[String]) -> CoreResult<()> {
+    // Redact/block secrets in tags before any DELETE/INSERT so a blocked tag
+    // never leaves the row tagless as a side effect of a partial write.
+    let tags = sanitize_memory_tags(tags)?;
+    conn.execute(
+        "DELETE FROM memory_tags WHERE memory_id = ?1",
+        params![id.to_string()],
+    )
+    .map_err(sqlite_err)?;
+    for t in &tags {
         conn.execute(
             "INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?1, ?2)",
             params![id.to_string(), t],
@@ -1439,5 +1469,138 @@ mod tests {
             tomb.reason
         );
         assert_eq!(tomb.title_redacted, "[purged]");
+    }
+
+    /// #385/#275: token-shaped secret in a tag during insert never reaches memory_tags.
+    #[test]
+    fn tag_secret_blocked_on_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mem.sqlite");
+        let store = SqliteMemoryStore::open(&db).unwrap();
+        let token = "sk-live-tagsecrettoken1234567890ab";
+        let mut d = draft("benign body about project notes");
+        d.tags = vec![token.to_string()];
+        let err = store
+            .put(MemoryWriteOp::Insert(d), 1)
+            .expect_err("credential-dominant tag must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("credential") || msg.contains("tag") || msg.contains("refuse"),
+            "{msg}"
+        );
+        // No row, no tags, no raw token in DB bytes.
+        assert!(store
+            .list_records(None, false, false, 10, 10)
+            .unwrap()
+            .is_empty());
+        let bytes = std::fs::read(&db).unwrap();
+        let hay = String::from_utf8_lossy(&bytes);
+        assert!(
+            !hay.contains(token),
+            "raw token must not appear in database bytes"
+        );
+    }
+
+    /// #385: secret introduced via UpdateMeta is rejected before replace_tags persists.
+    #[test]
+    fn tag_secret_blocked_on_update_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mem.sqlite");
+        let store = SqliteMemoryStore::open(&db).unwrap();
+        let mut d = draft("stable note content for tag update test");
+        d.tags = vec!["ok-tag".into()];
+        let rec = store.put(MemoryWriteOp::Insert(d), 1).unwrap();
+        let token = "sk-live-updatemetatagtoken1234567";
+        let err = store
+            .put(
+                MemoryWriteOp::UpdateMeta {
+                    id: rec.id,
+                    tags: Some(vec![token.to_string()]),
+                    pinned: None,
+                    valid_to: None,
+                    status: None,
+                },
+                2,
+            )
+            .expect_err("UpdateMeta secret tag must be refused");
+        assert!(format!("{err}").contains("credential") || format!("{err}").contains("refuse"));
+        // Original tag remains; secret never written.
+        let again = store.get(&rec.id).unwrap().unwrap();
+        assert_eq!(again.tags, vec!["ok-tag".to_string()]);
+        assert!(!again.tags.iter().any(|t| t.contains(token)));
+        let bytes = std::fs::read(&db).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains(token));
+    }
+
+    /// #385: mixed benign text + token is redacted (or blocked); raw token absent.
+    #[test]
+    fn tag_mixed_content_redacted_or_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mem.sqlite");
+        let store = SqliteMemoryStore::open(&db).unwrap();
+        let token = "sk-live-mixedtagtokenabcdef012345";
+        let mut d = draft("body for mixed tag test covering several words of prose");
+        d.tags = vec![format!("project {token} notes")];
+        match store.put(MemoryWriteOp::Insert(d), 1) {
+            Ok(rec) => {
+                assert!(
+                    !rec.tags.iter().any(|t| t.contains(token)),
+                    "raw token in tags: {:?}",
+                    rec.tags
+                );
+                let bytes = std::fs::read(&db).unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains(token));
+            }
+            Err(e) => {
+                // Credential-dominance may block short mixed tags — also acceptable.
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("credential") || msg.contains("refuse") || msg.contains("policy"),
+                    "{msg}"
+                );
+                let bytes = std::fs::read(&db).unwrap();
+                assert!(!String::from_utf8_lossy(&bytes).contains(token));
+            }
+        }
+    }
+
+    /// #385: normal non-secret tags survive insert unchanged.
+    #[test]
+    fn normal_tags_survive_unchanged() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let mut d = draft("ordinary memory body without secrets");
+        d.tags = vec!["backend".into(), "postgres".into(), "phase-2".into()];
+        let rec = store.put(MemoryWriteOp::Insert(d), 1).unwrap();
+        assert_eq!(
+            rec.tags,
+            vec![
+                "backend".to_string(),
+                "phase-2".to_string(),
+                "postgres".to_string()
+            ]
+        );
+    }
+
+    /// #385: purge removes all tags for the memory record; raw token never present.
+    #[test]
+    fn purge_removes_all_tags_for_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mem.sqlite");
+        let store = SqliteMemoryStore::open(&db).unwrap();
+        let mut d = draft("note that will be purged later for gdpr");
+        d.tags = vec!["keep-me".into(), "also-ok".into()];
+        let rec = store.put(MemoryWriteOp::Insert(d), 1).unwrap();
+        store.purge_gdpr(&rec.id, 2, "gdpr_purge").unwrap();
+        assert!(store.get(&rec.id).unwrap().is_none());
+        // Direct SQL: no tags remain for that id.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_tags WHERE memory_id = ?1",
+                rusqlite::params![rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "purge must clear memory_tags");
     }
 }

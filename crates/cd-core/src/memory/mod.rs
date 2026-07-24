@@ -37,9 +37,10 @@ pub use cue::{CandidateStatus, CueExtractOpts, CueExtractor, MemoryCandidate};
 pub use dedup::{apply_dedup_proposal, detect_dedup, DedupProposal};
 pub use edges::{expand_recall_neighbors, EdgeStore, MemoryEdge};
 pub use facade::{
-    attach_durable_memory_to_host, ensure_workspace_memory_gitignored, personal_memory_db_path,
-    workspace_memory_db_path, workspace_memory_gitignore_lines, MemoryConfig, TwoScopeMemory,
-    WorkspaceMemoryLocation,
+    attach_durable_memory_to_host, attach_durable_memory_to_host_with_cleanup,
+    cleanup_legacy_candidate_files, ensure_workspace_memory_gitignored, personal_memory_db_path,
+    workspace_memory_db_path, workspace_memory_gitignore_lines, FsLegacyCandidateCleanup,
+    LegacyCandidateCleanup, MemoryConfig, TwoScopeMemory, WorkspaceMemoryLocation,
 };
 pub use import::{
     bulk_import_markdown_notes, import_memory_fs_sqlite, import_memory_jsonl_sqlite,
