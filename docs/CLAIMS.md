@@ -41,8 +41,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Confluence publish converter gate (K16) | Shipped | crates/cd-core/src/harvest/publish.rs:gate_publish | #326 #403 |
 | Harvest Browser pane | Shipped | desktop/src/components/panes/HarvestPane.tsx:HarvestPane | #326 #401 |
 | Session skill pin (playbook inject) | Shipped | crates/cd-core/src/skills.rs:apply_pinned_skill_to_user_text | #343 |
-| Source-run git update guide | Shipped | crates/cd-core/src/git_source.rs:build_source_git_status | #340 |
-| Chat history recompact (agent context) | Shipped | crates/cd-core/src/sessions.rs:recompact_chat_history | #33 #112 |
+| Source-run git update guide | Shipped | crates/cd-core/src/git_source.rs:is_proven_contextdesk_source | #340 (canonical remote identity + timed-out Git kill; PR #416) |
+| Chat history recompact (agent context) | Shipped | crates/cd-core/src/sessions.rs:prepare_model_context | #33 #112 (hard total model budget + ambient re-enforce; PR #421 #424) |
 | Session context pack (files) | Shipped | crates/cd-core/src/session_context.rs:SessionContextStore | #341 |
 | Session context nested zip ingest | Shipped | crates/cd-core/src/session_context.rs:import_zip_bytes | #342 |
 | Background update poll + banner | Shipped | desktop/src/lib/updatePoll.ts:shouldPollNow | #339 |
@@ -57,7 +57,7 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Memory candidate review inbox | Shipped | crates/cd-core/src/memory/candidates.rs:CandidateInbox | #382 |
 | Memory salience/confidence + dedup proposals | Shipped | crates/cd-core/src/memory/score.rs:score_candidate | #383 |
 | Memory edges + neighbor recall expand | Shipped | crates/cd-core/src/memory/edges.rs:EdgeStore | #384 |
-| Memory bulk import + GDPR purge | Shipped | crates/cd-core/src/memory/sqlite_store.rs:purge_gdpr | #385 |
+| Memory bulk import + GDPR purge | Shipped | crates/cd-core/src/memory/sqlite_store.rs:purge_gdpr | #385 (purge shipped; tag redaction + fail-loud legacy candidate cleanup PR #422; bulk import UI residual — issue OPEN) |
 | Memory desktop candidate inbox | Shipped | desktop/src/components/panes/MemoryPane.tsx:MemoryPane | #382 |
 | Launch splash + pre-launch shell | Shipped | desktop/src/components/launch/SplashScreen.tsx:SplashScreen | #391–#394 |
 | Work-context preflight categories | Shipped | crates/cd-core/src/preflight.rs:work_context_items | #395 |

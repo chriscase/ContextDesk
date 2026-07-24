@@ -2,7 +2,7 @@
 
 Legend: **DONE** = AC met + tests | **PARTIAL** = real code, AC incomplete | **TODO** = missing or stub
 
-Last audit: 2026-07-17 (updated same day: 2026-07-17 honesty pass — prior pass over-reported DONE; CI green only after #97/#158 remediation).
+Last audit: 2026-07-17 (updated 2026-07-24: grok-build residual repairs — #33/#340 closed with proof; #385/#275 partial privacy land, left open).
 
 ## Phase 0 — Foundation
 
@@ -51,7 +51,7 @@ Last audit: 2026-07-17 (updated same day: 2026-07-17 honesty pass — prior pass
 | 30 | Streaming markdown | DONE | progressive text_delta + MarkdownBody + materialize |
 | 31 | Compact tools UI | DONE | status icons; collapse threshold 4 |
 | 32 | Composer | DONE | expand; Enter/Shift+Enter; stop SVG; list/code assist |
-| 33 | Compaction | PARTIAL | #112 wires context_messages/recompact into agent path; full history retained; pairing-safe keep. UI toggle show_full_history still accurate. |
+| 33 | Compaction | DONE | Full history retained on disk/UI; `prepare_model_context` hard-bounds complete model input (not summary-only); pairing-safe; agent re-enforces budget after ambient/prefetch (#416/#421/#424, agent:grok-build / model:grok-4.5). UI compact+expand still accurate. |
 | 34 | Multi-session tabs | DONE | session tabs + per-session state |
 | 35 | SVG icons | DONE | icons.tsx used across UI |
 | 58 | Golden harness | DONE | golden_research offline |
@@ -73,6 +73,31 @@ Last audit: 2026-07-17 (updated same day: 2026-07-17 honesty pass — prior pass
 | 54 | PARTIAL | slate skin CSS exists; Settings skin picker incomplete |
 | 55 | TODO | No tagged multi-OS release workflow (only ci.yml); see #172 |
 | 56 | DONE | composer markdown assist |
+
+## Phase 6 / memory residuals (honest, not bulk-closed)
+
+| # | Title | Status | Notes / agent |
+|---|--------|--------|---------------|
+| 340 | Source-run git update | DONE | Proven canonical remote identity + kill/reap timed-out Git; layout alone is not identity. PR #416. **agent:grok-build / model:grok-4.5** |
+| 275 | Phase 2+ memory trackers | PARTIAL / OPEN | Parent tracker; not closed. Partial privacy residuals noted. **agent:grok-build / model:grok-4.5** (partial) |
+| 385 | Bulk import + GDPR purge | PARTIAL / OPEN | GDPR purge + secret redaction on many fields shipped earlier; **this session:** tag redaction + fail-loud legacy `candidates.sqlite` cleanup (PR #422). Bulk import UI and other ACs remain. **agent:grok-build / model:grok-4.5** (partial) |
+| 359 | Log template embed / cloud corpus UI | residual | Prior skeptic residual; not closed as complete cloud UI |
+| 172 / 55 | Multi-OS release artifacts | TODO | Workflow may exist; public tag installers still residual |
+
+## Grok Build session attribution (2026-07-24)
+
+Issues and PRs labeled `agent:grok-build` + `model:grok-4.5` for this residual-repair pass:
+
+| Item | Role |
+|------|------|
+| Issue #33 | Reopened → hard total context budget + post-inject re-enforce → closed with CLOSE_PROOF |
+| Issue #340 | Reopened → source identity + Git timeout kill → closed with CLOSE_PROOF |
+| Issue #275 | Residual notes only; left **OPEN** |
+| Issue #385 | Tag redaction + legacy cleanup partial land; left **OPEN** |
+| PR #416 | `#340` identity + timeout kill → `b6cd2f7` |
+| PR #421 | `#33` `prepare_model_context` hard budget → `8c38511` |
+| PR #422 | `#385/#275` tags + legacy cleanup → `f967207` |
+| PR #424 | `#33` ambient/prefetch re-enforce → `e8589e6` |
 
 ## Close policy
 
