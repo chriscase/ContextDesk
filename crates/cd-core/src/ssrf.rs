@@ -97,7 +97,7 @@ pub fn validate_provider_url(raw: &str, policy: &SsrfPolicy) -> CoreResult<Url> 
 }
 
 /// Injectable DNS lookup for offline tests and production system resolution.
-pub trait DnsResolver {
+pub trait DnsResolver: Send + Sync {
     /// Resolve `host` (no port) to one or more IPs. Empty vec is an error.
     fn resolve(&self, host: &str) -> CoreResult<Vec<IpAddr>>;
 }
@@ -162,7 +162,7 @@ impl DnsResolver for MapResolver {
 pub fn resolve_and_validate(
     url: &Url,
     policy: &SsrfPolicy,
-    resolver: &impl DnsResolver,
+    resolver: &(impl DnsResolver + ?Sized),
 ) -> CoreResult<Vec<IpAddr>> {
     // Re-run syntactic + literal-IP checks on the serialized form so behavior
     // matches validate_provider_url for callers that only have a Url.
@@ -211,7 +211,7 @@ pub fn resolve_and_validate(
 pub fn build_pinned_client(
     url: &Url,
     policy: &SsrfPolicy,
-    resolver: &impl DnsResolver,
+    resolver: &(impl DnsResolver + ?Sized),
     timeout: std::time::Duration,
 ) -> CoreResult<reqwest::Client> {
     let ips = resolve_and_validate(url, policy, resolver)?;
@@ -241,7 +241,7 @@ pub fn build_pinned_client(
 pub fn build_pinned_client_for_url(
     raw: &str,
     policy: &SsrfPolicy,
-    resolver: &impl DnsResolver,
+    resolver: &(impl DnsResolver + ?Sized),
     timeout: std::time::Duration,
 ) -> CoreResult<(Url, reqwest::Client)> {
     let url = validate_provider_url(raw, policy)?;

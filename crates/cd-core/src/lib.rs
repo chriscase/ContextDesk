@@ -47,6 +47,8 @@ pub mod providers;
 pub mod redact;
 pub mod research;
 pub mod router;
+#[cfg(feature = "s3-object-store")]
+pub mod s3_object_store;
 /// Back-compat alias path used in docs.
 pub use keychain_store as secrets;
 pub mod news_sources;
