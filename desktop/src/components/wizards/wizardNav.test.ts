@@ -14,6 +14,25 @@ import {
 } from "./types";
 import { WIZARD_CATALOG, getWizard, LOG_TROUBLESHOOTING_WIZARD } from "./registry";
 
+import { buildLogTriageStarterPrompt, LOG_TRIAGE_STARTER_PROMPT } from "./registry";
+
+describe("buildLogTriageStarterPrompt", () => {
+  it("embeds corpus id so the agent need not ask the user", () => {
+    const seed = buildLogTriageStarterPrompt({
+      corpusId: "abc-def-12",
+      sessionContext: true,
+    });
+    expect(seed).toContain("abc-def-12");
+    expect(seed).toContain('corpus="abc-def-12"');
+    expect(seed).toMatch(/Do not ask me for a corpus id/i);
+    expect(seed).toMatch(/session context/i);
+  });
+
+  it("falls back to generic when nothing was attached", () => {
+    expect(buildLogTriageStarterPrompt({})).toBe(LOG_TRIAGE_STARTER_PROMPT);
+  });
+});
+
 describe("wizardNav", () => {
   it("advances, backs, skips, and cancels without blocking a blank chat path", () => {
     let s = createWizardNav(LOG_TROUBLESHOOTING_WIZARD.steps.length);

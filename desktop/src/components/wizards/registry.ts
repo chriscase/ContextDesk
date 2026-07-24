@@ -98,3 +98,29 @@ export function getWizard(id: string): WizardDef | undefined {
 
 export const LOG_TRIAGE_STARTER_PROMPT =
   "I attached/ingested logs for this incident. Cluster the main problems, outline a timeline around the first ERROR spike, and hypothesize root cause with citations. Prefer log tools when a corpus is available.";
+
+/** Build the starter prompt with corpus id so the agent does not ask the user for it. */
+export function buildLogTriageStarterPrompt(opts: {
+  corpusId?: string | null;
+  sessionContext?: boolean;
+}): string {
+  const parts: string[] = [];
+  if (opts.corpusId) {
+    parts.push(
+      `Logs were ingested into analysis corpus \`${opts.corpusId}\`. ` +
+        `Use log tools with corpus="${opts.corpusId}" (or omit corpus — the host default is this corpus).`,
+    );
+  }
+  if (opts.sessionContext) {
+    parts.push(
+      "Log files are also in this chat's session context pack (searchable via search_kb / read_file_slice under the session context).",
+    );
+  }
+  if (!opts.corpusId && !opts.sessionContext) {
+    return LOG_TRIAGE_STARTER_PROMPT;
+  }
+  parts.push(
+    "Cluster the main problems, outline a timeline around the first ERROR spike, and hypothesize root cause with citations. Do not ask me for a corpus id — it is already attached.",
+  );
+  return parts.join(" ");
+}

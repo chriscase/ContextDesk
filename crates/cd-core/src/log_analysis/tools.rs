@@ -51,16 +51,24 @@ pub fn ingest_logs_tool_spec() -> ToolSpec {
     }
 }
 
+/// Corpus param: optional when host has an active/default log corpus (wizard handoff).
+fn corpus_param() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "description": "Log corpus id. Optional when the host has an active corpus (set by the log wizard or last ingest)."
+    })
+}
+
 /// Read: hybrid search_logs.
 pub fn search_logs_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SEARCH_LOGS.into(),
-        description: "Hybrid search over an ingested log corpus (structured filter + semantic templates + keyword). Cite template ids in conclusions.".into(),
+        description: "Hybrid search over an ingested log corpus (structured filter + semantic templates + keyword). Cite template ids in conclusions. Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "query": { "type": "string" },
                 "level": { "type": "string" },
                 "service": { "type": "string" },
@@ -68,7 +76,7 @@ pub fn search_logs_tool_spec() -> ToolSpec {
                 "semantic": { "type": "boolean" },
                 "k": { "type": "integer" }
             },
-            "required": ["corpus"]
+            "required": []
         }),
     }
 }
@@ -77,15 +85,15 @@ pub fn search_logs_tool_spec() -> ToolSpec {
 pub fn cluster_problems_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CLUSTER_PROBLEMS.into(),
-        description: "Group log templates into problem clusters ranked by severity×frequency. Returns citeable template ids + exemplars.".into(),
+        description: "Group log templates into problem clusters ranked by severity×frequency. Returns citeable template ids + exemplars. Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "max_clusters": { "type": "integer" }
             },
-            "required": ["corpus"]
+            "required": []
         }),
     }
 }
@@ -95,17 +103,17 @@ pub fn timeline_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TIMELINE.into(),
         description:
-            "Frequency-over-time of log events in a corpus (optional level/service filter).".into(),
+            "Frequency-over-time of log events in a corpus (optional level/service filter). Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "width_secs": { "type": "integer" },
                 "level": { "type": "string" },
                 "service": { "type": "string" }
             },
-            "required": ["corpus"]
+            "required": []
         }),
     }
 }
@@ -114,18 +122,18 @@ pub fn timeline_tool_spec() -> ToolSpec {
 pub fn correlate_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CORRELATE.into(),
-        description: "Find templates that co-occur or precede a focus template near an incident time (temporal + sequence). Cite template ids.".into(),
+        description: "Find templates that co-occur or precede a focus template near an incident time (temporal + sequence). Cite template ids. Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "focus_template_id": { "type": "integer" },
                 "around_ts": { "type": "integer" },
                 "window_secs": { "type": "integer" },
                 "k": { "type": "integer" }
             },
-            "required": ["corpus", "focus_template_id"]
+            "required": ["focus_template_id"]
         }),
     }
 }
@@ -134,19 +142,19 @@ pub fn correlate_tool_spec() -> ToolSpec {
 pub fn anomalies_tool_spec() -> ToolSpec {
     ToolSpec {
         name: ANOMALIES.into(),
-        description: "New or rare log templates in an incident window vs a baseline window. Cite template ids.".into(),
+        description: "New or rare log templates in an incident window vs a baseline window. Cite template ids. Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "baseline_from": { "type": "integer" },
                 "baseline_to": { "type": "integer" },
                 "incident_from": { "type": "integer" },
                 "incident_to": { "type": "integer" },
                 "k": { "type": "integer" }
             },
-            "required": ["corpus", "baseline_from", "baseline_to", "incident_from", "incident_to"]
+            "required": ["baseline_from", "baseline_to", "incident_from", "incident_to"]
         }),
     }
 }
@@ -155,16 +163,16 @@ pub fn anomalies_tool_spec() -> ToolSpec {
 pub fn trace_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TRACE.into(),
-        description: "Follow a trace_id/request_id across services and time in a log corpus."
+        description: "Follow a trace_id/request_id across services and time in a log corpus. Omitting corpus uses the host active corpus."
             .into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
-                "corpus": { "type": "string" },
+                "corpus": corpus_param(),
                 "trace_id": { "type": "string" }
             },
-            "required": ["corpus", "trace_id"]
+            "required": ["trace_id"]
         }),
     }
 }

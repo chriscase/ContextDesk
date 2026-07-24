@@ -139,6 +139,52 @@ fn emit(progress: &dyn ProcessProgressObserver, update: ProcessProgress) {
     progress.progress(update);
 }
 
+/// If `path` is a `.zip` file, extract into a temp dir and return that path.
+/// Caller must keep the TempDir alive for the duration of ingest.
+fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::TempDir>)> {
+    let is_zip = path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+    if !is_zip {
+        return Ok((path.to_path_buf(), None));
+    }
+    let data = std::fs::read(path).map_err(|e| CoreError::Message(format!("read zip: {e}")))?;
+    let tmp = tempfile::tempdir().map_err(|e| CoreError::Message(format!("tempdir: {e}")))?;
+    let cursor = std::io::Cursor::new(data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
+        let name = file.name().to_string();
+        if name.ends_with('/') {
+            continue;
+        }
+        let rel = name.trim_start_matches('/');
+        if rel.is_empty()
+            || std::path::Path::new(rel)
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(CoreError::Policy(format!("zip-slip rejected: `{name}`")));
+        }
+        let dest = tmp.path().join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Message(format!("mkdir: {e}")))?;
+        }
+        let mut out =
+            std::fs::File::create(&dest).map_err(|e| CoreError::Message(format!("create: {e}")))?;
+        std::io::copy(&mut file, &mut out)
+            .map_err(|e| CoreError::Message(format!("extract: {e}")))?;
+    }
+    Ok((tmp.path().to_path_buf(), Some(tmp)))
+}
+
 fn ingest_path_inner(
     cache_root: &Path,
     path: &Path,
@@ -151,6 +197,8 @@ fn ingest_path_inner(
     let _ = embed_model;
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
+    let (path, _tmp_keep) = expand_zip_if_needed(path)?;
+    let path = path.as_path();
 
     emit(
         progress,
@@ -579,6 +627,39 @@ mod tests {
         let err =
             ingest_path_with_policy(dir.path(), &logs, "c", &policy, Some(backend)).unwrap_err();
         assert!(format!("{err}").contains("leaves this machine"), "{err}");
+    }
+
+    #[test]
+    fn ingest_zip_extracts_and_parses_logs() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("bundle.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("nested/app.log", opts).unwrap();
+            let mut body = String::new();
+            for i in 0..80 {
+                body.push_str(&format!(
+                    "ts={} level=error service=api msg=connection refused {}\n",
+                    1_700_000_000 + i,
+                    i % 7
+                ));
+            }
+            zip.write_all(body.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        // sanity: expand helper path
+        let (expanded, keep) = super::expand_zip_if_needed(&zip_path).unwrap();
+        assert!(keep.is_some());
+        assert!(expanded.join("nested/app.log").is_file());
+
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let report = ingest_path(&cache, &zip_path, "from-zip", None, "none").unwrap();
+        assert!(report.stats.lines >= 80, "lines={}", report.stats.lines);
+        assert!(!report.corpus_id.is_empty());
     }
 
     #[test]

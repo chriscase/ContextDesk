@@ -149,6 +149,8 @@ pub struct ToolHost {
     log_analysis_enabled: bool,
     /// Cache root for disposable log corpora (app cache dir).
     log_cache_dir: Option<PathBuf>,
+    /// Default corpus for log tools when `corpus` arg is omitted (wizard handoff).
+    active_log_corpus: Option<String>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -219,6 +221,7 @@ impl ToolHost {
             ambient_recall_enabled: true,
             log_analysis_enabled: false,
             log_cache_dir: None,
+            active_log_corpus: None,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -823,6 +826,39 @@ impl ToolHost {
     /// Whether log analysis tools are registered.
     pub fn log_analysis_enabled(&self) -> bool {
         self.log_analysis_enabled
+    }
+
+    /// Set the default log corpus for tools that omit `corpus` (wizard / UI handoff).
+    pub fn set_active_log_corpus(&mut self, corpus_id: Option<String>) {
+        self.active_log_corpus = corpus_id.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+    }
+
+    /// Active / default log corpus id, if any.
+    pub fn active_log_corpus(&self) -> Option<&str> {
+        self.active_log_corpus.as_deref()
+    }
+
+    /// Resolve corpus id from tool args, falling back to the host active corpus.
+    fn resolve_log_corpus(&self, args: &Value, tool: &str) -> CoreResult<String> {
+        if let Some(cid) = args.get("corpus").and_then(|v| v.as_str()) {
+            let t = cid.trim();
+            if !t.is_empty() {
+                return Ok(t.to_string());
+            }
+        }
+        if let Some(cid) = self.active_log_corpus.as_deref() {
+            return Ok(cid.to_string());
+        }
+        Err(CoreError::Message(format!(
+            "{tool} requires corpus (no host active log corpus is set; use the log wizard or pass corpus=)"
+        )))
     }
 
     /// Borrow the durable memory store when configured (ambient recall / tools).
@@ -1851,14 +1887,18 @@ impl ToolHost {
         ))
     }
 
-    fn tool_ingest_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+    fn tool_ingest_logs(
+        &mut self,
+        args: &Value,
+    ) -> CoreResult<(bool, String, String, Option<String>)> {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
         let cache = self
             .log_cache_dir
             .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?
+            .clone();
         let path = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -1890,12 +1930,14 @@ impl ToolHost {
         };
         let backend = self.log_embed_backend();
         let report = crate::log_analysis::ingest_path_with_policy(
-            cache,
+            &cache,
             std::path::Path::new(path),
             name,
             &policy,
             backend,
         )?;
+        // Wizard/UI and agent ingest both default subsequent log tools to this corpus.
+        self.set_active_log_corpus(Some(report.corpus_id.clone()));
         let mut raw = format!(
             "corpus={} lines={} templates={} reduction={:.1}x embedded={}\nTop templates:\n",
             report.corpus_id,
@@ -1910,8 +1952,8 @@ impl ToolHost {
         Ok((
             true,
             format!(
-                "ingested {} lines → {} templates",
-                report.stats.lines, report.stats.templates
+                "ingested {} lines → {} templates (corpus={}; now host active default)",
+                report.stats.lines, report.stats.templates, report.corpus_id
             ),
             raw,
             Some(format!("log_corpus:{}", report.corpus_id)),
@@ -1926,11 +1968,8 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("search_logs requires corpus".into()))?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let cid = self.resolve_log_corpus(args, "search_logs")?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let q = crate::log_analysis::SearchLogsQuery {
             query: args
                 .get("query")
@@ -1987,11 +2026,8 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("cluster_problems requires corpus".into()))?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let cid = self.resolve_log_corpus(args, "cluster_problems")?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let max = args
             .get("max_clusters")
             .and_then(|v| v.as_u64())
@@ -2022,11 +2058,8 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("timeline requires corpus".into()))?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let cid = self.resolve_log_corpus(args, "timeline")?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let width = args
             .get("width_secs")
             .and_then(|v| v.as_i64())
@@ -2063,10 +2096,7 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("correlate_logs requires corpus".into()))?;
+        let cid = self.resolve_log_corpus(args, "correlate_logs")?;
         let focus = args
             .get("focus_template_id")
             .and_then(|v| v.as_u64())
@@ -2079,7 +2109,7 @@ impl ToolHost {
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
         let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let hits = crate::log_analysis::correlate(&corpus, focus, around, window, k)?;
         let mut raw = String::new();
         for h in &hits {
@@ -2108,10 +2138,7 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("anomalies_logs requires corpus".into()))?;
+        let cid = self.resolve_log_corpus(args, "anomalies_logs")?;
         let bf = args
             .get("baseline_from")
             .and_then(|v| v.as_i64())
@@ -2129,7 +2156,7 @@ impl ToolHost {
             .and_then(|v| v.as_i64())
             .ok_or_else(|| CoreError::Message("incident_to required".into()))?;
         let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let hits = crate::log_analysis::anomalies(&corpus, bf, bt, inf, ito, k)?;
         let mut raw = String::new();
         for h in &hits {
@@ -2155,15 +2182,12 @@ impl ToolHost {
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
-        let cid = args
-            .get("corpus")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Message("trace_logs requires corpus".into()))?;
+        let cid = self.resolve_log_corpus(args, "trace_logs")?;
         let tid = args
             .get("trace_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| CoreError::Message("trace_logs requires trace_id".into()))?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, cid)?;
+        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let events = crate::log_analysis::trace(&corpus, tid)?;
         let mut raw = String::new();
         for e in &events {
@@ -3428,6 +3452,12 @@ impl ToolHost {
             return t.side_effect;
         }
         if let Some(tool) = crate::help::help_tool_specs()
+            .into_iter()
+            .find(|tool| tool.name == name)
+        {
+            return tool.side_effect;
+        }
+        if let Some(tool) = crate::log_analysis::log_tool_specs()
             .into_iter()
             .find(|tool| tool.name == name)
         {
@@ -5456,5 +5486,77 @@ mod tests {
             )
             .await;
         assert!(bad.is_err(), "self-approve must fail");
+    }
+
+    #[test]
+    fn resolve_log_corpus_uses_active_default() {
+        let (_tmp, mut host) = host_with_docs();
+        let err = host
+            .resolve_log_corpus(&json!({}), "cluster_problems")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires corpus"), "{err}");
+        host.set_active_log_corpus(Some("abc-123".into()));
+        assert_eq!(
+            host.resolve_log_corpus(&json!({}), "cluster_problems")
+                .unwrap(),
+            "abc-123"
+        );
+        assert_eq!(
+            host.resolve_log_corpus(&json!({"corpus": "override"}), "cluster_problems")
+                .unwrap(),
+            "override"
+        );
+        // Explicit empty falls through to active default.
+        assert_eq!(
+            host.resolve_log_corpus(&json!({"corpus": "  "}), "cluster_problems")
+                .unwrap(),
+            "abc-123"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_tools_use_active_corpus_without_arg() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut f = fs::File::create(logs.join("app.log")).unwrap();
+        for i in 0..40 {
+            writeln!(
+                f,
+                r#"{{"ts":{},"level":"error","service":"api","message":"connection refused {}"}}"#,
+                1_700_000_000 + i,
+                i % 5
+            )
+            .unwrap();
+        }
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "incident", None, "none").unwrap();
+
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+
+        // No corpus arg — must use host active default.
+        let r = host
+            .execute(crate::log_analysis::CLUSTER_PROBLEMS, &json!({}), None)
+            .await
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+        assert!(
+            r.detail_raw.contains("cluster=") || r.summary.contains("cluster"),
+            "{}",
+            r.detail_raw
+        );
+
+        let tl = host
+            .execute(crate::log_analysis::TIMELINE, &json!({}), None)
+            .await
+            .unwrap();
+        assert!(tl.ok, "{}", tl.summary);
     }
 }

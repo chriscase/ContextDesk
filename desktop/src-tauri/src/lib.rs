@@ -445,8 +445,29 @@ fn session_context_import_path(
     )
     .map_err(|e| e.to_string())?;
     let progress = TauriProcessProgress { app };
+    let p = std::path::Path::new(&path);
+    // Wizard "both"/session_context with a .zip must extract entries (not store the archive blob).
+    let is_zip = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    if is_zip && p.is_file() {
+        let data = std::fs::read(p).map_err(|e| format!("read zip: {e}"))?;
+        let entries = store
+            .import_zip_bytes_with_progress(
+                &data,
+                cd_core::session_context::DEFAULT_MAX_ZIP_NEST,
+                &progress,
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        return entries.into_iter().next().ok_or_else(|| {
+            "zip contained no extractable entries".to_string()
+        });
+    }
     store
-        .import_file_with_progress(std::path::Path::new(&path), None, &progress, None)
+        .import_file_with_progress(p, None, &progress, None)
         .map_err(|e| e.to_string())
 }
 
@@ -3892,12 +3913,14 @@ fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let host = state.host.lock().expect("host");
-    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
     // #359: product path uses policy-enforcing ingest (local default; cloud opt-in
     // requires explicit confirm args — UI does not pass cloud without confirm).
     let policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
-    let backend = host.log_embed_backend();
+    let backend = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        host.log_embed_backend()
+    };
     let progress = TauriProcessProgress { app };
     let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
         &cache,
@@ -3909,6 +3932,13 @@ fn ingest_log_path(
         None,
     )
     .map_err(|e| e.to_string())?;
+    // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
+    // the model (or user) to re-type the id.
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            h.set_active_log_corpus(Some(report.corpus_id.clone()));
+        }
+    }
     Ok(LogIngestReportDto {
         corpus_id: report.corpus_id,
         lines: report.stats.lines,
@@ -4006,7 +4036,37 @@ fn log_search(
 #[tauri::command]
 fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
+    // Clear active default if it pointed at this corpus.
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            if h.active_log_corpus() == Some(corpus_id.as_str()) {
+                h.set_active_log_corpus(None);
+            }
+        }
+    }
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
+}
+
+/// Set the host default log corpus so agent log tools can omit `corpus=` (wizard handoff).
+#[tauri::command]
+fn set_active_log_corpus(
+    state: State<'_, AppState>,
+    corpus_id: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_host(&state)?;
+    let mut host = state.host.lock().expect("host");
+    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
+    host.set_active_log_corpus(corpus_id);
+    Ok(host.active_log_corpus().map(|s| s.to_string()))
+}
+
+/// Current host default log corpus id (if any).
+#[tauri::command]
+fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    ensure_host(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    Ok(host.active_log_corpus().map(|s| s.to_string()))
 }
 
 /// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
@@ -4811,6 +4871,8 @@ pub fn run() {
             log_timeline,
             log_search,
             discard_log_corpus,
+            set_active_log_corpus,
+            get_active_log_corpus,
             write_memory_note,
             sql_ro_query,
             get_confluence_settings,

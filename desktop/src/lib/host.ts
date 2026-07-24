@@ -1581,6 +1581,25 @@ export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
   await invoke("discard_log_corpus", { corpusId });
 }
 
+/**
+ * Set the host default log corpus so agent tools can omit `corpus=`
+ * (log wizard handoff after SoftWrite ingest).
+ */
+export async function hostSetActiveLogCorpus(
+  corpusId: string | null,
+): Promise<string | null> {
+  if (!isTauri()) return corpusId;
+  return invoke<string | null>("set_active_log_corpus", {
+    corpusId,
+  });
+}
+
+/** Current host default log corpus id, if any. */
+export async function hostGetActiveLogCorpus(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("get_active_log_corpus");
+}
+
 export async function hostSetAmbientRecallEnabled(
   enabled: boolean,
 ): Promise<boolean> {

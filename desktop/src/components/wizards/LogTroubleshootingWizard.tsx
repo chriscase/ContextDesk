@@ -7,12 +7,13 @@ import {
   hostIngestLogPath,
   hostListenProcessProgress,
   hostSessionContextImportPath,
+  hostSetActiveLogCorpus,
   type ProcessProgressDto as HostProcessProgressDto,
 } from "../../lib/host";
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
 import {
-  LOG_TRIAGE_STARTER_PROMPT,
+  buildLogTriageStarterPrompt,
   LOG_TROUBLESHOOTING_WIZARD,
 } from "./registry";
 import { SessionWizardShell } from "./SessionWizardShell";
@@ -89,11 +90,18 @@ export function LogTroubleshootingWizard({
     try {
       let cid: string | null = null;
       if (mode === "corpus" || mode === "both") {
+        // Host extract-and-ingest handles .zip paths (binary zip is not a log file).
         const report = await hostIngestLogPath(path, corpusName.trim() || "incident");
         cid = report.corpusId;
         setCorpusId(cid);
+        try {
+          await hostSetActiveLogCorpus(cid);
+        } catch {
+          // Non-fatal: seed prompt still carries corpus id.
+        }
       }
       if (mode === "session_context" || mode === "both") {
+        // Host path import extracts .zip into session context (does not store the archive as one blob).
         await hostSessionContextImportPath(sessionId, path);
       }
       setRunDone(true);
@@ -140,9 +148,13 @@ export function LogTroubleshootingWizard({
       return;
     }
     if (step.id === "ready") {
+      const seed = buildLogTriageStarterPrompt({
+        corpusId,
+        sessionContext: mode === "session_context" || mode === "both",
+      });
       onComplete({
         wizardId: wizard.id,
-        composerSeed: LOG_TRIAGE_STARTER_PROMPT,
+        composerSeed: seed,
         skillPinId: wizard.skillPinId ?? "log-triage",
         corpusId,
         sessionId,
@@ -153,9 +165,13 @@ export function LogTroubleshootingWizard({
     }
     // welcome, mode, etc.
     if (stepIndex >= wizard.steps.length - 1) {
+      const seed = buildLogTriageStarterPrompt({
+        corpusId,
+        sessionContext: mode === "session_context" || mode === "both",
+      });
       onComplete({
         wizardId: wizard.id,
-        composerSeed: LOG_TRIAGE_STARTER_PROMPT,
+        composerSeed: seed,
         skillPinId: wizard.skillPinId ?? "log-triage",
         corpusId,
         sessionId,
