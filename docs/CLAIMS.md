@@ -28,7 +28,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Skin / theme registry beyond dark/light/slate | Roadmap | desktop/src/styles/themes/ | #99 |
 | External module sandbox | Roadmap | docs/ | #94 |
 | README product screenshot in docs/assets | Roadmap | docs/examples/host-adapter.md | #176 residual |
-| Proven multi-OS release installers (tag run) | Roadmap | .github/workflows/release.yml | #172 residual |
+| Proven multi-OS release installers (tag run) | Roadmap | .github/workflows/release.yml | #172 residual — workflow present; no public tag artifacts yet |
+| Release packaging docs + dispatch dry path | Shipped | docs/PACKAGING.md:Packaging | #55 #99 path documented |
 | Provider tools capability detect + persist | Shipped | crates/cd-core/src/providers.rs:set_profile_tools_enabled | #327 |
 | Expandable diagnostics + redacted GitHub report | Shipped | desktop/src/lib/errorReport.ts:buildErrorReport | #325 P0–P1 |
 | Build identity (version, channel, git) | Shipped | crates/cd-core/src/build_identity.rs:current | #338 |
