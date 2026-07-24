@@ -136,8 +136,11 @@ fn cancelled(opts: &AgentOptions) -> bool {
 
 /// Cheap char-based size estimate for near-limit compaction (#113).
 /// Approximate tokens ≈ chars/4 (no tokenizer dependency).
+///
+/// Delegates to [`crate::sessions::estimate_context_chars`] so the agent path
+/// and session helpers share one definition of the hard budget check.
 pub fn estimate_context_chars(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(|m| m.content.len()).sum()
+    crate::sessions::estimate_context_chars(messages)
 }
 
 /// Detect provider "context length exceeded" style errors from status + body.
@@ -204,8 +207,9 @@ pub fn is_tools_unsupported_error(err: &CoreError) -> bool {
     NEEDLES.iter().any(|n| s.contains(n))
 }
 
-/// Soft char budget before proactive recompact (~32k tokens * 4).
-const DEFAULT_CONTEXT_CHAR_BUDGET: usize = 120_000;
+/// Hard char budget for complete model-facing context (#33).
+/// Re-exported from sessions so tests and agent share one constant.
+pub use crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET;
 
 /// Collect + optional live sink for stream events.
 struct EventCollector<'a> {
@@ -391,25 +395,46 @@ pub async fn run_agent_turn_with_sink(
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
-        // #112/#113: pairing-safe compact context; near-limit shrink keep; one 400-retry.
-        let mut keep = opts.compact_keep_last.max(1);
-        let mut summary = crate::sessions::recompact_chat_history(history, keep);
-        let mut model_ctx =
-            crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
-        // Proactive near-limit: shrink keep until under char budget or floor.
-        let mut proactive_notice = false;
-        while estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET && keep > 2 {
-            keep = (keep / 2).max(2);
-            summary = crate::sessions::recompact_chat_history(history, keep);
-            model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
-            proactive_notice = true;
-        }
-        if proactive_notice {
+        // #33/#112/#113: hard total model-context budget via production helper.
+        // Full transcript is never mutated; only the model-facing view is bounded.
+        let prepared = match crate::sessions::prepare_model_context(
+            history,
+            opts.compact_keep_last.max(1),
+            DEFAULT_CONTEXT_CHAR_BUDGET,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                out.push(StreamEvent::Error {
+                    code: "context_too_long".into(),
+                    message: format!(
+                        "This chat exceeds the model context budget even after compaction ({e}). Start a new chat or remove older messages."
+                    ),
+                });
+                out.push(StreamEvent::TurnCompleted {
+                    reason: "context_too_long".into(),
+                });
+                return Ok(out.into_events());
+            }
+        };
+        let mut keep = prepared.keep;
+        let mut model_ctx = prepared.messages;
+        if prepared.compacted || prepared.truncated {
             out.push(StreamEvent::Error {
                 code: "context_compacted".into(),
                 message: "Conversation grew large — older turns were compacted for the model. Full history is still saved."
                     .into(),
             });
+        }
+        // Invariant: never call the provider with an over-budget context.
+        if estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET {
+            out.push(StreamEvent::Error {
+                code: "context_too_long".into(),
+                message: "Model context still exceeds the hard budget after preparation.".into(),
+            });
+            out.push(StreamEvent::TurnCompleted {
+                reason: "context_too_long".into(),
+            });
+            return Ok(out.into_events());
         }
         // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
         if opts.ambient_recall_enabled {
@@ -506,9 +531,27 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     // Reactive: harder compact + single retry (#113).
                     attempt = 1;
                     keep = (keep / 2).max(2);
-                    summary = crate::sessions::recompact_chat_history(history, keep);
-                    model_ctx =
-                        crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+                    match crate::sessions::prepare_model_context(
+                        history,
+                        keep,
+                        DEFAULT_CONTEXT_CHAR_BUDGET,
+                    ) {
+                        Ok(p) => {
+                            keep = p.keep;
+                            model_ctx = p.messages;
+                        }
+                        Err(_) => {
+                            out.push(StreamEvent::Error {
+                                code: "context_too_long".into(),
+                                message: "This chat is too long for the model even after compaction. Start a new chat or remove older messages."
+                                    .into(),
+                            });
+                            out.push(StreamEvent::TurnCompleted {
+                                reason: "context_too_long".into(),
+                            });
+                            return Ok(out.into_events());
+                        }
+                    }
                     out.push(StreamEvent::Error {
                         code: "context_compacted".into(),
                         message: "Provider hit context limit — compacted and retrying once.".into(),
@@ -677,9 +720,23 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
         tool_call_id: None,
         tool_calls: None,
     });
-    let keep = opts.compact_keep_last.max(1);
-    let summary = crate::sessions::recompact_chat_history(history, keep);
-    let model_ctx = crate::sessions::context_chat_messages(history, summary.as_deref(), keep);
+    let model_ctx = match crate::sessions::prepare_model_context(
+        history,
+        opts.compact_keep_last.max(1),
+        DEFAULT_CONTEXT_CHAR_BUDGET,
+    ) {
+        Ok(p) => p.messages,
+        Err(e) => {
+            out.push(StreamEvent::Error {
+                code: "context_too_long".into(),
+                message: format!("Context over budget during final synthesis ({e})."),
+            });
+            out.push(StreamEvent::TurnCompleted {
+                reason: "context_too_long".into(),
+            });
+            return Ok(out.into_events());
+        }
+    };
     let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
     let mut streamed_text = false;
     let mut on_text = |t: String| {
@@ -1249,6 +1306,185 @@ mod tests {
             history.len() > full_before,
             "full history must grow, len={}",
             history.len()
+        );
+    }
+
+    /// #33: production agent path — complete model input under hard budget; history intact.
+    #[tokio::test]
+    async fn agent_prepare_path_hard_total_context_budget() {
+        use crate::chat::{FunctionCall, Role, ToolCallMsg};
+        use std::sync::Mutex;
+
+        struct CaptureCtxBackend {
+            last_est: Mutex<usize>,
+            last_has_system: Mutex<bool>,
+            last_has_newest: Mutex<bool>,
+        }
+        #[async_trait]
+        impl ChatBackend for CaptureCtxBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                *self.last_est.lock().unwrap() = estimate_context_chars(messages);
+                *self.last_has_system.lock().unwrap() =
+                    messages.iter().any(|m| m.role == Role::System);
+                *self.last_has_newest.lock().unwrap() = messages.iter().any(|m| {
+                    m.role == Role::User && m.content.contains("newest user turn for model")
+                });
+                // Provider must never receive over-budget context.
+                assert!(
+                    estimate_context_chars(messages) <= DEFAULT_CONTEXT_CHAR_BUDGET,
+                    "provider saw over-budget context: {}",
+                    estimate_context_chars(messages)
+                );
+                Ok(ChatCompletion {
+                    content: "bounded".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let long = "Z".repeat(4_000);
+        let mut history = vec![ChatMessage {
+            role: Role::System,
+            content: "placeholder system (agent refreshes policy)".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        for i in 0..400 {
+            history.push(ChatMessage {
+                role: Role::User,
+                content: format!("u{i} {long}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+            history.push(ChatMessage {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: format!("c{i}"),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            });
+            history.push(ChatMessage {
+                role: Role::Tool,
+                content: format!("tool {i} {long}"),
+                tool_call_id: Some(format!("c{i}")),
+                tool_calls: None,
+            });
+            history.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("a{i}"),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
+        // Adversarial tail: enormous tool result.
+        history.push(ChatMessage {
+            role: Role::User,
+            content: "final question".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        history.push(ChatMessage {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCallMsg {
+                id: "huge".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "search_kb".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+        });
+        history.push(ChatMessage {
+            role: Role::Tool,
+            content: "Q".repeat(DEFAULT_CONTEXT_CHAR_BUDGET + 10_000),
+            tool_call_id: Some("huge".into()),
+            tool_calls: None,
+        });
+        // Snapshot non-system bodies (agent refreshes system policy in place).
+        let snap: Vec<(Role, String)> = history
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let full_len = history.len();
+
+        let backend = CaptureCtxBackend {
+            last_est: Mutex::new(0),
+            last_has_system: Mutex::new(false),
+            last_has_newest: Mutex::new(false),
+        };
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "newest user turn for model",
+            &mut history,
+            &AgentOptions {
+                compact_keep_last: 40,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let est = *backend.last_est.lock().unwrap();
+        assert!(
+            est > 0 && est <= DEFAULT_CONTEXT_CHAR_BUDGET,
+            "production path estimate {est} must be in (0, budget]"
+        );
+        assert!(
+            *backend.last_has_system.lock().unwrap(),
+            "system policy must reach provider"
+        );
+        assert!(
+            *backend.last_has_newest.lock().unwrap(),
+            "newest user turn must reach provider"
+        );
+        // Non-system transcript bodies retained byte-for-byte (plus new turn appends).
+        let after_non_sys: Vec<(Role, String)> = history
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        assert!(
+            after_non_sys.len() >= snap.len(),
+            "history must retain prior non-system messages"
+        );
+        for (i, (role, content)) in snap.iter().enumerate() {
+            assert_eq!(&after_non_sys[i].0, role);
+            assert_eq!(
+                &after_non_sys[i].1, content,
+                "persisted body mutated at {i}"
+            );
+        }
+        assert!(
+            history.len() >= full_len,
+            "history must retain full transcript"
+        );
+        // Did not terminal-error solely due to budget (provider was called).
+        let terminal_budget = events.iter().any(
+            |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "context_too_long"),
+        );
+        assert!(
+            !terminal_budget,
+            "should succeed under budget after preparation: {events:?}"
         );
     }
 
