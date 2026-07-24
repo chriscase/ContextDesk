@@ -735,9 +735,11 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     }
                 }
             };
-            let awaiting_permission = result.events.iter().any(|e| {
-                matches!(e, StreamEvent::PermissionRequired { .. })
-            }) || result.summary == "permission required";
+            let awaiting_permission = result
+                .events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::PermissionRequired { .. }))
+                || result.summary == "permission required";
             let is_web_search = tc.function.name == crate::tools::names::WEB_SEARCH;
             if is_web_search {
                 let passthrough = hold_web_search_citations(
