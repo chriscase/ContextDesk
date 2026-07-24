@@ -462,9 +462,10 @@ fn session_context_import_path(
                 None,
             )
             .map_err(|e| e.to_string())?;
-        return entries.into_iter().next().ok_or_else(|| {
-            "zip contained no extractable entries".to_string()
-        });
+        return entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| "zip contained no extractable entries".to_string());
     }
     store
         .import_file_with_progress(p, None, &progress, None)
@@ -3993,7 +3994,8 @@ fn get_log_corpus(
     corpus_id: String,
 ) -> Result<LogCorpusSummaryDto, String> {
     let cache = log_cache_dir(&state)?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     Ok(summary_dto(&c))
 }
 
@@ -4005,7 +4007,8 @@ fn list_log_templates(
     limit: Option<u32>,
 ) -> Result<Vec<LogTemplateRowDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     let lim = limit.unwrap_or(200) as usize;
     let mut rows = c.list_templates();
     rows.sort_by_key(|r| std::cmp::Reverse(r.info.count));
@@ -4029,12 +4032,9 @@ fn export_log_corpus_package(
     path: String,
 ) -> Result<String, String> {
     let cache = log_cache_dir(&state)?;
-    let man = cd_core::log_analysis::export_corpus_zip(
-        &cache,
-        &corpus_id,
-        std::path::Path::new(&path),
-    )
-    .map_err(|e| e.to_string())?;
+    let man =
+        cd_core::log_analysis::export_corpus_zip(&cache, &corpus_id, std::path::Path::new(&path))
+            .map_err(|e| e.to_string())?;
     Ok(man.format_version)
 }
 
@@ -4046,11 +4046,8 @@ fn import_log_corpus_package_path(
 ) -> Result<LogPackageImportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let report = cd_core::log_analysis::import_corpus_zip_path(
-        &cache,
-        std::path::Path::new(&path),
-    )
-    .map_err(|e| e.to_string())?;
+    let report = cd_core::log_analysis::import_corpus_zip_path(&cache, std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
     if let Ok(mut host) = state.host.lock() {
         if let Some(h) = host.as_mut() {
             h.set_active_log_corpus(Some(report.corpus_id.clone()));
