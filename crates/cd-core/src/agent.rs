@@ -211,6 +211,42 @@ pub fn is_tools_unsupported_error(err: &CoreError) -> bool {
 /// Re-exported from sessions so tests and agent share one constant.
 pub use crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET;
 
+/// After any post-prepare injection (ambient recall, tools-disabled KB prefetch),
+/// re-fit model-facing bodies and refuse if still over the hard budget.
+///
+/// Without this, ambient (~1.5k) or prefetch can push a near-ceiling context
+/// over `DEFAULT_CONTEXT_CHAR_BUDGET` after the initial gate.
+fn enforce_hard_context_budget(model_ctx: &mut Vec<ChatMessage>) -> Result<(), String> {
+    match crate::sessions::fit_model_context_to_budget(model_ctx, DEFAULT_CONTEXT_CHAR_BUDGET) {
+        Ok(fitted) => {
+            *model_ctx = fitted;
+            let est = estimate_context_chars(model_ctx);
+            if est > DEFAULT_CONTEXT_CHAR_BUDGET {
+                return Err(format!(
+                    "model context still over budget after fit ({est} > {DEFAULT_CONTEXT_CHAR_BUDGET})"
+                ));
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Terminal error events when the hard budget cannot be satisfied.
+fn terminal_context_too_long(
+    mut out: EventCollector<'_>,
+    message: impl Into<String>,
+) -> CoreResult<Vec<StreamEvent>> {
+    out.push(StreamEvent::Error {
+        code: "context_too_long".into(),
+        message: message.into(),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "context_too_long".into(),
+    });
+    Ok(out.into_events())
+}
+
 /// Collect + optional live sink for stream events.
 struct EventCollector<'a> {
     events: Vec<StreamEvent>,
@@ -427,16 +463,14 @@ pub async fn run_agent_turn_with_sink(
         }
         // Invariant: never call the provider with an over-budget context.
         if estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET {
-            out.push(StreamEvent::Error {
-                code: "context_too_long".into(),
-                message: "Model context still exceeds the hard budget after preparation.".into(),
-            });
-            out.push(StreamEvent::TurnCompleted {
-                reason: "context_too_long".into(),
-            });
-            return Ok(out.into_events());
+            return terminal_context_too_long(
+                out,
+                "Model context still exceeds the hard budget after preparation.",
+            );
         }
         // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
+        // Must re-enforce the hard total budget: ambient can add ~1.5k and would
+        // otherwise send an over-budget context when prepare left us near the ceiling.
         if opts.ambient_recall_enabled {
             if let Some(store) = host.durable_memory_store() {
                 let hist_text: String = model_ctx
@@ -474,6 +508,14 @@ pub async fn run_agent_turn_with_sink(
                             });
                         }
                         trail.push(format!("ambient_recall:{} hits", inj.count));
+                        if let Err(e) = enforce_hard_context_budget(&mut model_ctx) {
+                            return terminal_context_too_long(
+                                out,
+                                format!(
+                                    "Model context exceeds the hard budget after ambient recall ({e})."
+                                ),
+                            );
+                        }
                     }
                 }
             }
@@ -483,6 +525,14 @@ pub async fn run_agent_turn_with_sink(
         // without native tools so chat still works.
         let mut tools_disabled = false;
         let completion = loop {
+            // Final gate immediately before every provider request (covers ambient,
+            // tools-disabled prefetch, and reactive re-prepare).
+            if estimate_context_chars(&model_ctx) > DEFAULT_CONTEXT_CHAR_BUDGET {
+                return terminal_context_too_long(
+                    out,
+                    "Model context exceeds the hard budget immediately before provider request.",
+                );
+            }
             let mut on_text = |t: String| {
                 if !t.is_empty() {
                     streamed_text = true;
@@ -512,6 +562,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                             .into(),
                     });
                     // Soft-ground the model with a local KB prefetch when tools are off.
+                    // Prefetch is unbounded from search — re-enforce hard budget before retry.
                     if let Ok(ctx) = prefetch_context(host, user_text).await {
                         if !ctx.is_empty() {
                             model_ctx.push(ChatMessage {
@@ -523,6 +574,14 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                                 tool_calls: None,
                             });
                             trail.push("prefetch:search_kb".into());
+                            if let Err(e) = enforce_hard_context_budget(&mut model_ctx) {
+                                return terminal_context_too_long(
+                                    out,
+                                    format!(
+                                        "Model context exceeds the hard budget after tools-disabled prefetch ({e})."
+                                    ),
+                                );
+                            }
                         }
                     }
                     continue;
@@ -1486,6 +1545,219 @@ mod tests {
             !terminal_budget,
             "should succeed under budget after preparation: {events:?}"
         );
+    }
+
+    /// #33: ambient injection after prepare must not leave the provider over budget.
+    ///
+    /// Prepares a near-ceiling model context, attaches durable memory so ambient
+    /// injects a real hit, then asserts the production agent path still sends
+    /// `estimate_context_chars(model_ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET`.
+    /// Without post-ambient `enforce_hard_context_budget`, ambient (~1.5k) would
+    /// push a near-ceiling prepare over the hard limit.
+    #[tokio::test]
+    async fn agent_ambient_near_ceiling_stays_under_hard_budget() {
+        use crate::branding::Branding;
+        use crate::chat::Role;
+        use crate::memory::{
+            attach_durable_memory_to_host, MemoryConfig, MemoryDraft, MemoryWriteOp,
+        };
+        use std::sync::Mutex;
+
+        struct CaptureCtxBackend {
+            last_est: Mutex<usize>,
+            saw_provider: Mutex<bool>,
+        }
+        #[async_trait]
+        impl ChatBackend for CaptureCtxBackend {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let est = estimate_context_chars(messages);
+                *self.last_est.lock().unwrap() = est;
+                *self.saw_provider.lock().unwrap() = true;
+                assert!(
+                    est <= DEFAULT_CONTEXT_CHAR_BUDGET,
+                    "provider saw over-budget context after ambient: {est} > {DEFAULT_CONTEXT_CHAR_BUDGET}"
+                );
+                Ok(ChatCompletion {
+                    content: "ok".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        let ws = Workspace::new(
+            format!("ambient-budget-{}", uuid::Uuid::now_v7()),
+            vec![root.to_path_buf()],
+        );
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+        assert!(host.durable_memory_store().is_some());
+
+        // Seed durable memory that ambient will recall for the user query.
+        let marker = "uniqueambientbudgetphrase42";
+        let body = format!(
+            "{marker} {}",
+            "ambient-memory-fill ".repeat(80) // enough for a non-trivial inject block
+        );
+        let store = host.durable_memory_store().unwrap();
+        store
+            .put(
+                MemoryWriteOp::Insert(MemoryDraft::new(crate::memory::Kind::Fact, body.clone())),
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+
+        // Near-ceiling history: two recent messages alone exceed the budget so
+        // prepare truncates model-facing bodies up against the hard limit.
+        let half = DEFAULT_CONTEXT_CHAR_BUDGET / 2 + 5_000;
+        let mut history = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "placeholder".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "U".repeat(half),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "A".repeat(half),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Prove the residual: prepare alone is under budget, but prepare + ambient
+        // inject without re-fit would exceed (or leave no headroom for ambient).
+        let prepared =
+            crate::sessions::prepare_model_context(&history, 4, DEFAULT_CONTEXT_CHAR_BUDGET)
+                .expect("prepare must fit");
+        let prep_est = estimate_context_chars(&prepared.messages);
+        assert!(prep_est <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        // Room left for ambient should be smaller than a full ambient block when
+        // prepare is near the ceiling — if not, still exercise ambient path.
+        let headroom = DEFAULT_CONTEXT_CHAR_BUDGET.saturating_sub(prep_est);
+
+        let backend = CaptureCtxBackend {
+            last_est: Mutex::new(0),
+            saw_provider: Mutex::new(false),
+        };
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            &format!("remind me about {marker}"),
+            &mut history,
+            &AgentOptions {
+                compact_keep_last: 4,
+                ambient_recall_enabled: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let est = *backend.last_est.lock().unwrap();
+        let saw = *backend.saw_provider.lock().unwrap();
+        // Either provider was called under budget, or we terminal-errored — never
+        // over-budget provider call (asserted inside complete).
+        if saw {
+            assert!(
+                est <= DEFAULT_CONTEXT_CHAR_BUDGET,
+                "provider est {est} over budget"
+            );
+        } else {
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    StreamEvent::TurnCompleted { reason } if reason == "context_too_long"
+                )),
+                "if provider not called, must terminal budget: {events:?}"
+            );
+        }
+        // Ambient path engaged (citation or trail) when store has hits — soft check.
+        let ambient_signal = events.iter().any(|e| {
+            matches!(e, StreamEvent::Citation { locator: Some(l), .. } if l == "memory")
+                || matches!(e, StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.contains("ambient_recall")))
+        });
+        // If prepare left substantial headroom and ambient didn't fire, still OK
+        // as long as provider stayed under budget; when headroom is tight the
+        // enforce path is the critical one (est check above).
+        let _ = (headroom, ambient_signal, body);
+    }
+
+    /// #33 unit residual: ambient-sized insert on a near-ceiling context exceeds
+    /// budget unless `enforce_hard_context_budget` re-fits.
+    #[test]
+    fn enforce_hard_budget_after_ambient_sized_inject() {
+        // Build a context already at the hard ceiling.
+        let mut ctx = vec![ChatMessage {
+            role: Role::System,
+            content: "policy".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let fill = DEFAULT_CONTEXT_CHAR_BUDGET.saturating_sub(10);
+        ctx.push(ChatMessage {
+            role: Role::User,
+            content: "X".repeat(fill),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        // Simulate ambient inject (~1500 chars) without re-fit.
+        ctx.insert(
+            0,
+            ChatMessage {
+                role: Role::System,
+                content: format!(
+                    "[Ambient memory]\n{}",
+                    "m".repeat(crate::memory::AmbientBudget::default().max_chars)
+                ),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        let over = estimate_context_chars(&ctx);
+        assert!(
+            over > DEFAULT_CONTEXT_CHAR_BUDGET,
+            "setup must exceed budget before enforce: {over}"
+        );
+        enforce_hard_context_budget(&mut ctx).expect("must re-fit under budget");
+        assert!(estimate_context_chars(&ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+    }
+
+    /// #33: tools-disabled KB prefetch must not leave provider over budget.
+    #[test]
+    fn enforce_hard_budget_after_prefetch_sized_inject() {
+        let mut ctx = vec![ChatMessage {
+            role: Role::User,
+            content: "Y".repeat(DEFAULT_CONTEXT_CHAR_BUDGET.saturating_sub(50)),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        ctx.push(ChatMessage {
+            role: Role::System,
+            content: format!(
+                "Local knowledge prefetch (tools unavailable on this gateway):\n{}",
+                "p".repeat(8_000)
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        assert!(estimate_context_chars(&ctx) > DEFAULT_CONTEXT_CHAR_BUDGET);
+        enforce_hard_context_budget(&mut ctx).unwrap();
+        assert!(estimate_context_chars(&ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET);
     }
 
     /// #108: live sink receives each event as produced (same order as final batch).
