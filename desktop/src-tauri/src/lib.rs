@@ -1794,9 +1794,7 @@ fn test_confluence_config(state: State<'_, AppState>) -> Result<String, String> 
         );
     }
     if cfg.base_url.trim().is_empty() {
-        return Err(
-            "Base URL is required. Open Settings → Connectors → Confluence.".to_string(),
-        );
+        return Err("Base URL is required. Open Settings → Connectors → Confluence.".to_string());
     }
     let has = state
         .secrets
