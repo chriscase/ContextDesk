@@ -2515,6 +2515,27 @@ fn bounded_watch_text(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn connector_registers_tool(connector: &ConnectorConfig, tool_name: &str) -> bool {
+    if !connector.enabled {
+        return false;
+    }
+    if connector
+        .settings
+        .get("stub_tool")
+        .and_then(|stub| stub.get("name"))
+        .and_then(|name| name.as_str())
+        == Some(tool_name)
+    {
+        return true;
+    }
+    match connector.kind.as_str() {
+        "mcp" => tool_name.starts_with(&format!("mcp__{}__", connector.id)),
+        "sqlite" | "postgres" => tool_name == format!("sql_query__{}", connector.id),
+        "http" => tool_name == format!("http_get__{}", connector.id),
+        _ => false,
+    }
+}
+
 async fn observe_watcher(
     state: &AppState,
     definition: &WatcherDefinition,
@@ -2574,6 +2595,23 @@ async fn observe_watcher(
             arguments,
             ..
         } => {
+            let connector_matches = {
+                let workspaces = state
+                    .workspaces
+                    .lock()
+                    .map_err(|_| "workspace lock poisoned".to_string())?;
+                let workspace = workspaces
+                    .get(&definition.workspace_id)
+                    .ok_or_else(|| "watcher workspace not found".to_string())?;
+                workspace.connectors.iter().any(|connector| {
+                    connector.id == *connector_id && connector_registers_tool(connector, tool_name)
+                })
+            };
+            if !connector_matches {
+                return Err(format!(
+                    "connector poll tool '{tool_name}' is not registered by enabled connector '{connector_id}'"
+                ));
+            }
             let session_id = format!("watcher-{}", definition.id);
             ensure_session_host(
                 state,
@@ -5033,6 +5071,14 @@ mod tests {
             &connector_observation
         ));
         assert!(connector_observation.event_key.starts_with("connector:"));
+        let mut mismatched_connector = connector.clone();
+        if let WatchSource::ConnectorPoll { connector_id, .. } = &mut mismatched_connector.watch {
+            *connector_id = "different-connector".into();
+        }
+        assert!(observe_watcher(&state, &mismatched_connector, 600)
+            .await
+            .unwrap_err()
+            .contains("not registered by enabled connector"));
 
         let schedule = schedule_notify_watcher("schedule-source");
         let schedule_observation = observe_watcher(&state, &schedule, 600).await.unwrap();
