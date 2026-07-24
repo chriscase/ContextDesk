@@ -1,0 +1,2 @@
+crates/cd-core/src/agent.rs:224:20: replace > with == in enforce_hard_context_budget
+crates/cd-core/src/agent.rs:224:20: replace > with >= in enforce_hard_context_budget

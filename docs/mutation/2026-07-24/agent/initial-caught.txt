@@ -1,0 +1,4 @@
+crates/cd-core/src/agent.rs:143:5: replace estimate_context_chars -> usize with 0
+crates/cd-core/src/agent.rs:143:5: replace estimate_context_chars -> usize with 1
+crates/cd-core/src/agent.rs:220:5: replace enforce_hard_context_budget -> Result<(), String> with Ok(())
+crates/cd-core/src/agent.rs:224:20: replace > with < in enforce_hard_context_budget

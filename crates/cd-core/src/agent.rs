@@ -1692,15 +1692,22 @@ mod tests {
                 tool_calls: None,
             },
             ChatMessage {
-                role: Role::User,
+                role: Role::Assistant,
                 content: "U".repeat(half),
                 tool_call_id: None,
-                tool_calls: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "ambient-call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
             },
             ChatMessage {
-                role: Role::Assistant,
+                role: Role::Tool,
                 content: "A".repeat(half),
-                tool_call_id: None,
+                tool_call_id: Some("ambient-call".into()),
                 tool_calls: None,
             },
         ];
@@ -1736,31 +1743,167 @@ mod tests {
 
         let est = *backend.last_est.lock().unwrap();
         let saw = *backend.saw_provider.lock().unwrap();
-        // Either provider was called under budget, or we terminal-errored — never
-        // over-budget provider call (asserted inside complete).
-        if saw {
-            assert!(
-                est <= DEFAULT_CONTEXT_CHAR_BUDGET,
-                "provider est {est} over budget"
-            );
-        } else {
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    StreamEvent::TurnCompleted { reason } if reason == "context_too_long"
-                )),
-                "if provider not called, must terminal budget: {events:?}"
-            );
-        }
-        // Ambient path engaged (citation or trail) when store has hits — soft check.
+        assert!(
+            saw,
+            "ambient re-fit must preserve a usable turn instead of terminal-erroring: {events:?}"
+        );
+        assert!(
+            est <= DEFAULT_CONTEXT_CHAR_BUDGET,
+            "provider est {est} over budget"
+        );
         let ambient_signal = events.iter().any(|e| {
             matches!(e, StreamEvent::Citation { locator: Some(l), .. } if l == "memory")
                 || matches!(e, StreamEvent::SearchTrail { steps } if steps.iter().any(|s| s.contains("ambient_recall")))
         });
-        // If prepare left substantial headroom and ambient didn't fire, still OK
-        // as long as provider stayed under budget; when headroom is tight the
-        // enforce path is the critical one (est check above).
-        let _ = (headroom, ambient_signal, body);
+        assert!(
+            ambient_signal,
+            "fixture must drive real ambient injection: {events:?}"
+        );
+        assert!(
+            body.len() > headroom,
+            "ambient fixture must exceed prepare headroom ({headroom})"
+        );
+    }
+
+    /// Mutation regression: a real tools-unsupported retry must prefetch from
+    /// the shipped ToolHost, re-fit the enlarged context, and still reach the
+    /// provider with tools disabled.
+    #[tokio::test]
+    async fn agent_tools_disabled_prefetch_stays_under_hard_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RejectToolsThenCapture {
+            calls: AtomicUsize,
+            retry_estimate: std::sync::Mutex<Option<usize>>,
+        }
+
+        #[async_trait]
+        impl ChatBackend for RejectToolsThenCapture {
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    assert!(!tools.is_empty(), "first request must offer native tools");
+                    return Err(CoreError::Message(
+                        "\"auto\" tool choice requires --enable-auto-tool-choice".into(),
+                    ));
+                }
+                assert!(tools.is_empty(), "retry must disable rejected tools");
+                let estimate = estimate_context_chars(messages);
+                *self.retry_estimate.lock().unwrap() = Some(estimate);
+                assert!(
+                    estimate <= DEFAULT_CONTEXT_CHAR_BUDGET,
+                    "provider saw over-budget tools-disabled retry: {estimate}"
+                );
+                Ok(ChatCompletion {
+                    content: "grounded retry".into(),
+                    tool_calls: vec![],
+                    finish_reason: "stop".into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let marker = "uniqueprefetchbudgetphrase77";
+        for i in 0..6 {
+            fs::write(
+                dir.path().join(format!("prefetch-{i}.md")),
+                format!("{marker}\n{}", format!("fixture-{i} ").repeat(600)),
+            )
+            .unwrap();
+        }
+        let ws = Workspace::new("prefetch-budget", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let half = DEFAULT_CONTEXT_CHAR_BUDGET / 2 + 5_000;
+        let mut history = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "placeholder".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "U".repeat(half),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "prefetch-call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "search_kb".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: "A".repeat(half),
+                tool_call_id: Some("prefetch-call".into()),
+                tool_calls: None,
+            },
+        ];
+        let user_text = format!("find {marker}");
+        let mut projected = history.clone();
+        projected.push(ChatMessage {
+            role: Role::User,
+            content: user_text.clone(),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        let prepared =
+            crate::sessions::prepare_model_context(&projected, 2, DEFAULT_CONTEXT_CHAR_BUDGET)
+                .expect("prepare must fit");
+        let prepared_estimate = estimate_context_chars(&prepared.messages);
+        let prefetch = prefetch_context(&mut host, &user_text)
+            .await
+            .expect("fixture prefetch");
+        assert!(
+            prepared_estimate + prefetch.len() > DEFAULT_CONTEXT_CHAR_BUDGET,
+            "fixture must exceed the budget without post-prefetch re-fit: \
+             prepared={prepared_estimate}, prefetch={}, budget={DEFAULT_CONTEXT_CHAR_BUDGET}",
+            prefetch.len()
+        );
+
+        let backend = RejectToolsThenCapture {
+            calls: AtomicUsize::new(0),
+            retry_estimate: std::sync::Mutex::new(None),
+        };
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            &user_text,
+            &mut history,
+            &AgentOptions {
+                compact_keep_last: 2,
+                ambient_recall_enabled: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            backend.calls.load(Ordering::SeqCst),
+            2,
+            "tools-disabled retry must reach the provider"
+        );
+        let retry_estimate = backend
+            .retry_estimate
+            .lock()
+            .unwrap()
+            .expect("retry estimate");
+        assert!(retry_estimate <= DEFAULT_CONTEXT_CHAR_BUDGET);
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "tools_unsupported")
+        ));
+        assert!(!events.iter().any(
+            |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "context_too_long")
+        ));
     }
 
     /// #33 unit residual: ambient-sized insert on a near-ceiling context exceeds
@@ -1825,6 +1968,21 @@ mod tests {
         assert!(estimate_context_chars(&ctx) > DEFAULT_CONTEXT_CHAR_BUDGET);
         enforce_hard_context_budget(&mut ctx, DEFAULT_CONTEXT_CHAR_BUDGET).unwrap();
         assert!(estimate_context_chars(&ctx) <= DEFAULT_CONTEXT_CHAR_BUDGET);
+    }
+
+    /// Mutation regression: the hard gate is strictly `>`; an exact-budget
+    /// context is valid and must not be rejected by `==` / `>=` mutations.
+    #[test]
+    fn enforce_hard_budget_accepts_exact_budget() {
+        let mut ctx = vec![ChatMessage {
+            role: Role::User,
+            content: "E".repeat(DEFAULT_CONTEXT_CHAR_BUDGET),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        enforce_hard_context_budget(&mut ctx, DEFAULT_CONTEXT_CHAR_BUDGET)
+            .expect("exact budget must be accepted");
+        assert_eq!(estimate_context_chars(&ctx), DEFAULT_CONTEXT_CHAR_BUDGET);
     }
 
     /// #108: live sink receives each event as produced (same order as final batch).

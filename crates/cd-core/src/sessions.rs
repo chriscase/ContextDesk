@@ -1282,7 +1282,7 @@ mod tests {
     #[test]
     fn prepare_model_context_pairing_safe_tool_group_truncation() {
         use crate::chat::{FunctionCall, ToolCallMsg};
-        let big = "X".repeat(80_000);
+        let big = "X".repeat(DEFAULT_CONTEXT_CHAR_BUDGET + 20_000);
         let hist = vec![
             ChatMessage {
                 role: Role::System,
@@ -1320,6 +1320,200 @@ mod tests {
         if has_tool {
             assert!(has_asst, "tool result must not orphan from assistant call");
         }
+    }
+
+    /// Mutation regression: the fitter's newest-tool parent walk must execute
+    /// under real budget pressure, preserving the call message while older
+    /// unprotected content is shortened first.
+    #[test]
+    fn fit_model_context_protects_newest_tool_group_under_pressure() {
+        use crate::chat::{FunctionCall, ToolCallMsg};
+        let budget = 120_000;
+        let old = "O".repeat(10_000);
+        let parent = "P".repeat(50_000);
+        let tool = "T".repeat(80_000);
+        let messages = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: old.clone(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: parent.clone(),
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    ToolCallMsg {
+                        id: "latest-call-1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "search_kb".into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                    ToolCallMsg {
+                        id: "latest-call-2".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "search_kb".into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                ]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: "first result".into(),
+                tool_call_id: Some("latest-call-1".into()),
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: tool,
+                tool_call_id: Some("latest-call-2".into()),
+                tool_calls: None,
+            },
+        ];
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(fit_model_context_to_budget(&messages, budget));
+        });
+        let fitted = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("newest tool-parent walk must terminate")
+            .expect("must fit");
+        assert!(estimate_context_chars(&fitted) <= budget);
+        assert!(
+            fitted[1].content.len() < old.len(),
+            "older unprotected content must shrink before the newest tool group"
+        );
+        assert_eq!(
+            fitted[2].content, parent,
+            "assistant parent of newest tool result must remain protected"
+        );
+        assert_eq!(fitted[4].tool_call_id.as_deref(), Some("latest-call-2"));
+        assert!(
+            fitted[2]
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.iter().any(|call| call.id == "latest-call-2")),
+            "tool result must retain its assistant parent"
+        );
+    }
+
+    /// Mutation regression: force the proportional hard-clamp pass after the
+    /// 64 selective iterations are exhausted.
+    #[test]
+    fn fit_model_context_many_messages_reaches_hard_clamp() {
+        let budget = 10_000;
+        let messages: Vec<ChatMessage> = (0..200)
+            .map(|i| ChatMessage {
+                role: if i == 0 { Role::System } else { Role::User },
+                content: format!("{i:03}-{}", "Z".repeat(1_000)),
+                tool_call_id: None,
+                tool_calls: None,
+            })
+            .collect();
+
+        let fitted = fit_model_context_to_budget(&messages, budget).expect("hard clamp must fit");
+        assert_eq!(
+            fitted.len(),
+            messages.len(),
+            "model-only truncation must preserve message structure"
+        );
+        assert!(
+            estimate_context_chars(&fitted) <= budget,
+            "hard clamp returned an over-budget context"
+        );
+        assert!(
+            fitted
+                .iter()
+                .filter(|message| message.content.contains(MODEL_CONTEXT_TRUNCATE_MARKER))
+                .count()
+                > 64,
+            "fixture must exercise the all-message proportional clamp"
+        );
+    }
+
+    /// Mutation regression: loop-bound mutations at the keep floor must return
+    /// promptly rather than spinning forever.
+    #[test]
+    fn prepare_model_context_terminates_at_keep_floor() {
+        let history = vec![
+            ChatMessage {
+                role: Role::System,
+                content: "policy".into(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "U".repeat(20_000),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: Role::Assistant,
+                content: "A".repeat(20_000),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = prepare_model_context(&history, 2, 64);
+            let _ = tx.send(result);
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("preparation must terminate at keep=2");
+        match result {
+            Ok(prepared) => assert!(estimate_context_chars(&prepared.messages) <= 64),
+            Err(error) => assert!(error.estimate > error.budget),
+        }
+    }
+
+    /// Exact-budget input is already safe: it must not shrink the keep window,
+    /// report compaction, truncate content, or fail the final `>` gate.
+    #[test]
+    fn prepare_model_context_exact_budget_preserves_state() {
+        let history = vec![ChatMessage {
+            role: Role::User,
+            content: "E".repeat(64),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let prepared = prepare_model_context(&history, 8, 64).expect("exact budget is valid");
+        assert_eq!(prepared.keep, 8);
+        assert!(!prepared.compacted);
+        assert!(!prepared.truncated);
+        assert_eq!(estimate_context_chars(&prepared.messages), 64);
+    }
+
+    /// Over-budget input with a wide initial tail must reduce the keep window
+    /// before falling back to per-message truncation.
+    #[test]
+    fn prepare_model_context_over_budget_reduces_keep() {
+        let history: Vec<ChatMessage> = (0..12)
+            .map(|i| ChatMessage {
+                role: if i == 0 { Role::System } else { Role::User },
+                content: format!("{i}-{}", "K".repeat(500)),
+                tool_call_id: None,
+                tool_calls: None,
+            })
+            .collect();
+        let prepared = prepare_model_context(&history, 8, 1_200).expect("must fit");
+        assert!(prepared.keep < 8, "keep window was not reduced");
+        assert!(prepared.compacted);
+        assert!(estimate_context_chars(&prepared.messages) <= 1_200);
     }
 
     /// #33: shrinking keep converges — successive smaller keeps do not grow context.

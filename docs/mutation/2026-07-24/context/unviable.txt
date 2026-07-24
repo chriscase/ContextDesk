@@ -1,0 +1,2 @@
+crates/cd-core/src/sessions.rs:328:5: replace fit_model_context_to_budget -> Result<Vec<ChatMessage>, ContextBudgetError> with Ok(vec![Default::default()])
+crates/cd-core/src/sessions.rs:455:5: replace prepare_model_context -> Result<PreparedModelContext, ContextBudgetError> with Ok(Default::default())

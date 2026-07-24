@@ -735,6 +735,48 @@ mod tests {
         assert!(!base.exists(), "retry must remove legacy file");
     }
 
+    /// Mutation regression: a long workspace path must not be returned verbatim
+    /// when legacy cleanup fails. Keep only the bounded suffix used to identify
+    /// the candidate file without disclosing an arbitrary parent path.
+    #[test]
+    fn legacy_cleanup_failure_redacts_long_parent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let private_parent = "PRIVATE_CUSTOMER_ORG_SECRET_SEGMENT";
+        let mem_dir = dir
+            .path()
+            .join(private_parent)
+            .join("x".repeat(160))
+            .join("memory");
+        let base = mem_dir.join("candidates.sqlite");
+        assert!(
+            base.display().to_string().chars().count() > 96,
+            "fixture must exercise the long-path redaction branch"
+        );
+
+        let cleanup = ScriptedCleanup::new();
+        cleanup.fail_on(&base);
+        let err = cleanup_legacy_candidate_files(&mem_dir, &cleanup).expect_err("must fail");
+        let message = err.to_string();
+
+        assert!(
+            !message.contains(private_parent),
+            "privacy error disclosed the long parent path: {message}"
+        );
+        assert!(
+            message.contains('…') && message.contains("candidates.sqlite"),
+            "privacy error must retain only a recognizable bounded suffix: {message}"
+        );
+        let redacted_path = message
+            .split('`')
+            .nth(1)
+            .expect("privacy error must delimit the redacted path");
+        assert!(
+            redacted_path.chars().count() <= 81,
+            "redacted path grew with attacker-controlled input: {} chars",
+            redacted_path.chars().count()
+        );
+    }
+
     /// #385: cleanup never migrates/recalls legacy candidate contents.
     #[test]
     fn legacy_cleanup_does_not_migrate_or_ambient_recall() {
