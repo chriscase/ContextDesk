@@ -844,7 +844,8 @@ async fn confluence_get_json(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
 ) -> CoreResult<Value> {
-    confluence_get_json_with_retry(cfg, path_and_query, auth, policy).await
+    let (v, _notes) = confluence_get_json_with_retry(cfg, path_and_query, auth, policy).await?;
+    Ok(v)
 }
 
 async fn confluence_get_json_once(
@@ -1090,16 +1091,18 @@ pub fn parse_space_list(v: &Value, limit: usize) -> Vec<ConfluenceSpace> {
 }
 
 /// List spaces the PAT can see (Read; SSRF-safe client).
+///
+/// Second return value is retry/trail notes (e.g. `confluence:rate_limited: retrying…`).
 pub async fn list_spaces(
     cfg: &ConfluenceRoConfig,
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     limit: usize,
-) -> CoreResult<Vec<ConfluenceSpace>> {
+) -> CoreResult<(Vec<ConfluenceSpace>, Vec<String>)> {
     let limit = limit.clamp(1, MAX_SPACE_LIST_LIMIT);
     let path = format!("/space?limit={limit}&type=global");
-    let v = confluence_get_json_with_retry(cfg, &path, auth, policy).await?;
-    Ok(parse_space_list(&v, limit))
+    let (v, notes) = confluence_get_json_with_retry(cfg, &path, auth, policy).await?;
+    Ok((parse_space_list(&v, limit), notes))
 }
 
 /// Result of a live connection probe (#452 Settings).
@@ -1131,15 +1134,22 @@ pub async fn probe_connection(
         });
     }
     match list_spaces(cfg, auth, policy, 5).await {
-        Ok(spaces) => Ok(ConfluenceProbeResult {
-            ok: true,
-            message: format!(
+        Ok((spaces, notes)) => {
+            let mut message = format!(
                 "OK: authenticated; saw {} space(s) (sample). Allowlist has {} key(s). Empty allowlist does not block RO; harvest/write need keys. {CONFLUENCE_SETTINGS_PATH}",
                 spaces.len(),
                 cfg.spaces.len()
-            ),
-            spaces_seen: spaces.len(),
-        }),
+            );
+            if !notes.is_empty() {
+                message.push_str(" | ");
+                message.push_str(&notes.join(" "));
+            }
+            Ok(ConfluenceProbeResult {
+                ok: true,
+                message,
+                spaces_seen: spaces.len(),
+            })
+        }
         Err(e) => Ok(ConfluenceProbeResult {
             ok: false,
             message: e.to_string(),
@@ -1160,23 +1170,42 @@ fn is_retryable_confluence_error(msg: &str) -> bool {
 }
 
 /// GET with bounded 429/5xx retry (#452 / #459). Not cancellable mid-flight.
+///
+/// Returns JSON plus trail notes such as `confluence:rate_limited: retrying…`
+/// (surfaced in tool detail / probe messages).
 async fn confluence_get_json_with_retry(
     cfg: &ConfluenceRoConfig,
     path_and_query: &str,
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
-) -> CoreResult<Value> {
+) -> CoreResult<(Value, Vec<String>)> {
     let mut attempt = 0u32;
+    let mut notes: Vec<String> = Vec::new();
     loop {
         match confluence_get_json_once(cfg, path_and_query, auth, policy).await {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                if !notes.is_empty() {
+                    notes.push("confluence:rate_limited: recovered after retry".into());
+                }
+                return Ok((v, notes));
+            }
             Err(e) => {
                 let msg = e.to_string();
                 if attempt < CONFLUENCE_MAX_RETRIES && is_retryable_confluence_error(&msg) {
                     let backoff_ms = 200u64.saturating_mul(1u64 << attempt.min(3));
+                    notes.push(format!(
+                        "confluence:rate_limited: retrying (attempt {}) after {backoff_ms}ms…",
+                        attempt + 1
+                    ));
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     attempt += 1;
                     continue;
+                }
+                if !notes.is_empty() {
+                    return Err(CoreError::Message(format!(
+                        "{msg} (exhausted {attempt} retry attempt(s); {})",
+                        notes.join(" ")
+                    )));
                 }
                 return Err(e);
             }
@@ -1619,9 +1648,21 @@ mod tests {
         let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
         let auth = ConfluenceAuth::bearer("test-pat");
         let policy = SsrfPolicy::allow_private_networks();
-        let spaces = list_spaces(&cfg, &auth, &policy, 10).await.unwrap();
+        let (spaces, notes) = list_spaces(&cfg, &auth, &policy, 10).await.unwrap();
         assert_eq!(spaces.len(), 2);
         assert_eq!(spaces[0].key, "ENG");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("confluence:rate_limited: retrying")),
+            "expected retry trail note, got {notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("confluence:rate_limited: recovered after retry")),
+            "expected recovery note, got {notes:?}"
+        );
 
         let probe = probe_connection(&cfg, &auth, &policy).await.unwrap();
         assert!(probe.ok, "{}", probe.message);
