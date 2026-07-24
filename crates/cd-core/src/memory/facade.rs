@@ -157,12 +157,92 @@ pub fn ensure_workspace_memory_gitignored(
 /// Open personal + workspace stores from config and attach to a [`crate::tool_host::ToolHost`].
 ///
 /// This is the product seam (#264 skeptic fix): without it, `durable_memory` stays
+/// Filesystem operations for removing legacy on-disk candidate inboxes.
+///
+/// Injected so cleanup failure can be proven hermetically without relying on
+/// platform-specific file permissions (#381/#385).
+pub trait LegacyCandidateCleanup: Send + Sync {
+    /// Remove one path. `NotFound` must be treated as success by implementors.
+    fn remove_path(&self, path: &Path) -> std::io::Result<()>;
+}
+
+/// Production cleanup: `std::fs::remove_file`, ignoring missing files only.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FsLegacyCandidateCleanup;
+
+impl LegacyCandidateCleanup for FsLegacyCandidateCleanup {
+    fn remove_path(&self, path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Remove legacy `candidates.sqlite` (+ `-wal` / `-shm`) under `mem_dir`.
+///
+/// Failures are **never** silent: any non-NotFound error becomes a privacy
+/// policy error so attach cannot claim a non-durable inbox while raw files
+/// remain. Does not read or migrate candidate contents.
+pub fn cleanup_legacy_candidate_files(
+    mem_dir: &Path,
+    cleanup: &dyn LegacyCandidateCleanup,
+) -> CoreResult<()> {
+    let base = mem_dir.join("candidates.sqlite");
+    let paths = [
+        base.clone(),
+        PathBuf::from(format!("{}-wal", base.display())),
+        PathBuf::from(format!("{}-shm", base.display())),
+    ];
+    for p in &paths {
+        if let Err(e) = cleanup.remove_path(p) {
+            // Log redacted path only — never legacy contents.
+            // Redact to a short, path-safe suffix (ASCII path chars only in practice).
+            let path_disp = p.display().to_string();
+            let redacted = {
+                let chars: String = path_disp.chars().rev().take(80).collect::<String>();
+                if path_disp.chars().count() > 96 {
+                    format!("…{}", chars.chars().rev().collect::<String>())
+                } else {
+                    path_disp
+                }
+            };
+            tracing::error!(
+                path = %redacted,
+                error = %e,
+                "legacy candidate store cleanup failed"
+            );
+            return Err(CoreError::Policy(format!(
+                "privacy: failed to remove legacy candidate store at `{redacted}`: {e}. \
+                 Durable memory will not attach until cleanup succeeds (retry after fixing permissions)."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `None` and Phase-1 tools/ambient never run. Idempotent import of memory_fs notes
 /// runs once when the workspace store is first opened (stable ids).
 pub fn attach_durable_memory_to_host(
     host: &mut crate::tool_host::ToolHost,
     branding: &Branding,
     memory_cfg: &MemoryConfig,
+) -> CoreResult<()> {
+    attach_durable_memory_to_host_with_cleanup(
+        host,
+        branding,
+        memory_cfg,
+        &FsLegacyCandidateCleanup,
+    )
+}
+
+/// Same as [`attach_durable_memory_to_host`] with an injectable cleanup seam.
+pub fn attach_durable_memory_to_host_with_cleanup(
+    host: &mut crate::tool_host::ToolHost,
+    branding: &Branding,
+    memory_cfg: &MemoryConfig,
+    cleanup: &dyn LegacyCandidateCleanup,
 ) -> CoreResult<()> {
     if !memory_cfg.durable_memory_enabled {
         host.set_durable_memory_enabled(false);
@@ -232,13 +312,9 @@ pub fn attach_durable_memory_to_host(
     if let Ok(inbox) = super::CandidateInbox::open_in_memory() {
         host.set_candidate_inbox(Some(std::sync::Arc::new(inbox)));
     }
-    // Remove any legacy on-disk inbox left by older builds (best-effort).
-    let legacy_inbox = mem_dir.join("candidates.sqlite");
-    if legacy_inbox.is_file() {
-        let _ = std::fs::remove_file(&legacy_inbox);
-        let _ = std::fs::remove_file(format!("{}-wal", legacy_inbox.display()));
-        let _ = std::fs::remove_file(format!("{}-shm", legacy_inbox.display()));
-    }
+    // Remove any legacy on-disk inbox left by older builds. Failure is loud:
+    // never claim non-durable ambient success while raw candidates remain.
+    cleanup_legacy_candidate_files(&mem_dir, cleanup)?;
     if let Ok(edges) = super::EdgeStore::open(mem_dir.join("edges.sqlite")) {
         host.set_edge_store(Some(std::sync::Arc::new(edges)));
     }
@@ -531,6 +607,169 @@ mod tests {
         attach_durable_memory_to_host(&mut host2, &branding, &ambient_off).unwrap();
         assert!(host2.durable_memory_active());
         assert!(!host2.ambient_recall_enabled());
+    }
+
+    /// Injected cleanup that can fail deterministically for hermetic tests.
+    struct ScriptedCleanup {
+        fail_paths: std::sync::Mutex<std::collections::HashSet<String>>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedCleanup {
+        fn new() -> Self {
+            Self {
+                fail_paths: std::sync::Mutex::new(std::collections::HashSet::new()),
+                removed: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn fail_on(&self, path: &std::path::Path) {
+            self.fail_paths
+                .lock()
+                .unwrap()
+                .insert(path.display().to_string());
+        }
+        fn clear_failures(&self) {
+            self.fail_paths.lock().unwrap().clear();
+        }
+    }
+
+    impl LegacyCandidateCleanup for ScriptedCleanup {
+        fn remove_path(&self, path: &std::path::Path) -> std::io::Result<()> {
+            let key = path.display().to_string();
+            if self.fail_paths.lock().unwrap().contains(&key) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scripted cleanup failure",
+                ));
+            }
+            // Mirror production: NotFound is ok; otherwise delete if present.
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    self.removed.lock().unwrap().push(key);
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// #385: normal legacy db + wal + shm are removed on attach.
+    #[test]
+    fn legacy_candidate_cleanup_removes_db_wal_shm() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        let mem_dir = root.join(&branding.workspace_dir_name).join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        let base = mem_dir.join("candidates.sqlite");
+        std::fs::write(&base, b"legacy-db").unwrap();
+        std::fs::write(format!("{}-wal", base.display()), b"wal").unwrap();
+        std::fs::write(format!("{}-shm", base.display()), b"shm").unwrap();
+        let cleanup = ScriptedCleanup::new();
+        cleanup_legacy_candidate_files(&mem_dir, &cleanup).unwrap();
+        assert!(!base.exists());
+        assert!(!std::path::Path::new(&format!("{}-wal", base.display())).exists());
+        assert!(!std::path::Path::new(&format!("{}-shm", base.display())).exists());
+        let removed = cleanup.removed.lock().unwrap();
+        assert!(removed.iter().any(|p| p.ends_with("candidates.sqlite")));
+        assert!(removed.iter().any(|p| p.ends_with("candidates.sqlite-wal")));
+        assert!(removed.iter().any(|p| p.ends_with("candidates.sqlite-shm")));
+    }
+
+    /// #385: deterministic deletion failure is surfaced; attach does not succeed.
+    #[test]
+    fn legacy_cleanup_failure_surfaces_and_blocks_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        let mem_dir = root.join(&branding.workspace_dir_name).join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        let base = mem_dir.join("candidates.sqlite");
+        std::fs::write(&base, b"legacy-raw-must-remain-if-cleanup-fails").unwrap();
+
+        let cleanup = ScriptedCleanup::new();
+        cleanup.fail_on(&base);
+        let err = cleanup_legacy_candidate_files(&mem_dir, &cleanup).expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("privacy") || msg.contains("legacy candidate"),
+            "{msg}"
+        );
+        assert!(base.exists(), "file must remain after failed cleanup");
+
+        let ws = crate::workspace::Workspace {
+            id: format!("fail-{}", uuid::Uuid::now_v7()),
+            name: "c".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = crate::tool_host::ToolHost::new(ws, idx, None);
+        let attach_err = attach_durable_memory_to_host_with_cleanup(
+            &mut host,
+            &branding,
+            &MemoryConfig::default(),
+            &cleanup,
+        )
+        .expect_err("attach must not succeed after cleanup failure");
+        assert!(
+            format!("{attach_err}").contains("privacy")
+                || format!("{attach_err}").contains("legacy")
+        );
+        assert!(
+            !host.durable_memory_active(),
+            "must not enable durable memory after privacy cleanup failure"
+        );
+        assert!(base.exists());
+
+        // Retry succeeds after simulated failure is cleared.
+        cleanup.clear_failures();
+        attach_durable_memory_to_host_with_cleanup(
+            &mut host,
+            &branding,
+            &MemoryConfig::default(),
+            &cleanup,
+        )
+        .unwrap();
+        assert!(host.durable_memory_active());
+        assert!(!base.exists(), "retry must remove legacy file");
+    }
+
+    /// #385: cleanup never migrates/recalls legacy candidate contents.
+    #[test]
+    fn legacy_cleanup_does_not_migrate_or_ambient_recall() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let branding = Branding::embedded();
+        let mem_dir = root.join(&branding.workspace_dir_name).join("memory");
+        std::fs::create_dir_all(&mem_dir).unwrap();
+        let secret = "sk-live-legacycandidateonlytoken99";
+        let base = mem_dir.join("candidates.sqlite");
+        // Plant opaque bytes containing a token-shaped string — must never be recalled.
+        std::fs::write(&base, format!("raw-candidate-blob {secret}")).unwrap();
+        let ws = crate::workspace::Workspace {
+            id: format!("mig-{}", uuid::Uuid::now_v7()),
+            name: "c".into(),
+            roots: vec![root.to_path_buf()],
+        };
+        let idx = crate::index::KeywordIndex::build(&ws).unwrap();
+        let mut host = crate::tool_host::ToolHost::new(ws, idx, None);
+        attach_durable_memory_to_host(&mut host, &branding, &MemoryConfig::default()).unwrap();
+        assert!(!base.exists());
+        let store = host.durable_memory_store().expect("store");
+        let hits = store
+            .recall(
+                &crate::memory::RecallQuery::new(secret),
+                None,
+                crate::embed::HybridWeights::default(),
+                crate::embed::now_unix_secs(),
+            )
+            .unwrap();
+        assert!(
+            hits.iter()
+                .all(|h| !h.record.content.contains(secret) && !h.record.title.contains(secret)),
+            "legacy candidate must not ambient-recall or copy into durable memory"
+        );
     }
 
     /// #381 product path: attach must not leave candidates.sqlite; unapproved
