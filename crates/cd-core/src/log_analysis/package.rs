@@ -148,10 +148,15 @@ pub fn export_corpus_zip(
     corpus_id: &str,
     out_path: &Path,
 ) -> CoreResult<PackageManifest> {
-    let corpus = LogCorpus::open(cache_root, corpus_id)?;
-    corpus.flush()?;
-    let root = corpus.root().to_path_buf();
-    let meta = corpus.meta()?;
+    // Open, flush, snapshot meta, then **drop** the handle before reading
+    // `events.duckdb` — Windows exclusive-locks the DuckDB file while open.
+    let (root, meta) = {
+        let corpus = LogCorpus::open(cache_root, corpus_id)?;
+        corpus.flush()?;
+        let root = corpus.root().to_path_buf();
+        let meta = corpus.meta()?;
+        (root, meta)
+    };
 
     let payloads = ["meta.json", "events.duckdb", "templates.json"];
     let mut files = Vec::new();

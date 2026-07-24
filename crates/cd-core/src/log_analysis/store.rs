@@ -315,9 +315,29 @@ impl LogCorpus {
     }
 
     /// List summary for UI cards.
+    ///
+    /// Prefer meta.json (stats) without opening DuckDB when possible so Windows
+    /// does not hit exclusive file locks when another handle is open.
     pub fn list_summaries(cache_root: &Path) -> CoreResult<Vec<CorpusSummary>> {
         let mut out = Vec::new();
         for id in Self::list_ids(cache_root)? {
+            let root = cache_root.join("log_corpora").join(&id);
+            if let Ok(meta) = read_meta_file(&root) {
+                if let Some(ref stats) = meta.stats {
+                    out.push(CorpusSummary {
+                        id: meta.id.clone(),
+                        name: meta.name.clone(),
+                        event_count: stats.lines,
+                        template_count: stats.templates,
+                        engine: meta.engine.clone(),
+                        created_at: meta.created_at,
+                        source_label: meta.source_label.clone(),
+                        stats: Some(stats.clone()),
+                    });
+                    continue;
+                }
+                // Legacy meta without stats: open for live counts if possible.
+            }
             match Self::open(cache_root, &id) {
                 Ok(c) => out.push(c.summary()),
                 Err(_) => continue,
