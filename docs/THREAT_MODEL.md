@@ -63,6 +63,7 @@ Last security reconciliation: 2026-07-17 (remediation #140–#145).
 - MCP stdio servers remain untrusted once enabled; tools default HardWrite + first-use approval (#129); absolute command only; child `env_clear` |
 - Team server TLS is operator-owned (reverse proxy); **cd-server is HTTP-only by design** — `--allow-lan` requires TLS termination at a reverse proxy (#171)  
 - Telegram webhook input is authenticated by Telegram's secret-token header and then by an exact configured user→workspace role mapping. Chat-originated sessions cannot use the generic permission endpoint; HardWrite is only actionable by an authenticated paired workspace-admin client. Pairings/proposals are process-lifetime and are lost (not auto-approved) on restart (#289).
+- Watchers are server-resident but are not a write authority. Connector poll sources must be `Read`; a `propose_tool` action accepts only write-classified tools and runs them without a grant, producing the same paired-desktop proposal used by chat. The generic permission endpoint and Telegram chat approval both reject watcher-originated sessions. Source-event keys are transactionally deduplicated before action dispatch, favoring a missed event after a crash over a duplicate notification or write proposal (#290).
 
 
 ## Desktop updater trust boundary (#173)

@@ -27,6 +27,7 @@ subtle = "2"
 uuid = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tokio-stream = { version = "0.1.18", features = ["sync"] }
