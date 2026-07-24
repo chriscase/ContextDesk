@@ -58,11 +58,19 @@ export function Composer({
   const submit = useCallback(async () => {
     const t = value.trim();
     if (!t || disabled || busy) return;
-    const res = onSubmit(t);
-    const accepted = res instanceof Promise ? await res : res;
-    // Only clear when parent did not explicitly reject.
-    if (accepted !== false) {
-      setValue("");
+    // Clear immediately on submit so the draft does not sit through the whole
+    // agent turn (startTurn awaits network/tools). Restore only if rejected.
+    setValue("");
+    setExpanded(false);
+    try {
+      const res = onSubmit(t);
+      const accepted = res instanceof Promise ? await res : res;
+      if (accepted === false) {
+        setValue(t);
+      }
+    } catch {
+      // Parent threw before accepting — put the draft back.
+      setValue(t);
     }
   }, [value, disabled, busy, onSubmit]);
 
