@@ -437,6 +437,23 @@ mod tests {
     }
 
     #[test]
+    fn disabled_or_missing_pin_leaves_text() {
+        let sk = Skill {
+            id: "log-triage".into(),
+            name: "Log triage".into(),
+            description: "Triage logs".into(),
+            body: "PINNED".into(),
+            path: PathBuf::new(),
+            disabled: true,
+            allows_write: false,
+        };
+        let out = apply_pinned_skill_to_user_text("q", Some("log-triage"), &[sk]);
+        assert_eq!(out, "q", "disabled skill must not inject");
+        let out2 = apply_pinned_skill_to_user_text("q", Some("missing-id"), &[]);
+        assert_eq!(out2, "q", "missing skill must not inject");
+    }
+
+    #[test]
     fn slash_skill_overrides_pin() {
         let sk = Skill {
             id: "log-triage".into(),

@@ -1659,22 +1659,20 @@ impl ToolHost {
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("corpus");
-        // #359: always go through policy — default local; cloud needs confirm.
+        // #359: tool args must NOT grant cloud leave-machine consent (model-untrusted).
+        // Cloud requires host/UI-set policy later; agent tools may only choose local/none.
         let mode = args
             .get("embed_mode")
             .and_then(|v| v.as_str())
             .unwrap_or("local");
-        let cloud_confirm = args
-            .get("cloud_content_leaves_machine")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         let policy = match mode {
-            "cloud" => crate::log_analysis::LogEmbedPolicy::cloud_opt_in(
-                args.get("cloud_base_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-                cloud_confirm,
-            ),
+            "cloud" => {
+                return Err(CoreError::Policy(
+                    "cloud log embedding requires UI-originated per-corpus confirmation; \
+                     agent tools cannot set cloud_content_leaves_machine"
+                        .into(),
+                ));
+            }
             "none" => {
                 let mut p = crate::log_analysis::LogEmbedPolicy::local_default();
                 p.mode = crate::log_analysis::LogEmbedMode::None;

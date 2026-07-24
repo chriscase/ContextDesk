@@ -247,6 +247,16 @@ impl SqliteMemoryStore {
         // GDPR: tombstone must not retain recoverable user content (#385).
         // Keep only a fixed non-content marker + kind/scope/hash already stored.
         let title_redacted = "[purged]".to_string();
+        // Reason is operator-facing only — never store free-form user secrets.
+        let reason_safe = {
+            let r = crate::redact::redact_candidate(reason);
+            if r.blocked || r.redacted || reason.trim().is_empty() {
+                "gdpr_purge".to_string()
+            } else {
+                // Cap length; already secret-scrubbed.
+                reason.chars().take(64).collect::<String>()
+            }
+        };
         conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
         let tomb = PurgeTombstone {
             id: *id,
@@ -255,7 +265,7 @@ impl SqliteMemoryStore {
             scope: rec.scope.as_str().to_string(),
             content_hash: rec.content_hash.clone(),
             title_redacted: title_redacted.clone(),
-            reason: reason.to_string(),
+            reason: reason_safe,
         };
         conn.execute(
             "INSERT INTO memory_purge_tombstones (id, purged_at, kind, scope, content_hash, title_redacted, reason)
@@ -387,20 +397,43 @@ impl SqliteMemoryStore {
         };
         let content_hash = content_hash_for(&content);
         // url / due_at from structured (Rust-written, not GENERATED columns)
-        let url = draft.url.clone().or_else(|| {
+        // Redact all user-controlled string fields (#381/#385 multi-field).
+        let url_raw = draft.url.clone().or_else(|| {
             draft
                 .structured
                 .get("url")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         });
+        // URL/structured: redact; drop field if credential-dominant (never store raw secrets).
+        let url = match url_raw {
+            Some(u) => {
+                let r = crate::redact::redact_candidate(&u);
+                if r.blocked {
+                    None
+                } else if r.redacted {
+                    Some(r.text)
+                } else {
+                    Some(u)
+                }
+            }
+            None => None,
+        };
         let due_at = draft
             .due_at
             .or_else(|| draft.structured.get("due_at").and_then(|v| v.as_i64()));
         let structured = if draft.structured.is_null() {
             "{}".to_string()
         } else {
-            draft.structured.to_string()
+            let s = draft.structured.to_string();
+            let r = crate::redact::redact_candidate(&s);
+            if r.blocked {
+                "{}".to_string()
+            } else if r.redacted {
+                r.text
+            } else {
+                s
+            }
         };
         let valid_from = draft.valid_from;
         let valid_to = draft.valid_to;
@@ -1368,35 +1401,43 @@ mod tests {
             tomb.title_redacted
         );
     }
-}
 
-/// Product-path: attach uses in-memory candidate inbox (#381).
-#[cfg(test)]
-mod attach_inbox_tests {
-    use crate::memory::CandidateInbox;
-    use std::sync::Arc;
-    use tempfile::tempdir;
-
+    /// Multi-field: structured JSON and url must not retain raw tokens.
     #[test]
-    fn attach_uses_in_memory_inbox_no_candidates_sqlite() {
-        let dir = tempdir().unwrap();
-        let mem_dir = dir.path().join("mem");
-        std::fs::create_dir_all(&mem_dir).unwrap();
-        // Legacy file that older builds would have created
-        let legacy = mem_dir.join("candidates.sqlite");
-        std::fs::write(&legacy, b"should be removed").unwrap();
-
-        // Simulate product attach path (in-memory inbox + legacy wipe)
-        let inbox = CandidateInbox::open_in_memory().unwrap();
-        let _ = Arc::new(inbox);
-        if legacy.is_file() {
-            let _ = std::fs::remove_file(&legacy);
-        }
-        assert!(
-            !legacy.exists(),
-            "candidates.sqlite must not remain after attach policy"
+    fn structured_and_url_redacted_on_insert() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let token = "sk-live-zzabcdefghijklmnopqrst";
+        // Body is clean; secrets only in url/structured metadata fields.
+        let mut d = MemoryDraft::new(
+            Kind::Fact,
+            "Team notes for the quarter covering planning reviews and ops without secrets.",
         );
-        // Unapproved candidates live only in process memory — no disk path.
-        assert!(!mem_dir.join("candidates.sqlite").exists());
+        d.title = "quarterly notes".into();
+        d.url = Some(format!(
+            "https://docs.example.com/engineering/runbooks/quarterly-planning/index.html?ref=notes&session=planning&k={token}"
+        ));
+        d.structured = serde_json::json!({
+            "summary": format!(
+                "Long structured note about the project roadmap milestones deliveries \
+                 and customer outcomes mentioning {token} once in context."
+            )
+        });
+        let rec = store.put(MemoryWriteOp::Insert(d), 11).unwrap();
+        let url = rec.url.unwrap_or_default();
+        let structured = rec.structured.to_string();
+        assert!(!url.contains(token), "url still has token: {url}");
+        assert!(
+            !structured.contains(token),
+            "structured still has token: {structured}"
+        );
+        let tomb = store
+            .purge_gdpr(&rec.id, 20, &format!("user said {token}"))
+            .unwrap();
+        assert!(
+            !tomb.reason.contains(token),
+            "reason has token: {}",
+            tomb.reason
+        );
+        assert_eq!(tomb.title_redacted, "[purged]");
     }
 }
