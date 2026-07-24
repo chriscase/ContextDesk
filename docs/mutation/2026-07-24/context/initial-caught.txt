@@ -1,0 +1,14 @@
+crates/cd-core/src/sessions.rs:259:5: replace estimate_context_chars -> usize with 0
+crates/cd-core/src/sessions.rs:259:5: replace estimate_context_chars -> usize with 1
+crates/cd-core/src/sessions.rs:328:5: replace fit_model_context_to_budget -> Result<Vec<ChatMessage>, ContextBudgetError> with Ok(vec![])
+crates/cd-core/src/sessions.rs:330:37: replace <= with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:344:30: replace - with + in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:344:30: replace - with / in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:366:41: replace <= with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:377:20: replace <= with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:381:17: delete match arm None in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:403:53: replace - with + in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:403:53: replace - with / in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:433:12: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:463:22: replace / with * in prepare_model_context
+crates/cd-core/src/sessions.rs:475:40: replace > with < in prepare_model_context

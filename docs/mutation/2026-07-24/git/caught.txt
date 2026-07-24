@@ -1,0 +1,17 @@
+crates/cd-core/src/git_source.rs:208:5: replace is_canonical_contextdesk_remote -> bool with true
+crates/cd-core/src/git_source.rs:208:5: replace is_canonical_contextdesk_remote -> bool with false
+crates/cd-core/src/git_source.rs:211:17: replace && with || in is_canonical_contextdesk_remote
+crates/cd-core/src/git_source.rs:222:5: replace select_canonical_remote -> Option<(String, String)> with None
+crates/cd-core/src/git_source.rs:222:5: replace select_canonical_remote -> Option<(String, String)> with Some((String::new(), String::new()))
+crates/cd-core/src/git_source.rs:222:5: replace select_canonical_remote -> Option<(String, String)> with Some((String::new(), "xyzzy".into()))
+crates/cd-core/src/git_source.rs:222:5: replace select_canonical_remote -> Option<(String, String)> with Some(("xyzzy".into(), String::new()))
+crates/cd-core/src/git_source.rs:222:5: replace select_canonical_remote -> Option<(String, String)> with Some(("xyzzy".into(), "xyzzy".into()))
+crates/cd-core/src/git_source.rs:248:5: replace is_proven_contextdesk_source -> bool with true
+crates/cd-core/src/git_source.rs:248:5: replace is_proven_contextdesk_source -> bool with false
+crates/cd-core/src/git_source.rs:248:8: delete ! in is_proven_contextdesk_source
+crates/cd-core/src/git_source.rs:429:5: replace run_git_timeout -> Result<String, String> with Ok(String::new())
+crates/cd-core/src/git_source.rs:429:5: replace run_git_timeout -> Result<String, String> with Ok("xyzzy".into())
+crates/cd-core/src/git_source.rs:466:35: replace + with - in run_git_timeout
+crates/cd-core/src/git_source.rs:471:35: replace >= with < in run_git_timeout
+crates/cd-core/src/git_source.rs:492:8: delete ! in run_git_timeout
+crates/cd-core/src/git_source.rs:501:5: replace terminate_git_child with ()

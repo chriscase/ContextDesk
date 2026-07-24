@@ -1,0 +1,21 @@
+crates/cd-core/src/sessions.rs:343:8: delete ! in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:349:21: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:349:21: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:350:19: replace -= with += in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:350:19: replace -= with /= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:355:20: delete ! in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:422:37: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:422:37: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:424:27: replace / with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:426:32: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:426:32: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:462:46: replace > with < in prepare_model_context
+crates/cd-core/src/sessions.rs:462:46: replace > with == in prepare_model_context
+crates/cd-core/src/sessions.rs:462:46: replace > with >= in prepare_model_context
+crates/cd-core/src/sessions.rs:462:63: replace > with < in prepare_model_context
+crates/cd-core/src/sessions.rs:462:63: replace > with == in prepare_model_context
+crates/cd-core/src/sessions.rs:471:53: replace < with <= in prepare_model_context
+crates/cd-core/src/sessions.rs:471:53: replace < with == in prepare_model_context
+crates/cd-core/src/sessions.rs:475:40: replace > with == in prepare_model_context
+crates/cd-core/src/sessions.rs:475:40: replace > with >= in prepare_model_context
+crates/cd-core/src/sessions.rs:484:30: replace || with && in prepare_model_context

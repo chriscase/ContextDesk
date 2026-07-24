@@ -1,0 +1,37 @@
+crates/cd-core/src/sessions.rs:349:21: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:351:59: replace && with || in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:377:59: replace + with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:377:59: replace + with - in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:382:34: replace match guard len > bl with false in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:382:34: replace match guard len > bl with true in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:382:38: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:382:38: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:382:38: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:35: replace match guard len == bl && i < bi with false in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:35: replace match guard len == bl && i < bi with true in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:39: replace == with != in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:45: replace && with || in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:50: replace < with <= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:50: replace < with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:383:50: replace < with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:392:38: replace + with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:392:38: replace + with - in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:398:37: replace > with < in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:398:37: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:398:37: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:406:45: replace <= with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:411:20: replace <= with > in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:411:59: replace + with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:411:59: replace + with - in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:415:42: replace + with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:415:42: replace + with - in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:422:37: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:424:27: replace / with % in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:424:72: replace + with * in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:424:72: replace + with - in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:426:32: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:433:12: replace > with == in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:433:12: replace > with >= in fit_model_context_to_budget
+crates/cd-core/src/sessions.rs:463:22: replace / with % in prepare_model_context
+crates/cd-core/src/sessions.rs:471:53: replace < with > in prepare_model_context
+crates/cd-core/src/sessions.rs:472:9: replace || with && in prepare_model_context
