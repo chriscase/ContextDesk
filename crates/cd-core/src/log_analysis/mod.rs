@@ -20,7 +20,10 @@ pub mod why;
 pub use analysis::{cluster_problems, timeline, ClusterSummary, TimelineBucket};
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM};
-pub use ingest::{ingest_path, ingest_path_with_policy, IngestReport, IngestStats};
+pub use ingest::{
+    ingest_path, ingest_path_with_observer, ingest_path_with_policy,
+    ingest_path_with_policy_and_observer, IngestReport, IngestStats,
+};
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use search::{search_logs, SearchHit, SearchLogsQuery};
 pub use store::{CorpusId, LogCorpus, LogEvent, TemplateRow, EVENT_ENGINE};

@@ -1,6 +1,10 @@
 //! Session-scoped context packs (#341) — ad-hoc files for one chat, not permanent workspace roots.
 
 use crate::error::{CoreError, CoreResult};
+use crate::process_progress::{
+    progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
+    ProcessProgressObserver, ProcessProgressPhase,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -188,7 +192,67 @@ impl SessionContextStore {
 
     /// Import bytes as `rel_path` under the session root.
     pub fn import_bytes(&self, rel_path: &str, data: &[u8]) -> CoreResult<SessionContextEntry> {
+        self.import_bytes_with_progress(rel_path, data, &NoopProcessProgress, None)
+    }
+
+    /// Import bytes with multi-phase progress (#445).
+    pub fn import_bytes_with_progress(
+        &self,
+        rel_path: &str,
+        data: &[u8],
+        progress: &dyn ProcessProgressObserver,
+        cancel: Option<&CancelFlag>,
+    ) -> CoreResult<SessionContextEntry> {
+        let kind = ProcessProgressKind::SessionContextImport;
+        let base = progress_basename(Path::new(rel_path));
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Starting,
+                format!("importing {base}"),
+                true,
+            )
+            .with_fraction(0.0)
+            .with_bytes(data.len() as u64),
+        );
+        if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
+            progress.progress(ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Cancelled,
+                "import cancelled",
+                false,
+            ));
+            return Err(CoreError::Message(
+                "session context import cancelled".into(),
+            ));
+        }
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Read,
+                format!("read {base}"),
+                true,
+            )
+            .with_fraction(0.25)
+            .with_bytes(data.len() as u64),
+        );
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Validate,
+                "checking size caps",
+                true,
+            )
+            .with_fraction(0.45)
+            .with_bytes(data.len() as u64),
+        );
         if data.len() as u64 > self.caps.max_file_bytes {
+            progress.progress(ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Failed,
+                "file exceeds max size",
+                false,
+            ));
             return Err(CoreError::Policy(format!(
                 "file exceeds max_file_bytes ({})",
                 self.caps.max_file_bytes
@@ -196,6 +260,12 @@ impl SessionContextStore {
         }
         let existing = self.list()?;
         if existing.len() >= self.caps.max_files {
+            progress.progress(ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Failed,
+                "max files exceeded",
+                false,
+            ));
             return Err(CoreError::Policy(format!(
                 "session context max_files ({})",
                 self.caps.max_files
@@ -203,11 +273,27 @@ impl SessionContextStore {
         }
         let total = existing.iter().map(|e| e.size).sum::<u64>() + data.len() as u64;
         if total > self.caps.max_bytes {
+            progress.progress(ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Failed,
+                "max bytes exceeded",
+                false,
+            ));
             return Err(CoreError::Policy(format!(
                 "session context max_bytes ({})",
                 self.caps.max_bytes
             )));
         }
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Write,
+                format!("writing {base}"),
+                false,
+            )
+            .with_fraction(0.8)
+            .with_bytes(data.len() as u64),
+        );
         let dest = resolve_under_root(&self.root, rel_path)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| CoreError::Message(format!("mkdir: {e}")))?;
@@ -217,6 +303,17 @@ impl SessionContextStore {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| rel_path.to_string());
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Completed,
+                format!("imported {base}"),
+                false,
+            )
+            .with_fraction(1.0)
+            .with_bytes(data.len() as u64)
+            .with_files(1),
+        );
         Ok(SessionContextEntry {
             rel_path: rel_path.replace('\\', "/"),
             name,
@@ -230,6 +327,37 @@ impl SessionContextStore {
         source: &Path,
         dest_name: Option<&str>,
     ) -> CoreResult<SessionContextEntry> {
+        self.import_file_with_progress(source, dest_name, &NoopProcessProgress, None)
+    }
+
+    /// Import file with progress (#445).
+    pub fn import_file_with_progress(
+        &self,
+        source: &Path,
+        dest_name: Option<&str>,
+        progress: &dyn ProcessProgressObserver,
+        cancel: Option<&CancelFlag>,
+    ) -> CoreResult<SessionContextEntry> {
+        let kind = ProcessProgressKind::SessionContextImport;
+        let base = progress_basename(source);
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Starting,
+                format!("importing {base}"),
+                true,
+            )
+            .with_fraction(0.0),
+        );
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Read,
+                format!("read {base}"),
+                true,
+            )
+            .with_fraction(0.2),
+        );
         let data = fs::read(source).map_err(|e| CoreError::Message(format!("read source: {e}")))?;
         let name = dest_name
             .map(|s| s.to_string())
@@ -251,7 +379,7 @@ impl SessionContextStore {
         } else {
             safe
         };
-        self.import_bytes(&safe, &data)
+        self.import_bytes_with_progress(&safe, &data, progress, cancel)
     }
 
     /// Remove one relative path.
@@ -283,7 +411,81 @@ impl SessionContextStore {
         zip_bytes: &[u8],
         max_nest: u32,
     ) -> CoreResult<Vec<SessionContextEntry>> {
-        import_zip_into_store(self, zip_bytes, max_nest, 0)
+        self.import_zip_bytes_with_progress(zip_bytes, max_nest, &NoopProcessProgress, None)
+    }
+
+    /// Zip import with multi-phase progress (#445).
+    pub fn import_zip_bytes_with_progress(
+        &self,
+        zip_bytes: &[u8],
+        max_nest: u32,
+        progress: &dyn ProcessProgressObserver,
+        cancel: Option<&CancelFlag>,
+    ) -> CoreResult<Vec<SessionContextEntry>> {
+        let kind = ProcessProgressKind::SessionContextImport;
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Starting,
+                "starting zip import",
+                true,
+            )
+            .with_fraction(0.0)
+            .with_bytes(zip_bytes.len() as u64),
+        );
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Validate,
+                "validating archive",
+                true,
+            )
+            .with_fraction(0.15)
+            .with_bytes(zip_bytes.len() as u64),
+        );
+        if cancel.map(|c| c.is_cancelled()).unwrap_or(false) {
+            progress.progress(ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Cancelled,
+                "zip import cancelled",
+                false,
+            ));
+            return Err(CoreError::Message(
+                "session context import cancelled".into(),
+            ));
+        }
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Extract,
+                "extracting entries",
+                true,
+            )
+            .with_fraction(0.35)
+            .with_bytes(zip_bytes.len() as u64),
+        );
+        let imported = import_zip_into_store(self, zip_bytes, max_nest, 0)?;
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Write,
+                format!("wrote {} file(s)", imported.len()),
+                false,
+            )
+            .with_fraction(0.9)
+            .with_files(imported.len() as u64),
+        );
+        progress.progress(
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Completed,
+                format!("imported {} file(s) from zip", imported.len()),
+                false,
+            )
+            .with_fraction(1.0)
+            .with_files(imported.len() as u64),
+        );
+        Ok(imported)
     }
 
     /// Whether `abs_path` is under this session root (for tool path policy).
@@ -566,6 +768,35 @@ mod tests {
         store.import_bytes("b.txt", b"2").unwrap();
         let err = store.import_bytes("c.txt", b"3").unwrap_err();
         assert!(err.to_string().contains("max_files"));
+    }
+
+    #[test]
+    fn import_bytes_emits_progress_phases() {
+        use crate::process_progress::{ProcessProgressPhase, RecordingProcessProgress};
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            SessionContextStore::open(dir.path(), "prog-1", SessionContextCaps::default()).unwrap();
+        let rec = RecordingProcessProgress::default();
+        store
+            .import_bytes_with_progress("note.txt", b"hello world", &rec, None)
+            .unwrap();
+        let phases = rec.phases();
+        assert!(
+            phases.contains(&ProcessProgressPhase::Starting),
+            "{phases:?}"
+        );
+        assert!(
+            phases.contains(&ProcessProgressPhase::Validate),
+            "{phases:?}"
+        );
+        assert!(phases.contains(&ProcessProgressPhase::Write), "{phases:?}");
+        assert_eq!(
+            phases.last().copied(),
+            Some(ProcessProgressPhase::Completed)
+        );
+        for u in rec.updates.lock().unwrap().iter() {
+            assert!(!u.message.contains("/Users/"), "{}", u.message);
+        }
     }
 
     #[test]

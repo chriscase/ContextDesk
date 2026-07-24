@@ -7,6 +7,7 @@ import {
   hostDiscardLogCorpus,
   hostIngestLogPath,
   hostListLogCorpora,
+  hostListenProcessProgress,
   hostLogClusterProblems,
   hostLogSearch,
   hostLogTimeline,
@@ -14,7 +15,25 @@ import {
   type LogCorpusSummaryDto,
   type LogSearchHitDto,
   type LogTimelineBucketDto,
+  type ProcessProgressDto,
 } from "../../lib/host";
+import { openDirectoryDialog } from "../../lib/dialogs";
+import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
+import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
+
+function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
+  return {
+    kind: p.kind,
+    phase: p.phase as WizardProgressDto["phase"],
+    message: p.message,
+    fraction: p.fraction,
+    lines_processed: p.lines_processed,
+    files_processed: p.files_processed,
+    bytes_processed: p.bytes_processed,
+    templates: p.templates,
+    cancellable: p.cancellable,
+  };
+}
 
 type Props = {
   /** Optional initial path from file dialog (host-supplied). */
@@ -27,6 +46,7 @@ export function LogPane({ pickDirectory }: Props) {
   const [path, setPath] = useState("");
   const [name, setName] = useState("incident");
   const [busy, setBusy] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [clusters, setClusters] = useState<LogClusterDto[]>([]);
@@ -34,6 +54,19 @@ export function LogPane({ pickDirectory }: Props) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LogSearchHitDto[]>([]);
   const [exemplar, setExemplar] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void hostListenProcessProgress((p) => {
+      if (p.kind === "log_ingest") setProgress(p);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -70,8 +103,8 @@ export function LogPane({ pickDirectory }: Props) {
   }, [activeId, loadAnalysis]);
 
   async function onPick() {
-    if (!pickDirectory) return;
-    const p = await pickDirectory();
+    const picker = pickDirectory ?? (() => openDirectoryDialog("Choose log directory"));
+    const p = await picker();
     if (p) setPath(p);
   }
 
@@ -81,8 +114,10 @@ export function LogPane({ pickDirectory }: Props) {
       return;
     }
     setBusy(true);
+    setIngesting(true);
     setError(null);
     setNote(null);
+    setProgress(null);
     try {
       const r = await hostIngestLogPath(path.trim(), name.trim() || "incident");
       setNote(
@@ -94,6 +129,7 @@ export function LogPane({ pickDirectory }: Props) {
       setError(String(e));
     } finally {
       setBusy(false);
+      setIngesting(false);
     }
   }
 
@@ -150,11 +186,9 @@ export function LogPane({ pickDirectory }: Props) {
             aria-label="Log path"
           />
         </label>
-        {pickDirectory ? (
-          <button type="button" onClick={() => void onPick()} disabled={busy}>
-            Browse…
-          </button>
-        ) : null}
+        <button type="button" onClick={() => void onPick()} disabled={busy}>
+          Browse…
+        </button>
         <label>
           Name
           <input
@@ -165,9 +199,17 @@ export function LogPane({ pickDirectory }: Props) {
           />
         </label>
         <button type="button" onClick={() => void onIngest()} disabled={busy}>
-          {busy ? "Working…" : "Ingest"}
+          {ingesting ? "Ingesting…" : busy ? "Working…" : "Ingest"}
         </button>
       </section>
+
+      {ingesting || progress ? (
+        <ProcessProgressPanel
+          progress={progress ? hostProgressToWizard(progress) : null}
+          kind="log_ingest"
+          error={ingesting ? error : null}
+        />
+      ) : null}
 
       {error ? (
         <p className="error" role="alert">

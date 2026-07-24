@@ -68,6 +68,12 @@ export type ChatPaneProps = {
   /** Session skill pin (#343). */
   pinnedSkillId?: string | null;
   onPinnedSkillChange?: (skillId: string | null) => void;
+  /** Optional guided setup catalog (#447) — never required. */
+  onOpenGuidedSetup?: () => void;
+  /** Start a specific wizard by id (empty-state cards). */
+  onStartWizard?: (wizardId: string) => void;
+  /** External composer seed from wizard completion. */
+  externalSeedRequest?: { id: number; text: string } | null;
 };
 
 /** Chat tabpanel: session tabs + transcript + composer (#146). */
@@ -109,6 +115,9 @@ export function ChatPane(props: ChatPaneProps) {
     setSourceContent,
     setMemoryPath,
     openCompositionFromMemoryId,
+    onOpenGuidedSetup,
+    onStartWizard,
+    externalSeedRequest = null,
   } = props;
 
   const windowed = useMessageWindow(visibleMessages, chatScrollRef);
@@ -120,6 +129,9 @@ export function ChatPane(props: ChatPaneProps) {
   const fillStarter = (prompt: string) => {
     setSeedRequest({ id: Date.now(), text: prompt });
   };
+
+  // Wizard / parent seed takes precedence when id changes.
+  const effectiveSeed = externalSeedRequest ?? seedRequest;
 
   const kbdMod =
     typeof navigator !== "undefined" &&
@@ -184,14 +196,26 @@ export function ChatPane(props: ChatPaneProps) {
                   ))}
                 </div>
                 <div className="session-tabs__actions">
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    title="New chat"
-                    onClick={createSession}
-                  >
-                    +
-                  </button>
+                  <div className="chat-new-split" title="New chat">
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      title="New blank chat"
+                      onClick={createSession}
+                    >
+                      +
+                    </button>
+                    {onOpenGuidedSetup ? (
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        title="Guided setup (optional)"
+                        onClick={onOpenGuidedSetup}
+                      >
+                        Guided…
+                      </button>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     className="btn btn--ghost btn--sm"
@@ -265,8 +289,46 @@ export function ChatPane(props: ChatPaneProps) {
                     <p className="empty-state__body">{branding.tagline}</p>
                     <p className="empty-state__body">
                       Ask about your workspace, code, or notes. Starters fill
-                      the composer — edit, then send.
+                      the composer — edit, then send. Guided setup is optional.
                     </p>
+                    {onStartWizard || onOpenGuidedSetup ? (
+                      <div
+                        className="chat-wizard-cards"
+                        role="group"
+                        aria-label="Guided setup"
+                      >
+                        {onStartWizard ? (
+                          <>
+                            <button
+                              type="button"
+                              className="chat-wizard-card"
+                              onClick={() => onStartWizard("log-troubleshooting")}
+                            >
+                              <strong>Log troubleshooting</strong>
+                              <span>Ingest dumps with visual progress</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="chat-wizard-card"
+                              onClick={() => onStartWizard("memory-primer")}
+                            >
+                              <strong>Memory primer</strong>
+                              <span>Review inbox vs durable store</span>
+                            </button>
+                          </>
+                        ) : null}
+                        {onOpenGuidedSetup ? (
+                          <button
+                            type="button"
+                            className="chat-wizard-card"
+                            onClick={onOpenGuidedSetup}
+                          >
+                            <strong>All guided setups…</strong>
+                            <span>Optional multi-step workflows</span>
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <div
                       className="chat-starters"
                       role="group"
@@ -385,7 +447,7 @@ export function ChatPane(props: ChatPaneProps) {
                   onModelChange={setSessionModel}
                   onSetDefaultModel={(key) => void setAppDefaultModel(key)}
                   onStop={onStop}
-                  seedRequest={seedRequest}
+                  seedRequest={effectiveSeed}
                 />
               </div>
             </div>

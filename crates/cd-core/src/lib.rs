@@ -44,6 +44,7 @@ pub mod paths;
 pub mod permissions;
 pub mod preflight;
 pub mod probe;
+pub mod process_progress;
 pub mod providers;
 pub mod redact;
 pub mod research;

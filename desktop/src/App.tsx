@@ -45,6 +45,12 @@ import { hostSaveActiveProvider } from "./lib/host";
 import { saveLastGatewayUrl } from "./lib/aiGatewayPrefs";
 import type { WizardApplyPayload } from "./components/settings/AiSetupWizard";
 import { shouldSkipSplash } from "./components/launch/splashDuration";
+import {
+  WizardCatalog,
+  LogTroubleshootingWizard,
+  MemoryPrimerWizard,
+  type WizardOutcome,
+} from "./components/wizards";
 
 export function App() {
   const shell = useShellState();
@@ -92,6 +98,14 @@ export function App() {
     sessionId: string;
   } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** Optional session wizards (#442) — never blocks blank new chat. */
+  const [wizardCatalogOpen, setWizardCatalogOpen] = useState(false);
+  const [activeWizardId, setActiveWizardId] = useState<string | null>(null);
+  const [wizardSessionId, setWizardSessionId] = useState<string | null>(null);
+  const [wizardSeedRequest, setWizardSeedRequest] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
 
   const compactKeep = activeSession?.compactKeepLast ?? 6;
   const showFullHistory = activeSession?.showFullHistory ?? false;
@@ -214,12 +228,84 @@ export function App() {
     [openChatSessions, resolvedSessionId, setActiveSessionId, shell],
   );
 
+  const startWizard = useCallback(
+    (wizardId: string) => {
+      const session = ensureActiveSession();
+      setWizardCatalogOpen(false);
+      setWizardSessionId(session.id);
+      setActiveWizardId(wizardId);
+      shell.setPane("chat");
+    },
+    [ensureActiveSession, shell],
+  );
+
+  const onWizardComplete = useCallback(
+    (outcome: WizardOutcome) => {
+      setActiveWizardId(null);
+      setWizardSessionId(null);
+      if (outcome.skillPinId && outcome.sessionId) {
+        setSessions((all) => {
+          const next = all.map((s) =>
+            s.id === outcome.sessionId
+              ? {
+                  ...s,
+                  pinnedSkillId: outcome.skillPinId,
+                  updatedAt: nowIso(),
+                }
+              : s,
+          );
+          const cur = next.find((s) => s.id === outcome.sessionId);
+          if (cur) void persistSession(cur);
+          return next;
+        });
+      }
+      if (outcome.composerSeed) {
+        setWizardSeedRequest({ id: Date.now(), text: outcome.composerSeed });
+      }
+      if (outcome.openPane === "memory") {
+        shell.setPane("memory");
+      } else if (outcome.openPane === "logs") {
+        shell.setPane("logs");
+      } else if (outcome.openPane === "help") {
+        // Feature-detect Help pane (#434) — fall back to chat.
+        const helpOk =
+          typeof (shell as { setPane: (p: string) => void }).setPane ===
+          "function";
+        if (helpOk) {
+          try {
+            // PaneId may not include help yet — only open when type allows.
+            shell.setPane("chat");
+          } catch {
+            shell.setPane("chat");
+          }
+        } else {
+          shell.setPane("chat");
+        }
+      } else {
+        shell.setPane("chat");
+      }
+    },
+    [persistSession, setSessions, shell],
+  );
+
   const paletteItems: PaletteItem[] = useMemo(() => {
     const actions: PaletteItem[] = [
       {
         id: "action:new-chat",
         label: "New chat",
-        keywords: ["create", "n"],
+        keywords: ["create", "n", "blank"],
+        group: "action",
+      },
+      {
+        id: "action:guided-setup",
+        label: "Guided setup…",
+        keywords: ["wizard", "log", "troubleshoot", "guided"],
+        group: "action",
+      },
+      {
+        id: "action:wizard-log",
+        label: "Log troubleshooting wizard",
+        keywords: ["logs", "ingest", "triage", "incident"],
         group: "action",
       },
       {
@@ -257,6 +343,16 @@ export function App() {
         shell.setPane("chat");
         return;
       }
+      if (id === "action:guided-setup") {
+        ensureActiveSession();
+        setWizardCatalogOpen(true);
+        shell.setPane("chat");
+        return;
+      }
+      if (id === "action:wizard-log") {
+        startWizard("log-troubleshooting");
+        return;
+      }
       if (id === "action:settings") {
         shell.openSettings("health", chatScrollRef.current);
         return;
@@ -275,7 +371,15 @@ export function App() {
         shell.setPane("chat");
       }
     },
-    [createSession, shell, chatScrollRef, activeSession, setActiveSessionId],
+    [
+      createSession,
+      shell,
+      chatScrollRef,
+      activeSession,
+      setActiveSessionId,
+      ensureActiveSession,
+      startWizard,
+    ],
   );
 
   useKeyboardShortcuts({
@@ -545,6 +649,14 @@ export function App() {
                   createSession: () => {
                     createSession();
                   },
+                  onOpenGuidedSetup: () => {
+                    ensureActiveSession();
+                    setWizardCatalogOpen(true);
+                  },
+                  onStartWizard: (wizardId: string) => {
+                    startWizard(wizardId);
+                  },
+                  externalSeedRequest: wizardSeedRequest,
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
                   onChatScroll,
@@ -726,6 +838,41 @@ export function App() {
         onClose={closePalette}
         onSelect={onPaletteSelect}
       />
+      <WizardCatalog
+        open={wizardCatalogOpen}
+        onClose={() => setWizardCatalogOpen(false)}
+        onSelect={(id) => startWizard(id)}
+      />
+      {activeWizardId === "log-troubleshooting" &&
+      (wizardSessionId || resolvedSessionId) ? (
+        <LogTroubleshootingWizard
+          sessionId={wizardSessionId ?? resolvedSessionId}
+          onCancel={() => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+          }}
+          onComplete={onWizardComplete}
+          helpAvailable={false}
+          onLearnMore={() => {
+            // Help Center (#434) not required — keep chat usable.
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+            shell.setPane("chat");
+          }}
+        />
+      ) : null}
+      {activeWizardId === "memory-primer" &&
+      (wizardSessionId || resolvedSessionId) ? (
+        <MemoryPrimerWizard
+          sessionId={wizardSessionId ?? resolvedSessionId}
+          onCancel={() => {
+            setActiveWizardId(null);
+            setWizardSessionId(null);
+          }}
+          onComplete={onWizardComplete}
+          helpAvailable={false}
+        />
+      ) : null}
       <PermissionModal
         prompt={turn.permission}
         onRespond={turn.respondPermission}
