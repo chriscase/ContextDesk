@@ -12,6 +12,7 @@ use crate::process_progress::{
     progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
     ProcessProgressObserver, ProcessProgressPhase,
 };
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -182,27 +183,205 @@ pub const PROGRESS_EVERY_LINES: u64 = 2_000;
 /// Max templates to embed on bulk SoftWrite when embed is enabled (cap).
 pub const BULK_EMBED_TEMPLATE_CAP: usize = 256;
 
-/// If `path` is a `.zip` file, extract into a temp dir and return that path.
-///
-/// Opens the zip via **file streaming** (no full-archive `fs::read` into a
-/// single buffer). Entries are extracted one-at-a-time. Caller must keep the
-/// TempDir alive for the duration of ingest.
-fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::TempDir>)> {
-    let is_zip = path.is_file()
+fn is_zip_file(path: &Path) -> bool {
+    path.is_file()
         && path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case("zip"))
-            .unwrap_or(false);
-    if !is_zip {
-        return Ok((path.to_path_buf(), None));
+            .unwrap_or(false)
+}
+
+/// True if the first chunk of a file looks binary (NUL byte).
+fn looks_binary_file(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    let n = f.read(&mut buf).unwrap_or(0);
+    buf[..n].contains(&0)
+}
+
+/// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
+#[allow(clippy::too_many_arguments)]
+fn ingest_lines_from_reader(
+    reader: &mut dyn BufRead,
+    source_label: &str,
+    file_hint: Option<&Path>,
+    corpus: &LogCorpus,
+    miner: &mut DrainMiner,
+    stats: &mut IngestStats,
+    seq: &mut u64,
+    batch: &mut Vec<LogEvent>,
+    format_hint: &mut Option<LogFormat>,
+    files_done: u64,
+    file_count: u64,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    kind: ProcessProgressKind,
+) -> CoreResult<()> {
+    for line_res in reader.lines() {
+        if cancelled(cancel) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Cancelled,
+                    "ingest cancelled during parse",
+                    false,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes),
+            );
+            return Err(CoreError::Message("ingest cancelled".into()));
+        }
+        let Ok(line) = line_res else {
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if format_hint.is_none() {
+            *format_hint = Some(detect_format(&line, file_hint));
+        }
+        let parsed = parse_line(&line, *format_hint, *seq);
+        let fmt_key = match parsed.format {
+            LogFormat::Json => "json",
+            LogFormat::Logfmt => "logfmt",
+            LogFormat::Syslog => "syslog",
+            LogFormat::Plain => "plain",
+        };
+        *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
+        let msg = redact_message(&parsed.message);
+        let ts = parsed.ts.unwrap_or(*seq as i64);
+        stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
+        stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
+        let level_key = parsed.level.to_ascii_lowercase();
+        *stats.level_counts.entry(level_key).or_insert(0) += 1;
+        let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
+        let params = redact_params(&params);
+        batch.push(LogEvent {
+            seq: *seq,
+            ts,
+            level: parsed.level,
+            service: parsed.service,
+            host: parsed.host,
+            template_id: tid,
+            params,
+            trace_id: parsed.trace_id,
+            message: msg,
+            source: source_label.to_string(),
+        });
+        *seq += 1;
+        stats.lines += 1;
+        if batch.len() >= 256 {
+            if files_done == 0 && stats.lines <= 256 {
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Store,
+                        "writing event batches",
+                        true,
+                    )
+                    .with_fraction(0.45)
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes),
+                );
+            }
+            corpus.push_events(batch)?;
+            batch.clear();
+        }
+        if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
+            let frac =
+                0.15 + 0.45 * ((files_done as f32 + 0.5) / file_count.max(1) as f32).min(1.0);
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Parse,
+                    format!("parsing {source_label} ({} lines so far)", stats.lines),
+                    true,
+                )
+                .with_fraction(frac)
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes)
+                .with_templates(miner.templates().len() as u64),
+            );
+        }
     }
+    Ok(())
+}
+
+/// Stream zip members in-place (no full extract to temp). Cancel checked **per entry**.
+#[allow(clippy::too_many_arguments)]
+fn ingest_from_zip(
+    zip_path: &Path,
+    corpus: &LogCorpus,
+    miner: &mut DrainMiner,
+    stats: &mut IngestStats,
+    seq: &mut u64,
+    batch: &mut Vec<LogEvent>,
+    format_hint: &mut Option<LogFormat>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    kind: ProcessProgressKind,
+) -> CoreResult<u64> {
+    if cancelled(cancel) {
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Cancelled,
+                "ingest cancelled before zip open",
+                false,
+            ),
+        );
+        return Err(CoreError::Message("ingest cancelled".into()));
+    }
+
     let file =
-        std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open zip: {e}")))?;
-    let tmp = tempfile::tempdir().map_err(|e| CoreError::Message(format!("tempdir: {e}")))?;
+        std::fs::File::open(zip_path).map_err(|e| CoreError::Message(format!("open zip: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+    let entry_count = archive.len() as u64;
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Scan,
+            format!("zip has {entry_count} entr(y/ies); streaming members"),
+            true,
+        )
+        .with_fraction(0.1)
+        .with_files(entry_count),
+    );
+
+    let mut files_done = 0u64;
+    let mut files_parsed = 0usize;
+
     for i in 0..archive.len() {
+        if cancelled(cancel) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Cancelled,
+                    "ingest cancelled during zip stream",
+                    false,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes),
+            );
+            return Err(CoreError::Message("ingest cancelled".into()));
+        }
+
         let mut entry = archive
             .by_index(i)
             .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
@@ -218,28 +397,89 @@ fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::Te
         {
             return Err(CoreError::Policy(format!("zip-slip rejected: `{name}`")));
         }
-        let dest = tmp.path().join(rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CoreError::Message(format!("mkdir: {e}")))?;
-        }
-        let mut out =
-            std::fs::File::create(&dest).map_err(|e| CoreError::Message(format!("create: {e}")))?;
-        std::io::copy(&mut entry, &mut out)
-            .map_err(|e| CoreError::Message(format!("extract: {e}")))?;
-    }
-    Ok((tmp.path().to_path_buf(), Some(tmp)))
-}
 
-/// True if the first chunk of a file looks binary (NUL byte).
-fn looks_binary_file(path: &Path) -> bool {
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    use std::io::Read;
-    let mut buf = [0u8; 8192];
-    let n = f.read(&mut buf).unwrap_or(0);
-    buf[..n].contains(&0)
+        let size = entry.size();
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Scan,
+                format!(
+                    "zip member {}/{}: {}",
+                    i + 1,
+                    entry_count,
+                    progress_basename(std::path::Path::new(rel))
+                ),
+                true,
+            )
+            .with_fraction(0.1 + 0.05 * ((i as f32 + 1.0) / entry_count.max(1) as f32))
+            .with_files(files_done)
+            .with_lines(stats.lines)
+            .with_bytes(stats.source_bytes),
+        );
+
+        if size > DEFAULT_MAX_FILE_BYTES {
+            files_done += 1;
+            continue;
+        }
+
+        // Sample first bytes for binary without loading whole entry.
+        let mut head = [0u8; 8192];
+        let n = entry.read(&mut head).unwrap_or(0);
+        if head[..n].contains(&0) {
+            files_done += 1;
+            // Drain remaining entry to keep archive state consistent
+            let mut sink = std::io::sink();
+            let _ = std::io::copy(&mut entry, &mut sink);
+            continue;
+        }
+
+        stats.source_bytes = stats.source_bytes.saturating_add(size);
+        // Chain head + rest of entry for line parsing.
+        let rest = BufReader::with_capacity(64 * 1024, entry);
+        let mut chained = std::io::Cursor::new(head[..n].to_vec()).chain(rest);
+        let mut reader = BufReader::with_capacity(64 * 1024, &mut chained);
+
+        ingest_lines_from_reader(
+            &mut reader,
+            rel,
+            None,
+            corpus,
+            miner,
+            stats,
+            seq,
+            batch,
+            format_hint,
+            files_done,
+            entry_count,
+            progress,
+            cancel,
+            kind,
+        )?;
+
+        files_done += 1;
+        files_parsed += 1;
+        let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
+        if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Template,
+                    "Drain templating + redaction (zip stream)",
+                    true,
+                )
+                .with_fraction(frac)
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes)
+                .with_templates(miner.templates().len() as u64),
+            );
+        }
+    }
+
+    stats.files = files_parsed;
+    Ok(files_done)
 }
 
 fn ingest_path_inner(
@@ -254,9 +494,8 @@ fn ingest_path_inner(
     let _ = embed_model;
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
-    let (path, _tmp_keep) = expand_zip_if_needed(path)?;
-    let path = path.as_path();
 
+    // Starting + cancel **before** any zip work so multi-GB extracts are not forced.
     emit(
         progress,
         ProcessProgress::phase(
@@ -293,106 +532,57 @@ fn ingest_path_inner(
     );
 
     let corpus = LogCorpus::create(cache_root, name)?;
-    let files = collect_log_files(path)?;
-    let file_count = files.len() as u64;
-
-    emit(
-        progress,
-        ProcessProgress::phase(
-            kind,
-            ProcessProgressPhase::Scan,
-            format!("found {file_count} file(s)"),
-            true,
-        )
-        .with_fraction(0.1)
-        .with_files(file_count),
-    );
-
     let mut miner = DrainMiner::default();
-    let mut stats = IngestStats {
-        files: files.len(),
-        ..Default::default()
-    };
+    let mut stats = IngestStats::default();
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut format_hint: Option<LogFormat> = None;
     let mut files_done = 0u64;
 
-    // Combined parse + template + redact per line (phases reported at file boundaries).
-    emit(
-        progress,
-        ProcessProgress::phase(
+    if is_zip_file(path) {
+        // Stream members without full extract-to-temp (#499 skeptic fix).
+        files_done = ingest_from_zip(
+            path,
+            &corpus,
+            &mut miner,
+            &mut stats,
+            &mut seq,
+            &mut batch,
+            &mut format_hint,
+            progress,
+            cancel,
             kind,
-            ProcessProgressPhase::Parse,
-            "parsing and templating lines",
-            true,
-        )
-        .with_fraction(0.15)
-        .with_files(file_count),
-    );
+        )?;
+    } else {
+        let files = collect_log_files(path)?;
+        let file_count = files.len() as u64;
+        stats.files = files.len();
 
-    use std::io::{BufRead, BufReader};
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Scan,
+                format!("found {file_count} file(s)"),
+                true,
+            )
+            .with_fraction(0.1)
+            .with_files(file_count),
+        );
 
-    for file in &files {
-        if cancelled(cancel) {
-            emit(
-                progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Cancelled,
-                    "ingest cancelled during parse",
-                    false,
-                )
-                .with_lines(stats.lines)
-                .with_files(files_done),
-            );
-            return Err(CoreError::Message("ingest cancelled".into()));
-        }
+        emit(
+            progress,
+            ProcessProgress::phase(
+                kind,
+                ProcessProgressPhase::Parse,
+                "parsing and templating lines",
+                true,
+            )
+            .with_fraction(0.15)
+            .with_files(file_count),
+        );
 
-        let file_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-        // Soft guard: skip oversized members (do not allocate them).
-        if file_bytes > DEFAULT_MAX_FILE_BYTES {
-            files_done += 1;
-            emit(
-                progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Parse,
-                    format!(
-                        "skipped oversized {} ({} bytes > {} cap)",
-                        progress_basename(file),
-                        file_bytes,
-                        DEFAULT_MAX_FILE_BYTES
-                    ),
-                    true,
-                )
-                .with_fraction(0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32))
-                .with_lines(stats.lines)
-                .with_files(files_done),
-            );
-            continue;
-        }
-        if looks_binary_file(file) {
-            files_done += 1;
-            continue;
-        }
-
-        stats.source_bytes = stats.source_bytes.saturating_add(file_bytes);
-        let rel = file
-            .strip_prefix(path)
-            .unwrap_or(file.as_path())
-            .to_string_lossy()
-            .to_string();
-
-        // Stream lines — never `read_to_string` the whole member into one String.
-        let Ok(fh) = std::fs::File::open(file) else {
-            files_done += 1;
-            continue;
-        };
-        let reader = BufReader::with_capacity(64 * 1024, fh);
-        let mut lines_in_file = 0u64;
-
-        for line_res in reader.lines() {
+        for file in &files {
             if cancelled(cancel) {
                 emit(
                     progress,
@@ -403,84 +593,75 @@ fn ingest_path_inner(
                         false,
                     )
                     .with_lines(stats.lines)
-                    .with_files(files_done)
-                    .with_bytes(stats.source_bytes),
+                    .with_files(files_done),
                 );
                 return Err(CoreError::Message("ingest cancelled".into()));
             }
-            let Ok(line) = line_res else {
-                continue;
-            };
-            if line.trim().is_empty() {
-                continue;
-            }
-            if format_hint.is_none() {
-                format_hint = Some(detect_format(&line, Some(file)));
-            }
-            let parsed = parse_line(&line, format_hint, seq);
-            let fmt_key = match parsed.format {
-                LogFormat::Json => "json",
-                LogFormat::Logfmt => "logfmt",
-                LogFormat::Syslog => "syslog",
-                LogFormat::Plain => "plain",
-            };
-            *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
-            let msg = redact_message(&parsed.message);
-            let ts = parsed.ts.unwrap_or(seq as i64);
-            stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
-            stats.ts_max = Some(stats.ts_max.map_or(ts, |m| m.max(ts)));
-            let level_key = parsed.level.to_ascii_lowercase();
-            *stats.level_counts.entry(level_key).or_insert(0) += 1;
-            let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
-            let params = redact_params(&params);
-            batch.push(LogEvent {
-                seq,
-                ts,
-                level: parsed.level,
-                service: parsed.service,
-                host: parsed.host,
-                template_id: tid,
-                params,
-                trace_id: parsed.trace_id,
-                message: msg,
-                source: rel.clone(),
-            });
-            seq += 1;
-            stats.lines += 1;
-            lines_in_file += 1;
-            if batch.len() >= 256 {
-                if files_done == 0 && stats.lines <= 256 {
-                    emit(
-                        progress,
-                        ProcessProgress::phase(
-                            kind,
-                            ProcessProgressPhase::Store,
-                            "writing event batches",
-                            true,
-                        )
-                        .with_fraction(0.45)
-                        .with_lines(stats.lines)
-                        .with_files(files_done)
-                        .with_bytes(stats.source_bytes),
-                    );
-                }
-                corpus.push_events(&batch)?;
-                batch.clear();
-            }
-            // Line/byte progress so a single huge file still advances the UI.
-            if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
-                let frac =
-                    0.15 + 0.45 * ((files_done as f32 + 0.5) / file_count.max(1) as f32).min(1.0);
+
+            let file_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            if file_bytes > DEFAULT_MAX_FILE_BYTES {
+                files_done += 1;
                 emit(
                     progress,
                     ProcessProgress::phase(
                         kind,
                         ProcessProgressPhase::Parse,
                         format!(
-                            "parsing {} ({} lines so far)",
+                            "skipped oversized {} ({} bytes > {} cap)",
                             progress_basename(file),
-                            stats.lines
+                            file_bytes,
+                            DEFAULT_MAX_FILE_BYTES
                         ),
+                        true,
+                    )
+                    .with_fraction(0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32))
+                    .with_lines(stats.lines)
+                    .with_files(files_done),
+                );
+                continue;
+            }
+            if looks_binary_file(file) {
+                files_done += 1;
+                continue;
+            }
+
+            stats.source_bytes = stats.source_bytes.saturating_add(file_bytes);
+            let rel = file
+                .strip_prefix(path)
+                .unwrap_or(file.as_path())
+                .to_string_lossy()
+                .to_string();
+
+            let Ok(fh) = std::fs::File::open(file) else {
+                files_done += 1;
+                continue;
+            };
+            let mut reader = BufReader::with_capacity(64 * 1024, fh);
+            ingest_lines_from_reader(
+                &mut reader,
+                &rel,
+                Some(file.as_path()),
+                &corpus,
+                &mut miner,
+                &mut stats,
+                &mut seq,
+                &mut batch,
+                &mut format_hint,
+                files_done,
+                file_count,
+                progress,
+                cancel,
+                kind,
+            )?;
+            files_done += 1;
+            let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
+            if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Template,
+                        "Drain templating + redaction",
                         true,
                     )
                     .with_fraction(frac)
@@ -490,25 +671,6 @@ fn ingest_path_inner(
                     .with_templates(miner.templates().len() as u64),
                 );
             }
-        }
-        let _ = lines_in_file;
-        files_done += 1;
-        let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
-        if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
-            emit(
-                progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Template,
-                    "Drain templating + redaction",
-                    true,
-                )
-                .with_fraction(frac)
-                .with_lines(stats.lines)
-                .with_files(files_done)
-                .with_bytes(stats.source_bytes)
-                .with_templates(miner.templates().len() as u64),
-            );
         }
     }
 
@@ -684,7 +846,7 @@ fn ingest_path_inner(
         )
         .with_fraction(1.0)
         .with_lines(stats.lines)
-        .with_files(file_count)
+        .with_files(files_done)
         .with_bytes(stats.corpus_bytes)
         .with_templates(stats.templates as u64),
     );
@@ -799,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_zip_extracts_and_parses_logs() {
+    fn ingest_zip_streams_members_without_full_extract() {
         use std::io::Write as _;
         let dir = tempfile::tempdir().unwrap();
         let zip_path = dir.path().join("bundle.zip");
@@ -819,16 +981,93 @@ mod tests {
             zip.write_all(body.as_bytes()).unwrap();
             zip.finish().unwrap();
         }
-        // sanity: expand helper path
-        let (expanded, keep) = super::expand_zip_if_needed(&zip_path).unwrap();
-        assert!(keep.is_some());
-        assert!(expanded.join("nested/app.log").is_file());
-
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&cache).unwrap();
         let report = ingest_path(&cache, &zip_path, "from-zip", None, "none").unwrap();
         assert!(report.stats.lines >= 80, "lines={}", report.stats.lines);
         assert!(!report.corpus_id.is_empty());
+        // No full extract-to-temp: production uses ingest_from_zip
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/log_analysis/ingest.rs");
+        let prod = std::fs::read_to_string(&path)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(prod.contains("fn ingest_from_zip"));
+        assert!(
+            !prod.contains("tempfile::tempdir"),
+            "must not full-extract zip to temp"
+        );
+    }
+
+    #[test]
+    fn ingest_zip_cancel_mid_member_stream() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("many.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            // Several members so cancel can fire between entries / during lines.
+            for m in 0..8 {
+                zip.start_file(format!("part{m}.log"), opts).unwrap();
+                let mut body = String::new();
+                for i in 0..8_000 {
+                    body.push_str(&format!("info line {m}-{i}\n"));
+                }
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let flag = CancelFlag::new();
+        let flag2 = flag.clone();
+        struct CancelAfterN {
+            n: u64,
+            flag: CancelFlag,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelAfterN {
+            fn progress(&self, update: ProcessProgress) {
+                if update.lines_processed.unwrap_or(0) >= self.n
+                    || update.files_processed.unwrap_or(0) >= 2
+                {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+        let observer = CancelAfterN {
+            n: 3_000,
+            flag: flag2,
+            rec: RecordingProcessProgress::default(),
+        };
+        let err = ingest_path_with_observer(
+            dir.path(),
+            &zip_path,
+            "zip-cancel",
+            None,
+            "none",
+            &observer,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
+        let phases = observer.rec.phases();
+        assert!(
+            phases.contains(&ProcessProgressPhase::Cancelled),
+            "phases={phases:?}"
+        );
+        let updates = observer.rec.updates.lock().unwrap();
+        assert!(
+            updates.iter().any(|u| u.message.contains("zip member")
+                || u.message.contains("streaming")
+                || u.files_processed.unwrap_or(0) > 0),
+            "expected zip stream progress: {:?}",
+            updates.iter().map(|u| &u.message).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -938,28 +1177,26 @@ mod tests {
     }
 
     #[test]
-    fn expand_zip_streams_from_file_not_full_vec() {
-        // Production path: ZipArchive::new(File) — assert production function body
-        // (exclude this tests module so string literals here do not false-positive).
+    fn zip_path_streams_members_not_full_extract() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/log_analysis/ingest.rs");
         let full = std::fs::read_to_string(&path).expect("read ingest.rs");
         let prod = full.split("#[cfg(test)]").next().expect("prod section");
         assert!(
-            prod.contains("File::open(path)"),
-            "expand_zip must File::open zip"
+            prod.contains("fn ingest_from_zip"),
+            "zip stream path required"
         );
         assert!(
-            !prod.contains("Cursor::new(data)"),
-            "expand_zip must not load whole zip into Cursor(Vec)"
+            !prod.contains("tempfile::tempdir"),
+            "must not full-extract zip to temp before parse"
         );
         assert!(
             !prod.contains("read_to_string(file)"),
             "ingest must not read_to_string whole log members"
         );
         assert!(
-            prod.contains("BufReader"),
-            "must use BufReader line streaming"
+            prod.contains("BufReader") || prod.contains("BufRead"),
+            "must use line streaming"
         );
     }
 

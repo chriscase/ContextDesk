@@ -93,7 +93,10 @@ export function LogExplorer({ corpusId }: Props) {
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
-  const [nextTs, setNextTs] = useState<number | null>(null);
+  /** Per-lane composite cursors for multi-lane page-to-end (#505). */
+  const [laneCursors, setLaneCursors] = useState<
+    Record<string, { afterSeq: number | null; afterTs: number | null }>
+  >({});
   const [focusLaneId, setFocusLaneId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
@@ -202,14 +205,24 @@ export function LogExplorer({ corpusId }: Props) {
         const page = await hostLogQueryEvents(corpusId, filtersToQuery(filters));
         setTotalMatched(page.totalMatched);
         setNextCursor(page.nextCursor);
-        setNextTs(page.nextTs ?? null);
         setTimeQuality(page.timeQuality);
         setLaneEvents({ "lane-0": page.events });
+        setLaneCursors({
+          "lane-0": {
+            afterSeq: page.nextCursor,
+            afterTs: page.nextTs ?? null,
+          },
+        });
         setStatus(`${page.totalMatched} matched · showing ${page.events.length}`);
       } else {
         const byLane: Record<string, ExplorerEventDto[]> = {};
+        const cursors: Record<
+          string,
+          { afterSeq: number | null; afterTs: number | null }
+        > = {};
         let total = 0;
         let tq: TimeQuality = "order_only";
+        let shown = 0;
         for (const lane of lanes.slice(0, laneCount)) {
           const q = filtersToQuery(filters, {
             sources:
@@ -218,17 +231,27 @@ export function LogExplorer({ corpusId }: Props) {
                 : filters.sources.length > 0
                   ? filters.sources
                   : undefined,
-            limit: 200,
+            limit: 100,
+            sortByTime: true,
           });
           const page = await hostLogQueryEvents(corpusId, q);
           byLane[lane.id] = page.events;
+          cursors[lane.id] = {
+            afterSeq: page.nextCursor,
+            afterTs: page.nextTs ?? null,
+          };
           total = Math.max(total, page.totalMatched);
+          shown += page.events.length;
           tq = page.timeQuality;
         }
         setLaneEvents(byLane);
+        setLaneCursors(cursors);
         setTotalMatched(total);
         setTimeQuality(tq);
-        setStatus(`${laneCount} lanes · ${total} matched (per-lane caps)`);
+        setNextCursor(null);
+        setStatus(
+          `${laneCount} lanes · ${shown} loaded (page) · up to ${total} matched per lane`,
+        );
       }
     } catch (e) {
       setError(String(e));
@@ -563,28 +586,61 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
-  const loadMore = async () => {
-    if (nextCursor == null) return;
+  const loadMoreLane = async (laneId: string) => {
+    const cur = laneCursors[laneId];
+    if (cur?.afterSeq == null) return;
+    const lane = lanes.find((l) => l.id === laneId);
     setBusy(true);
     try {
       const page = await hostLogQueryEvents(
         corpusId,
         filtersToQuery(filters, {
-          afterSeq: nextCursor,
-          afterTs: nextTs,
+          sources:
+            lane && lane.sources.length > 0
+              ? lane.sources
+              : filters.sources.length > 0
+                ? filters.sources
+                : undefined,
+          afterSeq: cur.afterSeq,
+          afterTs: cur.afterTs,
           sortByTime: true,
+          limit: 100,
         }),
       );
-      setNextCursor(page.nextCursor);
-      setNextTs(page.nextTs ?? null);
       setLaneEvents((prev) => ({
         ...prev,
-        "lane-0": [...(prev["lane-0"] ?? []), ...page.events],
+        [laneId]: [...(prev[laneId] ?? []), ...page.events],
       }));
+      setLaneCursors((prev) => ({
+        ...prev,
+        [laneId]: {
+          afterSeq: page.nextCursor,
+          afterTs: page.nextTs ?? null,
+        },
+      }));
+      if (laneId === "lane-0") {
+        setNextCursor(page.nextCursor);
+      }
+      setStatus(
+        `Lane ${laneId}: loaded +${page.events.length} (cursor ${page.nextCursor ?? "end"})`,
+      );
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (laneCount <= 1) {
+      await loadMoreLane("lane-0");
+      return;
+    }
+    // Multi-lane: advance every lane that still has a cursor.
+    for (const lane of lanes.slice(0, laneCount)) {
+      if (laneCursors[lane.id]?.afterSeq != null) {
+        await loadMoreLane(lane.id);
+      }
     }
   };
 
@@ -861,6 +917,18 @@ export function LogExplorer({ corpusId }: Props) {
                   scrollToSeq={laneScrollSeq[lane.id] ?? null}
                   onRowClick={onRowClick}
                 />
+                {laneCursors[lane.id]?.afterSeq != null ? (
+                  <button
+                    type="button"
+                    className="log-explorer__btn"
+                    data-testid={`load-more-${lane.id}`}
+                    data-lane-load-more={lane.id}
+                    disabled={busy}
+                    onClick={() => void loadMoreLane(lane.id)}
+                  >
+                    Load more ({lane.label})
+                  </button>
+                ) : null}
               </section>
             ))}
           </div>
@@ -877,9 +945,15 @@ export function LogExplorer({ corpusId }: Props) {
               <pre style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0" }}>
                 {detail.message}
               </pre>
-              {nextCursor != null && laneCount === 1 && (
-                <button type="button" className="log-explorer__btn" onClick={() => void loadMore()}>
-                  Load more
+              {(nextCursor != null ||
+                Object.values(laneCursors).some((c) => c.afterSeq != null)) && (
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="load-more-all-lanes"
+                  onClick={() => void loadMore()}
+                >
+                  Load more{laneCount > 1 ? " (all lanes)" : ""}
                 </button>
               )}
             </div>
