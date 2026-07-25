@@ -53,14 +53,17 @@ import {
   type LaneEventRef,
 } from "../../lib/logExplorer/lanes";
 import {
+  aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
   formatEventTime,
+  leastReliableTimeQuality,
   timeQualityLabel,
   type Breakpoint,
   type Density,
   type ExplorerFilters,
   type LaneConfig,
+  type LaneTimeState,
 } from "../../lib/logExplorer/types";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import "../../styles/components/log-explorer.css";
@@ -121,6 +124,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
+  const [laneTimeStates, setLaneTimeStates] = useState<
+    Record<string, LaneTimeState>
+  >({});
   /** Per-lane scroll target seq from linked scrub. */
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
@@ -140,6 +146,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
+  const facetRequestRef = useRef(0);
+  const eventsRequestRef = useRef(0);
 
   // Breakpoint observer
   useEffect(() => {
@@ -200,30 +208,50 @@ export function LogExplorer({ corpusId }: Props) {
   }, [corpusId]);
 
   const loadFacets = useCallback(async () => {
+    const requestId = ++facetRequestRef.current;
     try {
       const f = await hostLogFacets(
         corpusId,
         filtersToQuery(filters, { keyword: null }),
       );
+      if (requestId !== facetRequestRef.current) return;
       setFacets(f);
-      setTimeQuality(f.timeQuality);
     } catch (e) {
+      if (requestId !== facetRequestRef.current) return;
       setError(String(e));
     }
   }, [corpusId, filters]);
 
   const loadEvents = useCallback(async () => {
+    const requestId = ++eventsRequestRef.current;
+    const visibleLanes = lanes.slice(0, laneCount);
+    const unloaded = Object.fromEntries(
+      visibleLanes.map((lane) => [
+        lane.id,
+        { status: "unloaded", quality: null } satisfies LaneTimeState,
+      ]),
+    );
     setBusy(true);
     setError(null);
+    setLaneTimeStates(unloaded);
+    setTimeQuality("order_only");
+    setGaps([]);
     try {
       if (laneCount <= 1) {
         const page = await hostLogQueryEvents(
           corpusId,
           filtersToQuery(filters),
         );
+        if (requestId !== eventsRequestRef.current) return;
+        const laneState: LaneTimeState =
+          page.events.length > 0
+            ? { status: "loaded", quality: page.timeQuality }
+            : { status: "empty", quality: null };
+        const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
         setNextCursor(page.nextCursor);
-        setTimeQuality(page.timeQuality);
+        setLaneTimeStates(states);
+        setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
         setLaneEvents({ "lane-0": page.events });
         setLaneCursors({
           "lane-0": {
@@ -240,10 +268,10 @@ export function LogExplorer({ corpusId }: Props) {
           string,
           { afterSeq: number | null; afterTs: number | null }
         > = {};
+        const states: Record<string, LaneTimeState> = {};
         let total = 0;
-        let tq: TimeQuality = "order_only";
         let shown = 0;
-        for (const lane of lanes.slice(0, laneCount)) {
+        const requests = visibleLanes.map(async (lane) => {
           const q = filtersToQuery(filters, {
             sources:
               lane.sources.length > 0
@@ -255,6 +283,21 @@ export function LogExplorer({ corpusId }: Props) {
             sortByTime: true,
           });
           const page = await hostLogQueryEvents(corpusId, q);
+          return { lane, page };
+        });
+        const results = await Promise.allSettled(requests);
+        if (requestId !== eventsRequestRef.current) return;
+        let failed = 0;
+        for (const [index, result] of results.entries()) {
+          const lane = visibleLanes[index]!;
+          if (result.status === "rejected") {
+            failed += 1;
+            byLane[lane.id] = [];
+            cursors[lane.id] = { afterSeq: null, afterTs: null };
+            states[lane.id] = { status: "error", quality: null };
+            continue;
+          }
+          const { page } = result.value;
           byLane[lane.id] = page.events;
           cursors[lane.id] = {
             afterSeq: page.nextCursor,
@@ -262,21 +305,36 @@ export function LogExplorer({ corpusId }: Props) {
           };
           total = Math.max(total, page.totalMatched);
           shown += page.events.length;
-          tq = page.timeQuality;
+          states[lane.id] =
+            page.events.length > 0
+              ? { status: "loaded", quality: page.timeQuality }
+              : { status: "empty", quality: null };
         }
         setLaneEvents(byLane);
         setLaneCursors(cursors);
+        setLaneTimeStates(states);
         setTotalMatched(total);
-        setTimeQuality(tq);
+        setTimeQuality(
+          aggregateLaneTimeQuality(
+            visibleLanes.map((lane) => lane.id),
+            states,
+          ),
+        );
         setNextCursor(null);
+        if (failed > 0) {
+          setError(
+            `${failed} evidence lane${failed === 1 ? "" : "s"} failed to load; time linking remains off`,
+          );
+        }
         setStatus(
           `${laneCount} lanes · ${shown} loaded (page) · up to ${total} matched per lane`,
         );
       }
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   }, [corpusId, filters, laneCount, lanes]);
 
@@ -286,10 +344,16 @@ export function LogExplorer({ corpusId }: Props) {
 
   useEffect(() => {
     void loadFacets();
+    return () => {
+      facetRequestRef.current += 1;
+    };
   }, [loadFacets]);
 
   useEffect(() => {
     void loadEvents();
+    return () => {
+      eventsRequestRef.current += 1;
+    };
   }, [loadEvents]);
 
   // Push view context to host for agent turns (optimized, not dump paste)
@@ -362,6 +426,16 @@ export function LogExplorer({ corpusId }: Props) {
     else setGaps([]);
   }, [linkMode, laneCount, lanes, laneEvents, timeQuality]);
 
+  useEffect(() => {
+    if (timeQuality === "order_only" && linkMode) {
+      setLinkMode(false);
+      setGaps([]);
+      setStatus(
+        "Linked scroll disabled: at least one visible lane has order-only or unavailable time",
+      );
+    }
+  }, [linkMode, timeQuality]);
+
   const toggleLevel = (level: string) => {
     setFilters((f) => {
       const has = f.levels.includes(level);
@@ -387,7 +461,14 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const runSearch = async () => {
+    const requestId = ++eventsRequestRef.current;
     setBusy(true);
+    setError(null);
+    setLaneTimeStates({
+      "lane-0": { status: "unloaded", quality: null },
+    });
+    setTimeQuality("order_only");
+    setGaps([]);
     try {
       const hits = await hostLogSearchEvents(corpusId, {
         query: searchDraft || filters.keyword || undefined,
@@ -395,17 +476,31 @@ export function LogExplorer({ corpusId }: Props) {
         k: 100,
         filter: filtersToQuery(filters, { keyword: null }),
       });
+      if (requestId !== eventsRequestRef.current) return;
       const evs = hits.map((h) => h.event);
+      const state: LaneTimeState =
+        evs.length > 0
+          ? {
+              status: "loaded",
+              quality: leastReliableTimeQuality(
+                evs.map((event) => event.timeQuality),
+              ),
+            }
+          : { status: "empty", quality: null };
+      const states = { "lane-0": state };
       setLaneEvents({ "lane-0": evs });
+      setLaneTimeStates(states);
+      setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
       setTotalMatched(evs.length);
       setHighlight(new Set(evs.map((e) => e.seq)));
       setStatus(
         `Search: ${evs.length} event hits (template-first semantic + keyword)`,
       );
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -650,6 +745,7 @@ export function LogExplorer({ corpusId }: Props) {
     const cur = laneCursors[laneId];
     if (cur?.afterSeq == null) return;
     const lane = lanes.find((l) => l.id === laneId);
+    const requestId = eventsRequestRef.current;
     setBusy(true);
     try {
       const page = await hostLogQueryEvents(
@@ -667,6 +763,7 @@ export function LogExplorer({ corpusId }: Props) {
           limit: 100,
         }),
       );
+      if (requestId !== eventsRequestRef.current) return;
       setLaneEvents((prev) => ({
         ...prev,
         [laneId]: [...(prev[laneId] ?? []), ...page.events],
@@ -681,13 +778,37 @@ export function LogExplorer({ corpusId }: Props) {
       if (laneId === "lane-0") {
         setNextCursor(page.nextCursor);
       }
+      if (page.events.length > 0) {
+        setLaneTimeStates((previous) => {
+          const prior = previous[laneId];
+          const quality =
+            prior?.status === "loaded" && prior.quality != null
+              ? leastReliableTimeQuality([prior.quality, page.timeQuality])
+              : page.timeQuality;
+          const next = {
+            ...previous,
+            [laneId]: {
+              status: "loaded",
+              quality,
+            } satisfies LaneTimeState,
+          };
+          setTimeQuality(
+            aggregateLaneTimeQuality(
+              lanes.slice(0, laneCount).map((visible) => visible.id),
+              next,
+            ),
+          );
+          return next;
+        });
+      }
       setStatus(
         `Lane ${laneId}: loaded +${page.events.length} (cursor ${page.nextCursor ?? "end"})`,
       );
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -745,6 +866,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-density={density}
       data-lane-count={laneCount}
       data-link-mode={linkMode ? "on" : "off"}
+      data-time-quality={timeQuality}
       data-resizable="true"
       onKeyDown={onKeyDown}
     >
@@ -773,7 +895,13 @@ export function LogExplorer({ corpusId }: Props) {
             onClick={() => {
               if (!linkMode && timeQuality === "order_only") {
                 setStatus(
-                  "Link requires wall-clock time; corpus is order-only — enabling will badge/warn",
+                  "Linked scroll unavailable: at least one visible lane has order-only or unavailable time",
+                );
+                return;
+              }
+              if (!linkMode && timeQuality === "mixed") {
+                setStatus(
+                  "Linked scroll uses mixed time quality; inspect each lane badge before interpreting gaps",
                 );
               }
               setLinkMode((v) => !v);
@@ -940,7 +1068,8 @@ export function LogExplorer({ corpusId }: Props) {
           <div className="log-explorer__lane-strip">
             {linkMode && gaps.length > 0 && (
               <span className="log-explorer__badge log-explorer__badge--warn">
-                {gaps.length} gap region{gaps.length === 1 ? "" : "s"}
+                {gaps.length} {timeQuality === "mixed" ? "potential " : ""}gap
+                region{gaps.length === 1 ? "" : "s"}
               </span>
             )}
             {navChips.map((chip, i) => (
@@ -958,56 +1087,82 @@ export function LogExplorer({ corpusId }: Props) {
           <div
             className={`log-explorer__lane-grid log-explorer__lane-grid--${laneCount}`}
           >
-            {lanes.slice(0, laneCount).map((lane) => (
-              <section
-                key={lane.id}
-                className={[
-                  "log-explorer__lane",
-                  focusLaneId === lane.id ? "log-explorer__lane--focus" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                data-lane-id={lane.id}
-                data-focused={focusLaneId === lane.id ? "true" : "false"}
-              >
-                <div className="log-explorer__lane-header">
-                  <strong>{lane.label}</strong>
-                  <span className="log-explorer__chat-preview">
-                    {(laneEvents[lane.id] ?? []).length} rows
-                    {focusLaneId === lane.id ? " · focused" : ""}
-                  </span>
-                </div>
-                {linkMode &&
-                  gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
-                    <div
-                      className="log-explorer__gap-band"
-                      title="Gap: this lane empty while peers have events"
-                      data-testid="log-explorer-gap"
-                    />
-                  )}
-                <VirtualizedEventList
-                  events={laneEvents[lane.id] ?? []}
-                  timeQuality={timeQuality}
-                  selected={selected}
-                  highlight={highlight}
-                  density={density}
-                  scrollToSeq={laneScrollSeq[lane.id] ?? null}
-                  onRowClick={onRowClick}
-                />
-                {laneCursors[lane.id]?.afterSeq != null ? (
-                  <button
-                    type="button"
-                    className="log-explorer__btn"
-                    data-testid={`load-more-${lane.id}`}
-                    data-lane-load-more={lane.id}
-                    disabled={busy}
-                    onClick={() => void loadMoreLane(lane.id)}
-                  >
-                    Load more ({lane.label})
-                  </button>
-                ) : null}
-              </section>
-            ))}
+            {lanes.slice(0, laneCount).map((lane) => {
+              const laneTime = laneTimeStates[lane.id] ?? {
+                status: "unloaded",
+                quality: null,
+              };
+              const laneTimeLabel =
+                laneTime.status === "loaded" && laneTime.quality != null
+                  ? timeQualityLabel(laneTime.quality)
+                  : laneTime.status === "empty"
+                    ? "time unavailable · empty"
+                    : laneTime.status === "error"
+                      ? "time unavailable · load failed"
+                      : "time unavailable · loading";
+              return (
+                <section
+                  key={lane.id}
+                  className={[
+                    "log-explorer__lane",
+                    focusLaneId === lane.id ? "log-explorer__lane--focus" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-lane-id={lane.id}
+                  data-focused={focusLaneId === lane.id ? "true" : "false"}
+                  data-time-status={laneTime.status}
+                  data-time-quality={laneTime.quality ?? "unavailable"}
+                >
+                  <div className="log-explorer__lane-header">
+                    <strong>{lane.label}</strong>
+                    <span
+                      className={`log-explorer__badge ${
+                        laneTime.quality === "order_only" ||
+                        laneTime.quality == null
+                          ? "log-explorer__badge--warn"
+                          : ""
+                      }`}
+                    >
+                      {laneTimeLabel}
+                    </span>
+                    <span className="log-explorer__chat-preview">
+                      {(laneEvents[lane.id] ?? []).length} rows
+                      {focusLaneId === lane.id ? " · focused" : ""}
+                    </span>
+                  </div>
+                  {linkMode &&
+                    gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
+                      <div
+                        className="log-explorer__gap-band"
+                        title="Gap: this lane empty while peers have events"
+                        data-testid="log-explorer-gap"
+                      />
+                    )}
+                  <VirtualizedEventList
+                    events={laneEvents[lane.id] ?? []}
+                    timeQuality={timeQuality}
+                    selected={selected}
+                    highlight={highlight}
+                    density={density}
+                    scrollToSeq={laneScrollSeq[lane.id] ?? null}
+                    onRowClick={onRowClick}
+                  />
+                  {laneCursors[lane.id]?.afterSeq != null ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      data-testid={`load-more-${lane.id}`}
+                      data-lane-load-more={lane.id}
+                      disabled={busy}
+                      onClick={() => void loadMoreLane(lane.id)}
+                    >
+                      Load more ({lane.label})
+                    </button>
+                  ) : null}
+                </section>
+              );
+            })}
           </div>
           {detail && (
             <div
