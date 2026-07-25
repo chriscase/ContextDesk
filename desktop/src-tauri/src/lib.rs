@@ -4256,6 +4256,16 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
     Ok(host.active_log_corpus().map(|s| s.to_string()))
 }
 
+/// Push Log Explorer viewport brief into the host for agent turn injection (#480).
+#[tauri::command]
+fn set_log_view_context(state: State<'_, AppState>, brief: Option<String>) -> Result<(), String> {
+    ensure_host(&state)?;
+    let mut host = state.host.lock().expect("host");
+    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
+    host.set_log_view_context_brief(brief);
+    Ok(())
+}
+
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
 
 /// Paged/keyset event query for the Log Explorer.
@@ -5247,6 +5257,7 @@ pub fn run() {
             discard_log_corpus,
             set_active_log_corpus,
             get_active_log_corpus,
+            set_log_view_context,
             log_query_events,
             log_facets,
             log_search_events,

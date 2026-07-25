@@ -384,6 +384,10 @@ pub async fn run_agent_turn_with_sink(
     if let Some(hint) = host.confluence_agent_hint() {
         system_content.push_str(&hint);
     }
+    // #480: Log Explorer viewport (filters/lanes/selection) — optimized, not dump paste.
+    if let Some(hint) = host.log_explorer_agent_hint() {
+        system_content.push_str(&hint);
+    }
 
     if history.is_empty() {
         history.push(ChatMessage {
