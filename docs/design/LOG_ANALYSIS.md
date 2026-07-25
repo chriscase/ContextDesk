@@ -169,5 +169,20 @@ Zip (flat entries):
 4. Import always assigns a **new** corpus id; store `origin_corpus_id`.
 5. SoftWrite import; export is user-chosen path only.
 
-Contributor checklist: changing package layout? bump `format_version` / `min_reader_version`, add fixture test, update this section.
+**Import safety contract**
 
+- Stat filesystem packages before opening them; reject the compressed-byte cap
+  before any whole-file read.
+- Preflight the bounded central directory and reject duplicate, absolute,
+  traversing, backslash, drive-prefix, hierarchical, and directory entries.
+- Cap `manifest.json` explicitly, then validate version, kind, engine, required
+  payloads, hashes, and declared bytes before creating cache staging.
+- Stream every expanded entry through a fixed-size buffer. Recognized payloads
+  go to staging while SHA-256 is calculated; unknown additive entries are
+  drained without retention but still count toward per-entry and aggregate
+  expanded-byte limits.
+- Open metadata, templates, and DuckDB while the corpus is still hidden under a
+  staging name. Rename is the final publication step; any prior failure removes
+  staging and cannot change the existing corpus set.
+
+Contributor checklist: changing package layout? bump `format_version` / `min_reader_version`, add fixture test, update this section.
