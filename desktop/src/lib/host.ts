@@ -1461,6 +1461,13 @@ export async function hostGetAmbientRecallEnabled(): Promise<boolean | null> {
 
 export type LogCorpusStatsDto = {
   files: number;
+  discoveredFiles: number;
+  excludedFiles: number;
+  failedFiles: number;
+  ignoredFiles: number;
+  exclusionCounts: Record<string, number>;
+  exclusionExamples: string[];
+  partial: boolean;
   lines: number;
   templates: number;
   reductionRatio: number;
@@ -1499,6 +1506,13 @@ export type LogIngestReportDto = {
   reductionRatio: number;
   embedded: number;
   files: number;
+  discoveredFiles: number;
+  excludedFiles: number;
+  failedFiles: number;
+  ignoredFiles: number;
+  exclusionCounts: Record<string, number>;
+  exclusionExamples: string[];
+  partial: boolean;
   sourceBytes: number;
   corpusBytes: number;
   levelCounts: Record<string, number>;

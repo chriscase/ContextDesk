@@ -9,6 +9,13 @@ export type StatsLike = {
   reductionRatio: number;
   embedded?: number;
   files?: number;
+  discoveredFiles?: number;
+  excludedFiles?: number;
+  failedFiles?: number;
+  ignoredFiles?: number;
+  exclusionCounts?: Record<string, number>;
+  exclusionExamples?: string[];
+  partial?: boolean;
   sourceBytes?: number;
   corpusBytes?: number;
   levelCounts?: Record<string, number>;
@@ -36,7 +43,21 @@ export function formatReduction(ratio: number | undefined | null): string {
 /** One-line blurb for composer seed / cards. */
 export function statsBlurb(s: StatsLike): string {
   const red = formatReduction(s.reductionRatio);
-  return `${s.lines.toLocaleString()} lines → ${s.templates.toLocaleString()} templates (${red} reduction)`;
+  const base = `${s.lines.toLocaleString()} lines → ${s.templates.toLocaleString()} templates (${red} reduction)`;
+  const discovered = s.discoveredFiles ?? s.files;
+  const fileSummary =
+    discovered == null || s.files == null
+      ? ""
+      : ` · ${s.files.toLocaleString()}/${discovered.toLocaleString()} files imported`;
+  const omissions = [
+    ["excluded", s.excludedFiles ?? 0],
+    ["failed", s.failedFiles ?? 0],
+    ["ignored", s.ignoredFiles ?? 0],
+  ]
+    .filter(([, count]) => Number(count) > 0)
+    .map(([label, count]) => `${Number(count).toLocaleString()} ${label}`)
+    .join(", ");
+  return `${base}${fileSummary}${omissions ? ` · partial: ${omissions}` : ""}`;
 }
 
 export function levelEntries(

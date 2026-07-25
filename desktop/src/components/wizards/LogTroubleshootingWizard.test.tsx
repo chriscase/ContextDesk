@@ -48,6 +48,13 @@ const richReport: LogIngestReportDto = {
   reductionRatio: 100,
   embedded: 8,
   files: 3,
+  discoveredFiles: 3,
+  excludedFiles: 0,
+  failedFiles: 0,
+  ignoredFiles: 0,
+  exclusionCounts: {},
+  exclusionExamples: [],
+  partial: false,
   sourceBytes: 2_048,
   corpusBytes: 1_024,
   levelCounts: { error: 20, warn: 5, info: 1_175 },
@@ -126,7 +133,7 @@ function expectRichStatsHero() {
   expect(within(hero).getByText("1,200")).toBeTruthy();
   expect(within(hero).getByText("12")).toBeTruthy();
   expect(within(hero).getByText("100.0×")).toBeTruthy();
-  expect(within(hero).getByText("3")).toBeTruthy();
+  expect(within(hero).getAllByText("3")).toHaveLength(2);
   expect(within(hero).getByText("2.0 KB")).toBeTruthy();
   expect(within(hero).getByText("1.0 KB")).toBeTruthy();
   expect(within(hero).getByText("8")).toBeTruthy();
@@ -186,6 +193,46 @@ describe("LogTroubleshootingWizard product path", () => {
     );
   });
 
+  it("renders an honest partial-ingest result with bounded exclusion reasons", async () => {
+    hostMocks.ingestPath.mockResolvedValue({
+      ...richReport,
+      files: 1,
+      discoveredFiles: 5,
+      excludedFiles: 2,
+      failedFiles: 1,
+      ignoredFiles: 1,
+      exclusionCounts: {
+        binary: 1,
+        too_large: 1,
+        open_failed: 1,
+        hidden: 1,
+      },
+      exclusionExamples: [
+        "binary: binary.log",
+        "too_large: oversized.log",
+        "open_failed: unreadable.log",
+        "hidden: .ignored.log",
+      ],
+      partial: true,
+    } satisfies LogIngestReportDto);
+    renderWizard();
+
+    await reachConfirmationForRaw();
+    await acceptSoftWriteAndWaitForRun(hostMocks.ingestPath);
+
+    const hero = await screen.findByTestId("wizard-ingest-stats");
+    expect(hero.textContent).toContain("1/5 files imported");
+    expect(hero.textContent).toContain(
+      "partial: 2 excluded, 1 failed, 1 ignored",
+    );
+    const partial = within(hero).getByTestId("ingest-partial");
+    expect(partial.textContent).toContain("not a complete copy");
+    expect(within(partial).getByText("binary: binary.log")).toBeTruthy();
+    expect(within(partial).getByText("too_large: oversized.log")).toBeTruthy();
+    expect(within(partial).getByText("open_failed: unreadable.log")).toBeTruthy();
+    expect(within(partial).getByText("hidden: .ignored.log")).toBeTruthy();
+  });
+
   it("imports a package only after confirmation and renders reloaded persisted stats under the new local id", async () => {
     hostMocks.importPackage.mockResolvedValue({
       corpusId: "local-import-456",
@@ -206,6 +253,13 @@ describe("LogTroubleshootingWizard product path", () => {
         templates: richReport.templates,
         reductionRatio: richReport.reductionRatio,
         embedded: richReport.embedded,
+        discoveredFiles: richReport.discoveredFiles,
+        excludedFiles: richReport.excludedFiles,
+        failedFiles: richReport.failedFiles,
+        ignoredFiles: richReport.ignoredFiles,
+        exclusionCounts: richReport.exclusionCounts,
+        exclusionExamples: richReport.exclusionExamples,
+        partial: richReport.partial,
         sourceBytes: richReport.sourceBytes,
         corpusBytes: richReport.corpusBytes,
         levelCounts: richReport.levelCounts,

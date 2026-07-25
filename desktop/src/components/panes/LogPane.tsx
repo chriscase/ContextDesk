@@ -469,6 +469,26 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <dd>{formatReduction(active.stats.reductionRatio)}</dd>
                         </div>
                         <div>
+                          <dt>Imported files</dt>
+                          <dd>{active.stats.files.toLocaleString()}</dd>
+                        </div>
+                        <div>
+                          <dt>Discovered files</dt>
+                          <dd>{active.stats.discoveredFiles.toLocaleString()}</dd>
+                        </div>
+                        <div>
+                          <dt>Excluded</dt>
+                          <dd>{active.stats.excludedFiles.toLocaleString()}</dd>
+                        </div>
+                        <div>
+                          <dt>Failed</dt>
+                          <dd>{active.stats.failedFiles.toLocaleString()}</dd>
+                        </div>
+                        <div>
+                          <dt>Ignored</dt>
+                          <dd>{active.stats.ignoredFiles.toLocaleString()}</dd>
+                        </div>
+                        <div>
                           <dt>Source</dt>
                           <dd>{formatBytes(active.stats.sourceBytes)}</dd>
                         </div>
@@ -481,6 +501,25 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <dd>{active.stats.embedded.toLocaleString()}</dd>
                         </div>
                       </dl>
+                      {active.stats.partial ? (
+                        <div
+                          className="log-ingest-partial"
+                          role="note"
+                          data-testid="log-ingest-partial"
+                        >
+                          <strong>Partial corpus</strong>
+                          <span>
+                            Some selected content was excluded, ignored, or unreadable.
+                          </span>
+                          {active.stats.exclusionExamples.length > 0 ? (
+                            <ul aria-label="Import exclusions">
+                              {active.stats.exclusionExamples.map((example, index) => (
+                                <li key={`${index}-${example}`}>{example}</li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div className="log-levels">
                         {levelEntries(active.stats.levelCounts).map(({ level, count }) => (
                           <span key={level} className={`chip chip--level chip--${level}`}>

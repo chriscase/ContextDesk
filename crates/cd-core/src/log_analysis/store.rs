@@ -27,8 +27,29 @@ pub const META_VERSION: u32 = 2;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CorpusStats {
-    /// Files read at ingest.
+    /// Files successfully read through EOF and imported.
     pub files: u64,
+    /// File entries discovered before policy/read decisions.
+    #[serde(default)]
+    pub discovered_files: u64,
+    /// Files excluded by an explicit policy guard.
+    #[serde(default)]
+    pub excluded_files: u64,
+    /// Files that could not be opened or completely read.
+    #[serde(default)]
+    pub failed_files: u64,
+    /// Entries intentionally ignored.
+    #[serde(default)]
+    pub ignored_files: u64,
+    /// Counts by stable exclusion/failure reason.
+    #[serde(default)]
+    pub exclusion_counts: std::collections::BTreeMap<String, u64>,
+    /// Bounded basename-only examples (`reason: basename`).
+    #[serde(default)]
+    pub exclusion_examples: Vec<String>,
+    /// True when discovered content was not fully imported.
+    #[serde(default)]
+    pub partial: bool,
     /// Lines parsed.
     pub lines: u64,
     /// Distinct templates.

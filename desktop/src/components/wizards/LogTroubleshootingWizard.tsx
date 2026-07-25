@@ -146,6 +146,13 @@ export function LogTroubleshootingWizard({
               reductionRatio: summary.stats.reductionRatio,
               embedded: summary.stats.embedded,
               files: summary.stats.files,
+              discoveredFiles: summary.stats.discoveredFiles,
+              excludedFiles: summary.stats.excludedFiles,
+              failedFiles: summary.stats.failedFiles,
+              ignoredFiles: summary.stats.ignoredFiles,
+              exclusionCounts: summary.stats.exclusionCounts ?? {},
+              exclusionExamples: summary.stats.exclusionExamples ?? [],
+              partial: summary.stats.partial,
               sourceBytes: summary.stats.sourceBytes,
               corpusBytes: summary.stats.corpusBytes,
               levelCounts: summary.stats.levelCounts ?? {},
@@ -514,8 +521,24 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
           <dd>{formatReduction(report.reductionRatio)}</dd>
         </div>
         <div>
-          <dt>Files</dt>
+          <dt>Imported files</dt>
           <dd>{report.files?.toLocaleString?.() ?? report.files ?? "—"}</dd>
+        </div>
+        <div>
+          <dt>Discovered files</dt>
+          <dd>{report.discoveredFiles.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Excluded</dt>
+          <dd>{report.excludedFiles.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Failed</dt>
+          <dd>{report.failedFiles.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Ignored</dt>
+          <dd>{report.ignoredFiles.toLocaleString()}</dd>
         </div>
         <div>
           <dt>Source size</dt>
@@ -530,6 +553,22 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
           <dd>{report.embedded?.toLocaleString?.() ?? report.embedded ?? "—"}</dd>
         </div>
       </dl>
+      {report.partial ? (
+        <div className="wizard-stats__partial" role="note" data-testid="ingest-partial">
+          <strong>Partial corpus</strong>
+          <span>
+            Some discovered content was excluded, ignored, or unreadable. The corpus is
+            usable but is not a complete copy of the selected source.
+          </span>
+          {report.exclusionExamples.length > 0 ? (
+            <ul aria-label="Import exclusions">
+              {report.exclusionExamples.map((example, index) => (
+                <li key={`${index}-${example}`}>{example}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
       {levels.length > 0 ? (
         <div className="wizard-stats__levels" aria-label="Level mix">
           {levels.map(({ level, count }) => (
