@@ -15,6 +15,7 @@ use crate::process_progress::{
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Stats from one ingest run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -182,6 +183,78 @@ pub const PROGRESS_EVERY_LINES: u64 = 2_000;
 
 /// Max templates to embed on bulk SoftWrite when embed is enabled (cap).
 pub const BULK_EMBED_TEMPLATE_CAP: usize = 256;
+
+/// Hidden, same-filesystem cache used until a new corpus is fully validated.
+///
+/// The final `log_corpora/{id}` path does not exist until [`Self::publish`].
+/// Dropping this guard after any error or cancellation removes the complete
+/// per-run staging tree.
+struct IngestStaging {
+    parent: PathBuf,
+    root: PathBuf,
+}
+
+impl IngestStaging {
+    fn new(cache_root: &Path) -> CoreResult<Self> {
+        let parent = cache_root.join(".log_ingest_staging");
+        std::fs::create_dir_all(&parent)?;
+        let root = parent.join(Uuid::now_v7().to_string());
+        std::fs::create_dir(&root)?;
+        Ok(Self { parent, root })
+    }
+
+    fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
+    fn publish(&mut self, cache_root: &Path, corpus_id: &str) -> CoreResult<()> {
+        let source = self.root.join("log_corpora").join(corpus_id);
+        let corpora_root = cache_root.join("log_corpora");
+        let destination = corpora_root.join(corpus_id);
+        if destination.exists() {
+            return Err(CoreError::Message(format!(
+                "refusing to replace existing log corpus {corpus_id}"
+            )));
+        }
+        std::fs::create_dir_all(&corpora_root)?;
+        std::fs::rename(&source, &destination)
+            .map_err(|e| CoreError::Message(format!("publish log corpus: {e}")))?;
+        self.cleanup();
+        Ok(())
+    }
+
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+        // Concurrent ingests may still own sibling directories.
+        let _ = std::fs::remove_dir(&self.parent);
+    }
+}
+
+impl Drop for IngestStaging {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestCheckpoint {
+    CorpusCreated,
+    EventsStored,
+    BeforeTemplates,
+    DuringEmbedding,
+    BeforeSummary,
+    BeforeValidation,
+    BeforePublish,
+}
+
+type IngestFaultHook<'a> = Option<&'a dyn Fn(IngestCheckpoint) -> CoreResult<()>>;
+
+fn check_ingest_fault(hook: IngestFaultHook<'_>, checkpoint: IngestCheckpoint) -> CoreResult<()> {
+    match hook {
+        Some(hook) => hook(checkpoint),
+        None => Ok(()),
+    }
+}
 
 fn is_zip_file(path: &Path) -> bool {
     path.is_file()
@@ -491,11 +564,32 @@ fn ingest_path_inner(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
-    let _ = embed_model;
+    ingest_path_inner_with_fault(
+        cache_root,
+        path,
+        name,
+        embed,
+        embed_model,
+        progress,
+        cancel,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_path_inner_with_fault(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    fault: IngestFaultHook<'_>,
+) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
 
-    // Starting + cancel **before** any zip work so multi-GB extracts are not forced.
     emit(
         progress,
         ProcessProgress::phase(
@@ -531,7 +625,61 @@ fn ingest_path_inner(
         .with_fraction(0.05),
     );
 
+    let mut staging = IngestStaging::new(cache_root)?;
+    let report = ingest_path_into_cache(
+        staging.cache_root(),
+        path,
+        name,
+        embed,
+        embed_model,
+        progress,
+        cancel,
+        fault,
+    )?;
+
+    check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
+    validate_staged_ingest(staging.cache_root(), &report)?;
+    check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+    staging.publish(cache_root, &report.corpus_id)?;
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Completed,
+            format!(
+                "ingested {} lines → {} templates ({:.1}× reduction)",
+                report.stats.lines, report.stats.templates, report.stats.reduction_ratio
+            ),
+            false,
+        )
+        .with_fraction(1.0)
+        .with_lines(report.stats.lines)
+        .with_files(report.stats.files as u64)
+        .with_bytes(report.stats.corpus_bytes)
+        .with_templates(report.stats.templates as u64),
+    );
+
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_path_into_cache(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    fault: IngestFaultHook<'_>,
+) -> CoreResult<IngestReport> {
+    let _ = embed_model;
+    let kind = ProcessProgressKind::LogIngest;
+    let source_label = progress_basename(path);
+
     let corpus = LogCorpus::create(cache_root, name)?;
+    check_ingest_fault(fault, IngestCheckpoint::CorpusCreated)?;
     let mut miner = DrainMiner::default();
     let mut stats = IngestStats::default();
     let mut seq = 0u64;
@@ -702,6 +850,7 @@ fn ingest_path_inner(
         );
         corpus.push_events(&batch)?;
     }
+    check_ingest_fault(fault, IngestCheckpoint::EventsStored)?;
 
     if cancelled(cancel) {
         emit(
@@ -718,6 +867,7 @@ fn ingest_path_inner(
     }
 
     // Persist templates
+    check_ingest_fault(fault, IngestCheckpoint::BeforeTemplates)?;
     emit(
         progress,
         ProcessProgress::phase(
@@ -744,6 +894,7 @@ fn ingest_path_inner(
     // through a full multi-k embed pass (semantic can be filled later).
     let mut embedded = 0usize;
     if let Some(backend) = embed {
+        check_ingest_fault(fault, IngestCheckpoint::DuringEmbedding)?;
         let mut templates = corpus.list_templates();
         templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
         let cap = BULK_EMBED_TEMPLATE_CAP.min(templates.len());
@@ -764,7 +915,18 @@ fn ingest_path_inner(
             std::collections::HashMap::new();
         for (i, row) in to_embed.into_iter().enumerate() {
             if cancelled(cancel) {
-                break;
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Cancelled,
+                        "ingest cancelled during template embedding",
+                        false,
+                    )
+                    .with_lines(stats.lines)
+                    .with_templates(embedded as u64),
+                );
+                return Err(CoreError::Message("ingest cancelled".into()));
             }
             if let Some(v) = hash_cache.get(&row.content_hash) {
                 corpus.set_template_vector(row.info.template_id, v.clone())?;
@@ -817,6 +979,7 @@ fn ingest_path_inner(
 
     corpus.flush()?;
     stats.corpus_bytes = corpus.corpus_bytes_on_disk();
+    check_ingest_fault(fault, IngestCheckpoint::BeforeSummary)?;
 
     let top_snap: Vec<TopTemplateSnapshot> = top
         .iter()
@@ -833,29 +996,39 @@ fn ingest_path_inner(
         top_snap,
     )?;
 
-    emit(
-        progress,
-        ProcessProgress::phase(
-            kind,
-            ProcessProgressPhase::Completed,
-            format!(
-                "ingested {} lines → {} templates ({:.1}× reduction)",
-                stats.lines, stats.templates, stats.reduction_ratio
-            ),
-            false,
-        )
-        .with_fraction(1.0)
-        .with_lines(stats.lines)
-        .with_files(files_done)
-        .with_bytes(stats.corpus_bytes)
-        .with_templates(stats.templates as u64),
-    );
-
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
         top_templates: top,
     })
+}
+
+fn validate_staged_ingest(staging_cache_root: &Path, report: &IngestReport) -> CoreResult<()> {
+    // Open only after the writer handle from `ingest_path_into_cache` has been
+    // dropped. This catches malformed metadata/templates/DuckDB while the
+    // corpus is still hidden and keeps rename compatible with Windows.
+    let opened = LogCorpus::open(staging_cache_root, &report.corpus_id)?;
+    let meta = opened.meta()?;
+    if meta.id != report.corpus_id {
+        return Err(CoreError::Message(
+            "staged corpus metadata id mismatch".into(),
+        ));
+    }
+    let Some(persisted) = meta.stats else {
+        return Err(CoreError::Message(
+            "staged corpus missing completed ingest stats".into(),
+        ));
+    };
+    if persisted.lines != report.stats.lines
+        || persisted.templates != report.stats.templates as u64
+        || opened.event_count() as u64 != report.stats.lines
+        || opened.template_count() != report.stats.templates
+    {
+        return Err(CoreError::Message(
+            "staged corpus validation counts do not match ingest report".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn collect_log_files(path: &Path) -> CoreResult<Vec<PathBuf>> {
@@ -895,6 +1068,36 @@ mod tests {
     use crate::embed::ConceptEmbedBackend;
     use crate::process_progress::{CancelFlag, ProcessProgressPhase, RecordingProcessProgress};
     use std::io::Write;
+
+    fn cache_tree_paths(root: &Path) -> Vec<PathBuf> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_path_buf());
+                }
+                if path.is_dir() {
+                    walk(root, &path, out);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn assert_no_ingest_staging(cache_root: &Path) {
+        assert!(
+            !cache_root.join(".log_ingest_staging").exists(),
+            "ingest staging survived: {:?}",
+            cache_tree_paths(cache_root)
+        );
+    }
 
     #[test]
     fn ingest_fixture_multi_format_with_reduction() {
@@ -1068,6 +1271,106 @@ mod tests {
             "expected zip stream progress: {:?}",
             updates.iter().map(|u| &u.message).collect::<Vec<_>>()
         );
+        drop(updates);
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
+    }
+
+    #[test]
+    fn ingest_failure_checkpoints_preserve_existing_corpus_set_and_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("app.log"),
+            "ts=1700000000 level=error msg=connection refused\n",
+        )
+        .unwrap();
+
+        let baseline = ingest_path(&cache, &logs, "baseline", None, "none").unwrap();
+        let baseline_ids = LogCorpus::list_ids(&cache).unwrap();
+        assert_eq!(baseline_ids, vec![baseline.corpus_id]);
+        let baseline_tree = cache_tree_paths(&cache);
+        let backend = ConceptEmbedBackend::new(16);
+
+        for checkpoint in [
+            IngestCheckpoint::CorpusCreated,
+            IngestCheckpoint::EventsStored,
+            IngestCheckpoint::BeforeTemplates,
+            IngestCheckpoint::DuringEmbedding,
+            IngestCheckpoint::BeforeSummary,
+            IngestCheckpoint::BeforeValidation,
+            IngestCheckpoint::BeforePublish,
+        ] {
+            let hook = |actual| {
+                if actual == checkpoint {
+                    Err(CoreError::Message(format!(
+                        "injected ingest failure at {checkpoint:?}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            };
+            let err = ingest_path_inner_with_fault(
+                &cache,
+                &logs,
+                "must-not-publish",
+                Some(&backend),
+                "concept",
+                &NoopProcessProgress,
+                None,
+                Some(&hook),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err}").contains("injected ingest failure"),
+                "{checkpoint:?}: {err}"
+            );
+            assert_eq!(
+                LogCorpus::list_ids(&cache).unwrap(),
+                baseline_ids,
+                "published a failed corpus at {checkpoint:?}"
+            );
+            assert_no_ingest_staging(&cache);
+            assert_eq!(
+                cache_tree_paths(&cache),
+                baseline_tree,
+                "cache tree changed at {checkpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_zip_failure_leaves_no_partial_corpus_or_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let zip_path = dir.path().join("broken.zip");
+        std::fs::write(&zip_path, b"not a zip archive").unwrap();
+
+        let err = ingest_path(&cache, &zip_path, "broken", None, "none").unwrap_err();
+        assert!(format!("{err}").contains("zip open"), "{err}");
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
+    fn successful_ingest_publishes_one_validated_corpus_and_no_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log"), "error connection refused\n").unwrap();
+
+        let report = ingest_path(&cache, &logs, "published", None, "none").unwrap();
+        assert_eq!(
+            LogCorpus::list_ids(&cache).unwrap(),
+            vec![report.corpus_id.clone()]
+        );
+        let reopened = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(reopened.event_count() as u64, report.stats.lines);
+        assert_eq!(reopened.template_count(), report.stats.templates);
+        assert_no_ingest_staging(&cache);
     }
 
     #[test]
@@ -1174,6 +1477,8 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err}").contains("cancelled"), "{err}");
         assert!(recorder.phases().contains(&ProcessProgressPhase::Cancelled));
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
     }
 
     #[test]
@@ -1246,6 +1551,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("cancelled"), "{err}");
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
     }
 
     #[test]
