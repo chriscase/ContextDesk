@@ -182,13 +182,12 @@ export function LogTroubleshootingWizard({
         }
       }
       setRunDone(true);
-      setStepIndex((i) => Math.min(i + 1, wizard.steps.length - 1));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [corpusName, mode, path, sessionId, sourceKind, wizard.steps.length]);
+  }, [corpusName, mode, path, sessionId, sourceKind]);
 
   const onContinue = async () => {
     setError(null);
