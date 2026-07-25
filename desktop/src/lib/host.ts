@@ -1650,6 +1650,17 @@ export async function hostGetActiveLogCorpus(): Promise<string | null> {
   return invoke<string | null>("get_active_log_corpus");
 }
 
+/**
+ * Push capped Log Explorer viewport brief into the host so agent turns
+ * receive optimized view context (filters/lanes/selection — not dump paste).
+ */
+export async function hostSetLogViewContext(
+  brief: string | null,
+): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("set_log_view_context", { brief });
+}
+
 export async function hostGetLogCorpus(
   corpusId: string,
 ): Promise<LogCorpusSummaryDto | null> {

@@ -1900,6 +1900,46 @@ mod tests {
     }
 
     #[test]
+    fn linked_corpus_set_list_and_reopen() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut linked = Session::new("On logs");
+        linked.id = "linked1".into();
+        linked.set_linked_corpus_id(Some("corpus-abc".into()));
+        linked.messages.push(StoredMessage {
+            id: "1".into(),
+            role: "user".into(),
+            content: "what failed?".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&linked).unwrap();
+
+        let mut other = Session::new("Unrelated");
+        other.id = "other1".into();
+        other.set_linked_corpus_id(Some("corpus-other".into()));
+        store.save(&other).unwrap();
+
+        let mut none = Session::new("No link");
+        none.id = "none1".into();
+        store.save(&none).unwrap();
+
+        let for_abc = store.list_meta_for_corpus("corpus-abc").unwrap();
+        assert_eq!(for_abc.len(), 1, "{for_abc:?}");
+        assert_eq!(for_abc[0].id, "linked1");
+        assert_eq!(for_abc[0].linked_corpus_id.as_deref(), Some("corpus-abc"));
+
+        // Reopen and clear
+        let mut reopened = store.load("linked1").unwrap();
+        assert_eq!(reopened.linked_corpus_id.as_deref(), Some("corpus-abc"));
+        reopened.set_linked_corpus_id(None);
+        store.save(&reopened).unwrap();
+        assert!(store.list_meta_for_corpus("corpus-abc").unwrap().is_empty());
+    }
+
+    #[test]
     fn list_meta_sorted_and_delete() {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path());

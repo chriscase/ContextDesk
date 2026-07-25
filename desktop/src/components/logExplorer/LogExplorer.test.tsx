@@ -12,8 +12,10 @@ vi.mock("../../lib/host", () => ({
     createdAt: 0,
   })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
+  hostSetLogViewContext: vi.fn(async () => {}),
   hostLogListBookmarks: vi.fn(async () => []),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
+  hostLoadChatSession: vi.fn(async () => null),
   hostLogFacets: vi.fn(async () => ({
     sources: { "api.log": 5, "worker.log": 5 },
     levels: { error: 3, info: 7 },
@@ -57,6 +59,7 @@ vi.mock("../../lib/host", () => ({
   hostLogDeleteBookmark: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
+  agentTurn: vi.fn(async () => []),
 }));
 
 describe("LogExplorer shell", () => {
@@ -64,17 +67,22 @@ describe("LogExplorer shell", () => {
     vi.clearAllMocks();
   });
 
-  it("renders filters, lanes, chat column, and library-free shell", async () => {
+  it("renders filters, lanes, chat column, splitters, virtualized rows", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
     expect(root).toBeTruthy();
+    expect(root.getAttribute("data-resizable")).toBe("true");
     expect(screen.getByTestId("log-explorer-filters")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-lanes")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat")).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-chat-composer")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-bookmarks")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-view-context")).toBeTruthy();
-    // Events load
+    // Events load via virtualized list
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    const vlist = screen.getAllByTestId("virtualized-event-list")[0]!;
+    expect(vlist.getAttribute("data-virtualized")).toBe("true");
     expect(root.getAttribute("data-lane-count")).toBe("1");
   });
 });
