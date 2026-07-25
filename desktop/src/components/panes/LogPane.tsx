@@ -13,6 +13,7 @@ import {
   hostLogClusterProblems,
   hostLogSearch,
   hostLogTimeline,
+  hostOpenLogExplorer,
   hostSetActiveLogCorpus,
   type LogClusterDto,
   type LogCorpusSummaryDto,
@@ -270,6 +271,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
             onClick={() => void onExportPackage()}
           >
             Export package…
+          </button>
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={busy || !activeId}
+            data-testid="open-log-explorer"
+            onClick={() => {
+              if (!activeId) return;
+              void hostOpenLogExplorer(activeId)
+                .then(() => setNote("Opened Log Explorer window"))
+                .catch((e) => setError(String(e)));
+            }}
+          >
+            Open Explorer…
           </button>
           {onOpenHelp ? (
             <button

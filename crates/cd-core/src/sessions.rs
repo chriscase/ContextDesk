@@ -37,6 +37,9 @@ pub struct SessionMeta {
     pub message_count: usize,
     /// Short preview for list rows.
     pub preview: String,
+    /// Linked log corpus id when set (#480).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_corpus_id: Option<String>,
 }
 
 /// Scored search hit for the chat archive.
@@ -100,6 +103,10 @@ pub struct Session {
     /// Pinned skill id for this chat (#343) — injected each turn until cleared.
     #[serde(default)]
     pub pinned_skill_id: Option<String>,
+    /// Optional log analysis corpus this chat is linked to (#480 / Log Explorer).
+    /// Any chat may set this; explorer lists sessions by this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_corpus_id: Option<String>,
 }
 
 fn default_keep_last() -> usize {
@@ -533,6 +540,7 @@ impl Session {
             provider_profile_id: None,
             last_read_message_id: None,
             pinned_skill_id: None,
+            linked_corpus_id: None,
         }
     }
 
@@ -642,7 +650,14 @@ impl Session {
             trashed_at: self.trashed_at,
             message_count: self.messages.len(),
             preview: self.preview(),
+            linked_corpus_id: self.linked_corpus_id.clone(),
         }
+    }
+
+    /// Link this session to a log analysis corpus (any chat may link — #480).
+    pub fn set_linked_corpus_id(&mut self, corpus_id: Option<String>) {
+        self.linked_corpus_id = corpus_id.filter(|s| !s.trim().is_empty());
+        self.touch();
     }
 
     /// Move to trash (soft-delete). Clears pin.
@@ -882,6 +897,27 @@ impl SessionStore {
     /// List session metadata, newest `updated_at` first (pinned first among ties).
     pub fn list_meta(&self) -> CoreResult<Vec<SessionMeta>> {
         let mut sessions = self.load_all()?;
+        sessions.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+        Ok(sessions.iter().map(Session::meta).collect())
+    }
+
+    /// Sessions linked to a log corpus (any chat may link — Log Explorer #480).
+    ///
+    /// Excludes trashed by default.
+    pub fn list_meta_for_corpus(&self, corpus_id: &str) -> CoreResult<Vec<SessionMeta>> {
+        let id = corpus_id.trim();
+        if id.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut sessions: Vec<Session> = self
+            .load_all()?
+            .into_iter()
+            .filter(|s| !s.trashed && s.linked_corpus_id.as_deref() == Some(id))
+            .collect();
         sessions.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)

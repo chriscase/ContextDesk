@@ -52,6 +52,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Log event store (DuckDB) | Shipped | crates/cd-core/src/log_analysis/store.rs:EVENT_ENGINE | #358 |
 | Log why-tools (correlate/anomalies/trace) | Shipped | crates/cd-core/src/log_analysis/why.rs:correlate | #363 |
 | Log desktop surface | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #362 |
+| Log Investigation Workspace (explorer) | Shipped | desktop/src/components/logExplorer/LogExplorer.tsx:LogExplorer | #480–#487 |
+| Log explorer query API (paged/facets/search) | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #482 |
+| Log explorer bookmarks + log_nav | Shipped | crates/cd-core/src/log_analysis/bookmarks.rs:list_bookmarks | #481 #485 |
 | Log template embed (local ONNX default) | Shipped | crates/cd-core/src/embed.rs:default_log_embed_backend | #359 |
 | Process progress (log ingest + session import) | Shipped | crates/cd-core/src/process_progress.rs:ProcessProgress | #445 #442 |
 | Session process wizard shell | Shipped | desktop/src/components/wizards/SessionWizardShell.tsx:SessionWizardShell | #444 #442 |
