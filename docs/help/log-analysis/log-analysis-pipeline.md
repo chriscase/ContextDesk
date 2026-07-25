@@ -15,6 +15,7 @@ related:
   - permission-tiers
   - memory-overview
   - log-portable-package
+  - log-explorer
 ---
 # How log analysis works
 
@@ -70,13 +71,21 @@ The `log-triage` skill can provide this method to a chat; see
 help://skills-context-packs. A skill does not bypass corpus ingest confirmation
 or any later write.
 
+## Investigation workspace
+
+After SoftWrite ingest, open **Log Explorer** from the Logs library for
+filters, multi-lane evidence, bookmarks, and corpus-linked chat. See
+help://log-explorer. SoftWrite bulk import streams zip/lines and can be
+cancelled; template embedding is deferred/capped so large dumps finish SoftWrite
+without a mandatory full embed pass.
+
 ## Current limits
 
 This is batch, post-mortem analysis. Live tailing, continuous alerts, and
 remote S3/Loki/Elastic/Kubernetes log-source connectors are not shipped in this
 pipeline. A cloud embedding option, when used, requires an explicit
-content-leaves-this-machine decision; the local template embedder is the
-normal desktop path.
+content-leaves-this-machine decision; bulk SoftWrite defaults to no embed.
+Bookmarks are not included in portable package v1.
 
 > Important:
 > Redaction reduces risk but cannot prove that arbitrary logs contain no

@@ -4072,11 +4072,16 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
     }
 }
 
+/// Key used in `AppState.cancels` for SoftWrite log ingest (#498).
+const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
+
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
 /// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
 ///
 /// Runs on a blocking thread pool so the UI event loop is not starved (macOS
-/// "Not Responding" during large zip/dir imports).
+/// "Not Responding" during large zip/dir imports). Bulk SoftWrite **skips
+/// template embed by default** (#502) so import finishes without a full embed
+/// pass; keyword/structured analysis still works.
 #[tauri::command]
 async fn ingest_log_path(
     app: tauri::AppHandle,
@@ -4086,30 +4091,40 @@ async fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    // #359: product path uses policy-enforcing ingest (local default; cloud opt-in
-    // requires explicit confirm args — UI does not pass cloud without confirm).
-    let policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
-    let backend = {
-        let host = state.host.lock().expect("host");
-        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-        host.log_embed_backend()
+    // Bulk SoftWrite: no embed (None mode). User can re-analyze later if needed.
+    let policy = cd_core::log_analysis::LogEmbedPolicy {
+        mode: cd_core::log_analysis::LogEmbedMode::None,
+        cloud_content_leaves_machine: false,
+        cloud_base_url: None,
+        model_id: "none".into(),
     };
     let progress = TauriProcessProgress { app: app.clone() };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.insert(LOG_INGEST_CANCEL_KEY.into(), cancel.inner_arc());
+    }
+    let cancel_for_job = cancel.clone();
     let report = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::ingest_path_with_policy_and_observer(
             &cache,
             std::path::Path::new(&path),
             &name_owned,
             &policy,
-            backend,
+            None, // no embed backend on bulk SoftWrite
             &progress,
-            None,
+            Some(&cancel_for_job),
         )
         .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("ingest task join: {e}"))??;
+    .map_err(|e| format!("ingest task join: {e}"))?;
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(LOG_INGEST_CANCEL_KEY);
+    }
+    let report = report?;
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
     if let Ok(mut host) = state.host.lock() {
@@ -4141,6 +4156,17 @@ async fn ingest_log_path(
             })
             .collect(),
     })
+}
+
+/// Request cancel of an in-flight SoftWrite log ingest (#498).
+#[tauri::command]
+fn cancel_log_ingest(state: State<'_, AppState>) -> Result<bool, String> {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(LOG_INGEST_CANCEL_KEY) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Problem clusters for a corpus.
@@ -5315,6 +5341,7 @@ pub fn run() {
             get_log_corpus,
             list_log_templates,
             ingest_log_path,
+            cancel_log_ingest,
             log_cluster_problems,
             log_timeline,
             log_search,

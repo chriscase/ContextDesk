@@ -300,27 +300,31 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
     let mut page_binds = binds.clone();
 
     if q.sort_by_time {
-        // Composite keyset matching ORDER BY ts, seq.
+        // Composite keyset matching ORDER BY ts, seq. Seq-only under time sort
+        // silently drops multi-file rows — refuse (#504).
+        if q.after_seq.is_some() && q.after_ts.is_none() {
+            return Err(CoreError::Message(
+                "time-sorted query requires after_ts with after_seq (composite keyset); \
+                 seq-only cursor is refused to prevent silent row drops"
+                    .into(),
+            ));
+        }
+        if q.before_seq.is_some() && q.before_ts.is_none() {
+            return Err(CoreError::Message(
+                "time-sorted query requires before_ts with before_seq (composite keyset)".into(),
+            ));
+        }
         if let (Some(ats), Some(aseq)) = (q.after_ts, q.after_seq) {
             page_where.push_str(" AND (ts > ? OR (ts = ? AND seq > ?))");
             page_binds.push(Value::BigInt(ats));
             page_binds.push(Value::BigInt(ats));
             page_binds.push(Value::BigInt(aseq as i64));
-        } else if let Some(after) = q.after_seq {
-            // Legacy: seq-only cursor without after_ts is unsafe for time sort —
-            // treat as seq-only keyset under time order (best-effort) but prefer
-            // callers always send after_ts from next_ts.
-            page_where.push_str(" AND seq > ?");
-            page_binds.push(Value::BigInt(after as i64));
         }
         if let (Some(bts), Some(bseq)) = (q.before_ts, q.before_seq) {
             page_where.push_str(" AND (ts < ? OR (ts = ? AND seq < ?))");
             page_binds.push(Value::BigInt(bts));
             page_binds.push(Value::BigInt(bts));
             page_binds.push(Value::BigInt(bseq as i64));
-        } else if let Some(before) = q.before_seq {
-            page_where.push_str(" AND seq < ?");
-            page_binds.push(Value::BigInt(before as i64));
         }
     } else {
         if let Some(after) = q.after_seq {
@@ -793,6 +797,78 @@ mod tests {
         .unwrap();
         assert!(!api_only.events.is_empty());
         assert!(api_only.events.iter().all(|e| e.source.contains("api")));
+    }
+
+    #[test]
+    fn multi_source_lane_filter_pages_complete() {
+        // Each "lane" is a source-group filter; page each to end under time sort.
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        for src in ["api.log", "worker.log"] {
+            let mut seen = std::collections::HashSet::new();
+            let mut after_seq = None;
+            let mut after_ts = None;
+            let mut total;
+            loop {
+                let page = query_events(
+                    &corpus,
+                    &EventQuery {
+                        sources: vec![src.into()],
+                        limit: 7,
+                        sort_by_time: true,
+                        after_seq,
+                        after_ts,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                total = page.total_matched;
+                for e in &page.events {
+                    assert!(
+                        e.source.contains(src.trim_end_matches(".log"))
+                            || e.source == src
+                            || e.source.ends_with(src),
+                        "source filter leak: {}",
+                        e.source
+                    );
+                    assert!(seen.insert(e.seq), "dup seq {}", e.seq);
+                }
+                if page.next_cursor.is_none() {
+                    break;
+                }
+                after_seq = page.next_cursor;
+                after_ts = page.next_ts;
+            }
+            assert_eq!(
+                seen.len() as u64,
+                total,
+                "lane {src}: paged union must match total_matched"
+            );
+            assert!(total > 0, "lane {src} empty");
+        }
+    }
+
+    #[test]
+    fn time_sort_refuses_seq_only_cursor() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let err = query_events(
+            &corpus,
+            &EventQuery {
+                sort_by_time: true,
+                after_seq: Some(1),
+                after_ts: None,
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("after_ts"),
+            "must refuse seq-only under time sort: {err}"
+        );
     }
 
     /// Multi-file late-ts-first ingest: seq order ≠ wall time. Time-sorted

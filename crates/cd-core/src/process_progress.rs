@@ -206,6 +206,11 @@ impl CancelFlag {
     pub fn is_cancelled(&self) -> bool {
         self.inner.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    /// Shared atomic for host maps that already store `Arc<AtomicBool>`.
+    pub fn inner_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.inner.clone()
+    }
 }
 
 /// Basename-only display for progress messages (never full home paths).

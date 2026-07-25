@@ -1560,6 +1560,12 @@ export async function hostIngestLogPath(
   return invoke<LogIngestReportDto>("ingest_log_path", { path, name: name ?? null });
 }
 
+/** Request cancel of SoftWrite log ingest (#498). */
+export async function hostCancelLogIngest(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_log_ingest");
+}
+
 /** Multi-phase process progress (#445) — redacted; no full home paths. */
 export type ProcessProgressDto = {
   kind: "log_ingest" | "session_context_import";

@@ -173,8 +173,20 @@ fn emit(progress: &dyn ProcessProgressObserver, update: ProcessProgress) {
     progress.progress(update);
 }
 
+/// Soft max size per log member before skip (bytes). Overridable via env later.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Emit parse progress every N lines so one huge file still advances UI.
+pub const PROGRESS_EVERY_LINES: u64 = 2_000;
+
+/// Max templates to embed on bulk SoftWrite when embed is enabled (cap).
+pub const BULK_EMBED_TEMPLATE_CAP: usize = 256;
+
 /// If `path` is a `.zip` file, extract into a temp dir and return that path.
-/// Caller must keep the TempDir alive for the duration of ingest.
+///
+/// Opens the zip via **file streaming** (no full-archive `fs::read` into a
+/// single buffer). Entries are extracted one-at-a-time. Caller must keep the
+/// TempDir alive for the duration of ingest.
 fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::TempDir>)> {
     let is_zip = path.is_file()
         && path
@@ -185,16 +197,16 @@ fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::Te
     if !is_zip {
         return Ok((path.to_path_buf(), None));
     }
-    let data = std::fs::read(path).map_err(|e| CoreError::Message(format!("read zip: {e}")))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open zip: {e}")))?;
     let tmp = tempfile::tempdir().map_err(|e| CoreError::Message(format!("tempdir: {e}")))?;
-    let cursor = std::io::Cursor::new(data);
     let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+        zip::ZipArchive::new(file).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
     for i in 0..archive.len() {
-        let mut file = archive
+        let mut entry = archive
             .by_index(i)
             .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
-        let name = file.name().to_string();
+        let name = entry.name().to_string();
         if name.ends_with('/') {
             continue;
         }
@@ -213,10 +225,21 @@ fn expand_zip_if_needed(path: &Path) -> CoreResult<(PathBuf, Option<tempfile::Te
         }
         let mut out =
             std::fs::File::create(&dest).map_err(|e| CoreError::Message(format!("create: {e}")))?;
-        std::io::copy(&mut file, &mut out)
+        std::io::copy(&mut entry, &mut out)
             .map_err(|e| CoreError::Message(format!("extract: {e}")))?;
     }
     Ok((tmp.path().to_path_buf(), Some(tmp)))
+}
+
+/// True if the first chunk of a file looks binary (NUL byte).
+fn looks_binary_file(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    let n = f.read(&mut buf).unwrap_or(0);
+    buf[..n].contains(&0)
 }
 
 fn ingest_path_inner(
@@ -308,6 +331,8 @@ fn ingest_path_inner(
         .with_files(file_count),
     );
 
+    use std::io::{BufRead, BufReader};
+
     for file in &files {
         if cancelled(cancel) {
             emit(
@@ -321,30 +346,78 @@ fn ingest_path_inner(
                 .with_lines(stats.lines)
                 .with_files(files_done),
             );
-            // Best-effort discard: drop corpus dir if API allows — LogCorpus has no delete;
-            // leave disposable cache entry; UI notes cancel.
             return Err(CoreError::Message("ingest cancelled".into()));
         }
 
         let file_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        // Soft guard: skip oversized members (do not allocate them).
+        if file_bytes > DEFAULT_MAX_FILE_BYTES {
+            files_done += 1;
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Parse,
+                    format!(
+                        "skipped oversized {} ({} bytes > {} cap)",
+                        progress_basename(file),
+                        file_bytes,
+                        DEFAULT_MAX_FILE_BYTES
+                    ),
+                    true,
+                )
+                .with_fraction(0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32))
+                .with_lines(stats.lines)
+                .with_files(files_done),
+            );
+            continue;
+        }
+        if looks_binary_file(file) {
+            files_done += 1;
+            continue;
+        }
+
         stats.source_bytes = stats.source_bytes.saturating_add(file_bytes);
-        let text = std::fs::read_to_string(file).unwrap_or_default();
         let rel = file
             .strip_prefix(path)
             .unwrap_or(file.as_path())
             .to_string_lossy()
             .to_string();
-        // Never put full absolute path in progress — basename only.
-        let _file_base = progress_basename(file);
 
-        for line in text.lines() {
+        // Stream lines — never `read_to_string` the whole member into one String.
+        let Ok(fh) = std::fs::File::open(file) else {
+            files_done += 1;
+            continue;
+        };
+        let reader = BufReader::with_capacity(64 * 1024, fh);
+        let mut lines_in_file = 0u64;
+
+        for line_res in reader.lines() {
+            if cancelled(cancel) {
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Cancelled,
+                        "ingest cancelled during parse",
+                        false,
+                    )
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes),
+                );
+                return Err(CoreError::Message("ingest cancelled".into()));
+            }
+            let Ok(line) = line_res else {
+                continue;
+            };
             if line.trim().is_empty() {
                 continue;
             }
             if format_hint.is_none() {
-                format_hint = Some(detect_format(line, Some(file)));
+                format_hint = Some(detect_format(&line, Some(file)));
             }
-            let parsed = parse_line(line, format_hint, seq);
+            let parsed = parse_line(&line, format_hint, seq);
             let fmt_key = match parsed.format {
                 LogFormat::Json => "json",
                 LogFormat::Logfmt => "logfmt",
@@ -352,7 +425,6 @@ fn ingest_path_inner(
                 LogFormat::Plain => "plain",
             };
             *stats.format_counts.entry(fmt_key.into()).or_insert(0) += 1;
-            // Redact is part of the pipeline; report phase periodically.
             let msg = redact_message(&parsed.message);
             let ts = parsed.ts.unwrap_or(seq as i64);
             stats.ts_min = Some(stats.ts_min.map_or(ts, |m| m.min(ts)));
@@ -375,8 +447,8 @@ fn ingest_path_inner(
             });
             seq += 1;
             stats.lines += 1;
+            lines_in_file += 1;
             if batch.len() >= 256 {
-                // Store phase begins once we flush batches.
                 if files_done == 0 && stats.lines <= 256 {
                     emit(
                         progress,
@@ -388,13 +460,38 @@ fn ingest_path_inner(
                         )
                         .with_fraction(0.45)
                         .with_lines(stats.lines)
-                        .with_files(files_done),
+                        .with_files(files_done)
+                        .with_bytes(stats.source_bytes),
                     );
                 }
                 corpus.push_events(&batch)?;
                 batch.clear();
             }
+            // Line/byte progress so a single huge file still advances the UI.
+            if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
+                let frac =
+                    0.15 + 0.45 * ((files_done as f32 + 0.5) / file_count.max(1) as f32).min(1.0);
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Parse,
+                        format!(
+                            "parsing {} ({} lines so far)",
+                            progress_basename(file),
+                            stats.lines
+                        ),
+                        true,
+                    )
+                    .with_fraction(frac)
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes)
+                    .with_templates(miner.templates().len() as u64),
+                );
+            }
         }
+        let _ = lines_in_file;
         files_done += 1;
         let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
         if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
@@ -409,6 +506,7 @@ fn ingest_path_inner(
                 .with_fraction(frac)
                 .with_lines(stats.lines)
                 .with_files(files_done)
+                .with_bytes(stats.source_bytes)
                 .with_templates(miner.templates().len() as u64),
             );
         }
@@ -480,25 +578,32 @@ fn ingest_path_inner(
     }
     corpus.upsert_templates(rows)?;
 
-    // Embed templates only (#359)
+    // Embed templates only (#359). Cap bulk SoftWrite so import is not forced
+    // through a full multi-k embed pass (semantic can be filled later).
     let mut embedded = 0usize;
     if let Some(backend) = embed {
+        let mut templates = corpus.list_templates();
+        templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
+        let cap = BULK_EMBED_TEMPLATE_CAP.min(templates.len());
+        let to_embed: Vec<_> = templates.into_iter().take(cap).collect();
         emit(
             progress,
             ProcessProgress::phase(
                 kind,
                 ProcessProgressPhase::Embed,
-                "embedding templates",
+                format!("embedding up to {cap} top templates (bulk SoftWrite cap)"),
                 false,
             )
             .with_fraction(0.85)
             .with_templates(corpus.template_count() as u64),
         );
-        let templates = corpus.list_templates();
-        let total_t = templates.len().max(1) as f32;
+        let total_t = to_embed.len().max(1) as f32;
         let mut hash_cache: std::collections::HashMap<String, Vec<f32>> =
             std::collections::HashMap::new();
-        for (i, row) in templates.into_iter().enumerate() {
+        for (i, row) in to_embed.into_iter().enumerate() {
+            if cancelled(cancel) {
+                break;
+            }
             if let Some(v) = hash_cache.get(&row.content_hash) {
                 corpus.set_template_vector(row.info.template_id, v.clone())?;
                 embedded += 1;
@@ -830,5 +935,131 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err}").contains("cancelled"), "{err}");
         assert!(recorder.phases().contains(&ProcessProgressPhase::Cancelled));
+    }
+
+    #[test]
+    fn expand_zip_streams_from_file_not_full_vec() {
+        // Production path: ZipArchive::new(File) — assert production function body
+        // (exclude this tests module so string literals here do not false-positive).
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/log_analysis/ingest.rs");
+        let full = std::fs::read_to_string(&path).expect("read ingest.rs");
+        let prod = full.split("#[cfg(test)]").next().expect("prod section");
+        assert!(
+            prod.contains("File::open(path)"),
+            "expand_zip must File::open zip"
+        );
+        assert!(
+            !prod.contains("Cursor::new(data)"),
+            "expand_zip must not load whole zip into Cursor(Vec)"
+        );
+        assert!(
+            !prod.contains("read_to_string(file)"),
+            "ingest must not read_to_string whole log members"
+        );
+        assert!(
+            prod.contains("BufReader"),
+            "must use BufReader line streaming"
+        );
+    }
+
+    #[test]
+    fn ingest_cancel_mid_stream_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("big.log")).unwrap();
+        for i in 0..50_000 {
+            writeln!(f, "ts={} level=info msg=line {i}", 1_700_000_000 + i).unwrap();
+        }
+        let flag = CancelFlag::new();
+        let flag2 = flag.clone();
+        // Cancel after a short delay from another "thread" simulation: cancel
+        // before call after first check would need async — cancel at start of
+        // second file by pre-cancelling after scanning? Use a custom approach:
+        // cancel immediately after Starting by racing — simplest: cancel mid-way
+        // via a second observer that cancels when lines exceed a threshold.
+        struct CancelAfterN {
+            n: u64,
+            flag: CancelFlag,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelAfterN {
+            fn progress(&self, update: ProcessProgress) {
+                if update.lines_processed.unwrap_or(0) >= self.n {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+        let rec = RecordingProcessProgress::default();
+        let observer = CancelAfterN {
+            n: 4_000,
+            flag: flag2,
+            rec,
+        };
+        let err = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "mid-cancel",
+            None,
+            "none",
+            &observer,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("cancelled"), "{err}");
+    }
+
+    #[test]
+    fn bulk_softwrite_no_embed_when_backend_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("a.log")).unwrap();
+        for i in 0..100 {
+            writeln!(f, "error connection refused {i}").unwrap();
+        }
+        let report = ingest_path(dir.path(), &logs, "no-embed", None, "none").unwrap();
+        assert_eq!(report.stats.embedded, 0);
+        assert!(report.stats.lines >= 100);
+    }
+
+    #[test]
+    fn progress_includes_line_byte_advances_on_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("huge.log")).unwrap();
+        // > PROGRESS_EVERY_LINES so we get mid-file parse updates
+        for i in 0..(PROGRESS_EVERY_LINES as usize * 3 + 10) {
+            writeln!(f, "info line number {i} padding padding").unwrap();
+        }
+        let recorder = RecordingProcessProgress::default();
+        let report = ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "prog-lines",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        assert!(report.stats.lines > PROGRESS_EVERY_LINES);
+        let updates = recorder.updates.lock().unwrap();
+        let with_lines: Vec<_> = updates
+            .iter()
+            .filter(|u| u.lines_processed.unwrap_or(0) >= PROGRESS_EVERY_LINES)
+            .collect();
+        assert!(
+            with_lines.len() >= 2,
+            "expected multiple line-progress updates, got {}",
+            with_lines.len()
+        );
+        assert!(
+            updates.iter().any(|u| u.bytes_processed.unwrap_or(0) > 0),
+            "expected bytes_processed on some updates"
+        );
     }
 }

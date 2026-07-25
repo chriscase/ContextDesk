@@ -24,7 +24,7 @@ describe("Help discovery production wiring (#440)", () => {
     const memory = source("components/panes/MemoryPane.tsx");
     const settings = source("components/SettingsModal.tsx");
     const help = source("lib/help.ts");
-    expect(logs).toContain('onOpenHelp("log-analysis-pipeline")');
+    expect(logs).toContain('onOpenHelp("log-explorer")');
     expect(memory).toContain('onOpenHelp("memory-overview")');
     expect(settings).toContain("helpPageForSettingsSection");
     expect(help).toContain('return "first-run"');
