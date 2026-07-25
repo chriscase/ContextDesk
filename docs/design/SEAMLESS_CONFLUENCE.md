@@ -48,9 +48,12 @@
 | `bad_cql` | 400 with CQL markers | Fix query; try free text or `space = "KEY"` |
 | `network` | transport/timeout/TLS | VPN/DNS/corp CA |
 | `misconfigured` | missing URL/PAT/connector off | Settings → Connectors → Confluence |
-| `other` | fallback | Truncated body + Settings if auth-shaped |
+| `other` | fallback | Status/class only + Settings guidance; remote body is never surfaced |
 
 Stable message prefix: `confluence:{kind}: …` for agents; human sentence after.
+Remote response bodies may be inspected only to classify a failure (for example,
+detecting bad CQL). They are not returned in UI, tool, audit, log, or snapshot
+diagnostics because an upstream server or proxy can reflect credentials.
 
 ## 4. Agent hint contract
 
@@ -65,9 +68,13 @@ No PAT, no base URL secrets. Absent when disabled/unconfigured.
 ## 5. Retry policy
 
 - Keep existing min-interval throttle between Confluence calls.
-- On HTTP 429 or 5xx: retry up to **2** additional attempts with exponential backoff (200ms, 800ms base; jitter optional).
+- On GET HTTP 429 or 500–599: retry up to **2** additional attempts with
+  deterministic backoff (200ms, then 400ms). Do not retry writes or
+  400/401/403/404.
 - Mid-request cancel: not cancellable once HTTP in flight; honest.
-- Surface `confluence:rate_limited: retrying…` then success or final fail.
+- Surface `confluence:rate_limited: …` for 429 and
+  `confluence:transient_server: …` for 5xx, including retry, recovery, or
+  bounded exhaustion, in every Confluence Read tool result.
 
 ## 6. Harvest / write UX
 

@@ -2293,6 +2293,23 @@ impl ToolHost {
         Ok(())
     }
 
+    fn append_confluence_retry_trail(
+        summary: &mut String,
+        raw: &mut String,
+        retry_notes: &[String],
+    ) {
+        if retry_notes.is_empty() {
+            return;
+        }
+        raw.push_str("\n\n");
+        raw.push_str(&retry_notes.join("\n"));
+        if let Some(last) = retry_notes.last() {
+            summary.push_str(" (");
+            summary.push_str(last);
+            summary.push(')');
+        }
+    }
+
     async fn tool_confluence_search(
         &mut self,
         args: &Value,
@@ -2329,7 +2346,8 @@ impl ToolHost {
             format!("text ~ \"{}\"", q.replace('"', "\\\""))
         };
         self.throttle_confluence().await?;
-        let hits = confluence_ro::cql_search(&cfg, &cql, &pat, limit).await?;
+        let response = confluence_ro::cql_search(&cfg, &cql, &pat, limit).await?;
+        let hits = response.value;
         let mut lines = Vec::new();
         let mut first = None;
         for h in &hits {
@@ -2341,7 +2359,7 @@ impl ToolHost {
                 h.id, h.title, h.space, h.excerpt
             ));
         }
-        let raw = if lines.is_empty() {
+        let mut raw = if lines.is_empty() {
             let allow = if cfg.spaces.is_empty() {
                 "no space allowlist (all spaces the PAT can see)".to_string()
             } else {
@@ -2355,12 +2373,9 @@ impl ToolHost {
         } else {
             lines.join("\n")
         };
-        Ok((
-            true,
-            format!("{} Confluence hit(s)", hits.len()),
-            raw,
-            first,
-        ))
+        let mut summary = format!("{} Confluence hit(s)", hits.len());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
+        Ok((true, summary, raw, first))
     }
 
     async fn tool_confluence_get_page(
@@ -2396,10 +2411,11 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let expanded =
+        let response =
             confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, false).await?;
+        let expanded = response.value;
         let cite = Some(format!("confluence:{page_id}"));
-        let raw = match format.as_str() {
+        let mut raw = match format.as_str() {
             "meta" => serde_json::to_string_pretty(&expanded.meta)
                 .unwrap_or_else(|_| format!("{:?}", expanded.meta)),
             "storage" => expanded.storage,
@@ -2408,12 +2424,9 @@ impl ToolHost {
             }
             _ => expanded.plain,
         };
-        Ok((
-            true,
-            format!("fetched confluence page {page_id} ({format})"),
-            raw,
-            cite,
-        ))
+        let mut summary = format!("fetched confluence page {page_id} ({format})");
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
+        Ok((true, summary, raw, cite))
     }
 
     async fn tool_confluence_list_spaces(
@@ -2438,7 +2451,8 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let (spaces, retry_notes) = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
+        let response = confluence_ro::list_spaces(&cfg, &auth, &policy, limit).await?;
+        let spaces = response.value;
         let lines: Vec<String> = spaces
             .iter()
             .map(|s| format!("- {} — {}", s.key, s.name))
@@ -2455,19 +2469,8 @@ impl ToolHost {
                 confluence_ro::CONFLUENCE_SETTINGS_PATH
             )
         };
-        if !retry_notes.is_empty() {
-            raw.push_str("\n\n");
-            raw.push_str(&retry_notes.join("\n"));
-        }
-        let summary = if retry_notes.is_empty() {
-            format!("{} Confluence space(s)", spaces.len())
-        } else {
-            format!(
-                "{} Confluence space(s) ({})",
-                spaces.len(),
-                retry_notes.last().map(|s| s.as_str()).unwrap_or("retried")
-            )
-        };
+        let mut summary = format!("{} Confluence space(s)", spaces.len());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
         Ok((true, summary, raw, None))
     }
 
@@ -2509,13 +2512,14 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let pages = if !page_id.is_empty() {
+        let response = if !page_id.is_empty() {
             confluence_ro::list_child_pages(&cfg, page_id, start, limit, &auth, &policy, false)
                 .await?
         } else {
             confluence_ro::list_space_root_pages(&cfg, space, start, limit, &auth, &policy, false)
                 .await?
         };
+        let pages = response.value;
         let mut lines = Vec::new();
         let mut first = None;
         for p in &pages {
@@ -2525,17 +2529,14 @@ impl ToolHost {
             let ver = p.version.map(|v| format!(" v{v}")).unwrap_or_default();
             lines.push(format!("- [{}] {} (space {}){ver}", p.id, p.title, p.space));
         }
-        let raw = if lines.is_empty() {
+        let mut raw = if lines.is_empty() {
             "No child/root pages found.".into()
         } else {
             lines.join("\n")
         };
-        Ok((
-            true,
-            format!("{} Confluence page(s)", pages.len()),
-            raw,
-            first,
-        ))
+        let mut summary = format!("{} Confluence page(s)", pages.len());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
+        Ok((true, summary, raw, first))
     }
 
     async fn tool_confluence_get_ancestors(
@@ -2565,22 +2566,20 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let ancestors = confluence_ro::list_ancestors(&cfg, page_id, &auth, &policy, false).await?;
+        let response = confluence_ro::list_ancestors(&cfg, page_id, &auth, &policy, false).await?;
+        let ancestors = response.value;
         let mut lines = Vec::new();
         for p in &ancestors {
             lines.push(format!("- [{}] {} (space {})", p.id, p.title, p.space));
         }
-        let raw = if lines.is_empty() {
+        let mut raw = if lines.is_empty() {
             format!("No ancestors for page {page_id}.")
         } else {
             lines.join("\n")
         };
-        Ok((
-            true,
-            format!("{} ancestor(s)", ancestors.len()),
-            raw,
-            Some(format!("confluence:{page_id}")),
-        ))
+        let mut summary = format!("{} ancestor(s)", ancestors.len());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
+        Ok((true, summary, raw, Some(format!("confluence:{page_id}"))))
     }
 
     async fn tool_confluence_list_attachments(
@@ -2610,8 +2609,9 @@ impl ToolHost {
         self.throttle_confluence().await?;
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
-        let atts =
+        let response =
             confluence_ro::list_attachments_meta(&cfg, page_id, &auth, &policy, false).await?;
+        let atts = response.value;
         let mut lines = Vec::new();
         for a in &atts {
             let size = a.file_size.map(|s| format!(" {s}B")).unwrap_or_default();
@@ -2622,17 +2622,14 @@ impl ToolHost {
                 .unwrap_or_default();
             lines.push(format!("- [{}] {}{mt}{size}", a.id, a.title));
         }
-        let raw = if lines.is_empty() {
+        let mut raw = if lines.is_empty() {
             format!("No attachments on page {page_id}.")
         } else {
             lines.join("\n")
         };
-        Ok((
-            true,
-            format!("{} attachment(s)", atts.len()),
-            raw,
-            Some(format!("confluence:{page_id}")),
-        ))
+        let mut summary = format!("{} attachment(s)", atts.len());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &response.retry_notes);
+        Ok((true, summary, raw, Some(format!("confluence:{page_id}"))))
     }
 
     /// SoftWrite harvest Confluence → durable memory + harvest row (#326 PR3).
@@ -2684,7 +2681,8 @@ impl ToolHost {
             let page_result =
                 match confluence_ro::fetch_page_expanded(&cfg, page_id, &auth, &policy, true).await
                 {
-                    Ok(body) => {
+                    Ok(response) => {
+                        let body = response.value;
                         if to_file {
                             let rel = file_path.clone().unwrap_or_else(|| {
                                 format!(
@@ -2836,7 +2834,7 @@ impl ToolHost {
         let auth = confluence_ro::ConfluenceAuth::bearer(pat);
         let policy = crate::ssrf::SsrfPolicy::allow_private_networks();
         self.throttle_confluence().await?;
-        let remote = match confluence_ro::fetch_page_expanded(
+        let (remote, retry_notes) = match confluence_ro::fetch_page_expanded(
             &cfg,
             &record.source.remote_id,
             &auth,
@@ -2845,12 +2843,18 @@ impl ToolHost {
         )
         .await
         {
-            Ok(body) => crate::harvest::observation_from_page(&body),
-            Err(e) if e.to_string().contains("404") => crate::harvest::RemoteObservation {
-                version: None,
-                content_hash: None,
-                missing: true,
-            },
+            Ok(response) => (
+                crate::harvest::observation_from_page(&response.value),
+                response.retry_notes,
+            ),
+            Err(e) if e.to_string().contains("404") => (
+                crate::harvest::RemoteObservation {
+                    version: None,
+                    content_hash: None,
+                    missing: true,
+                },
+                Vec::new(),
+            ),
             Err(e) => return Err(e),
         };
         let local_missing = match &record.destination {
@@ -2876,15 +2880,17 @@ impl ToolHost {
             local_missing,
             now,
         )?;
-        let raw = serde_json::json!({
+        let mut raw = serde_json::json!({
             "harvest_id": check.harvest_id.to_string(),
             "status": check.status.as_str(),
             "detail": check.detail,
         })
         .to_string();
+        let mut summary = format!("sync {}", check.status.as_str());
+        Self::append_confluence_retry_trail(&mut summary, &mut raw, &retry_notes);
         Ok((
             true,
-            format!("sync {}", check.status.as_str()),
+            summary,
             raw,
             Some(format!("harvest:{}", check.harvest_id)),
         ))
@@ -2923,7 +2929,8 @@ impl ToolHost {
             &policy,
             true,
         )
-        .await?;
+        .await?
+        .value;
         let now = crate::embed::now_unix_secs();
         match &record.destination {
             crate::harvest::HarvestDestination::Memory { .. } => {
@@ -4433,6 +4440,118 @@ mod tests {
         assert!(hint.contains("ENG"));
         assert!(!hint.to_ascii_lowercase().contains("pat"));
         assert!(!hint.contains("Bearer"));
+    }
+
+    #[tokio::test]
+    async fn confluence_read_tools_surface_retry_recovery_trails() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let transient_then = |path_value: &'static str, body: serde_json::Value| {
+            let server = &server;
+            async move {
+                Mock::given(method("GET"))
+                    .and(path(path_value))
+                    .respond_with(
+                        ResponseTemplate::new(500).set_body_string("reflected-secret-pat"),
+                    )
+                    .up_to_n_times(1)
+                    .mount(server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path(path_value))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .mount(server)
+                    .await;
+            }
+        };
+
+        transient_then(
+            "/rest/api/content/search",
+            json!({"results": [{"id":"10","title":"Auth","space":{"key":"ENG"},"excerpt":"ok"}]}),
+        )
+        .await;
+        transient_then(
+            "/rest/api/content/20",
+            json!({
+                "id":"20","title":"Page","space":{"key":"ENG"},
+                "body":{"storage":{"value":"<p>safe</p>"}}
+            }),
+        )
+        .await;
+        transient_then(
+            "/rest/api/content/30/child/page",
+            json!({"results": [{"id":"31","title":"Child","space":{"key":"ENG"}}]}),
+        )
+        .await;
+        transient_then(
+            "/rest/api/content/40",
+            json!({
+                "id":"40","title":"Leaf","space":{"key":"ENG"},
+                "ancestors":[{"id":"41","title":"Root","space":{"key":"ENG"}}]
+            }),
+        )
+        .await;
+        transient_then(
+            "/rest/api/content/50",
+            json!({"id":"50","title":"Files","space":{"key":"ENG"}}),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/content/50/child/attachment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"id":"a1","title":"runbook.txt"}]
+            })))
+            .mount(&server)
+            .await;
+        transient_then(
+            "/rest/api/space",
+            json!({"results": [{"key":"ENG","name":"Engineering"}]}),
+        )
+        .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.confluence_min_interval = Duration::ZERO;
+        host.set_confluence(
+            Some(ConfluenceRoConfig::new(server.uri(), vec!["ENG".into()])),
+            Some("reflected-secret-pat".into()),
+        );
+
+        let cases = [
+            (names::CONFLUENCE_SEARCH, json!({"query":"auth"})),
+            (
+                names::CONFLUENCE_GET_PAGE,
+                json!({"page_id":"20","format":"plain"}),
+            ),
+            (names::CONFLUENCE_LIST_CHILDREN, json!({"page_id":"30"})),
+            (names::CONFLUENCE_GET_ANCESTORS, json!({"page_id":"40"})),
+            (names::CONFLUENCE_LIST_ATTACHMENTS, json!({"page_id":"50"})),
+            (names::CONFLUENCE_LIST_SPACES, json!({})),
+        ];
+        for (tool, args) in cases {
+            let result = host.execute(tool, &args, None).await.unwrap();
+            assert!(result.ok, "{tool}: {}", result.detail_raw);
+            assert!(
+                result.detail_raw.contains("transient_server")
+                    && result.detail_raw.contains("recovered after retry"),
+                "{tool}: {}",
+                result.detail_raw
+            );
+            assert!(
+                !result.detail_raw.contains("reflected-secret-pat"),
+                "{tool}: {}",
+                result.detail_raw
+            );
+            assert!(
+                result.summary.contains("recovered after retry"),
+                "{tool}: {}",
+                result.summary
+            );
+        }
     }
 
     /// #451: model channel tokens must not break Confluence tool dispatch.

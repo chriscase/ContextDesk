@@ -107,6 +107,27 @@ impl std::fmt::Debug for ConfluenceAuth {
     }
 }
 
+/// A successful Confluence read plus bounded retry/recovery trail notes.
+///
+/// Keeping the notes beside the value prevents callers from silently dropping
+/// transient-recovery evidence before it reaches the user-facing tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfluenceRead<T> {
+    /// Parsed response value.
+    pub value: T,
+    /// Secret-free retry/recovery notes, empty when no retry occurred.
+    pub retry_notes: Vec<String>,
+}
+
+impl<T> ConfluenceRead<T> {
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> ConfluenceRead<U> {
+        ConfluenceRead {
+            value: f(self.value),
+            retry_notes: self.retry_notes,
+        }
+    }
+}
+
 /// Search hit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfluenceHit {
@@ -492,7 +513,7 @@ pub async fn cql_search(
     cql: &str,
     pat: &str,
     limit: usize,
-) -> CoreResult<Vec<ConfluenceHit>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluenceHit>>> {
     cql_search_with_policy(cfg, cql, pat, limit, &SsrfPolicy::allow_private_networks()).await
 }
 
@@ -503,7 +524,7 @@ pub async fn cql_search_with_policy(
     pat: &str,
     limit: usize,
     policy: &SsrfPolicy,
-) -> CoreResult<Vec<ConfluenceHit>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluenceHit>>> {
     cql_search_auth(cfg, cql, &ConfluenceAuth::bearer(pat), limit, 0, policy).await
 }
 
@@ -515,7 +536,7 @@ pub async fn cql_search_auth(
     limit: usize,
     start: usize,
     policy: &SsrfPolicy,
-) -> CoreResult<Vec<ConfluenceHit>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluenceHit>>> {
     let cql = build_scoped_cql(cfg, cql);
     let path = format!(
         "/content/search?cql={}&limit={}&start={}",
@@ -523,12 +544,16 @@ pub async fn cql_search_auth(
         limit.min(25),
         start
     );
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
-    Ok(parse_search_hits(cfg, &v))
+    let response = confluence_get_json(cfg, &path, auth, policy).await?;
+    Ok(response.map(|v| parse_search_hits(cfg, &v)))
 }
 
 /// Fetch page body as plain-ish text (storage format stripped lightly).
-pub async fn fetch_page(cfg: &ConfluenceRoConfig, page_id: &str, pat: &str) -> CoreResult<String> {
+pub async fn fetch_page(
+    cfg: &ConfluenceRoConfig,
+    page_id: &str,
+    pat: &str,
+) -> CoreResult<ConfluenceRead<String>> {
     fetch_page_with_policy(cfg, page_id, pat, &SsrfPolicy::allow_private_networks()).await
 }
 
@@ -538,10 +563,10 @@ pub async fn fetch_page_with_policy(
     page_id: &str,
     pat: &str,
     policy: &SsrfPolicy,
-) -> CoreResult<String> {
+) -> CoreResult<ConfluenceRead<String>> {
     let body =
         fetch_page_expanded(cfg, page_id, &ConfluenceAuth::bearer(pat), policy, false).await?;
-    Ok(body.plain)
+    Ok(body.map(|body| body.plain))
 }
 
 /// Fetch page with expands (meta + storage + plain).
@@ -551,11 +576,15 @@ pub async fn fetch_page_expanded(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     require_allowlist: bool,
-) -> CoreResult<ConfluencePageBody> {
+) -> CoreResult<ConfluenceRead<ConfluencePageBody>> {
     let path =
         format!("/content/{page_id}?expand=body.storage,space,version,ancestors,metadata.labels");
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
-    parse_page_expanded(cfg, &v, require_allowlist)
+    let response = confluence_get_json(cfg, &path, auth, policy).await?;
+    let body = parse_page_expanded(cfg, &response.value, require_allowlist)?;
+    Ok(ConfluenceRead {
+        value: body,
+        retry_notes: response.retry_notes,
+    })
 }
 
 /// List direct child pages of a parent content id.
@@ -567,13 +596,13 @@ pub async fn list_child_pages(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     require_allowlist: bool,
-) -> CoreResult<Vec<ConfluencePageMeta>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluencePageMeta>>> {
     let limit = limit.clamp(1, 25);
     let path = format!(
         "/content/{parent_id}/child/page?limit={limit}&start={start}&expand=space,version,ancestors"
     );
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
-    Ok(parse_content_list(cfg, &v, require_allowlist))
+    let response = confluence_get_json(cfg, &path, auth, policy).await?;
+    Ok(response.map(|v| parse_content_list(cfg, &v, require_allowlist)))
 }
 
 /// List ancestors (breadcrumb) for a page.
@@ -583,11 +612,12 @@ pub async fn list_ancestors(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     require_allowlist: bool,
-) -> CoreResult<Vec<ConfluencePageMeta>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluencePageMeta>>> {
     let path = format!("/content/{page_id}?expand=ancestors,space,version");
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
+    let response = confluence_get_json(cfg, &path, auth, policy).await?;
+    let v = &response.value;
     // Gate the page itself first.
-    let _ = parse_page_meta(cfg, &v, require_allowlist)?;
+    let _ = parse_page_meta(cfg, v, require_allowlist)?;
     let mut out = Vec::new();
     if let Some(arr) = v.get("ancestors").and_then(|a| a.as_array()) {
         for a in arr {
@@ -608,7 +638,10 @@ pub async fn list_ancestors(
             }
         }
     }
-    Ok(out)
+    Ok(ConfluenceRead {
+        value: out,
+        retry_notes: response.retry_notes,
+    })
 }
 
 /// List attachment metadata for a page (no binary).
@@ -618,14 +651,19 @@ pub async fn list_attachments_meta(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     require_allowlist: bool,
-) -> CoreResult<Vec<AttachmentMeta>> {
+) -> CoreResult<ConfluenceRead<Vec<AttachmentMeta>>> {
     // Confirm page is space-permitted first.
     let path_page = format!("/content/{page_id}?expand=space");
     let page = confluence_get_json(cfg, &path_page, auth, policy).await?;
-    let _ = parse_page_meta(cfg, &page, require_allowlist)?;
+    let _ = parse_page_meta(cfg, &page.value, require_allowlist)?;
     let path = format!("/content/{page_id}/child/attachment?limit=25&expand=version");
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
-    Ok(parse_attachments_meta(cfg, &v))
+    let attachments = confluence_get_json(cfg, &path, auth, policy).await?;
+    let mut retry_notes = page.retry_notes;
+    retry_notes.extend(attachments.retry_notes);
+    Ok(ConfluenceRead {
+        value: parse_attachments_meta(cfg, &attachments.value),
+        retry_notes,
+    })
 }
 
 /// Space root pages (no parent) for tree browse.
@@ -639,7 +677,7 @@ pub async fn list_space_root_pages(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     require_allowlist: bool,
-) -> CoreResult<Vec<ConfluencePageMeta>> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluencePageMeta>>> {
     let space_key = space_key.trim();
     if space_key.is_empty() {
         return Err(CoreError::Message(
@@ -666,24 +704,43 @@ pub async fn list_space_root_pages(
         limit,
         start
     );
-    let v = confluence_get_json(cfg, &path, auth, policy).await?;
-    let mut roots = parse_content_list(cfg, &v, require_allowlist);
+    let response = confluence_get_json(cfg, &path, auth, policy).await?;
+    let mut retry_notes = response.retry_notes;
+    let mut roots = parse_content_list(cfg, &response.value, require_allowlist);
     if roots.is_empty() && start == 0 {
         // Fallback: homepage children (many Server/DC spaces have no orphan roots).
         let space_path = format!("/space/{}?expand=homepage", urlencoding_encode(space_key));
-        if let Ok(space_v) = confluence_get_json(cfg, &space_path, auth, policy).await {
-            if let Some(home_id) = space_v
-                .pointer("/homepage/id")
-                .and_then(|i| i.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                roots =
-                    list_child_pages(cfg, home_id, start, limit, auth, policy, require_allowlist)
-                        .await?;
+        match confluence_get_json(cfg, &space_path, auth, policy).await {
+            Ok(space_response) => {
+                retry_notes.extend(space_response.retry_notes);
+                if let Some(home_id) = space_response
+                    .value
+                    .pointer("/homepage/id")
+                    .and_then(|i| i.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    let children = list_child_pages(
+                        cfg,
+                        home_id,
+                        start,
+                        limit,
+                        auth,
+                        policy,
+                        require_allowlist,
+                    )
+                    .await?;
+                    retry_notes.extend(children.retry_notes);
+                    roots = children.value;
+                }
             }
+            Err(e) if e.to_string().contains("not_found") => {}
+            Err(e) => return Err(e),
         }
     }
-    Ok(roots)
+    Ok(ConfluenceRead {
+        value: roots,
+        retry_notes,
+    })
 }
 
 /// Create a page (HardWrite path — caller enforces write_enabled + WRITE confirm).
@@ -739,7 +796,9 @@ pub async fn update_page(
     policy: &SsrfPolicy,
 ) -> CoreResult<ConfluencePageMeta> {
     // Load current to verify space allowlist
-    let body = fetch_page_expanded(cfg, page_id, auth, policy, true).await?;
+    let body = fetch_page_expanded(cfg, page_id, auth, policy, true)
+        .await?
+        .value;
     let space = body.meta.space.as_str();
     if !space_permitted(cfg, space, true) {
         return Err(CoreError::Policy(format!(
@@ -843,9 +902,30 @@ async fn confluence_get_json(
     path_and_query: &str,
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
-) -> CoreResult<Value> {
-    let (v, _notes) = confluence_get_json_with_retry(cfg, path_and_query, auth, policy).await?;
-    Ok(v)
+) -> CoreResult<ConfluenceRead<Value>> {
+    confluence_get_json_with_retry(cfg, path_and_query, auth, policy).await
+}
+
+#[derive(Debug)]
+struct ConfluenceRequestError {
+    error: CoreError,
+    status: Option<u16>,
+}
+
+impl ConfluenceRequestError {
+    fn transport(error: CoreError) -> Self {
+        Self {
+            error,
+            status: None,
+        }
+    }
+
+    fn http(status: u16, message: String) -> Self {
+        Self {
+            error: CoreError::Message(message),
+            status: Some(status),
+        }
+    }
 }
 
 async fn confluence_get_json_once(
@@ -853,13 +933,14 @@ async fn confluence_get_json_once(
     path_and_query: &str,
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
-) -> CoreResult<Value> {
+) -> Result<Value, ConfluenceRequestError> {
     let (base, client) = crate::ssrf::build_pinned_client_for_url(
         &cfg.base_url,
         policy,
         &crate::ssrf::SystemResolver,
         std::time::Duration::from_secs(30),
-    )?;
+    )
+    .map_err(ConfluenceRequestError::transport)?;
     // Prefer api_root from config (may rewrite /wiki), but pinned client is for base_url.
     // If WikiPrefix, requests go to base/wiki/rest/api — ensure host still matches pinned base.
     let root = api_root(cfg);
@@ -884,18 +965,26 @@ async fn confluence_get_json_once(
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| CoreError::Message(format_confluence_transport_error(&e)))?;
+        .map_err(|e| {
+            ConfluenceRequestError::transport(CoreError::Message(
+                format_confluence_transport_error(&e),
+            ))
+        })?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(CoreError::Message(format_confluence_http_error(
+        return Err(ConfluenceRequestError::http(
             status.as_u16(),
-            &body,
-        )));
+            format_confluence_http_error(status.as_u16(), &body),
+        ));
     }
     resp.json()
         .await
-        .map_err(|e| CoreError::Message(format!("confluence json: {e}")))
+        .map_err(|_| {
+            ConfluenceRequestError::transport(CoreError::Message(
+                "confluence:other: invalid JSON response — Check the base URL and REST path mode under Settings → Connectors → Confluence.".into(),
+            ))
+        })
 }
 
 /// Stable error class for Confluence failures (#452 / #457). Never includes PAT.
@@ -1009,12 +1098,12 @@ pub fn format_confluence_error(
 
 /// Classify connect/TLS failures (never include PAT). Used by search/fetch.
 fn format_confluence_transport_error(err: &reqwest::Error) -> String {
-    let mut detail = String::new();
+    let mut categories = Vec::new();
     if err.is_timeout() {
-        detail.push_str("timeout ");
+        categories.push("timeout");
     }
     if err.is_connect() {
-        detail.push_str("connect failed ");
+        categories.push("connect failed");
     }
     let full = err.to_string();
     let lower = full.to_ascii_lowercase();
@@ -1024,23 +1113,23 @@ fn format_confluence_transport_error(err: &reqwest::Error) -> String {
         || lower.contains("ssl")
         || lower.contains("handshake")
     {
-        detail.push_str("TLS/certificate ");
+        categories.push("TLS/certificate");
     }
-    let safe = full
-        .split('?')
-        .next()
-        .unwrap_or(&full)
-        .chars()
-        .take(120)
-        .collect::<String>();
-    detail.push_str(&safe);
-    format_confluence_error(ConfluenceErrorKind::Network, None, detail.trim())
+    let detail = if categories.is_empty() {
+        "request failed".to_string()
+    } else {
+        categories.join(", ")
+    };
+    format_confluence_error(ConfluenceErrorKind::Network, None, &detail)
 }
 
-/// Map HTTP failures to actionable messages (no PAT; body truncated).
+/// Map HTTP failures to actionable messages.
+///
+/// The response body is used only for classification and is never included in
+/// returned diagnostics because a remote server or proxy can reflect secrets.
 pub fn format_confluence_http_error(status: u16, body: &str) -> String {
     let kind = classify_confluence_http(status, body);
-    format_confluence_error(kind, Some(status), body)
+    format_confluence_error(kind, Some(status), "")
 }
 
 /// One Confluence space row from discovery (#452 / #456).
@@ -1098,11 +1187,11 @@ pub async fn list_spaces(
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
     limit: usize,
-) -> CoreResult<(Vec<ConfluenceSpace>, Vec<String>)> {
+) -> CoreResult<ConfluenceRead<Vec<ConfluenceSpace>>> {
     let limit = limit.clamp(1, MAX_SPACE_LIST_LIMIT);
     let path = format!("/space?limit={limit}&type=global");
-    let (v, notes) = confluence_get_json_with_retry(cfg, &path, auth, policy).await?;
-    Ok((parse_space_list(&v, limit), notes))
+    let response = confluence_get_json_with_retry(cfg, &path, auth, policy).await?;
+    Ok(response.map(|v| parse_space_list(&v, limit)))
 }
 
 /// Result of a live connection probe (#452 Settings).
@@ -1134,7 +1223,9 @@ pub async fn probe_connection(
         });
     }
     match list_spaces(cfg, auth, policy, 5).await {
-        Ok((spaces, notes)) => {
+        Ok(response) => {
+            let spaces = response.value;
+            let notes = response.retry_notes;
             let mut message = format!(
                 "OK: authenticated; saw {} space(s) (sample). Allowlist has {} key(s). Empty allowlist does not block RO; harvest/write need keys. {CONFLUENCE_SETTINGS_PATH}",
                 spaces.len(),
@@ -1161,12 +1252,64 @@ pub async fn probe_connection(
 /// Max additional attempts after the first failure for retryable statuses.
 const CONFLUENCE_MAX_RETRIES: u32 = 2;
 
-fn is_retryable_confluence_error(msg: &str) -> bool {
-    msg.contains("rate_limited")
-        || msg.contains("HTTP 429")
-        || msg.contains("HTTP 502")
-        || msg.contains("HTTP 503")
-        || msg.contains("HTTP 504")
+#[derive(Debug, Clone, Copy)]
+struct ConfluenceRetryPolicy {
+    delays_ms: [u64; CONFLUENCE_MAX_RETRIES as usize],
+}
+
+impl ConfluenceRetryPolicy {
+    #[cfg(not(test))]
+    const fn production() -> Self {
+        Self {
+            delays_ms: [200, 400],
+        }
+    }
+
+    #[cfg(test)]
+    const fn no_delay() -> Self {
+        Self { delays_ms: [0, 0] }
+    }
+
+    fn delay_ms(self, attempt: u32) -> u64 {
+        self.delays_ms
+            .get(attempt as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+fn active_retry_policy() -> ConfluenceRetryPolicy {
+    #[cfg(test)]
+    {
+        ConfluenceRetryPolicy::no_delay()
+    }
+    #[cfg(not(test))]
+    {
+        ConfluenceRetryPolicy::production()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfluenceRetryKind {
+    RateLimited,
+    TransientServer,
+}
+
+impl ConfluenceRetryKind {
+    fn token(self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate_limited",
+            Self::TransientServer => "transient_server",
+        }
+    }
+}
+
+fn retry_kind(status: Option<u16>) -> Option<ConfluenceRetryKind> {
+    match status {
+        Some(429) => Some(ConfluenceRetryKind::RateLimited),
+        Some(500..=599) => Some(ConfluenceRetryKind::TransientServer),
+        _ => None,
+    }
 }
 
 /// GET with bounded 429/5xx retry (#452 / #459). Not cancellable mid-flight.
@@ -1178,36 +1321,62 @@ async fn confluence_get_json_with_retry(
     path_and_query: &str,
     auth: &ConfluenceAuth,
     policy: &SsrfPolicy,
-) -> CoreResult<(Value, Vec<String>)> {
+) -> CoreResult<ConfluenceRead<Value>> {
+    confluence_get_json_with_retry_policy(cfg, path_and_query, auth, policy, active_retry_policy())
+        .await
+}
+
+async fn confluence_get_json_with_retry_policy(
+    cfg: &ConfluenceRoConfig,
+    path_and_query: &str,
+    auth: &ConfluenceAuth,
+    policy: &SsrfPolicy,
+    retry_policy: ConfluenceRetryPolicy,
+) -> CoreResult<ConfluenceRead<Value>> {
     let mut attempt = 0u32;
     let mut notes: Vec<String> = Vec::new();
+    let mut last_retry_kind: Option<ConfluenceRetryKind> = None;
     loop {
         match confluence_get_json_once(cfg, path_and_query, auth, policy).await {
             Ok(v) => {
-                if !notes.is_empty() {
-                    notes.push("confluence:rate_limited: recovered after retry".into());
-                }
-                return Ok((v, notes));
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if attempt < CONFLUENCE_MAX_RETRIES && is_retryable_confluence_error(&msg) {
-                    let backoff_ms = 200u64.saturating_mul(1u64 << attempt.min(3));
+                if let Some(kind) = last_retry_kind {
                     notes.push(format!(
-                        "confluence:rate_limited: retrying (attempt {}) after {backoff_ms}ms…",
+                        "confluence:{}: recovered after retry",
+                        kind.token()
+                    ));
+                }
+                return Ok(ConfluenceRead {
+                    value: v,
+                    retry_notes: notes,
+                });
+            }
+            Err(failure) => {
+                let kind = retry_kind(failure.status);
+                if attempt < CONFLUENCE_MAX_RETRIES {
+                    let Some(kind) = kind else {
+                        return Err(failure.error);
+                    };
+                    let backoff_ms = retry_policy.delay_ms(attempt);
+                    notes.push(format!(
+                        "confluence:{}: retrying (attempt {}) after {backoff_ms}ms…",
+                        kind.token(),
                         attempt + 1
                     ));
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    last_retry_kind = Some(kind);
+                    if backoff_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
                     attempt += 1;
                     continue;
                 }
+                let msg = failure.error.to_string();
                 if !notes.is_empty() {
                     return Err(CoreError::Message(format!(
                         "{msg} (exhausted {attempt} retry attempt(s); {})",
                         notes.join(" ")
                     )));
                 }
-                return Err(e);
+                return Err(failure.error);
             }
         }
     }
@@ -1380,11 +1549,26 @@ mod tests {
     }
 
     #[test]
-    fn http_error_truncates_body() {
-        let long = "x".repeat(500);
-        let msg = format_confluence_http_error(500, &long);
-        assert!(msg.len() < 500);
+    fn http_error_omits_remote_body_and_reflected_credentials() {
+        let bearer = "Bearer reflected-secret-pat";
+        let basic = "Basic dXNlcjpyZWZsZWN0ZWQtdG9rZW4=";
+        let userinfo = "https://user:reflected-password@wiki.example.test";
+        let body = format!(
+            "proxy failure authorization={bearer} fallback={basic} upstream={userinfo} \
+             access_token=reflected-query-token password=reflected-body-password"
+        );
+        let msg = format_confluence_http_error(500, &body);
         assert!(msg.contains("other") || msg.contains("500"));
+        for secret in [
+            "reflected-secret-pat",
+            "dXNlcjpyZWZsZWN0ZWQtdG9rZW4=",
+            "reflected-password",
+            "reflected-query-token",
+            "reflected-body-password",
+            "proxy failure",
+        ] {
+            assert!(!msg.contains(secret), "secret/body leaked in `{msg}`");
+        }
     }
 
     #[test]
@@ -1547,13 +1731,13 @@ mod tests {
         let hits = cql_search_with_policy(&cfg, "text ~ \"auth\"", "test-pat", 10, &policy)
             .await
             .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].title, "Auth");
+        assert_eq!(hits.value.len(), 1);
+        assert_eq!(hits.value[0].title, "Auth");
 
         let body = fetch_page_with_policy(&cfg, "10", "test-pat", &policy)
             .await
             .unwrap();
-        assert_eq!(body, "Page body");
+        assert_eq!(body.value, "Page body");
     }
 
     #[tokio::test]
@@ -1583,6 +1767,16 @@ mod tests {
                 "cql",
                 "space = \"ENG\" AND type = page AND parent is null ORDER BY title",
             ))
+            .respond_with(ResponseTemplate::new(500).set_body_string("transient"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/content/search"))
+            .and(query_param(
+                "cql",
+                "space = \"ENG\" AND type = page AND parent is null ORDER BY title",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "results": [{
                     "id": "100",
@@ -1600,15 +1794,24 @@ mod tests {
         let kids = list_child_pages(&cfg, "100", 0, 10, &auth, &policy, false)
             .await
             .unwrap();
-        assert_eq!(kids.len(), 1);
-        assert_eq!(kids[0].id, "101");
-        assert_eq!(kids[0].parent_id.as_deref(), Some("100"));
+        assert_eq!(kids.value.len(), 1);
+        assert_eq!(kids.value[0].id, "101");
+        assert_eq!(kids.value[0].parent_id.as_deref(), Some("100"));
 
         let roots = list_space_root_pages(&cfg, "ENG", 0, 10, &auth, &policy, false)
             .await
             .unwrap();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].title, "Root");
+        assert_eq!(roots.value.len(), 1);
+        assert_eq!(roots.value[0].title, "Root");
+        assert!(
+            roots
+                .retry_notes
+                .iter()
+                .any(|note| note.contains("transient_server")
+                    && note.contains("recovered after retry")),
+            "{:?}",
+            roots.retry_notes
+        );
 
         // Empty allowlist + require_allowlist blocks space roots
         let open = ConfluenceRoConfig::new(server.uri(), vec![]);
@@ -1648,24 +1851,215 @@ mod tests {
         let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
         let auth = ConfluenceAuth::bearer("test-pat");
         let policy = SsrfPolicy::allow_private_networks();
-        let (spaces, notes) = list_spaces(&cfg, &auth, &policy, 10).await.unwrap();
-        assert_eq!(spaces.len(), 2);
-        assert_eq!(spaces[0].key, "ENG");
+        let response = list_spaces(&cfg, &auth, &policy, 10).await.unwrap();
+        assert_eq!(response.value.len(), 2);
+        assert_eq!(response.value[0].key, "ENG");
         assert!(
-            notes
+            response
+                .retry_notes
                 .iter()
                 .any(|n| n.contains("confluence:rate_limited: retrying")),
-            "expected retry trail note, got {notes:?}"
+            "expected retry trail note, got {:?}",
+            response.retry_notes
         );
         assert!(
-            notes
+            response
+                .retry_notes
                 .iter()
                 .any(|n| n.contains("confluence:rate_limited: recovered after retry")),
-            "expected recovery note, got {notes:?}"
+            "expected recovery note, got {:?}",
+            response.retry_notes
         );
 
         let probe = probe_connection(&cfg, &auth, &policy).await.unwrap();
         assert!(probe.ok, "{}", probe.message);
         assert!(probe.message.contains("OK") || probe.message.contains("authenticated"));
+    }
+
+    async fn assert_retry_status(status: u16, expected_token: &str) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string("reflected-secret-pat should never escape"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"key": "ENG", "name": "Engineering"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
+        let auth = ConfluenceAuth::bearer("reflected-secret-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let response = confluence_get_json_with_retry_policy(
+            &cfg,
+            "/space?limit=5&type=global",
+            &auth,
+            &policy,
+            ConfluenceRetryPolicy::no_delay(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response
+                .value
+                .pointer("/results/0/key")
+                .and_then(Value::as_str),
+            Some("ENG")
+        );
+        assert!(
+            response
+                .retry_notes
+                .iter()
+                .any(|note| note.contains(expected_token) && note.contains("recovered")),
+            "{:?}",
+            response.retry_notes
+        );
+        assert!(response
+            .retry_notes
+            .iter()
+            .all(|note| !note.contains("reflected-secret-pat")));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_matrix_covers_429_500_and_503() {
+        assert_retry_status(429, "rate_limited").await;
+        assert_retry_status(500, "transient_server").await;
+        assert_retry_status(503, "transient_server").await;
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_is_bounded_and_scrubs_remote_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(
+                "Bearer reflected-secret-pat access_token=reflected-query-token \
+                         password=reflected-body-password",
+            ))
+            .mount(&server)
+            .await;
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
+        let auth = ConfluenceAuth::bearer("reflected-secret-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let err = confluence_get_json_with_retry_policy(
+            &cfg,
+            "/space?limit=5&type=global",
+            &auth,
+            &policy,
+            ConfluenceRetryPolicy::no_delay(),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exhausted 2 retry attempt"), "{msg}");
+        assert!(msg.contains("transient_server"), "{msg}");
+        assert!(!msg.contains("reflected-secret-pat"), "{msg}");
+        assert!(!msg.contains("reflected-query-token"), "{msg}");
+        assert!(!msg.contains("reflected-body-password"), "{msg}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+        let probe = probe_connection(&cfg, &auth, &policy).await.unwrap();
+        assert!(!probe.ok, "{}", probe.message);
+        assert!(!probe.message.contains("reflected-secret-pat"));
+        assert!(!probe.message.contains("reflected-query-token"));
+        assert!(!probe.message.contains("reflected-body-password"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
+    }
+
+    async fn assert_non_retryable_status(status: u16) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("reflected-secret-pat"))
+            .mount(&server)
+            .await;
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
+        let auth = ConfluenceAuth::bearer("reflected-secret-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let err = confluence_get_json_with_retry_policy(
+            &cfg,
+            "/space?limit=5&type=global",
+            &auth,
+            &policy,
+            ConfluenceRetryPolicy::no_delay(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().contains("reflected-secret-pat"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_failures_are_not_retried() {
+        assert_non_retryable_status(400).await;
+        assert_non_retryable_status(401).await;
+        assert_non_retryable_status(403).await;
+        assert_non_retryable_status(404).await;
+    }
+
+    #[tokio::test]
+    async fn mutation_failure_is_not_retried_and_scrubs_remote_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/content"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_string(
+                    "Bearer reflected-secret-pat access_token=reflected-query-token",
+                ),
+            )
+            .mount(&server)
+            .await;
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec!["ENG".into()]);
+        let auth = ConfluenceAuth::bearer("reflected-secret-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let err = create_page(&cfg, "ENG", "Title", "<p>safe</p>", None, &auth, &policy)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("reflected-secret-pat"), "{msg}");
+        assert!(!msg.contains("reflected-query-token"), "{msg}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_read_has_no_retry_trail() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/space"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+        let cfg = ConfluenceRoConfig::new(server.uri(), vec![]);
+        let auth = ConfluenceAuth::bearer("test-pat");
+        let policy = SsrfPolicy::allow_private_networks();
+        let response = list_spaces(&cfg, &auth, &policy, 5).await.unwrap();
+        assert!(response.retry_notes.is_empty());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }
