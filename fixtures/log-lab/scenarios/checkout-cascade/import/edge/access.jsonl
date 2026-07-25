@@ -1,0 +1,6 @@
+{"host":"edge-01.example","level":"info","message":"event_id=edge-baseline status=200 request=req-baseline duration_ms=42","service":"edge","trace_id":"trace-baseline-01","ts":1735732808}
+{"host":"edge-01.example","level":"info","message":"event_id=edge-start status=pending request=req-7f3a path=/checkout","service":"edge","trace_id":"trace-checkout-42","ts":1735732920}
+{"host":"edge-01.example","level":"error","message":"event_id=edge-504 status=504 request=req-7f3a duration_ms=48002","service":"edge","trace_id":"trace-checkout-42","ts":1735732968}
+{"host":"edge-02.example","level":"warn","message":"event_id=edge-429 status=429 request=req-secondary retry_after_s=2","service":"edge","trace_id":"trace-secondary-09","ts":1735732975}
+{"host":"edge-01.example","level":"info","message":"event_id=edge-decoy-health status=200 path=/health certificate=valid","service":"edge","trace_id":"trace-decoy-health","ts":1735732980}
+{"host":"edge-01.example","level":"info","message":"event_id=edge-recovery status=200 request=req-recovery duration_ms=38","service":"edge","trace_id":"trace-recovery-01","ts":1735733055}

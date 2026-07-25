@@ -1,0 +1,6 @@
+{"host":"api-01.example","level":"info","message":"event_id=api-baseline checkout accepted request=req-baseline","service":"checkout-api","trace_id":"trace-baseline-01","ts":1735732810}
+{"host":"api-01.example","level":"info","message":"event_id=api-start checkout accepted request=req-7f3a job=job-7f3a","service":"checkout-api","trace_id":"trace-checkout-42","ts":1735732925}
+{"host":"api-01.example","level":"warn","message":"event_id=api-pool-wait database pool wait exceeded 800ms request=req-7f3a","service":"checkout-api","trace_id":"trace-checkout-42","ts":1735732950}
+{"host":"api-01.example","level":"error","message":"event_id=api-timeout checkout failed database acquisition timeout request=req-7f3a","service":"checkout-api","trace_id":"trace-checkout-42","ts":1735732965}
+{"host":"api-02.example","level":"warn","message":"event_id=api-rate-limit overload guard returned 429 request=req-secondary","service":"checkout-api","trace_id":"trace-secondary-09","ts":1735732972}
+{"host":"api-01.example","level":"info","message":"event_id=api-recovery checkout latency normal request=req-recovery","service":"checkout-api","trace_id":"trace-recovery-01","ts":1735733060}

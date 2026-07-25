@@ -1,0 +1,77 @@
+{
+  "archives": [
+    {
+      "entries": [
+        "/absolute.log"
+      ],
+      "expected": "reject",
+      "id": "absolute"
+    },
+    {
+      "entries": [
+        "C:/drive.log"
+      ],
+      "expected": "reject",
+      "id": "drive_prefix"
+    },
+    {
+      "entries": [
+        "../escape.log"
+      ],
+      "expected": "reject",
+      "id": "traversal"
+    },
+    {
+      "entries": [
+        "nested\\escape.log"
+      ],
+      "expected": "reject",
+      "id": "backslash"
+    },
+    {
+      "entries": [
+        "nested//double.log"
+      ],
+      "expected": "reject",
+      "id": "ambiguous_separator"
+    },
+    {
+      "entries": [
+        "same.log",
+        "same.log"
+      ],
+      "expected": "reject",
+      "id": "duplicate"
+    },
+    {
+      "entries": [
+        "ignored/"
+      ],
+      "expected": "zero-safe-file failure",
+      "id": "directory_only"
+    },
+    {
+      "entries": [
+        "binary.log"
+      ],
+      "expected": "zero-safe-file failure",
+      "id": "binary_only"
+    },
+    {
+      "entries": [
+        "large.log"
+      ],
+      "expected": "bounded rejection",
+      "id": "compressed_limit"
+    },
+    {
+      "entries": [
+        "truncated.log"
+      ],
+      "expected": "bounded error without publication",
+      "id": "truncated"
+    }
+  ],
+  "generator_version": "contextdesk.log_lab.generator.v1",
+  "schema_version": 1
+}

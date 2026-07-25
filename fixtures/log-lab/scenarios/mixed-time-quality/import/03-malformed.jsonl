@@ -1,0 +1,2 @@
+{"level":"warn","message":"event_id=malformed-0 invalid timestamp","service":"malformed","ts":"not-a-time"}
+{"level":"error","message":"event_id=malformed-1 missing timestamp","service":"malformed"}

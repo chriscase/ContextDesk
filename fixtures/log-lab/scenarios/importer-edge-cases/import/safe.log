@@ -1,0 +1,2 @@
+INFO event_id=edge-safe-0 safe text line
+WARN event_id=edge-safe-1 partial fixture remains usable

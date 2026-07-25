@@ -1,0 +1,7 @@
+ts=1735732905 level=info service=checkout-worker host=worker-01.example trace_id=trace-checkout-42 msg=event_id=worker-start-job-job-7f3a-attempt-1
+ts=1735732932 level=error service=checkout-worker host=worker-01.example trace_id=trace-checkout-42 msg=event_id=worker-poison-job-job-7f3a-malformed-line-item-retryable-true
+ts=1735732940 level=warn service=checkout-worker host=worker-01.example trace_id=trace-checkout-42 msg=event_id=worker-retry-job-job-7f3a-attempt-2
+ts=1735732958 level=warn service=checkout-worker host=worker-02.example trace_id=trace-checkout-42 msg=event_id=worker-retry-3-job-job-7f3a-attempt-3
+ts=1735732988 level=error service=checkout-worker host=worker-01.example trace_id=trace-checkout-42 msg=event_id=worker-loop-job-job-7f3a-attempt-4-transaction-open-true
+ts=1735733038 level=info service=checkout-worker host=worker-01.example trace_id=trace-checkout-42 msg=event_id=worker-stopped-job-job-7f3a-dead-lettered
+ts=1735733052 level=info service=checkout-worker host=worker-01.example trace_id=trace-recovery-01 msg=event_id=worker-recovery-queue-depth-0

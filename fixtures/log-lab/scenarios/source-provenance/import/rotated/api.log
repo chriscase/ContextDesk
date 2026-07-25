@@ -1,0 +1,1 @@
+{"host":"api-01.example","level":"error","message":"event_id=rotation-new repeated-line-number=1","service":"rotated-api","trace_id":"trace-rotation","ts":1735734003}

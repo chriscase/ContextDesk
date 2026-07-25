@@ -1,0 +1,6 @@
+{"host":"queue-01.example","level":"info","message":"event_id=queue-receive job=job-7f3a delivery=1","service":"checkout-queue","trace_id":"trace-checkout-42","ts":1735732900}
+{"host":"queue-01.example","level":"warn","message":"event_id=queue-retry job=job-7f3a delivery=2 reason=worker-timeout","service":"checkout-queue","trace_id":"trace-checkout-42","ts":1735732935}
+{"host":"queue-01.example","level":"warn","message":"event_id=queue-retry-3 job=job-7f3a delivery=3 reason=worker-timeout","service":"checkout-queue","trace_id":"trace-checkout-42","ts":1735732955}
+{"host":"queue-01.example","level":"error","message":"event_id=queue-poison job=job-7f3a delivery=4 visibility_timeout_s=15","service":"checkout-queue","trace_id":"trace-checkout-42","ts":1735732990}
+{"host":"queue-01.example","level":"warn","message":"event_id=queue-dead-letter job=job-7f3a action=dead-letter","service":"checkout-queue","trace_id":"trace-checkout-42","ts":1735733035}
+{"host":"queue-01.example","level":"info","message":"event_id=queue-recovery depth=0 oldest_age_s=0","service":"checkout-queue","trace_id":"trace-recovery-01","ts":1735733050}

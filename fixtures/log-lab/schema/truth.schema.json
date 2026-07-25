@@ -1,0 +1,51 @@
+{
+  "$id": "https://contextdesk.example/schemas/log-lab-truth-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expected": {
+      "required": [
+        "files",
+        "events",
+        "time_quality",
+        "files_by_path"
+      ],
+      "type": "object"
+    },
+    "generator_version": {
+      "const": "contextdesk.log_lab.generator.v1"
+    },
+    "investigation": {
+      "type": "object"
+    },
+    "provenance": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "scenario_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "scenario_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "seed": {
+      "const": 52620260725
+    }
+  },
+  "required": [
+    "schema_version",
+    "scenario_version",
+    "scenario_id",
+    "generator_version",
+    "seed",
+    "provenance",
+    "expected"
+  ],
+  "title": "ContextDesk Log Lab truth manifest",
+  "type": "object"
+}

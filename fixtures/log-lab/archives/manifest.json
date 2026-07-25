@@ -1,0 +1,12 @@
+{
+  "archives": [
+    {
+      "entries": 6,
+      "events": 35,
+      "path": "checkout-cascade.zip",
+      "sha256": "e71e746b892dd75d3c1c28bf369920d402095d9628526fb74fbdfff1faa0146c"
+    }
+  ],
+  "generator_version": "contextdesk.log_lab.generator.v1",
+  "schema_version": 1
+}

@@ -1,0 +1,3 @@
+INFO event_id=plain-0 plain fallback line
+ERROR event_id=plain-1 stack trace begins
+    at fictional.module(example.rs:42)
