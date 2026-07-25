@@ -1,0 +1,4 @@
+{"host":"control-01.example","level":"info","message":"event_id=audit-baseline release=2025.01.01-1 active db_pool_max=32","service":"deploy-audit","trace_id":"change-baseline","ts":1735732800}
+{"host":"control-01.example","level":"warn","message":"event_id=audit-config release=2025.01.01-2 applied db_pool_max old=32 new=4","service":"deploy-audit","trace_id":"change-204","ts":1735732860}
+{"host":"control-01.example","level":"info","message":"event_id=audit-decoy certificate rotation completed successfully expires_in_days=89","service":"deploy-audit","trace_id":"change-decoy-cert","ts":1735732890}
+{"host":"control-01.example","level":"warn","message":"event_id=audit-rollback rollback release=2025.01.01-1 restored db_pool_max=32","service":"deploy-audit","trace_id":"change-rollback-204","ts":1735733030}

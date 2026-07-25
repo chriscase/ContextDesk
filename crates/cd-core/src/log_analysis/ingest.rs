@@ -15,7 +15,7 @@ use crate::process_progress::{
     progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
     ProcessProgressObserver, ProcessProgressPhase,
 };
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -350,6 +350,201 @@ fn is_zip_file(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+fn validate_raw_log_zip_entry(name: &str) -> CoreResult<(String, bool)> {
+    let directory = name.ends_with('/');
+    if name.is_empty()
+        || name.starts_with(['/', '\\'])
+        || name.contains('\\')
+        || name.contains("//")
+        || name.contains('\0')
+    {
+        return Err(CoreError::Policy(
+            "raw log zip entry path rejected by policy".into(),
+        ));
+    }
+    let normalized = if directory {
+        name.strip_suffix('/').unwrap_or(name)
+    } else {
+        name
+    };
+    if normalized.is_empty()
+        || normalized
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':')
+            && normalized
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(CoreError::Policy(
+            "raw log zip entry path rejected by policy".into(),
+        ));
+    }
+    Ok((normalized.to_string(), directory))
+}
+
+fn portable_source_identity(path: &Path) -> CoreResult<String> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                components.push(value.to_string_lossy().into_owned())
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(CoreError::Policy(
+                    "log source identity escaped its import root".into(),
+                ))
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(CoreError::Policy(
+            "log source identity is empty after normalization".into(),
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn read_zip_u16(bytes: &[u8], offset: usize) -> CoreResult<u16> {
+    let value = bytes
+        .get(offset..offset + 2)
+        .ok_or_else(|| CoreError::Message("raw log zip metadata is truncated".into()))?;
+    Ok(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn read_zip_u32(bytes: &[u8], offset: usize) -> CoreResult<u32> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| CoreError::Message("raw log zip metadata is truncated".into()))?;
+    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+/// Validate every central-directory name before `zip` builds its name index.
+///
+/// Some ZIP readers collapse duplicate names during open, so checking only the
+/// entries returned by `ZipArchive` cannot detect an ambiguous input.
+fn preflight_raw_log_zip(file: &mut std::fs::File) -> CoreResult<u64> {
+    const EOCD_MIN_BYTES: usize = 22;
+    const MAX_ZIP_COMMENT_BYTES: usize = u16::MAX as usize;
+    const CENTRAL_HEADER_BYTES: usize = 46;
+    const MAX_RAW_LOG_ENTRY_NAME_BYTES: usize = 4 * 1024;
+    const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
+    const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
+
+    let compressed_len = file
+        .metadata()
+        .map_err(|e| CoreError::Message(format!("read zip metadata: {e}")))?
+        .len();
+    if compressed_len < EOCD_MIN_BYTES as u64 {
+        return Err(CoreError::Message("zip open: missing end record".into()));
+    }
+    let tail_len = usize::try_from(compressed_len)
+        .unwrap_or(usize::MAX)
+        .min(EOCD_MIN_BYTES + MAX_ZIP_COMMENT_BYTES);
+    file.seek(SeekFrom::End(-(tail_len as i64)))
+        .map_err(|e| CoreError::Message(format!("seek zip tail: {e}")))?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail)
+        .map_err(|e| CoreError::Message(format!("read zip tail: {e}")))?;
+    let eocd_in_tail = (0..=tail.len().saturating_sub(EOCD_SIGNATURE.len()))
+        .rev()
+        .find(|position| {
+            let position = *position;
+            if tail.get(position..position + 4) != Some(EOCD_SIGNATURE) {
+                return false;
+            }
+            let Some(comment) = tail.get(position + 20..position + 22) else {
+                return false;
+            };
+            let comment_len = u16::from_le_bytes([comment[0], comment[1]]) as usize;
+            position + EOCD_MIN_BYTES + comment_len == tail.len()
+        })
+        .ok_or_else(|| CoreError::Message("zip open: missing end record".into()))?;
+    let eocd = &tail[eocd_in_tail..];
+    let disk = read_zip_u16(eocd, 4)?;
+    let central_disk = read_zip_u16(eocd, 6)?;
+    let entries_on_disk = read_zip_u16(eocd, 8)?;
+    let entries_total = read_zip_u16(eocd, 10)?;
+    let central_size = read_zip_u32(eocd, 12)?;
+    let central_offset = read_zip_u32(eocd, 16)?;
+    if disk != 0 || central_disk != 0 || entries_on_disk != entries_total {
+        return Err(CoreError::Policy(
+            "multi-disk raw log archives are not supported".into(),
+        ));
+    }
+    if entries_total == u16::MAX || central_size == u32::MAX || central_offset == u32::MAX {
+        return Err(CoreError::Policy(
+            "Zip64 raw log archive metadata is not supported".into(),
+        ));
+    }
+    let central_end = (central_offset as u64)
+        .checked_add(central_size as u64)
+        .ok_or_else(|| CoreError::Policy("raw log zip central directory overflow".into()))?;
+    let absolute_eocd = compressed_len - tail_len as u64 + eocd_in_tail as u64;
+    if central_end != absolute_eocd {
+        return Err(CoreError::Policy(
+            "raw log zip central directory is inconsistent".into(),
+        ));
+    }
+
+    file.seek(SeekFrom::Start(central_offset as u64))
+        .map_err(|e| CoreError::Message(format!("seek zip central directory: {e}")))?;
+    let mut names = std::collections::HashSet::with_capacity(entries_total as usize);
+    for _ in 0..entries_total {
+        let mut header = [0u8; CENTRAL_HEADER_BYTES];
+        file.read_exact(&mut header)
+            .map_err(|e| CoreError::Message(format!("read zip central directory: {e}")))?;
+        if &header[..4] != CENTRAL_SIGNATURE {
+            return Err(CoreError::Policy(
+                "raw log zip central directory entry is invalid".into(),
+            ));
+        }
+        let name_len = read_zip_u16(&header, 28)? as usize;
+        let extra_len = read_zip_u16(&header, 30)? as u64;
+        let comment_len = read_zip_u16(&header, 32)? as u64;
+        if name_len == 0 || name_len > MAX_RAW_LOG_ENTRY_NAME_BYTES {
+            return Err(CoreError::Policy(
+                "raw log zip entry name exceeds policy limit".into(),
+            ));
+        }
+        let mut name_bytes = vec![0u8; name_len];
+        file.read_exact(&mut name_bytes)
+            .map_err(|e| CoreError::Message(format!("read zip entry name: {e}")))?;
+        let name = std::str::from_utf8(&name_bytes)
+            .map_err(|_| CoreError::Policy("raw log zip entry name is not UTF-8".into()))?;
+        let (normalized, _) = validate_raw_log_zip_entry(name)?;
+        if !names.insert(normalized) {
+            return Err(CoreError::Policy(
+                "duplicate raw log zip entry rejected by policy".into(),
+            ));
+        }
+        let skip = extra_len
+            .checked_add(comment_len)
+            .ok_or_else(|| CoreError::Policy("raw log zip metadata overflow".into()))?;
+        file.seek(SeekFrom::Current(i64::try_from(skip).map_err(|_| {
+            CoreError::Policy("raw log zip metadata exceeds seek range".into())
+        })?))
+        .map_err(|e| CoreError::Message(format!("seek zip entry metadata: {e}")))?;
+    }
+    if file
+        .stream_position()
+        .map_err(|e| CoreError::Message(format!("read zip position: {e}")))?
+        != central_end
+    {
+        return Err(CoreError::Policy(
+            "raw log zip central directory lengths are inconsistent".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| CoreError::Message(format!("rewind zip: {e}")))?;
+    Ok(entries_total as u64)
+}
+
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
 #[allow(clippy::too_many_arguments)]
 fn ingest_lines_from_reader(
@@ -480,7 +675,6 @@ fn ingest_from_zip(
     stats: &mut IngestStats,
     seq: &mut u64,
     batch: &mut Vec<LogEvent>,
-    format_hint: &mut Option<LogFormat>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     kind: ProcessProgressKind,
@@ -498,11 +692,16 @@ fn ingest_from_zip(
         return Err(CoreError::Message("ingest cancelled".into()));
     }
 
-    let file =
+    let mut file =
         std::fs::File::open(zip_path).map_err(|e| CoreError::Message(format!("open zip: {e}")))?;
+    let entry_count = preflight_raw_log_zip(&mut file)?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
-    let entry_count = archive.len() as u64;
+    if archive.len() as u64 != entry_count {
+        return Err(CoreError::Policy(
+            "raw log zip entry index is ambiguous".into(),
+        ));
+    }
 
     emit(
         progress,
@@ -517,6 +716,7 @@ fn ingest_from_zip(
     );
 
     let mut files_done = 0u64;
+    let mut seen_names = std::collections::HashSet::new();
     for i in 0..archive.len() {
         if cancelled(cancel) {
             emit(
@@ -539,18 +739,16 @@ fn ingest_from_zip(
             .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
         let name = entry.name().to_string();
         stats.discover();
-        if name.ends_with('/') {
-            stats.ignored("directory", Path::new(&name));
+        let (rel, directory) = validate_raw_log_zip_entry(&name)?;
+        if !seen_names.insert(rel.clone()) {
+            return Err(CoreError::Policy(
+                "duplicate raw log zip entry rejected by policy".into(),
+            ));
+        }
+        if directory {
+            stats.ignored("directory", Path::new(&rel));
             files_done += 1;
             continue;
-        }
-        let rel = name.trim_start_matches('/');
-        if rel.is_empty()
-            || std::path::Path::new(rel)
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return Err(CoreError::Policy(format!("zip-slip rejected: `{name}`")));
         }
 
         let size = entry.size();
@@ -563,7 +761,7 @@ fn ingest_from_zip(
                     "zip member {}/{}: {}",
                     i + 1,
                     entry_count,
-                    progress_basename(std::path::Path::new(rel))
+                    progress_basename(std::path::Path::new(&rel))
                 ),
                 true,
             )
@@ -574,7 +772,7 @@ fn ingest_from_zip(
         );
 
         if size > DEFAULT_MAX_FILE_BYTES {
-            stats.excluded("too_large", Path::new(rel));
+            stats.excluded("too_large", Path::new(&rel));
             files_done += 1;
             continue;
         }
@@ -584,13 +782,13 @@ fn ingest_from_zip(
         let n = match entry.read(&mut head) {
             Ok(n) => n,
             Err(_) => {
-                stats.failed("read_failed", Path::new(rel));
+                stats.failed("read_failed", Path::new(&rel));
                 files_done += 1;
                 continue;
             }
         };
         if head[..n].contains(&0) {
-            stats.excluded("binary", Path::new(rel));
+            stats.excluded("binary", Path::new(&rel));
             files_done += 1;
             // Drain remaining entry to keep archive state consistent
             let mut sink = std::io::sink();
@@ -602,17 +800,18 @@ fn ingest_from_zip(
         let rest = BufReader::with_capacity(64 * 1024, entry);
         let mut chained = std::io::Cursor::new(head[..n].to_vec()).chain(rest);
         let mut reader = BufReader::with_capacity(64 * 1024, &mut chained);
+        let mut format_hint = None;
 
         let completely_read = ingest_lines_from_reader(
             &mut reader,
-            rel,
-            None,
+            &rel,
+            Some(Path::new(&rel)),
             corpus,
             miner,
             stats,
             seq,
             batch,
-            format_hint,
+            &mut format_hint,
             files_done,
             entry_count,
             progress,
@@ -624,7 +823,7 @@ fn ingest_from_zip(
         if completely_read {
             stats.imported();
         } else {
-            stats.failed("read_failed", Path::new(rel));
+            stats.failed("read_failed", Path::new(&rel));
         }
         let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
@@ -787,20 +986,10 @@ fn ingest_path_into_cache(
     let mut stats = IngestStats::default();
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
-    let mut format_hint: Option<LogFormat> = None;
     let files_done = if is_zip_file(path) {
         // Stream members without full extract-to-temp (#499 skeptic fix).
         ingest_from_zip(
-            path,
-            &corpus,
-            &mut miner,
-            &mut stats,
-            &mut seq,
-            &mut batch,
-            &mut format_hint,
-            progress,
-            cancel,
-            kind,
+            path, &corpus, &mut miner, &mut stats, &mut seq, &mut batch, progress, cancel, kind,
         )?
     } else {
         let inventory = collect_log_files(path)?;
@@ -922,11 +1111,12 @@ fn ingest_path_into_cache(
                         .unwrap_or("log"),
                 )
             };
-            let rel = rel_path.to_string_lossy().to_string();
+            let rel = portable_source_identity(rel_path)?;
 
             let rest = BufReader::with_capacity(64 * 1024, fh);
             let mut chained = std::io::Cursor::new(head[..n].to_vec()).chain(rest);
             let mut reader = BufReader::with_capacity(64 * 1024, &mut chained);
+            let mut format_hint = None;
             let completely_read = ingest_lines_from_reader(
                 &mut reader,
                 &rel,
@@ -969,6 +1159,12 @@ fn ingest_path_into_cache(
         }
         files_done
     };
+
+    if stats.lines == 0 {
+        return Err(CoreError::Message(
+            "no safe/importable log events were found".into(),
+        ));
+    }
 
     emit(
         progress,

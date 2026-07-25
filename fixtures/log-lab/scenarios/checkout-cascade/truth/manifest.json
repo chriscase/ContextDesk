@@ -1,0 +1,189 @@
+{
+  "expected": {
+    "bytes": 6247,
+    "events": 35,
+    "files": 6,
+    "files_by_path": {
+      "api/app.jsonl": {
+        "bytes": 1178,
+        "events": 6,
+        "sha256": "306cc8864890051875c58dd6cf48201043c6528c275fca56552180c1527e3dd3"
+      },
+      "audit/deploy.jsonl": {
+        "bytes": 814,
+        "events": 4,
+        "sha256": "25a429681fc84f637936d37597a1c22185167f0849cb51bcfae302cec64b0341"
+      },
+      "db/database.log": {
+        "bytes": 902,
+        "events": 6,
+        "sha256": "2c95251896e7c9833586aaac7450da336dff8528229d9a8472e4864e998a8514"
+      },
+      "edge/access.jsonl": {
+        "bytes": 1118,
+        "events": 6,
+        "sha256": "78d2764233a896c62823e374d8627646e7c6c4bdbb7b3017ab750d1866289271"
+      },
+      "queue/events.jsonl": {
+        "bytes": 1134,
+        "events": 6,
+        "sha256": "25fda101ac9824274e2489e7708e7269fe8b70dd0555f162bda303bbd5ef19d6"
+      },
+      "worker/worker.log": {
+        "bytes": 1101,
+        "events": 7,
+        "sha256": "4ed9dced10fbbd58539b3f5eb52026bb9851391f7a356efdb012a642a398c041"
+      }
+    },
+    "severities": {
+      "error": 7,
+      "info": 16,
+      "warn": 12
+    },
+    "source_count": 6,
+    "sources": {
+      "api/app.jsonl": 6,
+      "audit/deploy.jsonl": 4,
+      "db/database.log": 6,
+      "edge/access.jsonl": 6,
+      "queue/events.jsonl": 6,
+      "worker/worker.log": 7
+    },
+    "time_quality": "wall"
+  },
+  "generator_version": "contextdesk.log_lab.generator.v1",
+  "investigation": {
+    "affected_interval": {
+      "from": 1735732860,
+      "to": 1735733060
+    },
+    "canonical_queries": [
+      {
+        "kind": "literal",
+        "text": "job-7f3a"
+      },
+      {
+        "kind": "literal",
+        "text": "pool-max-4"
+      },
+      {
+        "kind": "trace",
+        "text": "trace-checkout-42"
+      },
+      {
+        "kind": "level_source",
+        "level": "error",
+        "source": "edge/access.jsonl"
+      }
+    ],
+    "canonical_questions": [
+      "What caused the checkout failures, and which evidence establishes the causal chain?",
+      "Which symptoms were secondary, and which apparent clue was a decoy?",
+      "What changed immediately before recovery?"
+    ],
+    "causal_timeline": [
+      {
+        "after": null,
+        "event_id": "audit-config",
+        "role": "primary_change"
+      },
+      {
+        "after": "audit-config",
+        "event_id": "queue-receive",
+        "role": "trigger"
+      },
+      {
+        "after": "queue-receive",
+        "event_id": "worker-loop",
+        "role": "amplifier"
+      },
+      {
+        "after": "worker-loop",
+        "event_id": "db-saturation",
+        "role": "resource_exhaustion"
+      },
+      {
+        "after": "db-saturation",
+        "event_id": "edge-504",
+        "role": "secondary_symptom"
+      },
+      {
+        "after": "edge-504",
+        "event_id": "audit-rollback",
+        "role": "repair"
+      },
+      {
+        "after": "audit-rollback",
+        "event_id": "edge-recovery",
+        "role": "observed_recovery"
+      }
+    ],
+    "decisive_clues": [
+      {
+        "event_id": "audit-config",
+        "query": "db_pool_max old=32 new=4",
+        "source": "audit/deploy.jsonl"
+      },
+      {
+        "event_id": "worker-loop",
+        "query": "job-job-7f3a attempt-4 transaction-open-true",
+        "source": "worker/worker.log"
+      },
+      {
+        "event_id": "db-saturation",
+        "query": "pool-active-4 pool-max-4 waiters-11",
+        "source": "db/database.log"
+      },
+      {
+        "event_id": "edge-504",
+        "query": "status=504 request=req-7f3a",
+        "source": "edge/access.jsonl"
+      },
+      {
+        "event_id": "audit-rollback",
+        "query": "restored db_pool_max=32",
+        "source": "audit/deploy.jsonl"
+      },
+      {
+        "event_id": "edge-recovery",
+        "query": "request=req-recovery duration_ms=38",
+        "source": "edge/access.jsonl"
+      }
+    ],
+    "decoys": [
+      {
+        "event_id": "audit-decoy",
+        "reason": "Certificate rotation completed successfully before the incident and health traffic remained 200."
+      },
+      {
+        "event_id": "edge-decoy-health",
+        "reason": "The health endpoint remained healthy while checkout requests failed; it does not explain pool saturation."
+      }
+    ],
+    "required_correlations": [
+      "trace-checkout-42",
+      "job-7f3a",
+      "req-7f3a",
+      "change-204"
+    ],
+    "root_cause": "Configuration shrink plus repeated poison-job processing exhausted the database connection pool.",
+    "rubric": {
+      "exact_prose_required": false,
+      "required": [
+        "identifies both the pool-size change and poison-job retry loop",
+        "cites at least three privacy-safe source paths",
+        "uses at least two correlation identifiers",
+        "separates primary cause from 429/504 symptoms",
+        "rejects the certificate-rotation decoy",
+        "cites rollback/dead-letter recovery evidence",
+        "states only evidence-supported conclusions"
+      ]
+    },
+    "summary": "Release 2025.01.01-2 reduced db_pool_max from 32 to 4. Poison job job-7f3a retried while retaining database work, exhausting the pool and causing checkout timeouts, 504s, and secondary 429s. Dead-lettering the job and rolling back the pool setting restored service."
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no third-party or production log material.",
+  "scenario_id": "checkout-cascade",
+  "scenario_version": 1,
+  "schema_version": 1,
+  "seed": 52620260725
+}

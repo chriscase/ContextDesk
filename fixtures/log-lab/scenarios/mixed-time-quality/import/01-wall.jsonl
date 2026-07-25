@@ -1,0 +1,4 @@
+{"host":"wall-01.example","level":"info","message":"event_id=wall-0 wall-clock event","service":"wall-service","trace_id":"trace-wall-0","ts":1735733400}
+{"host":"wall-01.example","level":"info","message":"event_id=wall-1 wall-clock event","service":"wall-service","trace_id":"trace-wall-1","ts":1735733401}
+{"host":"wall-01.example","level":"info","message":"event_id=wall-2 wall-clock event","service":"wall-service","trace_id":"trace-wall-2","ts":1735733402}
+{"host":"wall-01.example","level":"info","message":"event_id=wall-3 wall-clock event","service":"wall-service","trace_id":"trace-wall-3","ts":1735733403}

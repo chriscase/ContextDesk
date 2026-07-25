@@ -1,0 +1,1 @@
+{"host":"a-01.example","level":"error","message":"event_id=region-a-failure duplicate-basename marker=alpha","service":"catalog","trace_id":"trace-region-a","ts":1735734000}

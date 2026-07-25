@@ -1,0 +1,1 @@
+{"host":"b-01.example","level":"warn","message":"event_id=region-b-warning duplicate-basename marker=beta","service":"catalog","trace_id":"trace-region-b","ts":1735734000}

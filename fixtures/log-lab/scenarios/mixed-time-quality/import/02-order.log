@@ -1,0 +1,3 @@
+INFO event_id=order-0 startup without timestamp
+WARN event_id=order-1 queue depth rising
+ERROR event_id=order-2 order-only failure

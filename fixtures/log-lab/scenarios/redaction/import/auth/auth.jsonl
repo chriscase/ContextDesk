@@ -1,0 +1,3 @@
+{"host":"auth-01.example","level":"error","message":"event_id=redaction-api-key authentication rejected synthetic_key=sk-LOG-LAB-INVALID-abcdefghijklmnop account=fictional-user","service":"auth-service","trace_id":"trace-redaction-1","ts":1735735000}
+{"host":"auth-01.example","level":"warn","message":"event_id=redaction-bearer authorization failed Bearer LOG-LAB-INVALID-BEARER-abcdefghijklmnop request=req-redaction","service":"auth-service","trace_id":"trace-redaction-1","ts":1735735001}
+{"host":"auth-01.example","level":"info","message":"event_id=redaction-safe remediation=rotate-synthetic-test-credential owner=fictional-team","service":"auth-service","trace_id":"trace-redaction-1","ts":1735735002}
