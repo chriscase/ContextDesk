@@ -30,7 +30,7 @@ import/export, and open investigation. It is not a million-row browser.
 
 | Feature | Notes |
 | --- | --- |
-| Filters | Levels, sources, keyword/semantic search (template-first) |
+| Filters | Levels, sources, and keyword search; template-first semantic search only when the corpus reports vectors |
 | Evidence lanes | 1–4 source groups; optional timestamp link + gap bands |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
 | Bookmarks | Line or range on the corpus (`bookmarks.json` sidecar) |
@@ -45,6 +45,9 @@ import/export, and open investigation. It is not a million-row browser.
 | Session context pack | max 200 files / 50 MiB | Chat attachments only — not huge dumps |
 
 Cancel an in-progress SoftWrite with **Cancel ingest** on the progress panel.
+Keyword-only and deferred corpora remain searchable. Use **Re-analyze locally…**
+from the Logs overview to build template vectors with progress and cancellation;
+the Explorer then labels semantic search available.
 
 ## Bookmarks and packages
 

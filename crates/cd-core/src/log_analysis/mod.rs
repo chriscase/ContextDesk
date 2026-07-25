@@ -15,6 +15,7 @@ pub mod lanes;
 pub mod package;
 pub mod parse;
 pub mod query;
+pub mod reanalyze;
 pub mod redact_log;
 pub mod search;
 pub mod store;
@@ -28,7 +29,9 @@ pub use bookmarks::{
     update_bookmark, Bookmark, BookmarkSummary, NewBookmark,
 };
 pub use drain::{DrainMiner, TemplateInfo};
-pub use embed_policy::{LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM};
+pub use embed_policy::{
+    LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
+};
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, IngestReport, IngestStats,
@@ -48,11 +51,14 @@ pub use query::{
     EventQuery, EventSearchHit, EventSearchQuery, ExplorerEvent, LogFacets, TimeQuality,
     DEFAULT_EVENT_PAGE, MAX_EVENT_PAGE, MIN_WALL_TS,
 };
+pub use reanalyze::{
+    reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
+};
 pub use search::{search_logs, SearchHit, SearchLogsQuery};
 
 pub use store::{
-    CorpusId, CorpusMeta, CorpusStats, CorpusSummary, LogCorpus, LogEvent, TemplateRow,
-    TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
+    CorpusEmbeddingStatus, CorpusId, CorpusMeta, CorpusStats, CorpusSummary, EmbeddingState,
+    LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot, EVENT_ENGINE, META_VERSION,
 };
 pub use tools::{
     anomalies_tool_spec, cluster_problems_tool_spec, correlate_tool_spec, ingest_logs_tool_spec,

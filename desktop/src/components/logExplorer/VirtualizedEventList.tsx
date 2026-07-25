@@ -4,10 +4,7 @@
  */
 import { useCallback, useMemo, useRef, useState, type UIEvent } from "react";
 import type { ExplorerEventDto, TimeQuality } from "../../lib/host";
-import {
-  formatEventTime,
-  timeQualityLabel,
-} from "../../lib/logExplorer/types";
+import { formatEventTime, timeQualityLabel } from "../../lib/logExplorer/types";
 
 const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
@@ -76,7 +73,11 @@ export function VirtualizedEventList({
 
   if (events.length === 0) {
     return (
-      <div className="log-explorer__rows log-explorer__empty" role="list" aria-label={ariaLabel}>
+      <div
+        className="log-explorer__rows log-explorer__empty"
+        role="list"
+        aria-label={ariaLabel}
+      >
         No events match filters
       </div>
     );
@@ -136,6 +137,9 @@ export function VirtualizedEventList({
                 {formatEventTime(e.ts, tq)}
               </span>
               <span className={levelClass(e.level)}>{e.level}</span>
+              <span className="log-explorer__source" title={e.source}>
+                {e.source}
+              </span>
               <span className="log-explorer__msg" title={e.message}>
                 {e.message}
               </span>

@@ -238,6 +238,7 @@ export async function agentTurn(
   providerProfileId?: string | null,
   onEvent?: (ev: EventDto) => void,
   pinnedSkillId?: string | null,
+  logExplorerContext?: LogExplorerTurnContextDto | null,
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -246,6 +247,7 @@ export async function agentTurn(
     chat_model: chatModel?.trim() || null,
     provider_profile_id: providerProfileId?.trim() || null,
     pinned_skill_id: pinnedSkillId?.trim() || null,
+    log_explorer_context: logExplorerContext ?? null,
   };
 
   if (!isTauri()) {
@@ -1461,6 +1463,13 @@ export async function hostGetAmbientRecallEnabled(): Promise<boolean | null> {
 
 export type LogCorpusStatsDto = {
   files: number;
+  discoveredFiles: number;
+  excludedFiles: number;
+  failedFiles: number;
+  ignoredFiles: number;
+  exclusionCounts: Record<string, number>;
+  exclusionExamples: string[];
+  partial: boolean;
   lines: number;
   templates: number;
   reductionRatio: number;
@@ -1471,6 +1480,18 @@ export type LogCorpusStatsDto = {
   tsMin: number | null;
   tsMax: number | null;
   formatCounts: Record<string, number>;
+};
+
+export type LogEmbeddingState =
+  "keyword_only" | "deferred" | "partial" | "complete";
+
+export type LogEmbeddingStatusDto = {
+  state: LogEmbeddingState;
+  modelId: string | null;
+  embeddedTemplates: number;
+  totalTemplates: number;
+  reason: string | null;
+  updatedAt: number;
 };
 
 export type LogTopTemplateDto = {
@@ -1490,6 +1511,7 @@ export type LogCorpusSummaryDto = {
   sourceLabel: string | null;
   stats: LogCorpusStatsDto | null;
   topTemplates: LogTopTemplateDto[];
+  embedding?: LogEmbeddingStatusDto | null;
 };
 
 export type LogIngestReportDto = {
@@ -1499,6 +1521,13 @@ export type LogIngestReportDto = {
   reductionRatio: number;
   embedded: number;
   files: number;
+  discoveredFiles: number;
+  excludedFiles: number;
+  failedFiles: number;
+  ignoredFiles: number;
+  exclusionCounts: Record<string, number>;
+  exclusionExamples: string[];
+  partial: boolean;
   sourceBytes: number;
   corpusBytes: number;
   levelCounts: Record<string, number>;
@@ -1506,6 +1535,7 @@ export type LogIngestReportDto = {
   tsMax: number | null;
   formatCounts: Record<string, number>;
   topTemplates: LogTopTemplateDto[];
+  embedding?: LogEmbeddingStatusDto | null;
 };
 
 export type LogPackageImportDto = {
@@ -1564,6 +1594,19 @@ export async function hostIngestLogPath(
 export async function hostCancelLogIngest(): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_ingest");
+}
+
+/** Trusted local template-vector re-analysis; events are not reparsed. */
+export async function hostReanalyzeLogCorpus(
+  corpusId: string,
+): Promise<LogEmbeddingStatusDto> {
+  if (!isTauri()) throw new Error("Log re-analysis requires the desktop app");
+  return invoke<LogEmbeddingStatusDto>("reanalyze_log_corpus", { corpusId });
+}
+
+export async function hostCancelLogReanalysis(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_log_reanalysis");
 }
 
 /** Multi-phase process progress (#445) — redacted; no full home paths. */
@@ -1656,16 +1699,10 @@ export async function hostGetActiveLogCorpus(): Promise<string | null> {
   return invoke<string | null>("get_active_log_corpus");
 }
 
-/**
- * Push capped Log Explorer viewport brief into the host so agent turns
- * receive optimized view context (filters/lanes/selection — not dump paste).
- */
-export async function hostSetLogViewContext(
-  brief: string | null,
-): Promise<void> {
-  if (!isTauri()) return;
-  await invoke("set_log_view_context", { brief });
-}
+export type LogExplorerTurnContextDto = {
+  corpus_id: string;
+  brief: string;
+};
 
 export async function hostGetLogCorpus(
   corpusId: string,

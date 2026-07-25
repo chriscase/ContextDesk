@@ -18,6 +18,8 @@ type Props = {
   className?: string;
   /** SoftWrite cancel (#498). */
   onCancel?: () => void;
+  /** Operation-specific accessible cancel label. */
+  cancelLabel?: string;
 };
 
 export function ProcessProgressPanel({
@@ -26,6 +28,7 @@ export function ProcessProgressPanel({
   error,
   className,
   onCancel,
+  cancelLabel = "Cancel ingest",
 }: Props) {
   const k = kind ?? progress?.kind ?? "log_ingest";
   const pipeline: ProcessProgressPhase[] =
@@ -130,7 +133,7 @@ export function ProcessProgressPanel({
           data-testid="cancel-log-ingest"
           onClick={() => onCancel()}
         >
-          Cancel ingest
+          {cancelLabel}
         </button>
       ) : null}
     </div>

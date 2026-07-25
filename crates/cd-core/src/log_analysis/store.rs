@@ -27,8 +27,29 @@ pub const META_VERSION: u32 = 2;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CorpusStats {
-    /// Files read at ingest.
+    /// Files successfully read through EOF and imported.
     pub files: u64,
+    /// File entries discovered before policy/read decisions.
+    #[serde(default)]
+    pub discovered_files: u64,
+    /// Files excluded by an explicit policy guard.
+    #[serde(default)]
+    pub excluded_files: u64,
+    /// Files that could not be opened or completely read.
+    #[serde(default)]
+    pub failed_files: u64,
+    /// Entries intentionally ignored.
+    #[serde(default)]
+    pub ignored_files: u64,
+    /// Counts by stable exclusion/failure reason.
+    #[serde(default)]
+    pub exclusion_counts: std::collections::BTreeMap<String, u64>,
+    /// Bounded basename-only examples (`reason: basename`).
+    #[serde(default)]
+    pub exclusion_examples: Vec<String>,
+    /// True when discovered content was not fully imported.
+    #[serde(default)]
+    pub partial: bool,
     /// Lines parsed.
     pub lines: u64,
     /// Distinct templates.
@@ -67,6 +88,58 @@ pub struct TopTemplateSnapshot {
     pub severity: u8,
 }
 
+/// Persisted availability of semantic template vectors for a corpus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingState {
+    /// No template vectors are available; keyword/structured analysis remains usable.
+    #[default]
+    KeywordOnly,
+    /// Local embedding was deliberately deferred by the bulk policy.
+    Deferred,
+    /// Some, but not all, templates have vectors.
+    Partial,
+    /// Every template has a vector.
+    Complete,
+}
+
+/// Non-secret, restart-safe embedding status stored in `meta.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorpusEmbeddingStatus {
+    /// Current semantic availability.
+    #[serde(default)]
+    pub state: EmbeddingState,
+    /// Local model identity when known; never a credential or endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Templates with vectors.
+    #[serde(default)]
+    pub embedded_templates: u64,
+    /// Total templates at the last embedding decision.
+    #[serde(default)]
+    pub total_templates: u64,
+    /// Stable non-sensitive policy/result reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Unix time of the last completed embedding decision.
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl Default for CorpusEmbeddingStatus {
+    fn default() -> Self {
+        Self {
+            state: EmbeddingState::KeywordOnly,
+            model_id: None,
+            embedded_templates: 0,
+            total_templates: 0,
+            reason: Some("legacy_or_not_embedded".into()),
+            updated_at: 0,
+        }
+    }
+}
+
 /// Full corpus meta.json document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +173,9 @@ pub struct CorpusMeta {
     /// Top templates snapshot from last ingest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub top_templates: Vec<TopTemplateSnapshot>,
+    /// Actual semantic-vector availability and local model identity.
+    #[serde(default)]
+    pub embedding: CorpusEmbeddingStatus,
 }
 
 fn default_meta_version() -> u32 {
@@ -128,6 +204,9 @@ pub struct CorpusSummary {
     /// Persisted ingest stats when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<CorpusStats>,
+    /// Actual semantic-vector availability.
+    #[serde(default)]
+    pub embedding: CorpusEmbeddingStatus,
 }
 
 /// One stored line event after parse/template/redact.
@@ -199,6 +278,7 @@ impl LogCorpus {
             origin_corpus_id: None,
             stats: None,
             top_templates: Vec::new(),
+            embedding: CorpusEmbeddingStatus::default(),
         };
         write_meta_file(&root, &meta)?;
         let db_path = root.join("events.duckdb");
@@ -297,6 +377,7 @@ impl LogCorpus {
         source_label: Option<String>,
         stats: CorpusStats,
         top_templates: Vec<TopTemplateSnapshot>,
+        embedding: CorpusEmbeddingStatus,
     ) -> CoreResult<()> {
         let mut meta = self.meta.lock().map_err(|_| lock_err())?;
         meta.meta_version = META_VERSION;
@@ -305,8 +386,33 @@ impl LogCorpus {
         }
         meta.stats = Some(stats);
         meta.top_templates = top_templates;
+        meta.embedding = embedding;
         write_meta_file(&self.root, &meta)?;
         Ok(())
+    }
+
+    /// Actual vector availability, correcting legacy metadata from loaded rows.
+    pub fn embedding_status(&self) -> CorpusEmbeddingStatus {
+        let rows = self.templates.lock().unwrap_or_else(|e| e.into_inner());
+        let total = rows.len() as u64;
+        let embedded = rows.values().filter(|row| row.vector.is_some()).count() as u64;
+        let mut status = self
+            .meta
+            .lock()
+            .map(|meta| meta.embedding.clone())
+            .unwrap_or_default();
+        status.total_templates = total;
+        status.embedded_templates = embedded;
+        status.state = if total > 0 && embedded == total {
+            EmbeddingState::Complete
+        } else if embedded > 0 {
+            EmbeddingState::Partial
+        } else if status.state == EmbeddingState::Deferred {
+            EmbeddingState::Deferred
+        } else {
+            EmbeddingState::KeywordOnly
+        };
+        status
     }
 
     /// On-disk size of corpus artifacts (meta + duckdb + templates).
@@ -333,6 +439,7 @@ impl LogCorpus {
                         created_at: meta.created_at,
                         source_label: meta.source_label.clone(),
                         stats: Some(stats.clone()),
+                        embedding: meta.embedding.clone(),
                     });
                     continue;
                 }
@@ -359,6 +466,8 @@ impl LogCorpus {
         } else {
             (self.event_count() as u64, self.template_count() as u64)
         };
+        drop(meta);
+        let embedding = self.embedding_status();
         CorpusSummary {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -368,6 +477,7 @@ impl LogCorpus {
             created_at,
             source_label,
             stats,
+            embedding,
         }
     }
 
@@ -798,6 +908,7 @@ pub fn read_meta_file(root: &Path) -> CoreResult<CorpusMeta> {
         origin_corpus_id: None,
         stats: None,
         top_templates: Vec::new(),
+        embedding: CorpusEmbeddingStatus::default(),
     })
 }
 

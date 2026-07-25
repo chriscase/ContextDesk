@@ -24,8 +24,6 @@ import {
   hostLogSearchEvents,
   hostSaveChatSession,
   hostSetActiveLogCorpus,
-  hostSetChatLinkedCorpus,
-  hostSetLogViewContext,
   type EventQueryDto,
   type ExplorerEventDto,
   type LogBookmarkDto,
@@ -34,7 +32,13 @@ import {
   type SessionMetaDto,
   type TimeQuality,
 } from "../../lib/host";
-import { newSession, sessionFromDto, sessionToDto } from "../../lib/session";
+import {
+  applyEventsToMessage,
+  newSession,
+  nowIso,
+  sessionFromDto,
+  sessionToDto,
+} from "../../lib/session";
 import {
   applyLogNav,
   extractLogNavFromText,
@@ -48,14 +52,17 @@ import {
   type LaneEventRef,
 } from "../../lib/logExplorer/lanes";
 import {
+  aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
   formatEventTime,
+  leastReliableTimeQuality,
   timeQualityLabel,
   type Breakpoint,
   type Density,
   type ExplorerFilters,
   type LaneConfig,
+  type LaneTimeState,
 } from "../../lib/logExplorer/types";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import "../../styles/components/log-explorer.css";
@@ -66,7 +73,10 @@ type Props = {
 
 type ChatMsg = { id: string; role: "user" | "assistant"; content: string };
 
-function filtersToQuery(f: ExplorerFilters, extra?: Partial<EventQueryDto>): EventQueryDto {
+function filtersToQuery(
+  f: ExplorerFilters,
+  extra?: Partial<EventQueryDto>,
+): EventQueryDto {
   return {
     timeFrom: f.timeFrom,
     timeTo: f.timeTo,
@@ -110,9 +120,16 @@ export function LogExplorer({ corpusId }: Props) {
   const [lanes, setLanes] = useState<LaneConfig[]>([
     { id: "lane-0", label: "All sources", sources: [] },
   ]);
-  const [laneEvents, setLaneEvents] = useState<Record<string, ExplorerEventDto[]>>({});
+  const [laneEvents, setLaneEvents] = useState<
+    Record<string, ExplorerEventDto[]>
+  >({});
+  const [laneTimeStates, setLaneTimeStates] = useState<
+    Record<string, LaneTimeState>
+  >({});
   /** Per-lane scroll target seq from linked scrub. */
-  const [laneScrollSeq, setLaneScrollSeq] = useState<Record<string, number | null>>({});
+  const [laneScrollSeq, setLaneScrollSeq] = useState<
+    Record<string, number | null>
+  >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [chats, setChats] = useState<SessionMetaDto[]>([]);
@@ -128,6 +145,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
+  const facetRequestRef = useRef(0);
+  const eventsRequestRef = useRef(0);
+  const semanticAvailable =
+    (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
+    0;
 
   // Breakpoint observer
   useEffect(() => {
@@ -188,24 +210,50 @@ export function LogExplorer({ corpusId }: Props) {
   }, [corpusId]);
 
   const loadFacets = useCallback(async () => {
+    const requestId = ++facetRequestRef.current;
     try {
-      const f = await hostLogFacets(corpusId, filtersToQuery(filters, { keyword: null }));
+      const f = await hostLogFacets(
+        corpusId,
+        filtersToQuery(filters, { keyword: null }),
+      );
+      if (requestId !== facetRequestRef.current) return;
       setFacets(f);
-      setTimeQuality(f.timeQuality);
     } catch (e) {
+      if (requestId !== facetRequestRef.current) return;
       setError(String(e));
     }
   }, [corpusId, filters]);
 
   const loadEvents = useCallback(async () => {
+    const requestId = ++eventsRequestRef.current;
+    const visibleLanes = lanes.slice(0, laneCount);
+    const unloaded = Object.fromEntries(
+      visibleLanes.map((lane) => [
+        lane.id,
+        { status: "unloaded", quality: null } satisfies LaneTimeState,
+      ]),
+    );
     setBusy(true);
     setError(null);
+    setLaneTimeStates(unloaded);
+    setTimeQuality("order_only");
+    setGaps([]);
     try {
       if (laneCount <= 1) {
-        const page = await hostLogQueryEvents(corpusId, filtersToQuery(filters));
+        const page = await hostLogQueryEvents(
+          corpusId,
+          filtersToQuery(filters),
+        );
+        if (requestId !== eventsRequestRef.current) return;
+        const laneState: LaneTimeState =
+          page.events.length > 0
+            ? { status: "loaded", quality: page.timeQuality }
+            : { status: "empty", quality: null };
+        const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
         setNextCursor(page.nextCursor);
-        setTimeQuality(page.timeQuality);
+        setLaneTimeStates(states);
+        setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
         setLaneEvents({ "lane-0": page.events });
         setLaneCursors({
           "lane-0": {
@@ -213,17 +261,19 @@ export function LogExplorer({ corpusId }: Props) {
             afterTs: page.nextTs ?? null,
           },
         });
-        setStatus(`${page.totalMatched} matched · showing ${page.events.length}`);
+        setStatus(
+          `${page.totalMatched} matched · showing ${page.events.length}`,
+        );
       } else {
         const byLane: Record<string, ExplorerEventDto[]> = {};
         const cursors: Record<
           string,
           { afterSeq: number | null; afterTs: number | null }
         > = {};
+        const states: Record<string, LaneTimeState> = {};
         let total = 0;
-        let tq: TimeQuality = "order_only";
         let shown = 0;
-        for (const lane of lanes.slice(0, laneCount)) {
+        const requests = visibleLanes.map(async (lane) => {
           const q = filtersToQuery(filters, {
             sources:
               lane.sources.length > 0
@@ -235,6 +285,21 @@ export function LogExplorer({ corpusId }: Props) {
             sortByTime: true,
           });
           const page = await hostLogQueryEvents(corpusId, q);
+          return { lane, page };
+        });
+        const results = await Promise.allSettled(requests);
+        if (requestId !== eventsRequestRef.current) return;
+        let failed = 0;
+        for (const [index, result] of results.entries()) {
+          const lane = visibleLanes[index]!;
+          if (result.status === "rejected") {
+            failed += 1;
+            byLane[lane.id] = [];
+            cursors[lane.id] = { afterSeq: null, afterTs: null };
+            states[lane.id] = { status: "error", quality: null };
+            continue;
+          }
+          const { page } = result.value;
           byLane[lane.id] = page.events;
           cursors[lane.id] = {
             afterSeq: page.nextCursor,
@@ -242,21 +307,36 @@ export function LogExplorer({ corpusId }: Props) {
           };
           total = Math.max(total, page.totalMatched);
           shown += page.events.length;
-          tq = page.timeQuality;
+          states[lane.id] =
+            page.events.length > 0
+              ? { status: "loaded", quality: page.timeQuality }
+              : { status: "empty", quality: null };
         }
         setLaneEvents(byLane);
         setLaneCursors(cursors);
+        setLaneTimeStates(states);
         setTotalMatched(total);
-        setTimeQuality(tq);
+        setTimeQuality(
+          aggregateLaneTimeQuality(
+            visibleLanes.map((lane) => lane.id),
+            states,
+          ),
+        );
         setNextCursor(null);
+        if (failed > 0) {
+          setError(
+            `${failed} evidence lane${failed === 1 ? "" : "s"} failed to load; time linking remains off`,
+          );
+        }
         setStatus(
           `${laneCount} lanes · ${shown} loaded (page) · up to ${total} matched per lane`,
         );
       }
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   }, [corpusId, filters, laneCount, lanes]);
 
@@ -266,10 +346,16 @@ export function LogExplorer({ corpusId }: Props) {
 
   useEffect(() => {
     void loadFacets();
+    return () => {
+      facetRequestRef.current += 1;
+    };
   }, [loadFacets]);
 
   useEffect(() => {
     void loadEvents();
+    return () => {
+      eventsRequestRef.current += 1;
+    };
   }, [loadEvents]);
 
   // Push view context to host for agent turns (optimized, not dump paste)
@@ -309,13 +395,6 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarks,
   ]);
 
-  useEffect(() => {
-    void hostSetLogViewContext(viewBrief);
-    return () => {
-      void hostSetLogViewContext(null);
-    };
-  }, [viewBrief]);
-
   // Link/gap when multi-lane + link on
   useEffect(() => {
     if (!linkMode || laneCount < 2) {
@@ -324,9 +403,10 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const packed = lanes.slice(0, laneCount).map((l) => ({
       id: l.id,
-      events: (laneEvents[l.id] ?? []).map(
-        (e): LaneEventRef => ({ seq: e.seq, ts: e.ts }),
-      ),
+      events: (laneEvents[l.id] ?? []).map((e): LaneEventRef => ({
+        seq: e.seq,
+        ts: e.ts,
+      })),
     }));
     const allTs = packed.flatMap((l) => l.events.map((e) => e.ts));
     if (allTs.length === 0) {
@@ -341,12 +421,24 @@ export function LogExplorer({ corpusId }: Props) {
     else setGaps([]);
   }, [linkMode, laneCount, lanes, laneEvents, timeQuality]);
 
+  useEffect(() => {
+    if (timeQuality === "order_only" && linkMode) {
+      setLinkMode(false);
+      setGaps([]);
+      setStatus(
+        "Linked scroll disabled: at least one visible lane has order-only or unavailable time",
+      );
+    }
+  }, [linkMode, timeQuality]);
+
   const toggleLevel = (level: string) => {
     setFilters((f) => {
       const has = f.levels.includes(level);
       return {
         ...f,
-        levels: has ? f.levels.filter((x) => x !== level) : [...f.levels, level],
+        levels: has
+          ? f.levels.filter((x) => x !== level)
+          : [...f.levels, level],
       };
     });
   };
@@ -356,29 +448,56 @@ export function LogExplorer({ corpusId }: Props) {
       const has = f.sources.includes(source);
       return {
         ...f,
-        sources: has ? f.sources.filter((x) => x !== source) : [...f.sources, source],
+        sources: has
+          ? f.sources.filter((x) => x !== source)
+          : [...f.sources, source],
       };
     });
   };
 
   const runSearch = async () => {
+    const requestId = ++eventsRequestRef.current;
     setBusy(true);
+    setError(null);
+    setLaneTimeStates({
+      "lane-0": { status: "unloaded", quality: null },
+    });
+    setTimeQuality("order_only");
+    setGaps([]);
     try {
       const hits = await hostLogSearchEvents(corpusId, {
         query: searchDraft || filters.keyword || undefined,
-        semantic: true,
+        semantic: semanticAvailable,
         k: 100,
         filter: filtersToQuery(filters, { keyword: null }),
       });
+      if (requestId !== eventsRequestRef.current) return;
       const evs = hits.map((h) => h.event);
+      const state: LaneTimeState =
+        evs.length > 0
+          ? {
+              status: "loaded",
+              quality: leastReliableTimeQuality(
+                evs.map((event) => event.timeQuality),
+              ),
+            }
+          : { status: "empty", quality: null };
+      const states = { "lane-0": state };
       setLaneEvents({ "lane-0": evs });
+      setLaneTimeStates(states);
+      setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
       setTotalMatched(evs.length);
       setHighlight(new Set(evs.map((e) => e.seq)));
-      setStatus(`Search: ${evs.length} event hits (template-first semantic + keyword)`);
+      setStatus(
+        semanticAvailable
+          ? `Search: ${evs.length} event hits (template-first semantic + keyword)`
+          : `Search: ${evs.length} event hits (keyword-only; local re-analysis is not complete)`,
+      );
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -393,9 +512,10 @@ export function LogExplorer({ corpusId }: Props) {
     if (linkMode && laneCount > 1) {
       const packed = lanes.slice(0, laneCount).map((l) => ({
         id: l.id,
-        events: (laneEvents[l.id] ?? []).map(
-          (x): LaneEventRef => ({ seq: x.seq, ts: x.ts }),
-        ),
+        events: (laneEvents[l.id] ?? []).map((x): LaneEventRef => ({
+          seq: x.seq,
+          ts: x.ts,
+        })),
       }));
       const scrub = scrubLinked(e.ts, packed, timeQuality);
       if (scrub.linked) {
@@ -475,7 +595,11 @@ export function LogExplorer({ corpusId }: Props) {
           : `Applied log_nav · focus ${result.focusLane}`,
       );
     } else {
-      setStatus(result.label ? `Applied nav: ${result.label}` : "Applied log_nav filters");
+      setStatus(
+        result.label
+          ? `Applied nav: ${result.label}`
+          : "Applied log_nav filters",
+      );
     }
   };
 
@@ -500,12 +624,12 @@ export function LogExplorer({ corpusId }: Props) {
 
   /** Create linked chat and return its id (avoids stale React state in sendChat). */
   const createLinkedChat = async (): Promise<string | null> => {
+    setError(null);
     try {
       const s = newSession(`Logs · ${summary?.name ?? corpusId.slice(0, 8)}`);
       s.linkedCorpusId = corpusId;
       const saved = await hostSaveChatSession(sessionToDto(s));
       if (saved) {
-        await hostSetChatLinkedCorpus(saved.id, corpusId);
         const linked = await hostListChatSessionsForCorpus(corpusId);
         setChats(linked ?? []);
         await openChat(saved.id);
@@ -527,6 +651,7 @@ export function LogExplorer({ corpusId }: Props) {
       if (!sessionId) return;
     }
     setChatBusy(true);
+    setError(null);
     setChatDraft("");
     const userMsg: ChatMsg = {
       id: crypto.randomUUID(),
@@ -534,9 +659,6 @@ export function LogExplorer({ corpusId }: Props) {
       content: text,
     };
     setChatMessages((m) => [...m, userMsg]);
-    // Ensure host has latest viewport for this turn
-    await hostSetLogViewContext(viewBrief);
-    await hostSetActiveLogCorpus(corpusId);
     let assistantText = "";
     const assistantId = crypto.randomUUID();
     setChatMessages((m) => [
@@ -544,34 +666,66 @@ export function LogExplorer({ corpusId }: Props) {
       { id: assistantId, role: "assistant", content: "" },
     ]);
     try {
-      await agentTurn(sessionId!, text, false, null, null, (ev) => {
-        if (ev.kind === "text_delta") {
-          assistantText += String(ev.payload?.text ?? "");
-          setChatMessages((msgs) =>
-            msgs.map((x) =>
-              x.id === assistantId ? { ...x, content: assistantText } : x,
-            ),
-          );
-        }
-      });
-      // Extract log_nav from final assistant text
-      const found = extractLogNavFromText(assistantText);
-      if (found.length) setNavChips((prev) => [...prev, ...found]);
-      // Persist session messages via host load/save if available
+      const events = await agentTurn(
+        sessionId!,
+        text,
+        false,
+        null,
+        null,
+        (ev) => {
+          if (ev.kind === "text_delta") {
+            assistantText += String(ev.payload?.text ?? "");
+            setChatMessages((msgs) =>
+              msgs.map((x) =>
+                x.id === assistantId ? { ...x, content: assistantText } : x,
+              ),
+            );
+          }
+        },
+        null,
+        {
+          corpus_id: corpusId,
+          brief: viewBrief,
+        },
+      );
       const full = await hostLoadChatSession(sessionId!);
-      if (full) {
-        const s = sessionFromDto(full);
-        // host agent path already persisted history on host; refresh UI from store
-        setChatMessages(
-          s.messages.map((m) => ({
-            id: m.id,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })),
-        );
+      if (!full) {
+        throw new Error("Linked chat could not be reloaded after the turn");
       }
+      const session = sessionFromDto(full);
+      const folded = applyEventsToMessage(
+        { id: assistantId, role: "assistant", content: "" },
+        events,
+      ).msg;
+      const assistant = {
+        ...folded,
+        content: folded.content || assistantText,
+      };
+      const updated = {
+        ...session,
+        messages: [...session.messages, userMsg, assistant],
+        lastReadMessageId: assistantId,
+        updatedAt: nowIso(),
+      };
+      const saved = await hostSaveChatSession(sessionToDto(updated));
+      if (!saved) {
+        throw new Error("Linked chat turn was not persisted");
+      }
+      const persisted = sessionFromDto(saved);
+      setChatMessages(
+        persisted.messages.map((m) => ({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        })),
+      );
+
+      // Extract log_nav from the final persisted assistant text.
+      const found = extractLogNavFromText(assistant.content);
+      if (found.length) setNavChips((prev) => [...prev, ...found]);
       const linked = await hostListChatSessionsForCorpus(corpusId);
       setChats(linked ?? []);
+      setStatus("Linked chat response saved");
     } catch (e) {
       setError(String(e));
       setChatMessages((msgs) =>
@@ -590,6 +744,7 @@ export function LogExplorer({ corpusId }: Props) {
     const cur = laneCursors[laneId];
     if (cur?.afterSeq == null) return;
     const lane = lanes.find((l) => l.id === laneId);
+    const requestId = eventsRequestRef.current;
     setBusy(true);
     try {
       const page = await hostLogQueryEvents(
@@ -607,6 +762,7 @@ export function LogExplorer({ corpusId }: Props) {
           limit: 100,
         }),
       );
+      if (requestId !== eventsRequestRef.current) return;
       setLaneEvents((prev) => ({
         ...prev,
         [laneId]: [...(prev[laneId] ?? []), ...page.events],
@@ -621,13 +777,37 @@ export function LogExplorer({ corpusId }: Props) {
       if (laneId === "lane-0") {
         setNextCursor(page.nextCursor);
       }
+      if (page.events.length > 0) {
+        setLaneTimeStates((previous) => {
+          const prior = previous[laneId];
+          const quality =
+            prior?.status === "loaded" && prior.quality != null
+              ? leastReliableTimeQuality([prior.quality, page.timeQuality])
+              : page.timeQuality;
+          const next = {
+            ...previous,
+            [laneId]: {
+              status: "loaded",
+              quality,
+            } satisfies LaneTimeState,
+          };
+          setTimeQuality(
+            aggregateLaneTimeQuality(
+              lanes.slice(0, laneCount).map((visible) => visible.id),
+              next,
+            ),
+          );
+          return next;
+        });
+      }
       setStatus(
         `Lane ${laneId}: loaded +${page.events.length} (cursor ${page.nextCursor ?? "end"})`,
       );
     } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -677,12 +857,15 @@ export function LogExplorer({ corpusId }: Props) {
   return (
     <div
       ref={rootRef}
-      className={["log-explorer", bpClass, densityClass].filter(Boolean).join(" ")}
+      className={["log-explorer", bpClass, densityClass]
+        .filter(Boolean)
+        .join(" ")}
       data-testid="log-explorer"
       data-breakpoint={breakpoint}
       data-density={density}
       data-lane-count={laneCount}
       data-link-mode={linkMode ? "on" : "off"}
+      data-time-quality={timeQuality}
       data-resizable="true"
       onKeyDown={onKeyDown}
     >
@@ -711,7 +894,13 @@ export function LogExplorer({ corpusId }: Props) {
             onClick={() => {
               if (!linkMode && timeQuality === "order_only") {
                 setStatus(
-                  "Link requires wall-clock time; corpus is order-only — enabling will badge/warn",
+                  "Linked scroll unavailable: at least one visible lane has order-only or unavailable time",
+                );
+                return;
+              }
+              if (!linkMode && timeQuality === "mixed") {
+                setStatus(
+                  "Linked scroll uses mixed time quality; inspect each lane badge before interpreting gaps",
                 );
               }
               setLinkMode((v) => !v);
@@ -755,11 +944,18 @@ export function LogExplorer({ corpusId }: Props) {
         style={bodyStyle}
         data-testid="log-explorer-body"
       >
-        <aside className="log-explorer__filters" data-testid="log-explorer-filters">
+        <aside
+          className="log-explorer__filters"
+          data-testid="log-explorer-filters"
+        >
           <div className="log-explorer__section-title">Search</div>
           <input
             className="log-explorer__search"
-            placeholder="Keyword / semantic…"
+            placeholder={
+              semanticAvailable
+                ? "Keyword / semantic…"
+                : "Keyword search (semantic unavailable)…"
+            }
             value={searchDraft}
             onChange={(e) => setSearchDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -770,9 +966,18 @@ export function LogExplorer({ corpusId }: Props) {
             }}
             aria-label="Search logs"
           />
-          <button type="button" className="log-explorer__btn" onClick={() => void runSearch()}>
+          <button
+            type="button"
+            className="log-explorer__btn"
+            onClick={() => void runSearch()}
+          >
             Search
           </button>
+          <p className="log-explorer__chat-preview" role="note">
+            {semanticAvailable
+              ? "Semantic template search available"
+              : "Keyword-only corpus · re-analyze locally from Logs to enable semantic search"}
+          </p>
 
           <div className="log-explorer__section-title">Levels</div>
           <div className="log-explorer__facet">
@@ -810,9 +1015,14 @@ export function LogExplorer({ corpusId }: Props) {
           </div>
 
           <div className="log-explorer__section-title">Bookmarks</div>
-          <div className="log-explorer__bookmarks" data-testid="log-explorer-bookmarks">
+          <div
+            className="log-explorer__bookmarks"
+            data-testid="log-explorer-bookmarks"
+          >
             {bookmarks.length === 0 ? (
-              <div className="log-explorer__chat-preview">None yet — select rows + B</div>
+              <div className="log-explorer__chat-preview">
+                None yet — select rows + B
+              </div>
             ) : (
               bookmarks.map((b) => (
                 <div key={b.id} className="log-explorer__bm-item">
@@ -866,7 +1076,8 @@ export function LogExplorer({ corpusId }: Props) {
           <div className="log-explorer__lane-strip">
             {linkMode && gaps.length > 0 && (
               <span className="log-explorer__badge log-explorer__badge--warn">
-                {gaps.length} gap region{gaps.length === 1 ? "" : "s"}
+                {gaps.length} {timeQuality === "mixed" ? "potential " : ""}gap
+                region{gaps.length === 1 ? "" : "s"}
               </span>
             )}
             {navChips.map((chip, i) => (
@@ -881,59 +1092,91 @@ export function LogExplorer({ corpusId }: Props) {
               </button>
             ))}
           </div>
-          <div className={`log-explorer__lane-grid log-explorer__lane-grid--${laneCount}`}>
-            {lanes.slice(0, laneCount).map((lane) => (
-              <section
-                key={lane.id}
-                className={[
-                  "log-explorer__lane",
-                  focusLaneId === lane.id ? "log-explorer__lane--focus" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                data-lane-id={lane.id}
-                data-focused={focusLaneId === lane.id ? "true" : "false"}
-              >
-                <div className="log-explorer__lane-header">
-                  <strong>{lane.label}</strong>
-                  <span className="log-explorer__chat-preview">
-                    {(laneEvents[lane.id] ?? []).length} rows
-                    {focusLaneId === lane.id ? " · focused" : ""}
-                  </span>
-                </div>
-                {linkMode && gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
-                  <div
-                    className="log-explorer__gap-band"
-                    title="Gap: this lane empty while peers have events"
-                    data-testid="log-explorer-gap"
+          <div
+            className={`log-explorer__lane-grid log-explorer__lane-grid--${laneCount}`}
+          >
+            {lanes.slice(0, laneCount).map((lane) => {
+              const laneTime = laneTimeStates[lane.id] ?? {
+                status: "unloaded",
+                quality: null,
+              };
+              const laneTimeLabel =
+                laneTime.status === "loaded" && laneTime.quality != null
+                  ? timeQualityLabel(laneTime.quality)
+                  : laneTime.status === "empty"
+                    ? "time unavailable · empty"
+                    : laneTime.status === "error"
+                      ? "time unavailable · load failed"
+                      : "time unavailable · loading";
+              return (
+                <section
+                  key={lane.id}
+                  className={[
+                    "log-explorer__lane",
+                    focusLaneId === lane.id ? "log-explorer__lane--focus" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  data-lane-id={lane.id}
+                  data-focused={focusLaneId === lane.id ? "true" : "false"}
+                  data-time-status={laneTime.status}
+                  data-time-quality={laneTime.quality ?? "unavailable"}
+                >
+                  <div className="log-explorer__lane-header">
+                    <strong>{lane.label}</strong>
+                    <span
+                      className={`log-explorer__badge ${
+                        laneTime.quality === "order_only" ||
+                        laneTime.quality == null
+                          ? "log-explorer__badge--warn"
+                          : ""
+                      }`}
+                    >
+                      {laneTimeLabel}
+                    </span>
+                    <span className="log-explorer__chat-preview">
+                      {(laneEvents[lane.id] ?? []).length} rows
+                      {focusLaneId === lane.id ? " · focused" : ""}
+                    </span>
+                  </div>
+                  {linkMode &&
+                    gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
+                      <div
+                        className="log-explorer__gap-band"
+                        title="Gap: this lane empty while peers have events"
+                        data-testid="log-explorer-gap"
+                      />
+                    )}
+                  <VirtualizedEventList
+                    events={laneEvents[lane.id] ?? []}
+                    timeQuality={timeQuality}
+                    selected={selected}
+                    highlight={highlight}
+                    density={density}
+                    scrollToSeq={laneScrollSeq[lane.id] ?? null}
+                    onRowClick={onRowClick}
                   />
-                )}
-                <VirtualizedEventList
-                  events={laneEvents[lane.id] ?? []}
-                  timeQuality={timeQuality}
-                  selected={selected}
-                  highlight={highlight}
-                  density={density}
-                  scrollToSeq={laneScrollSeq[lane.id] ?? null}
-                  onRowClick={onRowClick}
-                />
-                {laneCursors[lane.id]?.afterSeq != null ? (
-                  <button
-                    type="button"
-                    className="log-explorer__btn"
-                    data-testid={`load-more-${lane.id}`}
-                    data-lane-load-more={lane.id}
-                    disabled={busy}
-                    onClick={() => void loadMoreLane(lane.id)}
-                  >
-                    Load more ({lane.label})
-                  </button>
-                ) : null}
-              </section>
-            ))}
+                  {laneCursors[lane.id]?.afterSeq != null ? (
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      data-testid={`load-more-${lane.id}`}
+                      data-lane-load-more={lane.id}
+                      disabled={busy}
+                      onClick={() => void loadMoreLane(lane.id)}
+                    >
+                      Load more ({lane.label})
+                    </button>
+                  ) : null}
+                </section>
+              );
+            })}
           </div>
           {detail && (
-            <div className="log-explorer__detail" data-testid="log-explorer-detail">
+            <div
+              className="log-explorer__detail"
+              data-testid="log-explorer-detail"
+            >
               <div>
                 <strong>seq {detail.seq}</strong> · {detail.source} ·{" "}
                 <span className={levelClass(detail.level)}>{detail.level}</span>
@@ -976,6 +1219,7 @@ export function LogExplorer({ corpusId }: Props) {
           <button
             type="button"
             className="log-explorer__btn"
+            data-testid="new-linked-chat"
             onClick={() => void createLinkedChat()}
           >
             New linked chat
@@ -991,7 +1235,9 @@ export function LogExplorer({ corpusId }: Props) {
                   key={c.id}
                   type="button"
                   className={`log-explorer__chat-item ${
-                    activeChatId === c.id ? "log-explorer__chat-item--active" : ""
+                    activeChatId === c.id
+                      ? "log-explorer__chat-item--active"
+                      : ""
                   }`}
                   onClick={() => void openChat(c.id)}
                 >
@@ -1003,7 +1249,10 @@ export function LogExplorer({ corpusId }: Props) {
           </div>
 
           <div className="log-explorer__section-title">Thread</div>
-          <div className="log-explorer__chat-thread" data-testid="log-explorer-chat-thread">
+          <div
+            className="log-explorer__chat-thread"
+            data-testid="log-explorer-chat-thread"
+          >
             {chatMessages.length === 0 ? (
               <div className="log-explorer__chat-preview">
                 Open or create a linked chat, then ask about this corpus. Agent
@@ -1021,7 +1270,10 @@ export function LogExplorer({ corpusId }: Props) {
               ))
             )}
           </div>
-          <div className="log-explorer__chat-composer" data-testid="log-explorer-chat-composer">
+          <div
+            className="log-explorer__chat-composer"
+            data-testid="log-explorer-chat-composer"
+          >
             <textarea
               className="log-explorer__search"
               rows={3}
@@ -1040,6 +1292,7 @@ export function LogExplorer({ corpusId }: Props) {
             <button
               type="button"
               className="log-explorer__btn log-explorer__btn--active"
+              data-testid="send-linked-chat"
               disabled={chatBusy || !chatDraft.trim()}
               onClick={() => void sendChat()}
             >
@@ -1061,7 +1314,9 @@ export function LogExplorer({ corpusId }: Props) {
             }}
             aria-label="Paste log_nav JSON"
           />
-          <div className="log-explorer__section-title">View context → agent</div>
+          <div className="log-explorer__section-title">
+            View context → agent
+          </div>
           <pre
             className="log-explorer__chat-preview"
             style={{ whiteSpace: "pre-wrap" }}
@@ -1079,4 +1334,3 @@ export function LogExplorer({ corpusId }: Props) {
     </div>
   );
 }
-

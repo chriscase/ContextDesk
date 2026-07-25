@@ -2028,6 +2028,27 @@ struct AgentTurnReq {
     /// Session-pinned skill id (#343); inject playbook when set.
     #[serde(default)]
     pinned_skill_id: Option<String>,
+    /// Present only for a turn started from a Log Explorer linked chat.
+    #[serde(default)]
+    log_explorer_context: Option<LogExplorerTurnContextReq>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogExplorerTurnContextReq {
+    corpus_id: String,
+    brief: String,
+}
+
+fn validate_log_explorer_turn_context(
+    session: &Session,
+    window_id: &str,
+    request: LogExplorerTurnContextReq,
+) -> Result<cd_core::agent::LogExplorerTurnContext, String> {
+    if session.linked_corpus_id.as_deref() != Some(request.corpus_id.as_str()) {
+        return Err("Log Explorer context does not match this chat session's linked corpus".into());
+    }
+    cd_core::agent::LogExplorerTurnContext::new(window_id, request.corpus_id, request.brief)
+        .map_err(|e| e.to_string())
 }
 
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
@@ -2595,6 +2616,7 @@ async fn propose_save_skill_cmd(
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
     req: AgentTurnReq,
     on_event: tauri::ipc::Channel<EventDto>,
 ) -> Result<(), String> {
@@ -2666,6 +2688,20 @@ async fn agent_turn(
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
 
+    let log_explorer_context = match req.log_explorer_context {
+        Some(request) => {
+            let session = session_store(&state)?
+                .load(&req.session_id)
+                .map_err(|e| e.to_string())?;
+            Some(validate_log_explorer_turn_context(
+                &session,
+                window.label(),
+                request,
+            )?)
+        }
+        None => None,
+    };
+
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
@@ -2695,6 +2731,10 @@ async fn agent_turn(
         host.set_session_context_base(Some(base));
     }
     host.set_active_session_id(Some(req.session_id.clone()));
+    let previous_log_corpus = host.active_log_corpus().map(str::to_string);
+    if let Some(context) = log_explorer_context.as_ref() {
+        host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    }
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -2711,7 +2751,7 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel(
+        cd_core::research::research_turn_with_cancel_and_context(
             &mut host,
             &profile,
             api_key,
@@ -2720,11 +2760,13 @@ async fn agent_turn(
             &req.session_id,
             false,
             Some(cancel.clone()),
+            log_explorer_context,
             Some(&mut sink),
         )
         .await
         .map_err(|e| e.to_string())
     };
+    host.set_active_log_corpus(previous_log_corpus);
     {
         let mut host_guard = state.host.lock().expect("host");
         *host_guard = Some(host);
@@ -2827,12 +2869,19 @@ fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, 
 }
 
 /// Persist full UI session (auto-save path). Seeds agent history.
+fn should_persist_chat_session(session: &Session) -> bool {
+    // Ordinary empty drafts stay ephemeral. An explicitly corpus-linked chat is
+    // different: the user created it from Log Explorer and the link itself is
+    // durable state needed before the first agent turn.
+    !session.messages.is_empty() || session.linked_corpus_id.is_some()
+}
+
 #[tauri::command]
 fn save_chat_session(state: State<'_, AppState>, mut session: Session) -> Result<Session, String> {
     session.maybe_auto_title_from_first_user();
     session.touch();
     // Do not persist empty never-messaged drafts under placeholder titles.
-    if session.messages.is_empty() {
+    if !should_persist_chat_session(&session) {
         return Ok(session);
     }
     let store = session_store(&state)?;
@@ -3818,6 +3867,13 @@ impl From<&cd_core::memory::MemoryRecord> for DurableMemoryDto {
 #[serde(rename_all = "camelCase")]
 struct LogCorpusStatsDto {
     files: u64,
+    discovered_files: u64,
+    excluded_files: u64,
+    failed_files: u64,
+    ignored_files: u64,
+    exclusion_counts: std::collections::BTreeMap<String, u64>,
+    exclusion_examples: Vec<String>,
+    partial: bool,
     lines: u64,
     templates: u64,
     reduction_ratio: f64,
@@ -3851,6 +3907,7 @@ struct LogCorpusSummaryDto {
     source_label: Option<String>,
     stats: Option<LogCorpusStatsDto>,
     top_templates: Vec<LogTopTemplateDto>,
+    embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
 #[derive(serde::Serialize)]
@@ -3894,6 +3951,13 @@ struct LogIngestReportDto {
     reduction_ratio: f64,
     embedded: u64,
     files: u64,
+    discovered_files: u64,
+    excluded_files: u64,
+    failed_files: u64,
+    ignored_files: u64,
+    exclusion_counts: std::collections::BTreeMap<String, u64>,
+    exclusion_examples: Vec<String>,
+    partial: bool,
     source_bytes: u64,
     corpus_bytes: u64,
     level_counts: std::collections::BTreeMap<String, u64>,
@@ -3901,6 +3965,7 @@ struct LogIngestReportDto {
     ts_max: Option<i64>,
     format_counts: std::collections::BTreeMap<String, u64>,
     top_templates: Vec<LogTopTemplateDto>,
+    embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
 #[derive(serde::Serialize)]
@@ -3930,6 +3995,13 @@ fn log_cache_dir(state: &AppState) -> Result<std::path::PathBuf, String> {
 fn stats_dto(s: &cd_core::log_analysis::CorpusStats) -> LogCorpusStatsDto {
     LogCorpusStatsDto {
         files: s.files,
+        discovered_files: s.discovered_files,
+        excluded_files: s.excluded_files,
+        failed_files: s.failed_files,
+        ignored_files: s.ignored_files,
+        exclusion_counts: s.exclusion_counts.clone(),
+        exclusion_examples: s.exclusion_examples.clone(),
+        partial: s.partial,
         lines: s.lines,
         templates: s.templates,
         reduction_ratio: s.reduction_ratio,
@@ -3970,6 +4042,7 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
         source_label: s.source_label,
         stats: s.stats.as_ref().map(stats_dto),
         top_templates: top,
+        embedding: c.embedding_status(),
     }
 }
 
@@ -4074,14 +4147,26 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
 
 /// Key used in `AppState.cancels` for SoftWrite log ingest (#498).
 const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
+const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
+
+fn desktop_local_log_embed_plan(
+    host: &ToolHost,
+) -> (
+    cd_core::log_analysis::LogEmbedPolicy,
+    Option<std::sync::Arc<dyn cd_core::embed::EmbedBackend>>,
+) {
+    let mut policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
+    policy.model_id = host.local_log_embed_model().to_string();
+    (policy, host.local_log_embed_backend())
+}
 
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
 /// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
 ///
 /// Runs on a blocking thread pool so the UI event loop is not starved (macOS
-/// "Not Responding" during large zip/dir imports). Bulk SoftWrite **skips
-/// template embed by default** (#502) so import finishes without a full embed
-/// pass; keyword/structured analysis still works.
+/// "Not Responding" during large zip/dir imports). Ordinary imports use the
+/// product-local ONNX backend; actual streamed input over 64 MiB is deferred.
+/// Keyword/structured analysis remains available in deferred mode.
 #[tauri::command]
 async fn ingest_log_path(
     app: tauri::AppHandle,
@@ -4091,12 +4176,10 @@ async fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    // Bulk SoftWrite: no embed (None mode). User can re-analyze later if needed.
-    let policy = cd_core::log_analysis::LogEmbedPolicy {
-        mode: cd_core::log_analysis::LogEmbedMode::None,
-        cloud_content_leaves_machine: false,
-        cloud_base_url: None,
-        model_id: "none".into(),
+    let (policy, embed_backend) = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        desktop_local_log_embed_plan(host)
     };
     let progress = TauriProcessProgress { app: app.clone() };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
@@ -4112,7 +4195,7 @@ async fn ingest_log_path(
             std::path::Path::new(&path),
             &name_owned,
             &policy,
-            None, // no embed backend on bulk SoftWrite
+            embed_backend,
             &progress,
             Some(&cancel_for_job),
         )
@@ -4139,6 +4222,13 @@ async fn ingest_log_path(
         reduction_ratio: report.stats.reduction_ratio,
         embedded: report.stats.embedded as u64,
         files: report.stats.files as u64,
+        discovered_files: report.stats.discovered_files,
+        excluded_files: report.stats.excluded_files,
+        failed_files: report.stats.failed_files,
+        ignored_files: report.stats.ignored_files,
+        exclusion_counts: report.stats.exclusion_counts.clone(),
+        exclusion_examples: report.stats.exclusion_examples.clone(),
+        partial: report.stats.partial,
         source_bytes: report.stats.source_bytes,
         corpus_bytes: report.stats.corpus_bytes,
         level_counts: report.stats.level_counts.clone(),
@@ -4155,7 +4245,74 @@ async fn ingest_log_path(
                 severity,
             })
             .collect(),
+        embedding: report.embedding,
     })
+}
+
+/// Trusted local re-analysis of template vectors; raw events are not reparsed.
+#[tauri::command]
+async fn reanalyze_log_corpus(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<cd_core::log_analysis::CorpusEmbeddingStatus, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let known = cd_core::log_analysis::LogCorpus::list_ids(&cache).map_err(|e| e.to_string())?;
+    if !known.iter().any(|known_id| known_id == &corpus_id) {
+        return Err("log corpus not found".into());
+    }
+    let (backend, model_id) = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        (
+            host.local_log_embed_backend().ok_or_else(|| {
+                "Local ONNX embedding model is unavailable. Restart after the model is installed."
+                    .to_string()
+            })?,
+            host.local_log_embed_model().to_string(),
+        )
+    };
+    let progress = TauriProcessProgress { app };
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(LOG_REANALYZE_CANCEL_KEY) {
+            return Err("a log re-analysis is already running".into());
+        }
+        cancels.insert(LOG_REANALYZE_CANCEL_KEY.into(), cancel.inner_arc());
+    }
+    let cancel_for_job = cancel.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::reanalyze_corpus_embeddings(
+            &cache,
+            &corpus_id,
+            backend.as_ref(),
+            &model_id,
+            &progress,
+            Some(&cancel_for_job),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("re-analysis task join: {error}"));
+    state
+        .cancels
+        .lock()
+        .expect("cancels")
+        .remove(LOG_REANALYZE_CANCEL_KEY);
+    result?
+}
+
+/// Cancel the active trusted local template re-analysis.
+#[tauri::command]
+fn cancel_log_reanalysis(state: State<'_, AppState>) -> Result<bool, String> {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(LOG_REANALYZE_CANCEL_KEY) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Request cancel of an in-flight SoftWrite log ingest (#498).
@@ -4288,16 +4445,6 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
     let host = state.host.lock().expect("host");
     let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
     Ok(host.active_log_corpus().map(|s| s.to_string()))
-}
-
-/// Push Log Explorer viewport brief into the host for agent turn injection (#480).
-#[tauri::command]
-fn set_log_view_context(state: State<'_, AppState>, brief: Option<String>) -> Result<(), String> {
-    ensure_host(&state)?;
-    let mut host = state.host.lock().expect("host");
-    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
-    host.set_log_view_context_brief(brief);
-    Ok(())
 }
 
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
@@ -5342,13 +5489,14 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             cancel_log_ingest,
+            reanalyze_log_corpus,
+            cancel_log_reanalysis,
             log_cluster_problems,
             log_timeline,
             log_search,
             discard_log_corpus,
             set_active_log_corpus,
             get_active_log_corpus,
-            set_log_view_context,
             log_query_events,
             log_facets,
             log_search_events,
@@ -5425,5 +5573,88 @@ mod help_host_tests {
                 .map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline")
         );
+    }
+}
+
+#[cfg(test)]
+mod chat_session_host_tests {
+    use super::*;
+
+    #[test]
+    fn linked_empty_chat_is_durable_but_ordinary_empty_draft_is_not() {
+        let ordinary = Session::new("Chat");
+        assert!(!should_persist_chat_session(&ordinary));
+
+        let mut linked = Session::new("Logs · fixture");
+        linked.set_linked_corpus_id(Some("corpus-1".into()));
+        assert!(should_persist_chat_session(&linked));
+    }
+
+    #[test]
+    fn explorer_turn_context_must_match_the_durable_session_link() {
+        let mut linked = Session::new("Logs · fixture");
+        linked.set_linked_corpus_id(Some("corpus-a".into()));
+
+        let context = validate_log_explorer_turn_context(
+            &linked,
+            "log-explorer-a",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-a".into(),
+                brief: "levels=error; selectedSeqs=[1,2]".into(),
+            },
+        )
+        .expect("matching linked context");
+        assert_eq!(context.window_id, "log-explorer-a");
+        assert_eq!(context.corpus_id, "corpus-a");
+
+        let mismatch = validate_log_explorer_turn_context(
+            &linked,
+            "log-explorer-b",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-b".into(),
+                brief: "levels=info".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("does not match"), "{mismatch}");
+
+        let ordinary = Session::new("Chat");
+        assert!(validate_log_explorer_turn_context(
+            &ordinary,
+            "main",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-a".into(),
+                brief: "levels=error".into(),
+            },
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod log_embedding_host_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_ingest_plan_uses_dedicated_local_backend_and_bulk_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = cd_core::workspace::Workspace::new("logs", vec![dir.path().to_path_buf()]);
+        let index = cd_core::index::KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+        host.set_log_embed_backend(
+            Some(std::sync::Arc::new(
+                cd_core::embed::ConceptEmbedBackend::new(32),
+            )),
+            "fixture-local",
+        );
+
+        let (policy, backend) = desktop_local_log_embed_plan(&host);
+        assert_eq!(policy.mode, cd_core::log_analysis::LogEmbedMode::Local);
+        assert_eq!(policy.model_id, "fixture-local");
+        assert_eq!(
+            policy.defer_above_source_bytes,
+            Some(cd_core::log_analysis::LOCAL_EMBED_DEFER_SOURCE_BYTES)
+        );
+        assert!(backend.is_some());
     }
 }

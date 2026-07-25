@@ -4,7 +4,10 @@ use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::parse::{detect_format, parse_line, LogFormat};
 use super::redact_log::{redact_message, redact_params};
-use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot};
+use super::store::{
+    template_content_hash, CorpusEmbeddingStatus, EmbeddingState, LogCorpus, LogEvent, TemplateRow,
+    TopTemplateSnapshot,
+};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
@@ -15,13 +18,35 @@ use crate::process_progress::{
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Stats from one ingest run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestStats {
-    /// Files read.
+    /// Files successfully read through EOF and imported.
     pub files: usize,
+    /// File entries discovered before policy/read decisions.
+    #[serde(default)]
+    pub discovered_files: u64,
+    /// Files excluded by an explicit policy guard.
+    #[serde(default)]
+    pub excluded_files: u64,
+    /// Files that could not be opened or completely read.
+    #[serde(default)]
+    pub failed_files: u64,
+    /// Entries intentionally ignored (for example hidden files/directories).
+    #[serde(default)]
+    pub ignored_files: u64,
+    /// Counts by stable exclusion/failure reason.
+    #[serde(default)]
+    pub exclusion_counts: std::collections::BTreeMap<String, u64>,
+    /// Bounded basename-only examples (`reason: basename`).
+    #[serde(default)]
+    pub exclusion_examples: Vec<String>,
+    /// True when any discovered content was not fully imported.
+    #[serde(default)]
+    pub partial: bool,
     /// Lines parsed.
     pub lines: u64,
     /// Distinct templates.
@@ -51,6 +76,13 @@ impl IngestStats {
     pub fn to_corpus_stats(&self) -> super::store::CorpusStats {
         super::store::CorpusStats {
             files: self.files as u64,
+            discovered_files: self.discovered_files,
+            excluded_files: self.excluded_files,
+            failed_files: self.failed_files,
+            ignored_files: self.ignored_files,
+            exclusion_counts: self.exclusion_counts.clone(),
+            exclusion_examples: self.exclusion_examples.clone(),
+            partial: self.partial,
             lines: self.lines,
             templates: self.templates as u64,
             reduction_ratio: self.reduction_ratio,
@@ -63,6 +95,39 @@ impl IngestStats {
             format_counts: self.format_counts.clone(),
         }
     }
+
+    fn discover(&mut self) {
+        self.discovered_files = self.discovered_files.saturating_add(1);
+    }
+
+    fn imported(&mut self) {
+        self.files = self.files.saturating_add(1);
+    }
+
+    fn excluded(&mut self, reason: &'static str, source: &Path) {
+        self.excluded_files = self.excluded_files.saturating_add(1);
+        self.record_omission(reason, source);
+    }
+
+    fn failed(&mut self, reason: &'static str, source: &Path) {
+        self.failed_files = self.failed_files.saturating_add(1);
+        self.record_omission(reason, source);
+    }
+
+    fn ignored(&mut self, reason: &'static str, source: &Path) {
+        self.ignored_files = self.ignored_files.saturating_add(1);
+        self.record_omission(reason, source);
+    }
+
+    fn record_omission(&mut self, reason: &'static str, source: &Path) {
+        *self.exclusion_counts.entry(reason.into()).or_insert(0) += 1;
+        if self.exclusion_examples.len() < MAX_EXCLUSION_EXAMPLES {
+            let safe_basename = redact_message(&progress_basename(source));
+            self.exclusion_examples
+                .push(format!("{reason}: {safe_basename}"));
+        }
+        self.partial = true;
+    }
 }
 
 /// Full ingest report.
@@ -74,6 +139,8 @@ pub struct IngestReport {
     pub stats: IngestStats,
     /// Top templates by count (for summary UI).
     pub top_templates: Vec<(u64, String, u64, u8)>,
+    /// Persisted semantic-vector availability.
+    pub embedding: CorpusEmbeddingStatus,
 }
 
 /// Ingest a file or directory into a new corpus under `cache_root`.
@@ -108,7 +175,21 @@ pub fn ingest_path_with_observer(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
-    ingest_path_inner(cache_root, path, name, embed, embed_model, progress, cancel)
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        embed,
+        embed_model,
+        if embed.is_some() {
+            LogEmbedMode::Local
+        } else {
+            LogEmbedMode::None
+        },
+        None,
+        progress,
+        cancel,
+    )
 }
 
 /// Ingest with an explicit [`LogEmbedPolicy`] (#359).
@@ -161,6 +242,8 @@ pub fn ingest_path_with_policy_and_observer(
         name,
         backend.as_deref(),
         policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
         progress,
         cancel,
     )
@@ -183,6 +266,81 @@ pub const PROGRESS_EVERY_LINES: u64 = 2_000;
 /// Max templates to embed on bulk SoftWrite when embed is enabled (cap).
 pub const BULK_EMBED_TEMPLATE_CAP: usize = 256;
 
+/// Maximum basename-only omission examples persisted or sent to the webview.
+pub const MAX_EXCLUSION_EXAMPLES: usize = 20;
+
+/// Hidden, same-filesystem cache used until a new corpus is fully validated.
+///
+/// The final `log_corpora/{id}` path does not exist until [`Self::publish`].
+/// Dropping this guard after any error or cancellation removes the complete
+/// per-run staging tree.
+struct IngestStaging {
+    parent: PathBuf,
+    root: PathBuf,
+}
+
+impl IngestStaging {
+    fn new(cache_root: &Path) -> CoreResult<Self> {
+        let parent = cache_root.join(".log_ingest_staging");
+        std::fs::create_dir_all(&parent)?;
+        let root = parent.join(Uuid::now_v7().to_string());
+        std::fs::create_dir(&root)?;
+        Ok(Self { parent, root })
+    }
+
+    fn cache_root(&self) -> &Path {
+        &self.root
+    }
+
+    fn publish(&mut self, cache_root: &Path, corpus_id: &str) -> CoreResult<()> {
+        let source = self.root.join("log_corpora").join(corpus_id);
+        let corpora_root = cache_root.join("log_corpora");
+        let destination = corpora_root.join(corpus_id);
+        if destination.exists() {
+            return Err(CoreError::Message(format!(
+                "refusing to replace existing log corpus {corpus_id}"
+            )));
+        }
+        std::fs::create_dir_all(&corpora_root)?;
+        std::fs::rename(&source, &destination)
+            .map_err(|e| CoreError::Message(format!("publish log corpus: {e}")))?;
+        self.cleanup();
+        Ok(())
+    }
+
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+        // Concurrent ingests may still own sibling directories.
+        let _ = std::fs::remove_dir(&self.parent);
+    }
+}
+
+impl Drop for IngestStaging {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IngestCheckpoint {
+    CorpusCreated,
+    EventsStored,
+    BeforeTemplates,
+    DuringEmbedding,
+    BeforeSummary,
+    BeforeValidation,
+    BeforePublish,
+}
+
+type IngestFaultHook<'a> = Option<&'a dyn Fn(IngestCheckpoint) -> CoreResult<()>>;
+
+fn check_ingest_fault(hook: IngestFaultHook<'_>, checkpoint: IngestCheckpoint) -> CoreResult<()> {
+    match hook {
+        Some(hook) => hook(checkpoint),
+        None => Ok(()),
+    }
+}
+
 fn is_zip_file(path: &Path) -> bool {
     path.is_file()
         && path
@@ -190,17 +348,6 @@ fn is_zip_file(path: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case("zip"))
             .unwrap_or(false)
-}
-
-/// True if the first chunk of a file looks binary (NUL byte).
-fn looks_binary_file(path: &Path) -> bool {
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    use std::io::Read;
-    let mut buf = [0u8; 8192];
-    let n = f.read(&mut buf).unwrap_or(0);
-    buf[..n].contains(&0)
 }
 
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
@@ -220,8 +367,9 @@ fn ingest_lines_from_reader(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     kind: ProcessProgressKind,
-) -> CoreResult<()> {
-    for line_res in reader.lines() {
+) -> CoreResult<bool> {
+    let mut raw_line = Vec::new();
+    loop {
         if cancelled(cancel) {
             emit(
                 progress,
@@ -237,16 +385,22 @@ fn ingest_lines_from_reader(
             );
             return Err(CoreError::Message("ingest cancelled".into()));
         }
-        let Ok(line) = line_res else {
-            continue;
+        raw_line.clear();
+        let bytes = match reader.read_until(b'\n', &mut raw_line) {
+            Ok(0) => break,
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(false),
         };
+        stats.source_bytes = stats.source_bytes.saturating_add(bytes as u64);
+        let line = String::from_utf8_lossy(&raw_line);
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.trim().is_empty() {
             continue;
         }
         if format_hint.is_none() {
-            *format_hint = Some(detect_format(&line, file_hint));
+            *format_hint = Some(detect_format(line, file_hint));
         }
-        let parsed = parse_line(&line, *format_hint, *seq);
+        let parsed = parse_line(line, *format_hint, *seq);
         let fmt_key = match parsed.format {
             LogFormat::Json => "json",
             LogFormat::Logfmt => "logfmt",
@@ -314,7 +468,7 @@ fn ingest_lines_from_reader(
             );
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Stream zip members in-place (no full extract to temp). Cancel checked **per entry**.
@@ -363,8 +517,6 @@ fn ingest_from_zip(
     );
 
     let mut files_done = 0u64;
-    let mut files_parsed = 0usize;
-
     for i in 0..archive.len() {
         if cancelled(cancel) {
             emit(
@@ -386,7 +538,10 @@ fn ingest_from_zip(
             .by_index(i)
             .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
         let name = entry.name().to_string();
+        stats.discover();
         if name.ends_with('/') {
+            stats.ignored("directory", Path::new(&name));
+            files_done += 1;
             continue;
         }
         let rel = name.trim_start_matches('/');
@@ -419,14 +574,23 @@ fn ingest_from_zip(
         );
 
         if size > DEFAULT_MAX_FILE_BYTES {
+            stats.excluded("too_large", Path::new(rel));
             files_done += 1;
             continue;
         }
 
         // Sample first bytes for binary without loading whole entry.
         let mut head = [0u8; 8192];
-        let n = entry.read(&mut head).unwrap_or(0);
+        let n = match entry.read(&mut head) {
+            Ok(n) => n,
+            Err(_) => {
+                stats.failed("read_failed", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+        };
         if head[..n].contains(&0) {
+            stats.excluded("binary", Path::new(rel));
             files_done += 1;
             // Drain remaining entry to keep archive state consistent
             let mut sink = std::io::sink();
@@ -434,13 +598,12 @@ fn ingest_from_zip(
             continue;
         }
 
-        stats.source_bytes = stats.source_bytes.saturating_add(size);
         // Chain head + rest of entry for line parsing.
         let rest = BufReader::with_capacity(64 * 1024, entry);
         let mut chained = std::io::Cursor::new(head[..n].to_vec()).chain(rest);
         let mut reader = BufReader::with_capacity(64 * 1024, &mut chained);
 
-        ingest_lines_from_reader(
+        let completely_read = ingest_lines_from_reader(
             &mut reader,
             rel,
             None,
@@ -458,7 +621,11 @@ fn ingest_from_zip(
         )?;
 
         files_done += 1;
-        files_parsed += 1;
+        if completely_read {
+            stats.imported();
+        } else {
+            stats.failed("read_failed", Path::new(rel));
+        }
         let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
             emit(
@@ -478,24 +645,51 @@ fn ingest_from_zip(
         }
     }
 
-    stats.files = files_parsed;
     Ok(files_done)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_path_inner(
     cache_root: &Path,
     path: &Path,
     name: &str,
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
-    let _ = embed_model;
+    ingest_path_inner_with_fault(
+        cache_root,
+        path,
+        name,
+        embed,
+        embed_model,
+        embed_mode,
+        defer_above_source_bytes,
+        progress,
+        cancel,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_path_inner_with_fault(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    fault: IngestFaultHook<'_>,
+) -> CoreResult<IngestReport> {
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
 
-    // Starting + cancel **before** any zip work so multi-GB extracts are not forced.
     emit(
         progress,
         ProcessProgress::phase(
@@ -531,17 +725,72 @@ fn ingest_path_inner(
         .with_fraction(0.05),
     );
 
+    let mut staging = IngestStaging::new(cache_root)?;
+    let report = ingest_path_into_cache(
+        staging.cache_root(),
+        path,
+        name,
+        embed,
+        embed_model,
+        embed_mode,
+        defer_above_source_bytes,
+        progress,
+        cancel,
+        fault,
+    )?;
+
+    check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
+    validate_staged_ingest(staging.cache_root(), &report)?;
+    check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+    staging.publish(cache_root, &report.corpus_id)?;
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Completed,
+            format!(
+                "ingested {} lines → {} templates ({:.1}× reduction)",
+                report.stats.lines, report.stats.templates, report.stats.reduction_ratio
+            ),
+            false,
+        )
+        .with_fraction(1.0)
+        .with_lines(report.stats.lines)
+        .with_files(report.stats.files as u64)
+        .with_bytes(report.stats.source_bytes)
+        .with_templates(report.stats.templates as u64),
+    );
+
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_path_into_cache(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    embed: Option<&dyn EmbedBackend>,
+    embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    fault: IngestFaultHook<'_>,
+) -> CoreResult<IngestReport> {
+    let kind = ProcessProgressKind::LogIngest;
+    let source_label = progress_basename(path);
+
     let corpus = LogCorpus::create(cache_root, name)?;
+    check_ingest_fault(fault, IngestCheckpoint::CorpusCreated)?;
     let mut miner = DrainMiner::default();
     let mut stats = IngestStats::default();
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut format_hint: Option<LogFormat> = None;
-    let mut files_done = 0u64;
-
-    if is_zip_file(path) {
+    let files_done = if is_zip_file(path) {
         // Stream members without full extract-to-temp (#499 skeptic fix).
-        files_done = ingest_from_zip(
+        ingest_from_zip(
             path,
             &corpus,
             &mut miner,
@@ -552,18 +801,30 @@ fn ingest_path_inner(
             progress,
             cancel,
             kind,
-        )?;
+        )?
     } else {
-        let files = collect_log_files(path)?;
-        let file_count = files.len() as u64;
-        stats.files = files.len();
+        let inventory = collect_log_files(path)?;
+        for ignored in &inventory.ignored {
+            stats.discover();
+            stats.ignored("hidden", ignored);
+        }
+        for _ in &inventory.files {
+            stats.discover();
+        }
+        if stats.discovered_files == 0 {
+            return Err(CoreError::Message(
+                "no importable log file entries discovered".into(),
+            ));
+        }
+        let file_count = stats.discovered_files;
+        let mut files_done = inventory.ignored.len() as u64;
 
         emit(
             progress,
             ProcessProgress::phase(
                 kind,
                 ProcessProgressPhase::Scan,
-                format!("found {file_count} file(s)"),
+                format!("found {file_count} file entr(y/ies)"),
                 true,
             )
             .with_fraction(0.1)
@@ -582,7 +843,7 @@ fn ingest_path_inner(
             .with_files(file_count),
         );
 
-        for file in &files {
+        for file in &inventory.files {
             if cancelled(cancel) {
                 emit(
                     progress,
@@ -598,8 +859,16 @@ fn ingest_path_inner(
                 return Err(CoreError::Message("ingest cancelled".into()));
             }
 
-            let file_bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            let file_bytes = match std::fs::metadata(file) {
+                Ok(metadata) => metadata.len(),
+                Err(_) => {
+                    stats.failed("metadata_failed", file);
+                    files_done += 1;
+                    continue;
+                }
+            };
             if file_bytes > DEFAULT_MAX_FILE_BYTES {
+                stats.excluded("too_large", file);
                 files_done += 1;
                 emit(
                     progress,
@@ -620,24 +889,45 @@ fn ingest_path_inner(
                 );
                 continue;
             }
-            if looks_binary_file(file) {
+
+            let mut fh = match std::fs::File::open(file) {
+                Ok(file) => file,
+                Err(_) => {
+                    stats.failed("open_failed", file);
+                    files_done += 1;
+                    continue;
+                }
+            };
+            let mut head = [0u8; 8192];
+            let n = match fh.read(&mut head) {
+                Ok(n) => n,
+                Err(_) => {
+                    stats.failed("read_failed", file);
+                    files_done += 1;
+                    continue;
+                }
+            };
+            if head[..n].contains(&0) {
+                stats.excluded("binary", file);
                 files_done += 1;
                 continue;
             }
 
-            stats.source_bytes = stats.source_bytes.saturating_add(file_bytes);
-            let rel = file
-                .strip_prefix(path)
-                .unwrap_or(file.as_path())
-                .to_string_lossy()
-                .to_string();
-
-            let Ok(fh) = std::fs::File::open(file) else {
-                files_done += 1;
-                continue;
+            let rel_path = if path.is_dir() {
+                file.strip_prefix(path).unwrap_or(file.as_path())
+            } else {
+                Path::new(
+                    file.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("log"),
+                )
             };
-            let mut reader = BufReader::with_capacity(64 * 1024, fh);
-            ingest_lines_from_reader(
+            let rel = rel_path.to_string_lossy().to_string();
+
+            let rest = BufReader::with_capacity(64 * 1024, fh);
+            let mut chained = std::io::Cursor::new(head[..n].to_vec()).chain(rest);
+            let mut reader = BufReader::with_capacity(64 * 1024, &mut chained);
+            let completely_read = ingest_lines_from_reader(
                 &mut reader,
                 &rel,
                 Some(file.as_path()),
@@ -654,6 +944,11 @@ fn ingest_path_inner(
                 kind,
             )?;
             files_done += 1;
+            if completely_read {
+                stats.imported();
+            } else {
+                stats.failed("read_failed", file);
+            }
             let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
             if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
                 emit(
@@ -672,7 +967,8 @@ fn ingest_path_inner(
                 );
             }
         }
-    }
+        files_done
+    };
 
     emit(
         progress,
@@ -702,6 +998,7 @@ fn ingest_path_inner(
         );
         corpus.push_events(&batch)?;
     }
+    check_ingest_fault(fault, IngestCheckpoint::EventsStored)?;
 
     if cancelled(cancel) {
         emit(
@@ -718,6 +1015,7 @@ fn ingest_path_inner(
     }
 
     // Persist templates
+    check_ingest_fault(fault, IngestCheckpoint::BeforeTemplates)?;
     emit(
         progress,
         ProcessProgress::phase(
@@ -742,8 +1040,11 @@ fn ingest_path_inner(
 
     // Embed templates only (#359). Cap bulk SoftWrite so import is not forced
     // through a full multi-k embed pass (semantic can be filled later).
+    let deferred = embed_mode == LogEmbedMode::Local
+        && defer_above_source_bytes.is_some_and(|limit| stats.source_bytes > limit);
     let mut embedded = 0usize;
-    if let Some(backend) = embed {
+    if let Some(backend) = embed.filter(|_| !deferred) {
+        check_ingest_fault(fault, IngestCheckpoint::DuringEmbedding)?;
         let mut templates = corpus.list_templates();
         templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
         let cap = BULK_EMBED_TEMPLATE_CAP.min(templates.len());
@@ -764,7 +1065,18 @@ fn ingest_path_inner(
             std::collections::HashMap::new();
         for (i, row) in to_embed.into_iter().enumerate() {
             if cancelled(cancel) {
-                break;
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Cancelled,
+                        "ingest cancelled during template embedding",
+                        false,
+                    )
+                    .with_lines(stats.lines)
+                    .with_templates(embedded as u64),
+                );
+                return Err(CoreError::Message("ingest cancelled".into()));
             }
             if let Some(v) = hash_cache.get(&row.content_hash) {
                 corpus.set_template_vector(row.info.template_id, v.clone())?;
@@ -799,6 +1111,35 @@ fn ingest_path_inner(
         0.0
     };
     stats.embedded = embedded;
+    let embedding = CorpusEmbeddingStatus {
+        state: if deferred {
+            EmbeddingState::Deferred
+        } else if stats.templates > 0 && embedded == stats.templates {
+            EmbeddingState::Complete
+        } else if embedded > 0 {
+            EmbeddingState::Partial
+        } else {
+            EmbeddingState::KeywordOnly
+        },
+        model_id: (embedded > 0 || deferred).then(|| embed_model.to_string()),
+        embedded_templates: embedded as u64,
+        total_templates: stats.templates as u64,
+        reason: Some(
+            if deferred {
+                "bulk_source_bytes_threshold"
+            } else if embed.is_none() && embed_mode == LogEmbedMode::Local {
+                "local_model_unavailable"
+            } else if embed_mode == LogEmbedMode::None {
+                "embedding_not_requested"
+            } else if embedded < stats.templates {
+                "template_cap_or_backend_failure"
+            } else {
+                "local_embedding_complete"
+            }
+            .into(),
+        ),
+        updated_at: crate::embed::now_unix_secs(),
+    };
 
     let mut top: Vec<_> = corpus
         .list_templates()
@@ -817,6 +1158,7 @@ fn ingest_path_inner(
 
     corpus.flush()?;
     stats.corpus_bytes = corpus.corpus_bytes_on_disk();
+    check_ingest_fault(fault, IngestCheckpoint::BeforeSummary)?;
 
     let top_snap: Vec<TopTemplateSnapshot> = top
         .iter()
@@ -831,47 +1173,68 @@ fn ingest_path_inner(
         Some(source_label.clone()),
         stats.to_corpus_stats(),
         top_snap,
+        embedding.clone(),
     )?;
-
-    emit(
-        progress,
-        ProcessProgress::phase(
-            kind,
-            ProcessProgressPhase::Completed,
-            format!(
-                "ingested {} lines → {} templates ({:.1}× reduction)",
-                stats.lines, stats.templates, stats.reduction_ratio
-            ),
-            false,
-        )
-        .with_fraction(1.0)
-        .with_lines(stats.lines)
-        .with_files(files_done)
-        .with_bytes(stats.corpus_bytes)
-        .with_templates(stats.templates as u64),
-    );
 
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
         top_templates: top,
+        embedding,
     })
 }
 
-fn collect_log_files(path: &Path) -> CoreResult<Vec<PathBuf>> {
-    let mut out = Vec::new();
+fn validate_staged_ingest(staging_cache_root: &Path, report: &IngestReport) -> CoreResult<()> {
+    // Open only after the writer handle from `ingest_path_into_cache` has been
+    // dropped. This catches malformed metadata/templates/DuckDB while the
+    // corpus is still hidden and keeps rename compatible with Windows.
+    let opened = LogCorpus::open(staging_cache_root, &report.corpus_id)?;
+    let meta = opened.meta()?;
+    if meta.id != report.corpus_id {
+        return Err(CoreError::Message(
+            "staged corpus metadata id mismatch".into(),
+        ));
+    }
+    let Some(persisted) = meta.stats else {
+        return Err(CoreError::Message(
+            "staged corpus missing completed ingest stats".into(),
+        ));
+    };
+    if persisted.lines != report.stats.lines
+        || persisted.templates != report.stats.templates as u64
+        || opened.event_count() as u64 != report.stats.lines
+        || opened.template_count() != report.stats.templates
+    {
+        return Err(CoreError::Message(
+            "staged corpus validation counts do not match ingest report".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct FileInventory {
+    files: Vec<PathBuf>,
+    ignored: Vec<PathBuf>,
+}
+
+fn collect_log_files(path: &Path) -> CoreResult<FileInventory> {
+    let mut out = FileInventory::default();
     if path.is_file() {
-        out.push(path.to_path_buf());
+        out.files.push(path.to_path_buf());
         return Ok(out);
     }
     if path.is_dir() {
         walk_dir(path, &mut out)?;
+    } else {
+        return Err(CoreError::Message("log source does not exist".into()));
     }
-    out.sort();
+    out.files.sort();
+    out.ignored.sort();
     Ok(out)
 }
 
-fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> CoreResult<()> {
+fn walk_dir(dir: &Path, out: &mut FileInventory) -> CoreResult<()> {
     for e in std::fs::read_dir(dir)? {
         let e = e?;
         let p = e.path();
@@ -881,9 +1244,10 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> CoreResult<()> {
             // skip obvious binaries
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if name.starts_with('.') {
+                out.ignored.push(p);
                 continue;
             }
-            out.push(p);
+            out.files.push(p);
         }
     }
     Ok(())
@@ -895,6 +1259,36 @@ mod tests {
     use crate::embed::ConceptEmbedBackend;
     use crate::process_progress::{CancelFlag, ProcessProgressPhase, RecordingProcessProgress};
     use std::io::Write;
+
+    fn cache_tree_paths(root: &Path) -> Vec<PathBuf> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_path_buf());
+                }
+                if path.is_dir() {
+                    walk(root, &path, out);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn assert_no_ingest_staging(cache_root: &Path) {
+        assert!(
+            !cache_root.join(".log_ingest_staging").exists(),
+            "ingest staging survived: {:?}",
+            cache_tree_paths(cache_root)
+        );
+    }
 
     #[test]
     fn ingest_fixture_multi_format_with_reduction() {
@@ -1068,6 +1462,108 @@ mod tests {
             "expected zip stream progress: {:?}",
             updates.iter().map(|u| &u.message).collect::<Vec<_>>()
         );
+        drop(updates);
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
+    }
+
+    #[test]
+    fn ingest_failure_checkpoints_preserve_existing_corpus_set_and_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("app.log"),
+            "ts=1700000000 level=error msg=connection refused\n",
+        )
+        .unwrap();
+
+        let baseline = ingest_path(&cache, &logs, "baseline", None, "none").unwrap();
+        let baseline_ids = LogCorpus::list_ids(&cache).unwrap();
+        assert_eq!(baseline_ids, vec![baseline.corpus_id]);
+        let baseline_tree = cache_tree_paths(&cache);
+        let backend = ConceptEmbedBackend::new(16);
+
+        for checkpoint in [
+            IngestCheckpoint::CorpusCreated,
+            IngestCheckpoint::EventsStored,
+            IngestCheckpoint::BeforeTemplates,
+            IngestCheckpoint::DuringEmbedding,
+            IngestCheckpoint::BeforeSummary,
+            IngestCheckpoint::BeforeValidation,
+            IngestCheckpoint::BeforePublish,
+        ] {
+            let hook = |actual| {
+                if actual == checkpoint {
+                    Err(CoreError::Message(format!(
+                        "injected ingest failure at {checkpoint:?}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            };
+            let err = ingest_path_inner_with_fault(
+                &cache,
+                &logs,
+                "must-not-publish",
+                Some(&backend),
+                "concept",
+                LogEmbedMode::Local,
+                None,
+                &NoopProcessProgress,
+                None,
+                Some(&hook),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err}").contains("injected ingest failure"),
+                "{checkpoint:?}: {err}"
+            );
+            assert_eq!(
+                LogCorpus::list_ids(&cache).unwrap(),
+                baseline_ids,
+                "published a failed corpus at {checkpoint:?}"
+            );
+            assert_no_ingest_staging(&cache);
+            assert_eq!(
+                cache_tree_paths(&cache),
+                baseline_tree,
+                "cache tree changed at {checkpoint:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_zip_failure_leaves_no_partial_corpus_or_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let zip_path = dir.path().join("broken.zip");
+        std::fs::write(&zip_path, b"not a zip archive").unwrap();
+
+        let err = ingest_path(&cache, &zip_path, "broken", None, "none").unwrap_err();
+        assert!(format!("{err}").contains("zip open"), "{err}");
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
+    fn successful_ingest_publishes_one_validated_corpus_and_no_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log"), "error connection refused\n").unwrap();
+
+        let report = ingest_path(&cache, &logs, "published", None, "none").unwrap();
+        assert_eq!(
+            LogCorpus::list_ids(&cache).unwrap(),
+            vec![report.corpus_id.clone()]
+        );
+        let reopened = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(reopened.event_count() as u64, report.stats.lines);
+        assert_eq!(reopened.template_count(), report.stats.templates);
+        assert_no_ingest_staging(&cache);
     }
 
     #[test]
@@ -1174,6 +1670,8 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err}").contains("cancelled"), "{err}");
         assert!(recorder.phases().contains(&ProcessProgressPhase::Cancelled));
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
     }
 
     #[test]
@@ -1246,6 +1744,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("cancelled"), "{err}");
+        assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
+        assert_no_ingest_staging(dir.path());
     }
 
     #[test]
@@ -1260,6 +1760,45 @@ mod tests {
         let report = ingest_path(dir.path(), &logs, "no-embed", None, "none").unwrap();
         assert_eq!(report.stats.embedded, 0);
         assert!(report.stats.lines >= 100);
+    }
+
+    #[test]
+    fn local_policy_embeds_ordinary_input_and_defers_above_exact_byte_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("app.log");
+        std::fs::write(&logs, "ts=1700000000 level=error msg=connection refused\n").unwrap();
+        let backend: Arc<dyn EmbedBackend> = Arc::new(ConceptEmbedBackend::new(32));
+
+        let mut ordinary = LogEmbedPolicy::local_default();
+        ordinary.model_id = "concept-local".into();
+        ordinary.defer_above_source_bytes = Some(u64::MAX);
+        let embedded = ingest_path_with_policy(
+            dir.path(),
+            &logs,
+            "ordinary",
+            &ordinary,
+            Some(backend.clone()),
+        )
+        .unwrap();
+        assert!(embedded.stats.embedded > 0);
+        assert_eq!(embedded.embedding.state, EmbeddingState::Complete);
+        assert_eq!(
+            embedded.embedding.model_id.as_deref(),
+            Some("concept-local")
+        );
+
+        let mut bulk = ordinary;
+        bulk.defer_above_source_bytes = Some(1);
+        let deferred =
+            ingest_path_with_policy(dir.path(), &logs, "bulk", &bulk, Some(backend)).unwrap();
+        assert_eq!(deferred.stats.embedded, 0);
+        assert_eq!(deferred.embedding.state, EmbeddingState::Deferred);
+        assert_eq!(
+            LogCorpus::open(dir.path(), &deferred.corpus_id)
+                .unwrap()
+                .embedding_status(),
+            deferred.embedding
+        );
     }
 
     #[test]
@@ -1298,5 +1837,144 @@ mod tests {
             updates.iter().any(|u| u.bytes_processed.unwrap_or(0) > 0),
             "expected bytes_processed on some updates"
         );
+    }
+
+    #[test]
+    fn directory_reporting_separates_imported_excluded_failed_and_ignored() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let safe = b"level=info msg=started\nlevel=error msg=Bearer test-secret-token\n";
+        std::fs::write(logs.join("safe.log"), safe).unwrap();
+        std::fs::write(logs.join("binary.log"), b"prefix\0binary").unwrap();
+        std::fs::write(logs.join(".hidden.log"), b"must be ignored\n").unwrap();
+        std::fs::write(logs.join("vanish.log"), b"unreadable after scan\n").unwrap();
+        let oversized = std::fs::File::create(logs.join("oversized.log")).unwrap();
+        oversized.set_len(DEFAULT_MAX_FILE_BYTES + 1).unwrap();
+
+        struct RemoveAfterScan {
+            path: PathBuf,
+            removed: AtomicBool,
+            recorder: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for RemoveAfterScan {
+            fn progress(&self, update: ProcessProgress) {
+                if update.message.starts_with("found ")
+                    && !self.removed.swap(true, Ordering::SeqCst)
+                {
+                    std::fs::remove_file(&self.path).unwrap();
+                }
+                self.recorder.progress(update);
+            }
+        }
+
+        let observer = RemoveAfterScan {
+            path: logs.join("vanish.log"),
+            removed: AtomicBool::new(false),
+            recorder: RecordingProcessProgress::default(),
+        };
+        let report = ingest_path_with_observer(
+            &cache,
+            &logs,
+            "honest-directory",
+            None,
+            "none",
+            &observer,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.stats.discovered_files, 5);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.excluded_files, 2);
+        assert_eq!(report.stats.failed_files, 1);
+        assert_eq!(report.stats.ignored_files, 1);
+        assert_eq!(report.stats.source_bytes, safe.len() as u64);
+        assert!(report.stats.partial);
+        assert_eq!(report.stats.exclusion_counts["binary"], 1);
+        assert_eq!(report.stats.exclusion_counts["too_large"], 1);
+        assert_eq!(report.stats.exclusion_counts["metadata_failed"], 1);
+        assert_eq!(report.stats.exclusion_counts["hidden"], 1);
+        assert!(report.stats.exclusion_examples.len() <= MAX_EXCLUSION_EXAMPLES);
+        assert!(report
+            .stats
+            .exclusion_examples
+            .iter()
+            .all(|example| !example.contains(dir.path().to_string_lossy().as_ref())));
+
+        let updates = observer.recorder.updates.lock().unwrap();
+        let byte_updates: Vec<u64> = updates
+            .iter()
+            .filter_map(|update| update.bytes_processed)
+            .collect();
+        assert!(
+            byte_updates.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress bytes regressed: {byte_updates:?}"
+        );
+        assert_eq!(
+            byte_updates.last().copied().unwrap_or_default(),
+            report.stats.source_bytes,
+            "completed progress reports source bytes actually streamed"
+        );
+        let diagnostics = format!("{:?} {:?}", report.stats, *updates);
+        assert!(!diagnostics.contains("test-secret-token"), "{diagnostics}");
+        assert!(!diagnostics.contains("/Users/"), "{diagnostics}");
+
+        let reopened = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let persisted = reopened.meta().unwrap().stats.unwrap();
+        assert_eq!(persisted.discovered_files, 5);
+        assert_eq!(persisted.files, 1);
+        assert!(persisted.partial);
+    }
+
+    #[test]
+    fn zip_reporting_uses_the_same_counter_semantics() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let zip_path = dir.path().join("mixed.zip");
+        let safe = b"level=info msg=safe zip line\n";
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.add_directory("ignored/", opts).unwrap();
+            zip.start_file("safe.log", opts).unwrap();
+            zip.write_all(safe).unwrap();
+            zip.start_file("binary.log", opts).unwrap();
+            zip.write_all(b"prefix\0binary").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let report = ingest_path(&cache, &zip_path, "honest-zip", None, "none").unwrap();
+        assert_eq!(report.stats.discovered_files, 3);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.excluded_files, 1);
+        assert_eq!(report.stats.failed_files, 0);
+        assert_eq!(report.stats.ignored_files, 1);
+        assert_eq!(report.stats.source_bytes, safe.len() as u64);
+        assert_eq!(report.stats.exclusion_counts["binary"], 1);
+        assert_eq!(report.stats.exclusion_counts["directory"], 1);
+        assert!(report.stats.partial);
+    }
+
+    #[test]
+    fn empty_directory_fails_without_publishing_a_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("empty");
+        std::fs::create_dir_all(&logs).unwrap();
+
+        let err = ingest_path(&cache, &logs, "empty", None, "none").unwrap_err();
+        assert!(
+            format!("{err}").contains("no importable log file entries"),
+            "{err}"
+        );
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
     }
 }

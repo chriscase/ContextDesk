@@ -38,7 +38,7 @@ pub fn is_log_tool(name: &str) -> bool {
 pub fn ingest_logs_tool_spec() -> ToolSpec {
     ToolSpec {
         name: INGEST_LOGS.into(),
-        description: "Ingest a local log file or directory into a disposable analysis corpus (parse, template, embed). SoftWrite — user must Accept. Returns corpus id + template summary.".into(),
+        description: "Ingest a local log file or directory into a disposable analysis corpus (parse, template, and local template embedding when available/below the bulk threshold). SoftWrite — user must Accept. Returns corpus id + truthful template/embedding summary.".into(),
         side_effect: ToolSideEffect::SoftWrite,
         parameters: json!({
             "type": "object",
@@ -63,7 +63,7 @@ fn corpus_param() -> serde_json::Value {
 pub fn search_logs_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SEARCH_LOGS.into(),
-        description: "Hybrid search over an ingested log corpus (structured filter + semantic templates + keyword). Cite template ids in conclusions. Omitting corpus uses the host active corpus.".into(),
+        description: "Search an ingested log corpus (structured + keyword; template-semantic only when that corpus has vectors). Cite template ids in conclusions. Omitting corpus uses the host active corpus.".into(),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",

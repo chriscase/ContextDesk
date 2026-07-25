@@ -82,13 +82,15 @@ Selection is automatic by size. Memory hybrid recall (#346) builds cosine-on-rea
 
 ## 6. Embedding — throughput matters
 
-- **Default: local in‑process ONNX** via `fastembed-rs` (batched, fast on CPU, no HTTP round‑trip, fully offline) — a better fit for bulk work than the per‑batch Ollama HTTP path. Same `EmbedBackend` trait as memory.
+- **Default: local in‑process ONNX** via `fastembed-rs` (fast on CPU; inference makes no HTTP request after the model is installed). The desktop may install the small model once; if it is unavailable the corpus is labeled keyword-only rather than pretending semantic search is active.
+- **Deterministic bulk policy:** ordinary imports embed up to the top 256 templates during ingest. After more than **64 MiB of actual streamed source bytes**, ingest records `deferred` and publishes the still-usable keyword/structured corpus without vectors.
+- **Trusted re-analysis:** Logs offers a human-confirmed local action for keyword-only/deferred corpora. It embeds up to 2,048 templates without reparsing events, reports progress/cancellation, and atomically publishes sidecars only after validation. Failure preserves the previous corpus/index.
 - **Opt‑in per corpus: a cloud embedding API** for throughput on huge corpora — an explicit toggle, with a clear "log content will leave this machine" confirmation (logs may be sensitive). Off by default.
 - **Embed templates only**, content‑hash cached — turns "embed 100M lines" into "embed a few thousand templates." This is what makes local embedding viable at this scale.
 
 ## 7. Retrieval + the analysis engine
 
-Retrieval is a **three‑way hybrid**: structured filter (time range, level, service, host, trace_id) ∩ semantic (template vector similarity) ∪ full‑text (raw message FTS). The structured filter runs first (columnar, cheap) and bounds the semantic/FTS work.
+Retrieval is a **three‑way hybrid when template vectors exist**: structured filter (time range, level, service, host, trace_id) ∩ semantic (template vector similarity) ∪ full‑text/keyword matching. Keyword/structured retrieval remains available when embedding is keyword-only or deferred; product paths must not label those results semantic.
 
 The value is the **analysis layer** on top — this is "find relationships / why problems happen":
 - **cluster_problems** — group templates into root‑cause clusters (semantic similarity + co‑occurrence), ranked by severity × frequency × anomaly. Answers "what is going wrong."
@@ -103,8 +105,8 @@ Registered like the memory/web tools (static specs behind a `log_analysis_enable
 
 | tool | tier | purpose |
 |---|---|---|
-| `ingest_logs` | SoftWrite | ingest a path/dir/bucket into a named corpus (parse+template+embed); returns corpus id + template summary |
-| `search_logs` | Read | hybrid: `{query?, corpus, time_range?, level?, service?, trace_id?, semantic?, k?}` |
+| `ingest_logs` | SoftWrite | ingest a path/dir/bucket into a named corpus (parse+template+local embed when below policy threshold); returns corpus id + template/embedding summary |
+| `search_logs` | Read | hybrid when vectors exist, otherwise keyword/structured: `{query?, corpus, time_range?, level?, service?, trace_id?, semantic?, k?}` |
 | `cluster_problems` | Read | root‑cause clusters ranked by severity×frequency×anomaly |
 | `correlate` | Read | temporal correlation / co‑occurrence / sequence around a time or template |
 | `timeline` | Read | frequency‑over‑time for a filter |
@@ -124,7 +126,7 @@ Ingest is the only write (it materializes a corpus). Everything else is Read —
 
 1. **Event‑store engine: DuckDB — SHIPPED (#358).** DuckDB is the event-store engine for the log subsystem (memory/KB stay SQLite). MIT `duckdb` crate + `bundled`. Confined to log corpora under app cache.
 2. **HNSW library — SHIPPED pure-Rust** (`crates/cd-core/src/vector_index.rs:HnswIndex`). *Not* DuckDB `vss` (reconsidered so memory and logs share one ANN crate; events stay DuckDB-only).
-3. **Local ONNX embedder — product default:** `fastembed-rs` (`AllMiniLML6V2`) via feature `log-fastembed`, **enabled on the desktop host**. Downloads the small model once at first use. Offline `cargo test` (feature off) uses deterministic `ConceptEmbedBackend`. Cloud embed is per-corpus opt-in with explicit “log content leaves this machine” confirm (`LogEmbedPolicy`). Memory hybrid may still use Ollama; log templates prefer the dedicated log ONNX backend (`ToolHost::log_embed_backend`).
+3. **Local ONNX embedder — product default:** `fastembed-rs` (`AllMiniLML6V2`) via feature `log-fastembed`, **enabled on the desktop host**. It may download the small model once. Offline default core tests (feature off) use injected deterministic `ConceptEmbedBackend`. Desktop ingest uses only the dedicated local log backend—not a provider fallback—and persists `keyword_only`, `deferred`, `partial`, or `complete` plus the non-secret model id. Cloud opt-in and its content-leaves-machine confirmation remain tracked separately in #359.
 4. **Corpus retention: keep-until-discarded** under app cache (`log_corpora/{id}`).
 
 ## 11. Phasing
