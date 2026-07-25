@@ -147,7 +147,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
     if (!path) return;
     const ok = await dialogConfirm(
-      "SoftWrite: ingest into a disposable analysis corpus (secrets redacted). Continue?",
+      "SoftWrite: ingest into a disposable analysis corpus (parse → template → DuckDB). " +
+        "Directories and large dumps are fully supported here (no 200-file chat-pack limit). Continue?",
       { title: "Import logs" },
     );
     if (!ok) return;

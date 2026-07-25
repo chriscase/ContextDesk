@@ -267,7 +267,9 @@ impl SessionContextStore {
                 false,
             ));
             return Err(CoreError::Policy(format!(
-                "session context max_files ({})",
+                "session context max_files ({}) — chat attach packs are intentionally small. \
+                 For large log dumps use Logs → Import logs (analysis corpus) or the wizard's \
+                 “Log corpus” mode, not session context alone / Both with huge trees.",
                 self.caps.max_files
             )));
         }
@@ -714,8 +716,14 @@ fn import_zip_into_store(
         match store.import_bytes(rel, &data) {
             Ok(e) => imported.push(e),
             Err(e) => {
-                if e.to_string().contains("max_") {
-                    return Err(e);
+                let msg = e.to_string();
+                if msg.contains("max_files") || msg.contains("max_bytes") {
+                    // Fail with context about partial progress so wizard can soft-continue on corpus.
+                    return Err(CoreError::Policy(format!(
+                        "{msg} (imported {} file(s) from archive before the limit; \
+                         large dumps belong in the log analysis corpus, not the chat pack)",
+                        imported.len()
+                    )));
                 }
                 return Err(e);
             }
@@ -767,7 +775,12 @@ mod tests {
         store.import_bytes("a.txt", b"1").unwrap();
         store.import_bytes("b.txt", b"2").unwrap();
         let err = store.import_bytes("c.txt", b"3").unwrap_err();
-        assert!(err.to_string().contains("max_files"));
+        let msg = err.to_string();
+        assert!(msg.contains("max_files"), "{msg}");
+        assert!(
+            msg.contains("Log corpus") || msg.contains("large log"),
+            "error should steer users to corpus for dumps: {msg}"
+        );
     }
 
     #[test]

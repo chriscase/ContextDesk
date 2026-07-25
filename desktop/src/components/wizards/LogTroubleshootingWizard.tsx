@@ -74,6 +74,8 @@ export function LogTroubleshootingWizard({
     null,
   );
   const [runDone, setRunDone] = useState(false);
+  /** Non-fatal note when session pack hits caps after corpus succeeded. */
+  const [sessionPackNote, setSessionPackNote] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -122,6 +124,7 @@ export function LogTroubleshootingWizard({
     setError(null);
     setProgress(null);
     setRunDone(false);
+    setSessionPackNote(null);
     try {
       let cid: string | null = null;
 
@@ -177,8 +180,28 @@ export function LogTroubleshootingWizard({
           }
         }
         if (mode === "session_context" || mode === "both") {
-          // Host path import extracts .zip into session context.
-          await hostSessionContextImportPath(sessionId, path);
+          // Zip extracts; directories walk until chat-pack caps (default 200 files).
+          // Large Airbus-style dumps often exceed caps — corpus is the right home.
+          try {
+            await hostSessionContextImportPath(sessionId, path);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const isCap =
+              /max_files|max_bytes|chat-pack|session context max/i.test(msg);
+            if (mode === "both" && isCap && cid) {
+              // Corpus already ingested — do not fail the whole wizard.
+              setSessionPackNote(
+                `Corpus ready, but chat session pack was skipped: ${msg}`,
+              );
+            } else if (mode === "session_context" && isCap) {
+              setError(
+                `${msg} Tip: switch mode to “Log corpus” for large dumps (analysis pipeline has no 200-file chat-pack limit).`,
+              );
+              return;
+            } else {
+              throw e instanceof Error ? e : new Error(msg);
+            }
+          }
         }
       }
       setRunDone(true);
@@ -402,7 +425,9 @@ export function LogTroubleshootingWizard({
                   onChange={() => setMode("both")}
                 />
                 <span>
-                  <strong>Both</strong> — corpus analysis + chat attachments
+                  <strong>Both</strong> — corpus analysis + a small chat pack
+                  (≤200 files / 50 MiB). Huge dumps keep the corpus even if the
+                  pack caps out.
                 </span>
               </label>
             </>
@@ -461,6 +486,11 @@ export function LogTroubleshootingWizard({
                 ) : null}
                 .
               </p>
+              {sessionPackNote ? (
+                <p className="muted" role="status">
+                  {sessionPackNote}
+                </p>
+              ) : null}
               {ingestReport ? (
                 <IngestStatsHero report={ingestReport} />
               ) : null}
@@ -485,6 +515,11 @@ export function LogTroubleshootingWizard({
           {corpusId ? (
             <p>
               Corpus id: <code>{corpusId}</code> (also available in the Logs pane).
+            </p>
+          ) : null}
+          {sessionPackNote ? (
+            <p className="muted" role="status">
+              {sessionPackNote}
             </p>
           ) : null}
           {ingestReport ? <IngestStatsHero report={ingestReport} /> : null}

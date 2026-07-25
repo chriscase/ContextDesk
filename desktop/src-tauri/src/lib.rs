@@ -467,9 +467,98 @@ fn session_context_import_path(
             .next()
             .ok_or_else(|| "zip contained no extractable entries".to_string());
     }
+    // Directory → walk and import up to session caps (basename paths under pack root).
+    // Large dumps will hit max_files; callers (wizard Both) should treat that as soft-fail
+    // after corpus ingest.
+    if p.is_dir() {
+        return import_session_context_directory(&store, p, &progress);
+    }
     store
         .import_file_with_progress(p, None, &progress, None)
         .map_err(|e| e.to_string())
+}
+
+/// Import files from a directory into session context until caps fail.
+fn import_session_context_directory(
+    store: &cd_core::session_context::SessionContextStore,
+    dir: &std::path::Path,
+    progress: &TauriProcessProgress,
+) -> Result<cd_core::session_context::SessionContextEntry, String> {
+    use cd_core::process_progress::{
+        ProcessProgress, ProcessProgressKind, ProcessProgressObserver, ProcessProgressPhase,
+    };
+    let kind = ProcessProgressKind::SessionContextImport;
+    progress.progress(
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Starting,
+            "importing directory into session context",
+            true,
+        )
+        .with_fraction(0.0),
+    );
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(d) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.is_file() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if !name.starts_with('.') {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    walk(dir, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return Err("directory contained no files to attach".into());
+    }
+    let mut last: Option<cd_core::session_context::SessionContextEntry> = None;
+    let mut imported = 0usize;
+    for (i, f) in files.iter().enumerate() {
+        let rel = f
+            .strip_prefix(dir)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| {
+                f.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("file-{i}"))
+            });
+        match store.import_file_with_progress(f, Some(&rel), progress, None) {
+            Ok(e) => {
+                last = Some(e);
+                imported += 1;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("max_files") || msg.contains("max_bytes") {
+                    return Err(format!(
+                        "{msg} (directory had {} files; attached {imported} before the chat-pack limit. \
+                         Prefer Logs corpus / wizard “Log corpus” for large dumps.)",
+                        files.len()
+                    ));
+                }
+                return Err(msg);
+            }
+        }
+    }
+    progress.progress(
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Completed,
+            format!("attached {imported} file(s) from directory"),
+            false,
+        )
+        .with_fraction(1.0)
+        .with_files(imported as u64),
+    );
+    last.ok_or_else(|| "directory import produced no entries".to_string())
 }
 
 #[tauri::command]

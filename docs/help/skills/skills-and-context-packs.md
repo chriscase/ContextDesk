@@ -30,7 +30,13 @@ Drop or import files from the session context bar. ZIP archives may be expanded
 with traversal and nesting checks. ContextDesk stores entries under that
 session's app-data context directory, not as permanent workspace roots.
 
-Default safety caps are 200 files, 50 MiB total, and 10 MiB for one file. A
+Default safety caps are 200 files, 50 MiB total, and 10 MiB for one file.
+Large log dumps (Airbus-style trees, multi-hundred file zips) should use
+**Logs → Import logs** or the wizard **Log corpus** mode — not session context
+alone. **Both** in the wizard still builds the corpus first; if the chat pack
+hits the file cap, the corpus remains and the pack attach is skipped with a note.
+
+A
 limit failure is reported instead of silently importing a partial file as
 complete. Removing or purging the pack affects the session copy, not the
 original source file.
