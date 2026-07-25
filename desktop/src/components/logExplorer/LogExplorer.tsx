@@ -93,6 +93,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [nextTs, setNextTs] = useState<number | null>(null);
+  const [focusLaneId, setFocusLaneId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
   const [detail, setDetail] = useState<ExplorerEventDto | null>(null);
@@ -200,6 +202,7 @@ export function LogExplorer({ corpusId }: Props) {
         const page = await hostLogQueryEvents(corpusId, filtersToQuery(filters));
         setTotalMatched(page.totalMatched);
         setNextCursor(page.nextCursor);
+        setNextTs(page.nextTs ?? null);
         setTimeQuality(page.timeQuality);
         setLaneEvents({ "lane-0": page.events });
         setStatus(`${page.totalMatched} matched · showing ${page.events.length}`);
@@ -437,7 +440,20 @@ export function LogExplorer({ corpusId }: Props) {
     }
     setFilters(result.filters);
     setHighlight(new Set(result.highlightSeq));
-    setStatus(result.label ? `Applied nav: ${result.label}` : "Applied log_nav filters");
+    if (result.focusLane) {
+      setFocusLaneId(result.focusLane);
+      // Ensure multi-lane view if agent targets a non-default lane.
+      if (laneCount < 2 && result.focusLane !== "lane-0") {
+        configureLanes(Math.min(4, Math.max(2, lanes.length || 2)));
+      }
+      setStatus(
+        result.label
+          ? `Applied nav: ${result.label} · focus ${result.focusLane}`
+          : `Applied log_nav · focus ${result.focusLane}`,
+      );
+    } else {
+      setStatus(result.label ? `Applied nav: ${result.label}` : "Applied log_nav filters");
+    }
   };
 
   const openChat = async (id: string) => {
@@ -459,7 +475,8 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
-  const createLinkedChat = async () => {
+  /** Create linked chat and return its id (avoids stale React state in sendChat). */
+  const createLinkedChat = async (): Promise<string | null> => {
     try {
       const s = newSession(`Logs · ${summary?.name ?? corpusId.slice(0, 8)}`);
       s.linkedCorpusId = corpusId;
@@ -470,10 +487,12 @@ export function LogExplorer({ corpusId }: Props) {
         setChats(linked ?? []);
         await openChat(saved.id);
         setStatus(`Linked chat created: ${saved.title}`);
+        return saved.id;
       }
     } catch (e) {
       setError(String(e));
     }
+    return null;
   };
 
   const sendChat = async () => {
@@ -481,19 +500,8 @@ export function LogExplorer({ corpusId }: Props) {
     if (!text || chatBusy) return;
     let sessionId = activeChatId;
     if (!sessionId) {
-      await createLinkedChat();
-      sessionId = activeChatId;
-      // createLinkedChat sets active; re-read via a local create if still null
-      if (!sessionId) {
-        const s = newSession(`Logs · ${summary?.name ?? corpusId.slice(0, 8)}`);
-        s.linkedCorpusId = corpusId;
-        const saved = await hostSaveChatSession(sessionToDto(s));
-        if (!saved) return;
-        await hostSetChatLinkedCorpus(saved.id, corpusId);
-        sessionId = saved.id;
-        setActiveChatId(sessionId);
-        setChats(await hostListChatSessionsForCorpus(corpusId));
-      }
+      sessionId = await createLinkedChat();
+      if (!sessionId) return;
     }
     setChatBusy(true);
     setChatDraft("");
@@ -561,9 +569,14 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       const page = await hostLogQueryEvents(
         corpusId,
-        filtersToQuery(filters, { afterSeq: nextCursor }),
+        filtersToQuery(filters, {
+          afterSeq: nextCursor,
+          afterTs: nextTs,
+          sortByTime: true,
+        }),
       );
       setNextCursor(page.nextCursor);
+      setNextTs(page.nextTs ?? null);
       setLaneEvents((prev) => ({
         ...prev,
         "lane-0": [...(prev["lane-0"] ?? []), ...page.events],
@@ -814,11 +827,22 @@ export function LogExplorer({ corpusId }: Props) {
           </div>
           <div className={`log-explorer__lane-grid log-explorer__lane-grid--${laneCount}`}>
             {lanes.slice(0, laneCount).map((lane) => (
-              <section key={lane.id} className="log-explorer__lane" data-lane-id={lane.id}>
+              <section
+                key={lane.id}
+                className={[
+                  "log-explorer__lane",
+                  focusLaneId === lane.id ? "log-explorer__lane--focus" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                data-lane-id={lane.id}
+                data-focused={focusLaneId === lane.id ? "true" : "false"}
+              >
                 <div className="log-explorer__lane-header">
                   <strong>{lane.label}</strong>
                   <span className="log-explorer__chat-preview">
                     {(laneEvents[lane.id] ?? []).length} rows
+                    {focusLaneId === lane.id ? " · focused" : ""}
                   </span>
                 </div>
                 {linkMode && gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
