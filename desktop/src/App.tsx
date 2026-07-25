@@ -28,12 +28,18 @@ import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
   hostGetDurableMemory,
+  hostOpenExternalUrl,
   hostSaveCompositionDraft,
   hostSetDefaultChatModel,
   hostWriteMemory,
   modelSelectionKey,
   parseModelSelectionKey,
 } from "./lib/host";
+import {
+  buildFeedbackReport,
+  feedbackDraftChatSeed,
+  type FeedbackKind,
+} from "./lib/errorReport";
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
 import { foldPreview, nowIso } from "./lib/session";
@@ -172,8 +178,7 @@ export function App() {
     modelOptions: shell.modelOptions,
     defaultModelKey: shell.defaultModelKey,
     preflightBlocking: shell.preflight.hasBlocking,
-    onNeedPreflight: () =>
-      shell.openSettings("health", chatScrollRef.current),
+    onNeedPreflight: () => shell.openSettings("health", chatScrollRef.current),
     persistSession,
     upgradeTitleWithLlm,
     pinScrollToEnd,
@@ -362,6 +367,30 @@ export function App() {
         label: "Open archive",
         group: "action",
       },
+      {
+        id: "action:report-bug",
+        label: "Report a bug…",
+        keywords: ["github", "issue", "feedback", "error"],
+        group: "action",
+      },
+      {
+        id: "action:request-feature",
+        label: "Request a feature…",
+        keywords: ["github", "issue", "enhancement", "feedback", "wish"],
+        group: "action",
+      },
+      {
+        id: "action:send-feedback",
+        label: "Send feedback…",
+        keywords: ["github", "issue", "comment"],
+        group: "action",
+      },
+      {
+        id: "action:draft-feature-chat",
+        label: "Draft feature request with AI…",
+        keywords: ["github", "issue", "llm", "draft"],
+        group: "action",
+      },
     ];
     const sessionItems: PaletteItem[] = openChatSessions.map((s) => ({
       id: `session:${s.id}`,
@@ -410,6 +439,61 @@ export function App() {
         shell.setPane("archive");
         return;
       }
+      const openFeedback = async (kind: FeedbackKind) => {
+        const summary =
+          kind === "feature"
+            ? "Feature idea"
+            : kind === "feedback"
+              ? "Product feedback"
+              : "Something went wrong";
+        const report = buildFeedbackReport({
+          kind,
+          summary,
+          detail:
+            "Describe what you wanted, what happened, and any redacted diagnostics you can paste.",
+          appVersion: shell.branding.version,
+          channel: shell.branding.channel,
+          gitSha: shell.branding.git_sha ?? undefined,
+          identityLine: shell.branding.identity_line,
+        });
+        try {
+          await navigator.clipboard.writeText(report.reportMarkdown);
+        } catch {
+          /* clipboard may be denied */
+        }
+        try {
+          await hostOpenExternalUrl(report.githubNewIssueUrl);
+        } catch {
+          try {
+            await hostOpenExternalUrl(
+              "https://github.com/chriscase/ContextDesk/issues/new",
+            );
+          } catch {
+            /* user can paste from clipboard */
+          }
+        }
+      };
+      if (id === "action:report-bug") {
+        void openFeedback("bug");
+        return;
+      }
+      if (id === "action:request-feature") {
+        void openFeedback("feature");
+        return;
+      }
+      if (id === "action:send-feedback") {
+        void openFeedback("feedback");
+        return;
+      }
+      if (id === "action:draft-feature-chat") {
+        ensureActiveSession();
+        shell.setPane("chat");
+        setWizardSeedRequest({
+          id: Date.now(),
+          text: feedbackDraftChatSeed("feature"),
+        });
+        return;
+      }
       if (id.startsWith("session:")) {
         const sid = id.slice("session:".length);
         setActiveSessionId(sid);
@@ -435,8 +519,7 @@ export function App() {
     },
     onOpenPalette: openPalette,
     onOpenHelp: () => openHelp({ pageId: "product-overview" }),
-    onOpenSettings: () =>
-      shell.openSettings("health", chatScrollRef.current),
+    onOpenSettings: () => shell.openSettings("health", chatScrollRef.current),
     onPrevSession: () => switchSessionByDelta(-1),
     onNextSession: () => switchSessionByDelta(1),
     onSessionByIndex: (i) => {
@@ -520,9 +603,7 @@ export function App() {
       <SplashScreen
         icon={<ContextDeskMark size={120} />}
         title={shell.branding.name}
-        tagline={
-          shell.branding.tagline || "Your workspace, remembered."
-        }
+        tagline={shell.branding.tagline || "Your workspace, remembered."}
         company="Open source"
         accentColor="#4a9eff"
         onComplete={shell.completeSplash}
@@ -744,7 +825,11 @@ export function App() {
                     setSessions((all) => {
                       const next = all.map((s) =>
                         s.id === resolvedSessionId
-                          ? { ...s, pinnedSkillId: skillId, updatedAt: nowIso() }
+                          ? {
+                              ...s,
+                              pinnedSkillId: skillId,
+                              updatedAt: nowIso(),
+                            }
                           : s,
                       );
                       const cur = next.find((s) => s.id === resolvedSessionId);

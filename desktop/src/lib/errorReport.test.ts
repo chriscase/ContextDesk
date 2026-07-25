@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildErrorReport,
+  buildFeedbackReport,
   buildGitHubNewIssueUrl,
+  feedbackDraftChatSeed,
   redactDiagnosticText,
 } from "./errorReport";
 
@@ -50,7 +52,9 @@ describe("buildErrorReport (#325)", () => {
     expect(r.reportMarkdown).not.toContain("cql=secret");
     expect(r.reportMarkdown).toContain("Channel: dev");
     expect(r.reportMarkdown).toContain("Git: abc1234");
-    expect(r.githubNewIssueUrl).toContain("github.com/chriscase/ContextDesk/issues/new");
+    expect(r.githubNewIssueUrl).toContain(
+      "github.com/chriscase/ContextDesk/issues/new",
+    );
     expect(r.githubNewIssueUrl).toContain("title=");
     expect(decodeURIComponent(r.githubNewIssueUrl)).not.toContain("mentorg");
   });
@@ -68,5 +72,44 @@ describe("buildGitHubNewIssueUrl", () => {
     const parsed = new URL(u);
     expect(parsed.searchParams.get("title")).toBe("bug: test");
     expect(parsed.searchParams.get("body")).toBe("hello world");
+  });
+});
+
+describe("buildFeedbackReport", () => {
+  it("builds feature request URL without requiring an error", () => {
+    const r = buildFeedbackReport({
+      kind: "feature",
+      summary: "Richer log importer for Airbus dumps",
+      detail: "Folder ingest produced zero lines.",
+      debugLog: ["scan found 3 files", "file a.gz: skipped binary-like"],
+      appVersion: "0.1.0",
+      channel: "dev",
+    });
+    expect(r.githubNewIssueUrl).toContain("issues/new");
+    expect(r.reportMarkdown).toContain("feature");
+    expect(r.reportMarkdown).toContain("skipped binary");
+    expect(r.reportMarkdown).toContain("Richer log importer");
+    expect(feedbackDraftChatSeed("feature")).toMatch(/feature request/i);
+  });
+
+  it("redacts secrets and private destinations from every feedback surface", () => {
+    const rawToken = ["ghp", "12345678901234567890"].join("_");
+    const privateHost = "logs.internal.example";
+    const report = buildFeedbackReport({
+      kind: "bug",
+      summary: `Failure using ${rawToken}`,
+      detail: `Request to https://${privateHost}/ingest?token=${rawToken} failed`,
+      debugLog: [`Authorization: Bearer ${rawToken}`],
+    });
+    const decodedUrl = decodeURIComponent(report.githubNewIssueUrl);
+    for (const output of [
+      report.summary,
+      report.technical,
+      report.reportMarkdown,
+      decodedUrl,
+    ]) {
+      expect(output).not.toContain(rawToken);
+      expect(output).not.toContain(privateHost);
+    }
   });
 });
