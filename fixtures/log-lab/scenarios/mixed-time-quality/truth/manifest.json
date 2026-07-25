@@ -1,5 +1,6 @@
 {
   "expected": {
+    "bytes": 1199,
     "events": 11,
     "files": 4,
     "files_by_path": {
@@ -23,6 +24,18 @@
         "events": 2,
         "sha256": "486e01048d62a993c0d493b265e9af0316d5771ea052010116d75af8419afa3d"
       }
+    },
+    "severities": {
+      "error": 2,
+      "info": 6,
+      "warn": 3
+    },
+    "source_count": 4,
+    "sources": {
+      "01-wall.jsonl": 4,
+      "02-order.log": 3,
+      "03-malformed.jsonl": 2,
+      "04-skew.log": 2
     },
     "time_quality": "mixed"
   },

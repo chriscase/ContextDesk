@@ -1,5 +1,6 @@
 {
   "expected": {
+    "bytes": 131,
     "events": 2,
     "files": 4,
     "files_by_path": {
@@ -23,6 +24,17 @@
         "events": 2,
         "sha256": "0fb070cd4022872d0e11b26854c0864a58fb64acdc2a85a20ae5cc3a0912bd9b"
       }
+    },
+    "severities": {
+      "info": 1,
+      "warn": 1
+    },
+    "source_count": 4,
+    "sources": {
+      ".hidden.log": 0,
+      "binary.log": 0,
+      "empty.log": 0,
+      "safe.log": 2
     },
     "time_quality": "order_only"
   },

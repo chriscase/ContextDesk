@@ -1,12 +1,13 @@
 {
   "expected": {
+    "bytes": 1135,
     "events": 12,
     "files": 10,
     "files_by_path": {
       "formats/01-plain.log": {
-        "bytes": 123,
+        "bytes": 131,
         "events": 3,
-        "sha256": "aaccd24f7e798e3c4588986a934d15f8155cc590dfc86fbd928eae8e368db053"
+        "sha256": "853059532628c79aef63aee7dada1dbef728a9a17f123d6d8cbb666ff673c4c9"
       },
       "formats/02-logfmt.log": {
         "bytes": 131,
@@ -53,6 +54,25 @@
         "events": 1,
         "sha256": "4195b4e57de0046a0e592da3ff405fca627da8355abace4bb419da8011f49e0f"
       }
+    },
+    "severities": {
+      "error": 4,
+      "info": 5,
+      "unknown": 1,
+      "warn": 2
+    },
+    "source_count": 10,
+    "sources": {
+      "formats/01-plain.log": 3,
+      "formats/02-logfmt.log": 1,
+      "formats/03-syslog.log": 1,
+      "formats/04-crlf.log": 2,
+      "formats/05-utf8.log": 1,
+      "formats/06-empty.log": 0,
+      "region-a/app.jsonl": 1,
+      "region-b/app.jsonl": 1,
+      "rotated/api.log": 1,
+      "rotated/api.log.1": 1
     },
     "time_quality": "mixed"
   },

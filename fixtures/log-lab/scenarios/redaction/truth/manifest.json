@@ -1,5 +1,6 @@
 {
   "expected": {
+    "bytes": 709,
     "events": 3,
     "files": 1,
     "files_by_path": {
@@ -8,6 +9,15 @@
         "events": 3,
         "sha256": "80393077016e796106d9e8126ba1b657febaa9792754713a8ca45b5ced161409"
       }
+    },
+    "severities": {
+      "error": 1,
+      "info": 1,
+      "warn": 1
+    },
+    "source_count": 1,
+    "sources": {
+      "auth/auth.jsonl": 3
     },
     "time_quality": "wall"
   },

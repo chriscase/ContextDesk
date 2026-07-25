@@ -1,5 +1,6 @@
 {
   "expected": {
+    "bytes": 6221,
     "events": 35,
     "files": 6,
     "files_by_path": {
@@ -34,6 +35,20 @@
         "sha256": "eaa55f218ca79d6c5451543fb2dc547e43f00194a47f80934665d2bfec514b6e"
       }
     },
+    "severities": {
+      "error": 7,
+      "info": 16,
+      "warn": 12
+    },
+    "source_count": 6,
+    "sources": {
+      "api/app.jsonl": 6,
+      "audit/deploy.jsonl": 4,
+      "db/database.log": 6,
+      "edge/access.jsonl": 6,
+      "queue/events.jsonl": 6,
+      "worker/worker.log": 7
+    },
     "time_quality": "wall"
   },
   "generator_version": "contextdesk.log_lab.generator.v1",
@@ -65,6 +80,43 @@
       "What caused the checkout failures, and which evidence establishes the causal chain?",
       "Which symptoms were secondary, and which apparent clue was a decoy?",
       "What changed immediately before recovery?"
+    ],
+    "causal_timeline": [
+      {
+        "after": null,
+        "event_id": "audit-config",
+        "role": "primary_change"
+      },
+      {
+        "after": "audit-config",
+        "event_id": "queue-receive",
+        "role": "trigger"
+      },
+      {
+        "after": "queue-receive",
+        "event_id": "worker-loop",
+        "role": "amplifier"
+      },
+      {
+        "after": "worker-loop",
+        "event_id": "db-saturation",
+        "role": "resource_exhaustion"
+      },
+      {
+        "after": "db-saturation",
+        "event_id": "edge-504",
+        "role": "secondary_symptom"
+      },
+      {
+        "after": "edge-504",
+        "event_id": "audit-rollback",
+        "role": "repair"
+      },
+      {
+        "after": "audit-rollback",
+        "event_id": "edge-recovery",
+        "role": "observed_recovery"
+      }
     ],
     "decisive_clues": [
       {

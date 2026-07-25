@@ -533,6 +533,15 @@ fn checkout_cascade_truth(files: &[ImportFile]) -> Value {
             "summary": "Release 2025.01.01-2 reduced db_pool_max from 32 to 4. Poison job job-7f3a retried while retaining database work, exhausting the pool and causing checkout timeouts, 504s, and secondary 429s. Dead-lettering the job and rolling back the pool setting restored service.",
             "root_cause": "Configuration shrink plus repeated poison-job processing exhausted the database connection pool.",
             "affected_interval": {"from": 1735732860_i64, "to": 1735733060_i64},
+            "causal_timeline": [
+                {"event_id": "audit-config", "role": "primary_change", "after": null},
+                {"event_id": "queue-receive", "role": "trigger", "after": "audit-config"},
+                {"event_id": "worker-loop", "role": "amplifier", "after": "queue-receive"},
+                {"event_id": "db-saturation", "role": "resource_exhaustion", "after": "worker-loop"},
+                {"event_id": "edge-504", "role": "secondary_symptom", "after": "db-saturation"},
+                {"event_id": "audit-rollback", "role": "repair", "after": "edge-504"},
+                {"event_id": "edge-recovery", "role": "observed_recovery", "after": "audit-rollback"}
+            ],
             "decisive_clues": [
                 {"event_id": "audit-config", "source": "audit/deploy.jsonl", "query": "db_pool_max old=32 new=4"},
                 {"event_id": "worker-loop", "source": "worker/worker.log", "query": "job-job-7f3a attempt-4 transaction-open-true"},
@@ -662,7 +671,7 @@ fn source_provenance_files() -> Vec<ImportFile> {
     let plain = vec![
         "INFO event_id=plain-0 plain fallback line".to_string(),
         "ERROR event_id=plain-1 stack trace begins".to_string(),
-        "    at fictional.module(example.rs:42)".to_string(),
+        "    at fictional.module.invalid(example.rs:42)".to_string(),
     ];
     let logfmt_lines = vec![logfmt(
         base + 2,
@@ -852,6 +861,15 @@ fn base_truth(
         })
         .collect::<serde_json::Map<_, _>>();
     let events = files.iter().map(|file| file.event_count).sum::<u64>();
+    let bytes = files
+        .iter()
+        .map(|file| file.bytes.len() as u64)
+        .sum::<u64>();
+    let sources = files
+        .iter()
+        .map(|file| (file.path.clone(), Value::from(file.event_count)))
+        .collect::<serde_json::Map<_, _>>();
+    let severities = expected_severity_counts(files);
     json!({
         "schema_version": TRUTH_SCHEMA_VERSION,
         "scenario_version": 1,
@@ -862,11 +880,57 @@ fn base_truth(
         "expected": {
             "files": files.len(),
             "events": events,
+            "bytes": bytes,
+            "source_count": files.len(),
+            "sources": sources,
+            "severities": severities,
             "time_quality": time_quality,
             "files_by_path": file_hashes
         },
         "investigation": investigation
     })
+}
+
+fn expected_severity_counts(files: &[ImportFile]) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for file in files {
+        let text = String::from_utf8_lossy(&file.bytes);
+        for line in text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(file.event_count as usize)
+        {
+            let level = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("level")
+                        .and_then(Value::as_str)
+                        .map(str::to_ascii_lowercase)
+                })
+                .or_else(|| {
+                    line.split_whitespace().find_map(|token| {
+                        token
+                            .strip_prefix("level=")
+                            .map(|value| value.trim_matches('"').to_ascii_lowercase())
+                    })
+                })
+                .or_else(|| {
+                    let lower = line.to_ascii_lowercase();
+                    ["fatal", "error", "warn", "info", "debug"]
+                        .into_iter()
+                        .find(|level| {
+                            lower
+                                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                                .any(|token| token == *level)
+                        })
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "unknown".into());
+            *counts.entry(level).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn truth_schema() -> Value {
@@ -885,7 +949,16 @@ fn truth_schema() -> Value {
             "provenance": {"type": "string", "minLength": 1},
             "expected": {
                 "type": "object",
-                "required": ["files", "events", "time_quality", "files_by_path"]
+                "required": [
+                    "files",
+                    "events",
+                    "bytes",
+                    "source_count",
+                    "sources",
+                    "severities",
+                    "time_quality",
+                    "files_by_path"
+                ]
             },
             "investigation": {"type": "object"}
         },
@@ -977,6 +1050,15 @@ fn write_deterministic_zip(files: &[ImportFile], path: &Path) -> LabResult<()> {
 pub fn verify_safety(root: &Path) -> LabResult<()> {
     let mut failures = Vec::new();
     let home = std::env::var("HOME").ok().filter(|value| value.len() > 1);
+    let environment_markers = ["USER", "LOGNAME", "HOSTNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| value.len() >= 8)
+        .collect::<Vec<_>>();
+    let current_epoch_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs());
     for path in collect_regular_files(root)? {
         let rel = path
             .strip_prefix(root)
@@ -997,12 +1079,21 @@ pub fn verify_safety(root: &Path) -> LabResult<()> {
                     &format!("{rel}:{}", entry.name()),
                     &bytes,
                     home.as_deref(),
+                    &environment_markers,
+                    current_epoch_seconds,
                     &mut failures,
                 );
             }
         } else {
             let bytes = fs::read(&path)?;
-            scan_fixture_bytes(&rel, &bytes, home.as_deref(), &mut failures);
+            scan_fixture_bytes(
+                &rel,
+                &bytes,
+                home.as_deref(),
+                &environment_markers,
+                current_epoch_seconds,
+                &mut failures,
+            );
         }
     }
     if failures.is_empty() {
@@ -1012,7 +1103,14 @@ pub fn verify_safety(root: &Path) -> LabResult<()> {
     }
 }
 
-fn scan_fixture_bytes(label: &str, bytes: &[u8], home: Option<&str>, failures: &mut Vec<String>) {
+fn scan_fixture_bytes(
+    label: &str,
+    bytes: &[u8],
+    home: Option<&str>,
+    environment_markers: &[String],
+    current_epoch_seconds: Option<u64>,
+    failures: &mut Vec<String>,
+) {
     let text = String::from_utf8_lossy(bytes);
     for needle in ["/Users/", "/home/", "C:\\Users\\"] {
         if text.contains(needle) {
@@ -1024,6 +1122,24 @@ fn scan_fixture_bytes(label: &str, bytes: &[u8], home: Option<&str>, failures: &
     if let Some(home) = home {
         if text.contains(home) {
             failures.push(format!("{label}: contains the current HOME value"));
+        }
+    }
+    if environment_markers
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        failures.push(format!(
+            "{label}: contains a value copied from the current environment"
+        ));
+    }
+    if let Some(now) = current_epoch_seconds {
+        let start = now.saturating_sub(300);
+        let contains_current_clock = (start..=now.saturating_add(300)).any(|timestamp| {
+            text.contains(&timestamp.to_string())
+                || text.contains(&timestamp.saturating_mul(1_000).to_string())
+        });
+        if contains_current_clock {
+            failures.push(format!("{label}: contains a current-clock epoch timestamp"));
         }
     }
     for token in text.split(|ch: char| {
@@ -1055,6 +1171,15 @@ fn scan_fixture_bytes(label: &str, bytes: &[u8], home: Option<&str>, failures: &
                 }
                 Err(_) => failures.push(format!("{label}: malformed URL `{token}`")),
             }
+        } else if let Some(host) = domain_like_host(token) {
+            if !host.ends_with(".example")
+                && !host.ends_with(".test")
+                && !host.ends_with(".invalid")
+            {
+                failures.push(format!(
+                    "{label}: public-looking bare hostname is not reserved"
+                ));
+            }
         }
     }
     if text.contains("sk-") && !text.contains("sk-LOG-LAB-INVALID-") {
@@ -1065,6 +1190,39 @@ fn scan_fixture_bytes(label: &str, bytes: &[u8], home: Option<&str>, failures: &
             failures.push(format!("{label}: unapproved Bearer credential shape"));
         }
     }
+}
+
+fn domain_like_host(token: &str) -> Option<String> {
+    let candidate = token
+        .rsplit_once('=')
+        .map_or(token, |(_, value)| value)
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+            )
+        })
+        .trim_end_matches('.');
+    if candidate.contains('/') || candidate.contains('\\') || candidate.parse::<Ipv4Addr>().is_ok()
+    {
+        return None;
+    }
+    let mut labels = candidate.split('.');
+    let first = labels.next()?;
+    let remaining = labels.collect::<Vec<_>>();
+    let tld = remaining.last()?;
+    if first.is_empty()
+        || !first.chars().any(|ch| ch.is_ascii_alphabetic())
+        || !(2..=63).contains(&tld.len())
+        || !tld.chars().all(|ch| ch.is_ascii_alphabetic())
+        || matches!(
+            *tld,
+            "log" | "json" | "jsonl" | "txt" | "zip" | "md" | "rs" | "toml"
+        )
+    {
+        return None;
+    }
+    Some(candidate.to_ascii_lowercase())
 }
 
 fn is_documentation_ip(ip: Ipv4Addr) -> bool {
