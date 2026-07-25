@@ -33,4 +33,23 @@ describe("logNav", () => {
     expect(navs).toHaveLength(1);
     expect(navs[0]!.corpusId).toBe("x");
   });
+
+  it("applies levels, time window, and focusLane", () => {
+    const action = parseLogNav({
+      type: "log_nav",
+      corpusId: "c1",
+      levels: ["error"],
+      tsFrom: 50,
+      tsTo: 200,
+      focusLane: "lane-1",
+      highlightSeq: [9],
+    });
+    expect(action).not.toBeNull();
+    const applied = applyLogNav(emptyFilters(), action!, "c1");
+    expect(applied.filters.levels).toEqual(["error"]);
+    expect(applied.filters.timeFrom).toBe(50);
+    expect(applied.filters.timeTo).toBe(200);
+    expect(applied.focusLane).toBe("lane-1");
+    expect(applied.highlightSeq).toEqual([9]);
+  });
 });

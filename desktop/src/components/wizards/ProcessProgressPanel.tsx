@@ -16,6 +16,8 @@ type Props = {
   kind?: ProcessProgressDto["kind"];
   error?: string | null;
   className?: string;
+  /** SoftWrite cancel (#498). */
+  onCancel?: () => void;
 };
 
 export function ProcessProgressPanel({
@@ -23,6 +25,7 @@ export function ProcessProgressPanel({
   kind,
   error,
   className,
+  onCancel,
 }: Props) {
   const k = kind ?? progress?.kind ?? "log_ingest";
   const pipeline: ProcessProgressPhase[] =
@@ -118,6 +121,17 @@ export function ProcessProgressPanel({
             </>
           ) : null}
         </dl>
+      ) : null}
+
+      {onCancel && !terminal && !error ? (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          data-testid="cancel-log-ingest"
+          onClick={() => onCancel()}
+        >
+          Cancel ingest
+        </button>
       ) : null}
     </div>
   );

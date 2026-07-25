@@ -6,6 +6,7 @@ import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
   hostImportLogCorpusPackagePath,
+  hostCancelLogIngest,
   hostIngestLogPath,
   hostListLogCorpora,
   hostListLogTemplates,
@@ -36,6 +37,7 @@ import {
 } from "../../lib/logStats";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
+import { LogExplorer } from "../logExplorer/LogExplorer";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -73,6 +75,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [templates, setTemplates] = useState<LogTemplateRowDto[]>([]);
   const [exemplar, setExemplar] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
+  /** In-app Explorer escape hatch when multi-window fails (#503). */
+  const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -253,6 +257,27 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   const maxTl = Math.max(1, ...timeline.map((b) => b.count));
 
+  if (inAppExplorerId) {
+    return (
+      <div
+        className="log-pane pane--fill log-pane--explorer-embed"
+        data-testid="log-pane-in-app-explorer"
+        style={{ position: "relative", minHeight: "100%" }}
+      >
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ position: "absolute", top: 8, right: 8, zIndex: 20 }}
+          data-testid="close-in-app-explorer"
+          onClick={() => setInAppExplorerId(null)}
+        >
+          Close Explorer
+        </button>
+        <LogExplorer corpusId={inAppExplorerId} />
+      </div>
+    );
+  }
+
   return (
     <div className="log-pane pane--fill" data-testid="log-pane">
       <header className="pane-chrome">
@@ -281,16 +306,36 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               if (!activeId) return;
               void hostOpenLogExplorer(activeId)
                 .then(() => setNote("Opened Log Explorer window"))
-                .catch((e) => setError(String(e)));
+                .catch((e) => {
+                  // Escape hatch: full-surface explorer inside Logs (#503)
+                  setInAppExplorerId(activeId);
+                  setNote(
+                    `Multi-window open failed (${String(e)}); opened Explorer in-app.`,
+                  );
+                });
             }}
           >
             Open Explorer…
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy || !activeId}
+            data-testid="open-log-explorer-in-app"
+            title="Open Explorer inside this window (no multi-window)"
+            onClick={() => {
+              if (!activeId) return;
+              setInAppExplorerId(activeId);
+              void hostSetActiveLogCorpus(activeId);
+            }}
+          >
+            Open in app
           </button>
           {onOpenHelp ? (
             <button
               type="button"
               className="btn btn--ghost"
-              onClick={() => onOpenHelp("log-analysis-pipeline")}
+              onClick={() => onOpenHelp("log-explorer")}
             >
               Learn more
             </button>
@@ -303,6 +348,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           progress={progress ? hostProgressToWizard(progress) : null}
           kind="log_ingest"
           error={ingesting ? error : null}
+          onCancel={
+            ingesting
+              ? () => {
+                  void hostCancelLogIngest().then((ok) => {
+                    if (ok) setNote("Cancel requested…");
+                  });
+                }
+              : undefined
+          }
         />
       ) : null}
 

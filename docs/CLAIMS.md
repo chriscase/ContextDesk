@@ -55,6 +55,11 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Log Investigation Workspace (explorer) | Shipped | desktop/src/components/logExplorer/LogExplorer.tsx:LogExplorer | #480–#487 |
 | Log explorer query API (paged/facets/search) | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #482 |
 | Log explorer bookmarks + log_nav | Shipped | crates/cd-core/src/log_analysis/bookmarks.rs:list_bookmarks | #481 #485 |
+| Log SoftWrite stream zip/lines + cancel | Shipped | crates/cd-core/src/log_analysis/ingest.rs:expand_zip_if_needed | #498–#502 #496 |
+| Log SoftWrite bulk skip embed | Shipped | desktop/src-tauri/src/lib.rs:ingest_log_path | #502 #496 |
+| Log explorer time-sort composite keyset only | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #504 #494 |
+| Log Explorer in-app escape hatch | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #503 |
+| Bookmarks not in package v1 | Shipped | docs/help/log-analysis/log-explorer.md | #509 |
 | Log template embed (local ONNX default) | Shipped | crates/cd-core/src/embed.rs:default_log_embed_backend | #359 |
 | Process progress (log ingest + session import) | Shipped | crates/cd-core/src/process_progress.rs:ProcessProgress | #445 #442 |
 | Session process wizard shell | Shipped | desktop/src/components/wizards/SessionWizardShell.tsx:SessionWizardShell | #444 #442 |
