@@ -4074,8 +4074,11 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
 
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
 /// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
+///
+/// Runs on a blocking thread pool so the UI event loop is not starved (macOS
+/// "Not Responding" during large zip/dir imports).
 #[tauri::command]
-fn ingest_log_path(
+async fn ingest_log_path(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
@@ -4091,17 +4094,22 @@ fn ingest_log_path(
         let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
         host.log_embed_backend()
     };
-    let progress = TauriProcessProgress { app };
-    let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
-        &cache,
-        std::path::Path::new(&path),
-        name.as_deref().unwrap_or("corpus"),
-        &policy,
-        backend,
-        &progress,
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    let progress = TauriProcessProgress { app: app.clone() };
+    let name_owned = name.unwrap_or_else(|| "corpus".into());
+    let report = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::ingest_path_with_policy_and_observer(
+            &cache,
+            std::path::Path::new(&path),
+            &name_owned,
+            &policy,
+            backend,
+            &progress,
+            None,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("ingest task join: {e}"))??;
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
     if let Ok(mut host) = state.host.lock() {
@@ -4409,9 +4417,56 @@ fn set_chat_linked_corpus(
     Ok(session)
 }
 
+/// Build the SPA URL for a Log Explorer window.
+///
+/// In **dev**, secondary windows must hit the Vite `devUrl` (External) — `WebviewUrl::App`
+/// loads a blank white page because there is no packaged asset protocol for the query
+/// route. In **release**, load packaged `index.html` with the same query string.
+fn log_explorer_webview_url(
+    app: &tauri::AppHandle,
+    corpus_id: &str,
+) -> Result<tauri::WebviewUrl, String> {
+    // Encode corpus id for query (UUIDs are safe; keep general).
+    let corpus_q = urlencoding_encode(corpus_id);
+    let query = format!("window=log-explorer&corpus={corpus_q}");
+
+    // Only use Vite devUrl while running `tauri dev`. In release builds the same
+    // conf still lists devUrl — using it would open a blank localhost window.
+    if tauri::is_dev() {
+        if let Some(dev) = app.config().build.dev_url.as_ref() {
+            let base = dev.as_str().trim_end_matches('/');
+            let full = format!("{base}/?{query}");
+            let parsed = full
+                .parse()
+                .map_err(|e| format!("log explorer dev url: {e}"))?;
+            return Ok(tauri::WebviewUrl::External(parsed));
+        }
+    }
+
+    // Packaged app: App protocol + query (Vite-built SPA still reads location.search).
+    Ok(tauri::WebviewUrl::App(format!("index.html?{query}").into()))
+}
+
+/// Minimal percent-encoding for query values (alphanumeric + `-_`. unchanged).
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Open (or focus) a multi-window Log Explorer bound to `corpus_id`.
+///
+/// **Async** on purpose: creating a `WebviewWindow` from a sync command can leave a
+/// blank white, uncloseable window on some platforms (Tauri / WebView2 guidance).
 #[tauri::command]
-fn open_log_explorer(
+async fn open_log_explorer(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     corpus_id: String,
@@ -4427,27 +4482,36 @@ fn open_log_explorer(
             h.set_active_log_corpus(Some(corpus_id.clone()));
         }
     }
+    // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
     let label = format!(
         "log-explorer-{}",
         corpus_id
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .take(48)
             .collect::<String>()
     );
-    // Focus existing window if already open.
     use tauri::Manager;
     if let Some(w) = app.get_webview_window(&label) {
         let _ = w.set_focus();
+        let _ = w.unminimize();
         return Ok(label);
     }
-    let url = format!("index.html?window=log-explorer&corpus={corpus_id}");
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+
+    let url = log_explorer_webview_url(&app, &corpus_id)?;
+    // Build on the main runtime — async command is the supported path.
+    tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)
         .inner_size(1400.0, 900.0)
         .min_inner_size(720.0, 480.0)
         .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("open log explorer window: {e}"))?;
     Ok(label)
 }
 
