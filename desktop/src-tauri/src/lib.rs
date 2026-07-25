@@ -1891,7 +1891,7 @@ fn list_confluence_spaces(
     let ro = cfg.to_ro_config();
     let auth = cd_core::confluence_ro::ConfluenceAuth::bearer(pat);
     let lim = limit.unwrap_or(50).min(100) as usize;
-    let (spaces, _retry_notes) = {
+    let response = {
         let run = async {
             cd_core::confluence_ro::list_spaces(&ro, &auth, &policy, lim)
                 .await
@@ -1905,7 +1905,8 @@ fn list_confluence_spaces(
                 .block_on(run)
         }
     }?;
-    Ok(spaces
+    Ok(response
+        .value
         .into_iter()
         .map(|s| ConfluenceSpaceDto {
             key: s.key,
