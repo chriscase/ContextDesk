@@ -30,6 +30,12 @@ use uuid::Uuid;
 
 /// Package format id for packages written by this build.
 pub const PACKAGE_FORMAT_VERSION: &str = "contextdesk.log_corpus.v1";
+/// Exact package readers compiled into this build.
+///
+/// Add the new reader here before changing the writer to a new major. Once v2
+/// exists, keep both v2 and v1 in this registry for the documented N/N−1
+/// compatibility window.
+pub const PACKAGE_READERS: &[PackageReader] = &[PackageReader::V1];
 /// Package kind.
 pub const PACKAGE_KIND: &str = "log_corpus";
 /// Reader capability version for this binary (bump when import rules change incompatibly).
@@ -50,6 +56,23 @@ pub const MAX_META_BYTES: u64 = 4 * 1024 * 1024;
 pub const IMPORT_BUFFER_BYTES: usize = 64 * 1024;
 /// Flat package entry names are intentionally short and non-hierarchical.
 pub const MAX_ENTRY_NAME_BYTES: usize = 255;
+
+/// Version-specific package reader selected only after shared ZIP/path/cap
+/// validation has completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageReader {
+    /// Historical and current `contextdesk.log_corpus.v1` packages.
+    V1,
+}
+
+impl PackageReader {
+    /// Exact manifest format identifier accepted by this reader.
+    pub const fn format_version(self) -> &'static str {
+        match self {
+            Self::V1 => PACKAGE_FORMAT_VERSION,
+        }
+    }
+}
 
 /// One file entry in the package manifest.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -116,35 +139,39 @@ pub struct PackageImportReport {
     pub stats: Option<CorpusStats>,
 }
 
-/// Validate format_version + min_reader_version before any cache writes.
-pub fn validate_package_versions(format_version: &str, min_reader_version: u32) -> CoreResult<()> {
-    // Supported majors: v1 only for now (dual-path window starts when v2 lands).
-    if !format_version.starts_with("contextdesk.log_corpus.v") {
+fn resolve_package_reader(format_version: &str) -> CoreResult<PackageReader> {
+    if let Some(reader) = PACKAGE_READERS
+        .iter()
+        .copied()
+        .find(|reader| reader.format_version() == format_version)
+    {
+        return Ok(reader);
+    }
+
+    let future_major = format_version
+        .strip_prefix("contextdesk.log_corpus.v")
+        .filter(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|suffix| suffix.parse::<u32>().ok())
+        .filter(|major| *major > 1);
+    if future_major.is_some() {
         return Err(CoreError::Message(format!(
-            "unsupported package format_version: {format_version} \
-             (this build supports {PACKAGE_FORMAT_VERSION})"
+            "This package requires ContextDesk package reader for format {format_version} \
+             (this build supports {PACKAGE_FORMAT_VERSION} / reader {PACKAGE_READER_VERSION}). \
+             Re-export from a matching app or upgrade ContextDesk."
         )));
     }
-    // Parse trailing major digit(s) after `.v`
-    let major = format_version
-        .rsplit(".v")
-        .next()
-        .and_then(|s| s.parse::<u32>().ok());
-    match major {
-        Some(1) => {}
-        Some(n) if n > 1 => {
-            return Err(CoreError::Message(format!(
-                "This package requires ContextDesk package reader for format {format_version} \
-                 (this build supports {PACKAGE_FORMAT_VERSION} / reader {PACKAGE_READER_VERSION}). \
-                 Re-export from a matching app or upgrade ContextDesk."
-            )));
-        }
-        _ => {
-            return Err(CoreError::Message(format!(
-                "unsupported package format_version: {format_version}"
-            )));
-        }
-    }
+
+    Err(CoreError::Message(format!(
+        "unsupported package format_version: {format_version} \
+         (this build accepts exactly {PACKAGE_FORMAT_VERSION})"
+    )))
+}
+
+fn resolve_package_reader_version(
+    format_version: &str,
+    min_reader_version: u32,
+) -> CoreResult<PackageReader> {
+    let reader = resolve_package_reader(format_version)?;
     if min_reader_version > PACKAGE_READER_VERSION {
         return Err(CoreError::Message(format!(
             "This package requires ContextDesk package reader ≥ {min_reader_version} \
@@ -152,7 +179,12 @@ pub fn validate_package_versions(format_version: &str, min_reader_version: u32) 
              Upgrade ContextDesk or ask the sender for an older package."
         )));
     }
-    Ok(())
+    Ok(reader)
+}
+
+/// Validate format_version + min_reader_version before any cache writes.
+pub fn validate_package_versions(format_version: &str, min_reader_version: u32) -> CoreResult<()> {
+    resolve_package_reader_version(format_version, min_reader_version).map(|_| ())
 }
 
 /// Export an existing corpus directory into a portable zip at `out_path`.
@@ -351,6 +383,50 @@ struct ScannedArchive {
     by_name: HashMap<String, ScannedEntry>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PackageReadPlan {
+    import_templates: bool,
+}
+
+fn build_package_read_plan(
+    reader: PackageReader,
+    manifest: &PackageManifest,
+    scanned: &ScannedArchive,
+    manifest_files: &HashMap<String, PackageFileEntry>,
+) -> CoreResult<PackageReadPlan> {
+    match reader {
+        PackageReader::V1 => {
+            for required in ["meta.json", "events.duckdb"] {
+                if !scanned.by_name.contains_key(required) {
+                    return Err(CoreError::Message(format!(
+                        "package missing required file: {required}"
+                    )));
+                }
+                if !manifest_files.contains_key(required) {
+                    return Err(CoreError::Message(format!(
+                        "package hash missing for required payload `{required}`"
+                    )));
+                }
+            }
+
+            let import_templates = scanned.by_name.contains_key("templates.json");
+            if import_templates && !manifest_files.contains_key("templates.json") {
+                return Err(CoreError::Message(
+                    "package hash missing for required payload `templates.json`".into(),
+                ));
+            }
+
+            // All v1 feature tags, including known tags, are advisory. The
+            // hashed payload list and optional `stats` field are authoritative;
+            // unknown tags therefore remain additive and cannot switch readers
+            // or bypass shared validation.
+            let _v1_advisory_features = &manifest.features;
+
+            Ok(PackageReadPlan { import_templates })
+        }
+    }
+}
+
 fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
     cache_root: &Path,
     mut reader: R,
@@ -411,7 +487,8 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
         .map_err(|e| CoreError::Message(format!("manifest parse: {e}")))?;
 
     // Format, kind, and engine gates happen before cache staging exists.
-    validate_package_versions(&manifest.format_version, manifest.min_reader_version)?;
+    let reader =
+        resolve_package_reader_version(&manifest.format_version, manifest.min_reader_version)?;
     if manifest.package_kind != PACKAGE_KIND {
         return Err(CoreError::Message("unsupported package_kind".into()));
     }
@@ -426,26 +503,7 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
         ));
     }
     let manifest_files = validate_manifest_files(&manifest.files, &scanned)?;
-
-    for required in ["meta.json", "events.duckdb"] {
-        if !scanned.by_name.contains_key(required) {
-            return Err(CoreError::Message(format!(
-                "package missing required file: {required}"
-            )));
-        }
-        if !manifest_files.contains_key(required) {
-            return Err(CoreError::Message(format!(
-                "package hash missing for required payload `{required}`"
-            )));
-        }
-    }
-    if scanned.by_name.contains_key("templates.json")
-        && !manifest_files.contains_key("templates.json")
-    {
-        return Err(CoreError::Message(
-            "package hash missing for required payload `templates.json`".into(),
-        ));
-    }
+    let read_plan = build_package_read_plan(reader, &manifest, &scanned, &manifest_files)?;
 
     let origin_id = manifest.corpus_id.clone();
     let new_id = Uuid::now_v7().to_string();
@@ -464,6 +522,7 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
             &mut archive,
             &scanned,
             &manifest_files,
+            read_plan,
             &staging,
             limits,
             &mut metrics,
@@ -803,6 +862,7 @@ fn stream_archive_entries<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     scanned: &ScannedArchive,
     manifest_files: &HashMap<String, PackageFileEntry>,
+    read_plan: PackageReadPlan,
     staging: &Path,
     limits: ImportLimits,
     metrics: &mut ImportMetrics,
@@ -826,7 +886,7 @@ fn stream_archive_entries<R: Read + Seek>(
                 std::fs::File::create(staging.join("events.duckdb"))
                     .map_err(|e| CoreError::Message(format!("create event staging: {e}")))?,
             ),
-            "templates.json" => Box::new(
+            "templates.json" if read_plan.import_templates => Box::new(
                 std::fs::File::create(staging.join("templates.json"))
                     .map_err(|e| CoreError::Message(format!("create template staging: {e}")))?,
             ),
@@ -876,7 +936,7 @@ fn stream_archive_entries<R: Read + Seek>(
             "not every manifest payload was validated".into(),
         ));
     }
-    if !scanned.by_name.contains_key("templates.json") {
+    if !read_plan.import_templates {
         std::fs::write(staging.join("templates.json"), b"[]")
             .map_err(|e| CoreError::Message(format!("write templates: {e}")))?;
     }
@@ -1102,6 +1162,182 @@ mod tests {
         buf.into_inner()
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum FrozenV1Fixture {
+        Minimal,
+        Full,
+        UnknownFields,
+    }
+
+    /// Build the historical v1 fixture from fixed v1-era SQL and JSON literals.
+    ///
+    /// This intentionally does not call `export_corpus_zip`, `LogCorpus::create`,
+    /// ingest, current metadata serialization, or current schema initialization.
+    /// A future writer/schema change therefore cannot silently regenerate these
+    /// compatibility expectations; changing them requires an explicit edit here.
+    fn frozen_v1_package(dir: &Path, fixture: FrozenV1Fixture) -> Vec<u8> {
+        let db_path = dir.join(format!("frozen-v1-{fixture:?}.duckdb"));
+        let connection = duckdb::Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE events (
+                    seq BIGINT NOT NULL,
+                    ts BIGINT NOT NULL,
+                    level VARCHAR NOT NULL,
+                    service VARCHAR,
+                    host VARCHAR,
+                    template_id BIGINT NOT NULL,
+                    params VARCHAR NOT NULL,
+                    trace_id VARCHAR,
+                    message VARCHAR NOT NULL,
+                    source VARCHAR NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        if !matches!(fixture, FrozenV1Fixture::Minimal) {
+            connection
+                .execute_batch(
+                    r#"
+                    INSERT INTO events VALUES (
+                        1, 1700000000, 'error', 'api', 'node-1', 1, '[]',
+                        'trace-frozen-v1', 'connection refused by frozen upstream',
+                        'historical.log'
+                    );
+                    CHECKPOINT;
+                    "#,
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let events = std::fs::read(&db_path).unwrap();
+
+        let meta = match fixture {
+            FrozenV1Fixture::Minimal => br#"{
+                "id":"frozen-v1-minimal",
+                "name":"Frozen v1 minimal",
+                "created_at":1700000000,
+                "engine":"duckdb"
+            }"#
+            .to_vec(),
+            FrozenV1Fixture::Full => br#"{
+                "id":"frozen-v1-full",
+                "name":"Frozen v1 full",
+                "created_at":1700000000,
+                "engine":"duckdb",
+                "license":"MIT",
+                "vector_index":"exact"
+            }"#
+            .to_vec(),
+            FrozenV1Fixture::UnknownFields => br#"{
+                "id":"frozen-v1-unknown",
+                "name":"Frozen v1 unknown fields",
+                "created_at":1700000000,
+                "engine":"duckdb",
+                "future_meta_object":{"enabled":true}
+            }"#
+            .to_vec(),
+        };
+        let templates = (!matches!(fixture, FrozenV1Fixture::Minimal)).then(|| {
+            br#"[{
+                "info":{
+                    "template_id":1,
+                    "pattern":"connection refused by frozen upstream",
+                    "token_count":5,
+                    "count":1,
+                    "first_seen":1700000000,
+                    "last_seen":1700000000,
+                    "severity":5,
+                    "example":"connection refused by frozen upstream"
+                },
+                "content_hash":"frozen-v1-template-hash",
+                "vector":[0.25,0.5,0.75]
+            }]"#
+            .to_vec()
+        });
+
+        let mut files = vec![
+            serde_json::json!({
+                "path": "meta.json",
+                "sha256": hex_sha256(&meta),
+                "bytes": meta.len(),
+            }),
+            serde_json::json!({
+                "path": "events.duckdb",
+                "sha256": hex_sha256(&events),
+                "bytes": events.len(),
+            }),
+        ];
+        if let Some(templates) = &templates {
+            files.push(serde_json::json!({
+                "path": "templates.json",
+                "sha256": hex_sha256(templates),
+                "bytes": templates.len(),
+            }));
+        }
+
+        let mut manifest = serde_json::json!({
+            "formatVersion": "contextdesk.log_corpus.v1",
+            "minReaderVersion": 1,
+            "packageKind": "log_corpus",
+            "createdAt": 1700000000,
+            "corpusId": match fixture {
+                FrozenV1Fixture::Minimal => "frozen-v1-minimal",
+                FrozenV1Fixture::Full => "frozen-v1-full",
+                FrozenV1Fixture::UnknownFields => "frozen-v1-unknown",
+            },
+            "name": match fixture {
+                FrozenV1Fixture::Minimal => "Frozen v1 minimal",
+                FrozenV1Fixture::Full => "Frozen v1 full",
+                FrozenV1Fixture::UnknownFields => "Frozen v1 unknown fields",
+            },
+            "engine": "duckdb",
+            "files": files,
+        });
+        if !matches!(fixture, FrozenV1Fixture::Minimal) {
+            manifest["features"] = serde_json::json!([
+                "events_duckdb",
+                "templates_json",
+                "template_vectors",
+                "corpus_stats"
+            ]);
+            manifest["stats"] = serde_json::json!({
+                "files": 1,
+                "lines": 1,
+                "templates": 1,
+                "reductionRatio": 1.0,
+                "embedded": 1,
+                "sourceBytes": 48,
+                "corpusBytes": 0,
+                "levelCounts": {"error": 1},
+                "tsMin": 1700000000,
+                "tsMax": 1700000000,
+                "formatCounts": {"plain": 1}
+            });
+        }
+        if matches!(fixture, FrozenV1Fixture::UnknownFields) {
+            manifest["futureOptionalField"] = serde_json::json!({"nested": ["still", "accepted"]});
+            manifest["features"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!("future_optional_payload_semantics"));
+        }
+
+        let mut entries = vec![
+            (
+                "manifest.json".to_string(),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            ),
+            ("meta.json".to_string(), meta),
+            ("events.duckdb".to_string(), events),
+        ];
+        if let Some(templates) = templates {
+            entries.push(("templates.json".to_string(), templates));
+        }
+        zip_from_owned(&entries, zip::CompressionMethod::Deflated)
+    }
+
     fn replace_all_same_len(mut bytes: Vec<u8>, from: &[u8], to: &[u8]) -> Vec<u8> {
         assert_eq!(from.len(), to.len());
         let mut replaced = 0;
@@ -1200,6 +1436,128 @@ mod tests {
         cursor.set_position(0);
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
         scan_archive(&mut archive, limits)
+    }
+
+    #[test]
+    fn exact_reader_registry_rejects_malformed_v1_lookalikes() {
+        assert_eq!(PACKAGE_READERS, &[PackageReader::V1]);
+        assert_eq!(
+            resolve_package_reader("contextdesk.log_corpus.v1").unwrap(),
+            PackageReader::V1
+        );
+        for malformed in [
+            "contextdesk.log_corpus.v01",
+            "contextdesk.log_corpus.v1.extra",
+            "contextdesk.log_corpus.v1 ",
+            "contextdesk.log_corpus.v1/../v2",
+            "CONTEXTDESK.log_corpus.v1",
+            "contextdesk.log-corpus.v1",
+        ] {
+            let error = resolve_package_reader(malformed).unwrap_err();
+            assert!(
+                error.to_string().contains("accepts exactly"),
+                "{malformed}: {error}"
+            );
+        }
+        let too_new = resolve_package_reader("contextdesk.log_corpus.v2").unwrap_err();
+        assert!(too_new.to_string().contains("upgrade ContextDesk"));
+    }
+
+    #[test]
+    fn frozen_v1_minimal_imports_without_current_exporter() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = frozen_v1_package(dir.path(), FrozenV1Fixture::Minimal);
+        let cache = dir.path().join("cache");
+
+        let report = import_corpus_zip(&cache, &package).unwrap();
+        assert_eq!(report.origin_corpus_id, "frozen-v1-minimal");
+        assert!(report.stats.is_none());
+
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(corpus.name(), "Frozen v1 minimal");
+        assert_eq!(corpus.event_count(), 0);
+        assert_eq!(corpus.template_count(), 0);
+        let meta = corpus.meta().unwrap();
+        assert_eq!(meta.meta_version, META_VERSION);
+        assert_eq!(meta.origin_corpus_id.as_deref(), Some("frozen-v1-minimal"));
+    }
+
+    #[test]
+    fn frozen_v1_full_imports_and_searches_without_current_exporter() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = frozen_v1_package(dir.path(), FrozenV1Fixture::Full);
+        let cache = dir.path().join("cache");
+
+        let report = import_corpus_zip(&cache, &package).unwrap();
+        let stats = report.stats.as_ref().expect("frozen stats must survive");
+        assert_eq!(stats.lines, 1);
+        assert_eq!(stats.embedded, 1);
+
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(corpus.event_count(), 1);
+        assert_eq!(corpus.template_count(), 1);
+        assert_eq!(
+            corpus.list_templates()[0].vector.as_deref(),
+            Some([0.25, 0.5, 0.75].as_slice())
+        );
+        let hits = crate::log_analysis::search_logs(
+            &corpus,
+            &crate::log_analysis::SearchLogsQuery {
+                query: Some("connection refused".into()),
+                k: 10,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].template_id, 1);
+        assert!(hits[0].pattern.contains("frozen upstream"));
+    }
+
+    #[test]
+    fn frozen_v1_unknown_optional_fields_and_features_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = frozen_v1_package(dir.path(), FrozenV1Fixture::UnknownFields);
+        let cache = dir.path().join("cache");
+
+        let report = import_corpus_zip(&cache, &package).unwrap();
+        assert_eq!(report.origin_corpus_id, "frozen-v1-unknown");
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(corpus.event_count(), 1);
+        assert_eq!(corpus.template_count(), 1);
+    }
+
+    #[test]
+    fn shared_archive_validation_precedes_reader_dispatch() {
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "formatVersion": "contextdesk.log_corpus.v99",
+            "minReaderVersion": 99,
+            "packageKind": PACKAGE_KIND,
+            "createdAt": 1,
+            "corpusId": "too-new",
+            "name": "too-new",
+            "engine": EVENT_ENGINE,
+            "files": [],
+        }))
+        .unwrap();
+        let package = zip_from_owned(
+            &[
+                ("manifest.json".into(), manifest),
+                ("../must-fail-before-dispatch".into(), vec![b'x']),
+            ],
+            zip::CompressionMethod::Stored,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+
+        let error = import_corpus_zip(&cache, &package).unwrap_err();
+        assert!(
+            error.to_string().contains("traversing") || error.to_string().contains("ambiguous"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("v99"), "{error}");
+        assert!(cache_entries(&cache).is_empty());
     }
 
     #[test]
