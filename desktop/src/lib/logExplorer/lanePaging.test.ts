@@ -69,11 +69,10 @@ describe("lanePaging (#505)", () => {
 
     const seen = new Set<number>();
     let cursor: LaneCursor | undefined;
-    let totalMatched = 0;
     // first page
     let q = filtersToLaneQuery(emptyFilters(), lane, undefined, 100);
     let page = await queryHost(q);
-    totalMatched = page.totalMatched;
+    const totalMatched = page.totalMatched;
     for (const e of page.events) seen.add(e.seq);
     cursor = cursorFromPage(page);
     while (laneHasMore(cursor)) {

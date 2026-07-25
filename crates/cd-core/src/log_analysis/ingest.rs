@@ -204,6 +204,7 @@ fn looks_binary_file(path: &Path) -> bool {
 }
 
 /// Parse lines from a streaming reader into the corpus batch (shared by dir + zip).
+#[allow(clippy::too_many_arguments)]
 fn ingest_lines_from_reader(
     reader: &mut dyn BufRead,
     source_label: &str,
@@ -317,6 +318,7 @@ fn ingest_lines_from_reader(
 }
 
 /// Stream zip members in-place (no full extract to temp). Cancel checked **per entry**.
+#[allow(clippy::too_many_arguments)]
 fn ingest_from_zip(
     zip_path: &Path,
     corpus: &LogCorpus,
