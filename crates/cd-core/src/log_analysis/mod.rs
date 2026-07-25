@@ -27,8 +27,8 @@ pub use ingest::{
 };
 pub use package::{
     export_corpus_zip, import_corpus_zip, import_corpus_zip_path, import_corpus_zip_reader,
-    validate_package_versions, PackageImportReport, PackageManifest, PACKAGE_FORMAT_VERSION,
-    PACKAGE_READER_VERSION,
+    validate_package_versions, PackageImportReport, PackageManifest, PackageReader,
+    PACKAGE_FORMAT_VERSION, PACKAGE_READERS, PACKAGE_READER_VERSION,
 };
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use search::{search_logs, SearchHit, SearchLogsQuery};

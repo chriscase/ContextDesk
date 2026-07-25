@@ -164,10 +164,24 @@ Zip (flat entries):
 **Compat rules**
 
 1. Additive optional JSON within a major; unknown fields ignored.
-2. Breaking → new major + dual-path importer (N and N−1).
-3. `min_reader_version` > this build’s `PACKAGE_READER_VERSION` → clear error, no cache write.
-4. Import always assigns a **new** corpus id; store `origin_corpus_id`.
-5. SoftWrite import; export is user-chosen path only.
+2. `format_version` dispatch is exact. Today the registry contains only
+   `contextdesk.log_corpus.v1`; lookalikes such as `.v1.extra` are not v1.
+3. Only v1 has shipped. A breaking change introduces a real new major; when v2
+   is introduced, its PR must keep both v2 and v1 readers for the N/N−1 window.
+   Later removal of an older reader requires an explicit deprecation decision,
+   documentation, and fixture change.
+4. ZIP/path/cap/declared-byte/hash validation is shared outside version
+   readers. Version readers own only their payload contract and optional feature
+   semantics. In v1, all feature tags are advisory: hashed payload entries and
+   the optional `stats` field are authoritative, and unknown tags are ignored.
+5. `min_reader_version` is a capability gate within the selected major.
+   `min_reader_version` > this build’s `PACKAGE_READER_VERSION` produces a clear
+   error and no cache write.
+6. Package `format_version` and on-disk `meta_version` are independent:
+   importing a v1 package may upgrade legacy/missing meta version to the current
+   local metadata representation.
+7. Import always assigns a **new** corpus id; store `origin_corpus_id`.
+8. SoftWrite import; export is user-chosen path only.
 
 **Import safety contract**
 
@@ -185,4 +199,19 @@ Zip (flat entries):
   staging name. Rename is the final publication step; any prior failure removes
   staging and cannot change the existing corpus set.
 
-Contributor checklist: changing package layout? bump `format_version` / `min_reader_version`, add fixture test, update this section.
+**Contributor checklist: changing package format?**
+
+1. Classify the change as additive within the current major or breaking.
+2. For an additive v1 change, keep existing fields/payloads readable, use only
+   optional fields/files, and add a frozen-v1 unknown-field regression.
+3. For the first breaking change, add an exact v2 reader and writer, retain the
+   exact v1 reader in `PACKAGE_READERS`, and add frozen v2 plus existing frozen
+   v1 import/search proof. Do not relax shared ZIP/path/cap/hash validation in a
+   version branch.
+4. Bump `min_reader_version` only for a reader-capability requirement within a
+   major, with a focused too-new-reader test.
+5. Never regenerate historical compatibility assertions through the current
+   exporter. Frozen v1 tests use fixed v1-era SQL and JSON literals so writer or
+   schema evolution cannot silently rewrite the expected artifact.
+6. Update this section, user-facing unsupported-version copy, and the close
+   proof with exact fixtures and supported registry entries.
