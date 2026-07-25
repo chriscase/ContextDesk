@@ -453,6 +453,17 @@ impl LogCorpus {
         Ok(())
     }
 
+    /// Run a closure with the DuckDB connection (explorer query plane).
+    ///
+    /// Prefer this over loading all events for large corpora.
+    pub fn with_connection<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> CoreResult<R>,
+    ) -> CoreResult<R> {
+        let conn = self.db.lock().map_err(|_| lock_err())?;
+        f(&conn)
+    }
+
     /// Event count (DuckDB).
     pub fn event_count(&self) -> usize {
         let conn = match self.db.lock() {

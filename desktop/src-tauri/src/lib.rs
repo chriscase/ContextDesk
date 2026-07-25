@@ -4256,6 +4256,180 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
     Ok(host.active_log_corpus().map(|s| s.to_string()))
 }
 
+// ── Log Explorer (#480–#487) ────────────────────────────────────────────────
+
+/// Paged/keyset event query for the Log Explorer.
+#[tauri::command]
+fn log_query_events(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventPage, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
+}
+
+/// Facets under filters for explorer filter rail.
+#[tauri::command]
+fn log_facets(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::LogFacets, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
+}
+
+/// Keyword + template-semantic event search (template-first semantic).
+#[tauri::command]
+fn log_search_events(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: Option<String>,
+    semantic: Option<bool>,
+    k: Option<u32>,
+    filter: Option<cd_core::log_analysis::EventQuery>,
+) -> Result<Vec<cd_core::log_analysis::EventSearchHit>, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let host = state.host.lock().expect("host");
+    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let q = cd_core::log_analysis::EventSearchQuery {
+        query,
+        semantic: semantic.unwrap_or(true),
+        k: k.unwrap_or(50) as usize,
+        filter: filter.unwrap_or_default(),
+    };
+    cd_core::log_analysis::search_events(&c, &q, host.log_embed_backend().as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// List bookmarks for a corpus.
+#[tauri::command]
+fn log_list_bookmarks(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Vec<cd_core::log_analysis::Bookmark>, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::list_bookmarks(&c).map_err(|e| e.to_string())
+}
+
+/// Add a line or range bookmark.
+#[tauri::command]
+fn log_add_bookmark(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    seq_from: u64,
+    seq_to: u64,
+    label: String,
+    note: Option<String>,
+    color: Option<String>,
+    ts_from: Option<i64>,
+    ts_to: Option<i64>,
+) -> Result<cd_core::log_analysis::Bookmark, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::add_range_bookmark(
+        &c, seq_from, seq_to, label, note, color, ts_from, ts_to,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Delete a bookmark by id.
+#[tauri::command]
+fn log_delete_bookmark(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    bookmark_id: String,
+) -> Result<bool, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::delete_bookmark(&c, &bookmark_id).map_err(|e| e.to_string())
+}
+
+/// List chat sessions linked to a corpus (any chat may link).
+#[tauri::command]
+fn list_chat_sessions_for_corpus(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Vec<cd_core::sessions::SessionMeta>, String> {
+    session_store(&state)?
+        .list_meta_for_corpus(&corpus_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Set or clear `linked_corpus_id` on a chat session.
+#[tauri::command]
+fn set_chat_linked_corpus(
+    state: State<'_, AppState>,
+    session_id: String,
+    corpus_id: Option<String>,
+) -> Result<cd_core::sessions::Session, String> {
+    let store = session_store(&state)?;
+    let mut session = store.load(&session_id).map_err(|e| e.to_string())?;
+    session.set_linked_corpus_id(corpus_id);
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Open (or focus) a multi-window Log Explorer bound to `corpus_id`.
+#[tauri::command]
+fn open_log_explorer(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<String, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let title = format!("Log Explorer · {}", c.name());
+    // Set active corpus so agent tools resolve without id.
+    if let Ok(mut host) = state.host.lock() {
+        if let Some(h) = host.as_mut() {
+            h.set_active_log_corpus(Some(corpus_id.clone()));
+        }
+    }
+    let label = format!(
+        "log-explorer-{}",
+        corpus_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>()
+    );
+    // Focus existing window if already open.
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.set_focus();
+        return Ok(label);
+    }
+    let url = format!("index.html?window=log-explorer&corpus={corpus_id}");
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &label,
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title(title)
+    .inner_size(1400.0, 900.0)
+    .min_inner_size(720.0, 480.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(label)
+}
+
 /// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5062,6 +5236,15 @@ pub fn run() {
             discard_log_corpus,
             set_active_log_corpus,
             get_active_log_corpus,
+            log_query_events,
+            log_facets,
+            log_search_events,
+            log_list_bookmarks,
+            log_add_bookmark,
+            log_delete_bookmark,
+            list_chat_sessions_for_corpus,
+            set_chat_linked_corpus,
+            open_log_explorer,
             export_log_corpus_package,
             import_log_corpus_package_path,
             write_memory_note,

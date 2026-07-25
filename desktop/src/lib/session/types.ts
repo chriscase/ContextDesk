@@ -44,6 +44,8 @@ export type ChatSession = {
   lastReadMessageId: string | null;
   /** Pinned skill id for this chat (#343); null = none. */
   pinnedSkillId: string | null;
+  /** Linked log analysis corpus (#480); any chat may set this. */
+  linkedCorpusId: string | null;
 };
 
 export type UiScale = "90" | "100" | "110";

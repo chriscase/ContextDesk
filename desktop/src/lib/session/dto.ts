@@ -31,6 +31,7 @@ export function newSession(
     providerProfileId: null,
     lastReadMessageId: null,
     pinnedSkillId: null,
+    linkedCorpusId: null,
   };
 }
 
@@ -101,6 +102,7 @@ export function sessionFromDto(dto: ChatSessionDto): ChatSession {
     providerProfileId: dto.provider_profile_id ?? null,
     lastReadMessageId: dto.last_read_message_id ?? null,
     pinnedSkillId: dto.pinned_skill_id ?? null,
+    linkedCorpusId: dto.linked_corpus_id ?? null,
   };
 }
 
@@ -130,6 +132,7 @@ export function sessionToDto(s: ChatSession): ChatSessionDto {
     provider_profile_id: s.providerProfileId,
     last_read_message_id: s.lastReadMessageId,
     pinned_skill_id: s.pinnedSkillId,
+    linked_corpus_id: s.linkedCorpusId,
   };
 }
 

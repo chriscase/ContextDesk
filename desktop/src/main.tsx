@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { LogExplorer } from "./components/logExplorer/LogExplorer";
 import "./assets/fonts/fonts.css";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -20,10 +21,20 @@ import "./styles/components/command-palette.css";
 import "./styles/components/composition.css";
 import "./styles/components/panes.css";
 import "./styles/components/session-wizard.css";
+import "./styles/components/log-explorer.css";
 import "./styles/help.css";
 
+function bootRoot() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("window") === "log-explorer") {
+    const corpus = params.get("corpus")?.trim();
+    if (corpus) {
+      return <LogExplorer corpusId={corpus} />;
+    }
+  }
+  return <App />;
+}
+
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
+  <StrictMode>{bootRoot()}</StrictMode>,
 );

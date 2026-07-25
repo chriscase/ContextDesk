@@ -858,6 +858,8 @@ export type ChatSessionDto = {
   last_read_message_id?: string | null;
   /** Session-pinned skill id (#343). */
   pinned_skill_id?: string | null;
+  /** Linked log analysis corpus (#480 Log Explorer). */
+  linked_corpus_id?: string | null;
 };
 
 export type ModelOptionDto = {
@@ -1003,6 +1005,8 @@ export type SessionMetaDto = {
   trashed_at?: string | null;
   message_count: number;
   preview: string;
+  /** Linked log analysis corpus (#480). */
+  linked_corpus_id?: string | null;
 };
 
 export type SessionSearchHitDto = {
@@ -1671,6 +1675,184 @@ export async function hostExportLogCorpusPackage(
 ): Promise<string> {
   if (!isTauri()) throw new Error("Export requires Tauri host");
   return invoke<string>("export_log_corpus_package", { corpusId, path });
+}
+
+// ── Log Explorer (#480) ─────────────────────────────────────────────────────
+
+export type TimeQuality = "wall" | "mixed" | "order_only";
+
+export type ExplorerEventDto = {
+  seq: number;
+  ts: number;
+  timeQuality: TimeQuality;
+  level: string;
+  service: string | null;
+  host: string | null;
+  templateId: number;
+  traceId: string | null;
+  message: string;
+  source: string;
+};
+
+export type EventQueryDto = {
+  timeFrom?: number | null;
+  timeTo?: number | null;
+  levels?: string[];
+  sources?: string[];
+  services?: string[];
+  hosts?: string[];
+  templateId?: number | null;
+  templateIds?: number[];
+  traceId?: string | null;
+  keyword?: string | null;
+  afterSeq?: number | null;
+  beforeSeq?: number | null;
+  limit?: number;
+  sortByTime?: boolean;
+};
+
+export type EventPageDto = {
+  events: ExplorerEventDto[];
+  nextCursor: number | null;
+  totalMatched: number;
+  timeQuality: TimeQuality;
+};
+
+export type LogFacetsDto = {
+  sources: Record<string, number>;
+  levels: Record<string, number>;
+  services: Record<string, number>;
+  hosts: Record<string, number>;
+  timeQuality: TimeQuality;
+};
+
+export type EventSearchHitDto = {
+  event: ExplorerEventDto;
+  score: number;
+  matchKind: string;
+  templateId: number | null;
+};
+
+export type LogBookmarkDto = {
+  id: string;
+  label: string;
+  seqFrom: number;
+  seqTo: number;
+  tsFrom?: number | null;
+  tsTo?: number | null;
+  color?: string | null;
+  note?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export async function hostLogQueryEvents(
+  corpusId: string,
+  query: EventQueryDto = {},
+): Promise<EventPageDto> {
+  if (!isTauri()) {
+    return { events: [], nextCursor: null, totalMatched: 0, timeQuality: "order_only" };
+  }
+  return invoke<EventPageDto>("log_query_events", { corpusId, query });
+}
+
+export async function hostLogFacets(
+  corpusId: string,
+  query: EventQueryDto = {},
+): Promise<LogFacetsDto> {
+  if (!isTauri()) {
+    return {
+      sources: {},
+      levels: {},
+      services: {},
+      hosts: {},
+      timeQuality: "order_only",
+    };
+  }
+  return invoke<LogFacetsDto>("log_facets", { corpusId, query });
+}
+
+export async function hostLogSearchEvents(
+  corpusId: string,
+  opts: {
+    query?: string;
+    semantic?: boolean;
+    k?: number;
+    filter?: EventQueryDto;
+  } = {},
+): Promise<EventSearchHitDto[]> {
+  if (!isTauri()) return [];
+  return invoke<EventSearchHitDto[]>("log_search_events", {
+    corpusId,
+    query: opts.query ?? null,
+    semantic: opts.semantic ?? true,
+    k: opts.k ?? null,
+    filter: opts.filter ?? null,
+  });
+}
+
+export async function hostLogListBookmarks(
+  corpusId: string,
+): Promise<LogBookmarkDto[]> {
+  if (!isTauri()) return [];
+  return invoke<LogBookmarkDto[]>("log_list_bookmarks", { corpusId });
+}
+
+export async function hostLogAddBookmark(
+  corpusId: string,
+  args: {
+    seqFrom: number;
+    seqTo: number;
+    label: string;
+    note?: string | null;
+    color?: string | null;
+    tsFrom?: number | null;
+    tsTo?: number | null;
+  },
+): Promise<LogBookmarkDto> {
+  if (!isTauri()) throw new Error("Bookmarks require Tauri host");
+  return invoke<LogBookmarkDto>("log_add_bookmark", {
+    corpusId,
+    seqFrom: args.seqFrom,
+    seqTo: args.seqTo,
+    label: args.label,
+    note: args.note ?? null,
+    color: args.color ?? null,
+    tsFrom: args.tsFrom ?? null,
+    tsTo: args.tsTo ?? null,
+  });
+}
+
+export async function hostLogDeleteBookmark(
+  corpusId: string,
+  bookmarkId: string,
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("log_delete_bookmark", { corpusId, bookmarkId });
+}
+
+export async function hostListChatSessionsForCorpus(
+  corpusId: string,
+): Promise<SessionMetaDto[]> {
+  if (!isTauri()) return [];
+  return invoke<SessionMetaDto[]>("list_chat_sessions_for_corpus", { corpusId });
+}
+
+export async function hostSetChatLinkedCorpus(
+  sessionId: string,
+  corpusId: string | null,
+): Promise<ChatSessionDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ChatSessionDto>("set_chat_linked_corpus", {
+    sessionId,
+    corpusId,
+  });
+}
+
+/** Open multi-window Log Explorer for a corpus. */
+export async function hostOpenLogExplorer(corpusId: string): Promise<string> {
+  if (!isTauri()) throw new Error("Log Explorer requires Tauri host");
+  return invoke<string>("open_log_explorer", { corpusId });
 }
 
 /** Import portable package (SoftWrite — new disposable corpus). */
