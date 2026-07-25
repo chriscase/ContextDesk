@@ -171,10 +171,15 @@ fn parse_ts_value(v: &serde_json::Value) -> Option<i64> {
 
 fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
     let mut map = std::collections::HashMap::new();
-    for tok in raw.split_whitespace() {
+    for tok in split_logfmt_tokens(raw) {
         if let Some((k, v)) = tok.split_once('=') {
-            let v = v.trim_matches('"');
-            map.insert(k.to_string(), v.to_string());
+            let v = v
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(v)
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
+            map.insert(k.to_string(), v);
         }
     }
     let level = map
@@ -205,6 +210,35 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         raw: raw.to_string(),
         format: LogFormat::Logfmt,
     }
+}
+
+fn split_logfmt_tokens(raw: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            token.push(ch);
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+            token.push(ch);
+        } else if ch.is_whitespace() && !quoted {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
@@ -324,6 +358,17 @@ mod tests {
         assert_eq!(p.level, "warn");
         assert_eq!(p.service.as_deref(), Some("worker"));
         assert!(p.message.contains("retry"));
+    }
+
+    #[test]
+    fn parse_logfmt_preserves_quoted_message_and_escapes() {
+        let line = r#"ts=100 level=error service=worker trace_id=trace-42 msg="retry loop says \"wait\" at C:\\queue""#;
+        assert_eq!(detect_format(line, None), LogFormat::Logfmt);
+        let p = parse_line(line, None, 0);
+        assert_eq!(p.level, "error");
+        assert_eq!(p.service.as_deref(), Some("worker"));
+        assert_eq!(p.trace_id.as_deref(), Some("trace-42"));
+        assert_eq!(p.message, r#"retry loop says "wait" at C:\queue"#);
     }
 
     #[test]

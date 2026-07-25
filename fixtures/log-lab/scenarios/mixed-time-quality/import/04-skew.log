@@ -1,2 +1,2 @@
-ts=1735733280 level=warn service=skewed-service host=skew-01.example trace_id=trace-skew-1 msg=event_id=skew-0-clock-behind-120s
-ts=1735733410 level=info service=skewed-service host=skew-01.example trace_id=trace-skew-2 msg=event_id=skew-1-late-arrival
+ts=1735733280 level=warn service=skewed-service host=skew-01.example trace_id=trace-skew-1 msg="event_id=skew-0 clock-behind-120s"
+ts=1735733410 level=info service=skewed-service host=skew-01.example trace_id=trace-skew-2 msg="event_id=skew-1 late-arrival"

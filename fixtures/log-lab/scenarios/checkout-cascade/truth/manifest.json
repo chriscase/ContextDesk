@@ -1,6 +1,6 @@
 {
   "expected": {
-    "bytes": 6221,
+    "bytes": 6247,
     "events": 35,
     "files": 6,
     "files_by_path": {
@@ -15,9 +15,9 @@
         "sha256": "25a429681fc84f637936d37597a1c22185167f0849cb51bcfae302cec64b0341"
       },
       "db/database.log": {
-        "bytes": 890,
+        "bytes": 902,
         "events": 6,
-        "sha256": "5213eda153d5efdbc2c27dcb03e30392201c6f3940549d43f3e6edfd0a99d34c"
+        "sha256": "2c95251896e7c9833586aaac7450da336dff8528229d9a8472e4864e998a8514"
       },
       "edge/access.jsonl": {
         "bytes": 1118,
@@ -30,9 +30,9 @@
         "sha256": "25fda101ac9824274e2489e7708e7269fe8b70dd0555f162bda303bbd5ef19d6"
       },
       "worker/worker.log": {
-        "bytes": 1087,
+        "bytes": 1101,
         "events": 7,
-        "sha256": "eaa55f218ca79d6c5451543fb2dc547e43f00194a47f80934665d2bfec514b6e"
+        "sha256": "4ed9dced10fbbd58539b3f5eb52026bb9851391f7a356efdb012a642a398c041"
       }
     },
     "severities": {

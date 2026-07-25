@@ -1,6 +1,6 @@
 {
   "expected": {
-    "bytes": 1135,
+    "bytes": 1137,
     "events": 12,
     "files": 10,
     "files_by_path": {
@@ -10,9 +10,9 @@
         "sha256": "853059532628c79aef63aee7dada1dbef728a9a17f123d6d8cbb666ff673c4c9"
       },
       "formats/02-logfmt.log": {
-        "bytes": 131,
+        "bytes": 133,
         "events": 1,
-        "sha256": "281a4035034d4bfcbbda15c0a73d740e60793b50aa04a938ad1f079abcba9dd5"
+        "sha256": "b5a4e824cf6187ba6e838d308f1b1a63ea33ecc7739bb067c1bea4491f807e48"
       },
       "formats/03-syslog.log": {
         "bytes": 77,

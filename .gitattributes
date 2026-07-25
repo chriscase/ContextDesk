@@ -1,0 +1,7 @@
+# Frozen Log Lab text must regenerate byte-identically on every checkout.
+fixtures/log-lab/** text eol=lf
+
+# Preserve deliberately non-text fixture bytes.
+fixtures/log-lab/**/*.zip -text -eol
+fixtures/log-lab/**/04-crlf.log -text -eol
+fixtures/log-lab/**/binary.log -text -eol

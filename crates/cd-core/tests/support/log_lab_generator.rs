@@ -993,9 +993,9 @@ fn logfmt(
     trace_id: &str,
     message: &str,
 ) -> String {
+    let message = message.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
-        "ts={ts} level={level} service={service} host={host} trace_id={trace_id} msg={}",
-        message.replace(' ', "-")
+        "ts={ts} level={level} service={service} host={host} trace_id={trace_id} msg=\"{message}\""
     )
 }
 
@@ -1308,7 +1308,7 @@ fn summarize_generation(root: &Path, profile: &str, events: usize) -> LabResult<
         tree_hasher.update(path.as_bytes());
         tree_hasher.update([0]);
         tree_hasher.update(hash.as_bytes());
-        tree_hasher.update([b'\n']);
+        tree_hasher.update(*b"\n");
         bytes = bytes.saturating_add(fs::metadata(root.join(path))?.len());
     }
     Ok(GenerationSummary {

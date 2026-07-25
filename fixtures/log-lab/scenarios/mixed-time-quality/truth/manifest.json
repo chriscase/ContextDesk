@@ -1,6 +1,6 @@
 {
   "expected": {
-    "bytes": 1199,
+    "bytes": 1203,
     "events": 11,
     "files": 4,
     "files_by_path": {
@@ -20,9 +20,9 @@
         "sha256": "60d1a770d5cac48a89f8d67c0e4ee1a6fbf5a1b487498f6d4a0bfa9e8af89140"
       },
       "04-skew.log": {
-        "bytes": 253,
+        "bytes": 257,
         "events": 2,
-        "sha256": "486e01048d62a993c0d493b265e9af0316d5771ea052010116d75af8419afa3d"
+        "sha256": "97d280a9875ac566ee90bdbc6bedf3f01b846ba12d1f85ff7b477b36d14d764b"
       }
     },
     "severities": {

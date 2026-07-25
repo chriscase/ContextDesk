@@ -1,6 +1,6 @@
-ts=1735732805 level=info service=database host=db-01.example trace_id=trace-baseline-01 msg=event_id=db-baseline-pool-active-2-pool-max-32
-ts=1735732930 level=warn service=database host=db-01.example trace_id=trace-checkout-42 msg=event_id=db-saturation-pool-active-4-pool-max-4-waiters-11
-ts=1735732945 level=error service=database host=db-01.example trace_id=trace-checkout-42 msg=event_id=db-lock-job-job-7f3a-held-transaction-lock-ms-45000
-ts=1735732960 level=error service=database host=db-01.example trace_id=trace-checkout-42 msg=event_id=db-timeout-acquire-timeout-request-req-7f3a-pool-max-4
-ts=1735732970 level=warn service=database host=db-01.example trace_id=trace-secondary-09 msg=event_id=db-secondary-waiters-23-pool-active-4
-ts=1735733045 level=info service=database host=db-01.example trace_id=trace-recovery-01 msg=event_id=db-recovery-pool-active-3-pool-max-32-waiters-0
+ts=1735732805 level=info service=database host=db-01.example trace_id=trace-baseline-01 msg="event_id=db-baseline pool-active-2 pool-max-32"
+ts=1735732930 level=warn service=database host=db-01.example trace_id=trace-checkout-42 msg="event_id=db-saturation pool-active-4 pool-max-4 waiters-11"
+ts=1735732945 level=error service=database host=db-01.example trace_id=trace-checkout-42 msg="event_id=db-lock job-job-7f3a held-transaction-lock-ms-45000"
+ts=1735732960 level=error service=database host=db-01.example trace_id=trace-checkout-42 msg="event_id=db-timeout acquire-timeout request-req-7f3a pool-max-4"
+ts=1735732970 level=warn service=database host=db-01.example trace_id=trace-secondary-09 msg="event_id=db-secondary waiters-23 pool-active-4"
+ts=1735733045 level=info service=database host=db-01.example trace_id=trace-recovery-01 msg="event_id=db-recovery pool-active-3 pool-max-32 waiters-0"

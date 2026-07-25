@@ -1,1 +1,1 @@
-ts=1735734002 level=info service=format-service host=format-01.example trace_id=trace-logfmt msg=event_id=logfmt-0-format-detected
+ts=1735734002 level=info service=format-service host=format-01.example trace_id=trace-logfmt msg="event_id=logfmt-0 format-detected"
