@@ -1717,7 +1717,10 @@ export type EventQueryDto = {
   traceId?: string | null;
   keyword?: string | null;
   afterSeq?: number | null;
+  /** Composite keyset with afterSeq when sortByTime (wall-time page cursor). */
+  afterTs?: number | null;
   beforeSeq?: number | null;
+  beforeTs?: number | null;
   limit?: number;
   sortByTime?: boolean;
 };
@@ -1725,6 +1728,8 @@ export type EventQueryDto = {
 export type EventPageDto = {
   events: ExplorerEventDto[];
   nextCursor: number | null;
+  /** Pair with nextCursor for time-sorted Load more. */
+  nextTs?: number | null;
   totalMatched: number;
   timeQuality: TimeQuality;
 };

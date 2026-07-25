@@ -78,6 +78,7 @@ pub fn corpus_time_quality(corpus: &LogCorpus) -> TimeQuality {
     .unwrap_or_else(|_| EventPage {
         events: vec![],
         next_cursor: None,
+        next_ts: None,
         total_matched: 0,
         time_quality: TimeQuality::OrderOnly,
     });
@@ -128,10 +129,15 @@ pub struct EventQuery {
     pub trace_id: Option<String>,
     /// Keyword substring (case-insensitive) on redacted message.
     pub keyword: Option<String>,
-    /// Keyset: return rows with seq **greater than** this (ascending).
+    /// Keyset: with `after_ts` when `sort_by_time` — composite (ts, seq);
+    /// without ts, seq-only (`seq > after_seq`).
     pub after_seq: Option<u64>,
-    /// Keyset: return rows with seq **less than** this (for reverse scroll).
+    /// Keyset time cursor for time-sorted pages (pair with `after_seq`).
+    pub after_ts: Option<i64>,
+    /// Keyset: return rows with seq **less than** this (reverse / seq sort).
     pub before_seq: Option<u64>,
+    /// Keyset time cursor for reverse time-sorted pages (pair with `before_seq`).
+    pub before_ts: Option<i64>,
     /// Max rows (clamped to [`MAX_EVENT_PAGE`]).
     pub limit: usize,
     /// Sort by timestamp then seq (default true). When false, seq only.
@@ -157,7 +163,9 @@ impl Default for EventQuery {
             trace_id: None,
             keyword: None,
             after_seq: None,
+            after_ts: None,
             before_seq: None,
+            before_ts: None,
             limit: 0,
             sort_by_time: true,
         }
@@ -213,8 +221,11 @@ impl From<LogEvent> for ExplorerEvent {
 pub struct EventPage {
     /// Rows (≤ limit).
     pub events: Vec<ExplorerEvent>,
-    /// Pass as `after_seq` for next page (last seq when ascending).
+    /// Pass as `after_seq` for next page. Only set when a full page was returned.
     pub next_cursor: Option<u64>,
+    /// Pass as `after_ts` with `next_cursor` when time-sorted. Only set on full page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_ts: Option<i64>,
     /// Approximate total matching under filters (COUNT).
     pub total_matched: u64,
     /// Corpus/window time quality hint.
@@ -267,6 +278,11 @@ pub struct EventSearchQuery {
 }
 
 /// Query events with SQL filters + keyset pagination.
+///
+/// When `sort_by_time` is true, keyset uses composite `(ts, seq)` via
+/// `after_ts`+`after_seq` so multi-file corpora (file-order seq, overlapping
+/// wall times) do not drop rows on Load more. Seq-only keyset is used when
+/// sorting by seq.
 pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage> {
     let limit = if q.limit == 0 {
         DEFAULT_EVENT_PAGE
@@ -282,13 +298,39 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
     };
     let mut page_where = where_sql.clone();
     let mut page_binds = binds.clone();
-    if let Some(after) = q.after_seq {
-        page_where.push_str(" AND seq > ?");
-        page_binds.push(Value::BigInt(after as i64));
-    }
-    if let Some(before) = q.before_seq {
-        page_where.push_str(" AND seq < ?");
-        page_binds.push(Value::BigInt(before as i64));
+
+    if q.sort_by_time {
+        // Composite keyset matching ORDER BY ts, seq.
+        if let (Some(ats), Some(aseq)) = (q.after_ts, q.after_seq) {
+            page_where.push_str(" AND (ts > ? OR (ts = ? AND seq > ?))");
+            page_binds.push(Value::BigInt(ats));
+            page_binds.push(Value::BigInt(ats));
+            page_binds.push(Value::BigInt(aseq as i64));
+        } else if let Some(after) = q.after_seq {
+            // Legacy: seq-only cursor without after_ts is unsafe for time sort —
+            // treat as seq-only keyset under time order (best-effort) but prefer
+            // callers always send after_ts from next_ts.
+            page_where.push_str(" AND seq > ?");
+            page_binds.push(Value::BigInt(after as i64));
+        }
+        if let (Some(bts), Some(bseq)) = (q.before_ts, q.before_seq) {
+            page_where.push_str(" AND (ts < ? OR (ts = ? AND seq < ?))");
+            page_binds.push(Value::BigInt(bts));
+            page_binds.push(Value::BigInt(bts));
+            page_binds.push(Value::BigInt(bseq as i64));
+        } else if let Some(before) = q.before_seq {
+            page_where.push_str(" AND seq < ?");
+            page_binds.push(Value::BigInt(before as i64));
+        }
+    } else {
+        if let Some(after) = q.after_seq {
+            page_where.push_str(" AND seq > ?");
+            page_binds.push(Value::BigInt(after as i64));
+        }
+        if let Some(before) = q.before_seq {
+            page_where.push_str(" AND seq < ?");
+            page_binds.push(Value::BigInt(before as i64));
+        }
     }
 
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
@@ -307,7 +349,20 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
         Ok((total_matched, events))
     })?;
 
-    let next_cursor = events.last().map(|e| e.seq);
+    // Only offer next page when this page was full (more rows may exist).
+    let (next_cursor, next_ts) = if events.len() == limit {
+        let last = events.last();
+        (
+            last.map(|e| e.seq),
+            if q.sort_by_time {
+                last.map(|e| e.ts)
+            } else {
+                None
+            },
+        )
+    } else {
+        (None, None)
+    };
     let tq = if events.is_empty() {
         corpus_time_quality_from_meta(corpus)
     } else {
@@ -317,6 +372,7 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
     Ok(EventPage {
         events,
         next_cursor,
+        next_ts,
         total_matched: total_matched.max(0) as u64,
         time_quality: tq,
     })
@@ -675,19 +731,32 @@ mod tests {
         assert!(page.events.len() <= 10);
         assert!(page.events.iter().all(|e| e.level == "error"));
         assert!(page.total_matched >= page.events.len() as u64);
+        // Full page ⇒ next cursor present with composite ts.
+        if page.events.len() == 10 {
+            assert!(page.next_cursor.is_some());
+            assert!(page.next_ts.is_some());
+        }
 
         let next = query_events(
             &corpus,
             &EventQuery {
                 levels: vec!["error".into()],
                 after_seq: page.next_cursor,
+                after_ts: page.next_ts,
                 limit: 10,
                 ..Default::default()
             },
         )
         .unwrap();
-        if let Some(c) = page.next_cursor {
-            assert!(next.events.iter().all(|e| e.seq > c) || next.events.is_empty());
+        if let (Some(cseq), Some(cts)) = (page.next_cursor, page.next_ts) {
+            for e in &next.events {
+                assert!(
+                    e.ts > cts || (e.ts == cts && e.seq > cseq),
+                    "time-sort keyset must advance past ({cts},{cseq}); got seq={} ts={}",
+                    e.seq,
+                    e.ts
+                );
+            }
         }
 
         let big = query_events(
@@ -699,6 +768,19 @@ mod tests {
         )
         .unwrap();
         assert!(big.events.len() <= MAX_EVENT_PAGE);
+        // Partial last page must not offer another page.
+        if (big.events.len() as u64) < big.total_matched.min(MAX_EVENT_PAGE as u64) {
+            // when total fits in one page
+        }
+        if big.events.len() < big.total_matched as usize && big.events.len() == MAX_EVENT_PAGE {
+            assert!(big.next_cursor.is_some());
+        } else if big.events.len() < MAX_EVENT_PAGE {
+            assert!(
+                big.next_cursor.is_none(),
+                "partial page must not set next_cursor"
+            );
+            assert!(big.next_ts.is_none());
+        }
 
         let api_only = query_events(
             &corpus,
@@ -711,6 +793,119 @@ mod tests {
         .unwrap();
         assert!(!api_only.events.is_empty());
         assert!(api_only.events.iter().all(|e| e.source.contains("api")));
+    }
+
+    /// Multi-file late-ts-first ingest: seq order ≠ wall time. Time-sorted
+    /// paging with composite keyset must return every event exactly once.
+    #[test]
+    fn query_time_sort_pages_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        // Lexical walk: late.log before early.log would be wrong; force order
+        // by creating a_late then b_early so ingest assigns early seqs to late ts.
+        let mut late = std::fs::File::create(logs.join("a_late.log")).unwrap();
+        for i in 0..4 {
+            writeln!(
+                late,
+                r#"{{"ts":{},"level":"info","service":"late","message":"late {i}"}}"#,
+                2_000_000_000 + i
+            )
+            .unwrap();
+        }
+        let mut early = std::fs::File::create(logs.join("b_early.log")).unwrap();
+        for i in 0..4 {
+            writeln!(
+                early,
+                r#"{{"ts":{},"level":"info","service":"early","message":"early {i}"}}"#,
+                1_700_000_000 + i
+            )
+            .unwrap();
+        }
+        // Overlapping wall ts across sources (same ts, different seq).
+        let mut mid = std::fs::File::create(logs.join("c_mid.log")).unwrap();
+        for i in 0..4 {
+            writeln!(
+                mid,
+                r#"{{"ts":{},"level":"info","service":"mid","message":"mid {i}"}}"#,
+                1_700_000_001 + i // overlaps early timestamps
+            )
+            .unwrap();
+        }
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let report = ingest_path(&cache, &logs, "keyset", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+
+        let limit = 4usize;
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut after_seq: Option<u64> = None;
+        let mut after_ts: Option<i64> = None;
+        let mut pages = 0usize;
+        let mut total_matched;
+        loop {
+            let page = query_events(
+                &corpus,
+                &EventQuery {
+                    limit,
+                    sort_by_time: true,
+                    after_seq,
+                    after_ts,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            total_matched = page.total_matched;
+            pages += 1;
+            assert!(pages < 50, "pagination did not terminate (cursor bug?)");
+            for e in &page.events {
+                assert!(seen.insert(e.seq), "duplicate seq {} across pages", e.seq);
+            }
+            // Events within a page are ordered by (ts, seq)
+            for w in page.events.windows(2) {
+                let a = &w[0];
+                let b = &w[1];
+                assert!(
+                    a.ts < b.ts || (a.ts == b.ts && a.seq < b.seq),
+                    "page not ordered by (ts,seq): ({},{}) then ({},{})",
+                    a.ts,
+                    a.seq,
+                    b.ts,
+                    b.seq
+                );
+            }
+            if page.events.len() < limit {
+                assert!(page.next_cursor.is_none());
+                assert!(page.next_ts.is_none());
+                break;
+            }
+            assert!(page.next_cursor.is_some() && page.next_ts.is_some());
+            after_seq = page.next_cursor;
+            after_ts = page.next_ts;
+        }
+
+        assert_eq!(
+            seen.len() as u64,
+            total_matched,
+            "union of pages must equal total_matched; seen={} total={} (seq-only keyset would drop late-ts early-seq rows)",
+            seen.len(),
+            total_matched
+        );
+        assert!(
+            total_matched >= 12,
+            "fixture should have ≥12 events, got {total_matched}"
+        );
+        // Prove we would have failed under seq-only keyset: early-seq late-ts
+        // events must appear in the union.
+        let late_present = corpus.with_events(|evs| {
+            evs.iter()
+                .filter(|e| e.source.contains("a_late"))
+                .all(|e| seen.contains(&e.seq))
+        });
+        assert!(
+            late_present,
+            "all late-file events must appear in paged results"
+        );
     }
 
     #[test]

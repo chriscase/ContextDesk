@@ -280,6 +280,11 @@
   background: var(--bg-app, #0b0c0e);
 }
 
+.log-explorer__lane--focus {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: -2px;
+}
+
 .log-explorer__lane-header {
   display: flex;
   align-items: center;
