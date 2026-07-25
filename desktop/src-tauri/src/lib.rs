@@ -4322,10 +4322,9 @@ fn log_list_bookmarks(
     cd_core::log_analysis::list_bookmarks(&c).map_err(|e| e.to_string())
 }
 
-/// Add a line or range bookmark.
-#[tauri::command]
-fn log_add_bookmark(
-    state: State<'_, AppState>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogAddBookmarkArgs {
     corpus_id: String,
     seq_from: u64,
     seq_to: u64,
@@ -4334,13 +4333,29 @@ fn log_add_bookmark(
     color: Option<String>,
     ts_from: Option<i64>,
     ts_to: Option<i64>,
+}
+
+/// Add a line or range bookmark.
+#[tauri::command]
+fn log_add_bookmark(
+    state: State<'_, AppState>,
+    args: LogAddBookmarkArgs,
 ) -> Result<cd_core::log_analysis::Bookmark, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
     cd_core::log_analysis::add_range_bookmark(
-        &c, seq_from, seq_to, label, note, color, ts_from, ts_to,
+        &c,
+        cd_core::log_analysis::NewBookmark {
+            seq_from: args.seq_from,
+            seq_to: args.seq_to,
+            label: args.label,
+            note: args.note,
+            color: args.color,
+            ts_from: args.ts_from,
+            ts_to: args.ts_to,
+        },
     )
     .map_err(|e| e.to_string())
 }

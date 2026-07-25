@@ -25,7 +25,7 @@ pub mod why;
 pub use analysis::{cluster_problems, timeline, ClusterSummary, TimelineBucket};
 pub use bookmarks::{
     add_line_bookmark, add_range_bookmark, bookmark_summaries, delete_bookmark, list_bookmarks,
-    update_bookmark, Bookmark, BookmarkSummary,
+    update_bookmark, Bookmark, BookmarkSummary, NewBookmark,
 };
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM};
@@ -61,7 +61,7 @@ pub use tools::{
 };
 pub use view_context::{
     apply_log_nav, build_view_context, parse_log_nav, view_context_brief, ExplorerFilters,
-    LaneView, LogNavAction, LogNavApplyResult, ViewContextSnapshot, MAX_VIEW_BOOKMARKS,
-    MAX_VIEW_SEQS,
+    LaneView, LogNavAction, LogNavApplyResult, ViewContextInput, ViewContextSnapshot,
+    MAX_VIEW_BOOKMARKS, MAX_VIEW_SEQS,
 };
 pub use why::{anomalies, correlate, trace, AnomalyHit, CorrelateHit, TraceEvent};

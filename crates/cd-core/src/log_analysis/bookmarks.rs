@@ -118,20 +118,48 @@ pub fn add_line_bookmark(
     color: Option<String>,
     ts: Option<i64>,
 ) -> CoreResult<Bookmark> {
-    add_range_bookmark(corpus, seq, seq, label, note, color, ts, ts)
+    add_range_bookmark(
+        corpus,
+        NewBookmark {
+            seq_from: seq,
+            seq_to: seq,
+            label: label.into(),
+            note,
+            color,
+            ts_from: ts,
+            ts_to: ts,
+        },
+    )
+}
+
+/// Parameters for creating a range bookmark.
+#[derive(Debug, Clone)]
+pub struct NewBookmark {
+    /// Inclusive start seq.
+    pub seq_from: u64,
+    /// Inclusive end seq.
+    pub seq_to: u64,
+    /// Label.
+    pub label: String,
+    /// Note.
+    pub note: Option<String>,
+    /// Color token.
+    pub color: Option<String>,
+    /// Optional ts from.
+    pub ts_from: Option<i64>,
+    /// Optional ts to.
+    pub ts_to: Option<i64>,
 }
 
 /// Create a range bookmark (inclusive seq bounds).
-pub fn add_range_bookmark(
-    corpus: &LogCorpus,
-    seq_from: u64,
-    seq_to: u64,
-    label: impl Into<String>,
-    note: Option<String>,
-    color: Option<String>,
-    ts_from: Option<i64>,
-    ts_to: Option<i64>,
-) -> CoreResult<Bookmark> {
+pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bookmark> {
+    let seq_from = new.seq_from;
+    let seq_to = new.seq_to;
+    let label = new.label;
+    let note = new.note;
+    let color = new.color;
+    let ts_from = new.ts_from;
+    let ts_to = new.ts_to;
     let (from, to) = if seq_from <= seq_to {
         (seq_from, seq_to)
     } else {
@@ -140,7 +168,7 @@ pub fn add_range_bookmark(
     let now = crate::embed::now_unix_secs();
     let bm = Bookmark {
         id: Uuid::now_v7().to_string(),
-        label: label.into(),
+        label,
         seq_from: from,
         seq_to: to,
         ts_from,
@@ -202,7 +230,7 @@ pub fn bookmark_summaries(corpus: &LogCorpus, cap: usize) -> CoreResult<Vec<Book
     all.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     Ok(all
         .iter()
-        .take(cap.max(1).min(100))
+        .take(cap.clamp(1, 100))
         .map(BookmarkSummary::from)
         .collect())
 }
@@ -232,16 +260,37 @@ mod tests {
         c.flush().unwrap();
         let id = c.id().to_string();
 
-        let b1 = add_line_bookmark(&c, 1, "interesting", Some("note".into()), None, Some(1_700_000_000))
-            .unwrap();
-        let b2 = add_range_bookmark(&c, 1, 1, "range", None, Some("red".into()), None, None).unwrap();
+        let b1 = add_line_bookmark(
+            &c,
+            1,
+            "interesting",
+            Some("note".into()),
+            None,
+            Some(1_700_000_000),
+        )
+        .unwrap();
+        let b2 = add_range_bookmark(
+            &c,
+            NewBookmark {
+                seq_from: 1,
+                seq_to: 1,
+                label: "range".into(),
+                note: None,
+                color: Some("red".into()),
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
         assert_eq!(list_bookmarks(&c).unwrap().len(), 2);
 
         drop(c);
         let c2 = LogCorpus::open(dir.path(), &id).unwrap();
         let all = list_bookmarks(&c2).unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|b| b.id == b1.id && b.label == "interesting"));
+        assert!(all
+            .iter()
+            .any(|b| b.id == b1.id && b.label == "interesting"));
         assert!(all.iter().any(|b| b.id == b2.id && b.seq_from == 1));
 
         update_bookmark(&c2, &b1.id, Some("renamed".into()), None, None).unwrap();

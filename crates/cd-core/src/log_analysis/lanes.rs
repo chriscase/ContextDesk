@@ -214,7 +214,10 @@ mod tests {
     fn order_only_refuses_link() {
         let r = scrub_linked(
             100,
-            &[("a".into(), vec![ev(1, 100)]), ("b".into(), vec![ev(2, 200)])],
+            &[
+                ("a".into(), vec![ev(1, 100)]),
+                ("b".into(), vec![ev(2, 200)]),
+            ],
             TimeQuality::OrderOnly,
         );
         assert!(!r.linked);
@@ -225,18 +228,16 @@ mod tests {
     #[test]
     fn scrub_finds_peer_positions() {
         let lanes = vec![
-            (
-                "api".into(),
-                vec![ev(1, 1000), ev(2, 1100), ev(3, 1200)],
-            ),
-            (
-                "worker".into(),
-                vec![ev(10, 1050), ev(11, 1150)],
-            ),
+            ("api".into(), vec![ev(1, 1000), ev(2, 1100), ev(3, 1200)]),
+            ("worker".into(), vec![ev(10, 1050), ev(11, 1150)]),
         ];
         let r = scrub_linked(1100, &lanes, TimeQuality::Wall);
         assert!(r.linked);
-        let api = r.peer_positions.iter().find(|p| p.lane_id == "api").unwrap();
+        let api = r
+            .peer_positions
+            .iter()
+            .find(|p| p.lane_id == "api")
+            .unwrap();
         assert_eq!(api.seq, Some(2));
         let w = r
             .peer_positions
@@ -249,10 +250,7 @@ mod tests {
     #[test]
     fn gaps_where_one_lane_empty() {
         let lanes = vec![
-            (
-                "a".into(),
-                vec![ev(1, 0), ev(2, 10), ev(3, 50)],
-            ),
+            ("a".into(), vec![ev(1, 0), ev(2, 10), ev(3, 50)]),
             (
                 "b".into(),
                 vec![ev(10, 0), ev(11, 50)], // gap in middle bucket 10–20

@@ -90,44 +90,58 @@ impl ViewContextSnapshot {
     pub const SCHEMA_VERSION: u32 = 1;
 }
 
+/// Inputs for [`build_view_context`] (keeps the public API under clippy arity).
+#[derive(Debug, Clone)]
+pub struct ViewContextInput {
+    /// Corpus id.
+    pub corpus_id: String,
+    /// Optional display name.
+    pub corpus_name: Option<String>,
+    /// Active filters.
+    pub filters: ExplorerFilters,
+    /// Lanes (capped to 4).
+    pub lanes: Vec<LaneView>,
+    /// Link mode.
+    pub link_mode: bool,
+    /// Time quality.
+    pub time_quality: TimeQuality,
+    /// Selected seqs (capped).
+    pub selected_seqs: Vec<u64>,
+    /// Visible range.
+    pub visible_seq_range: Option<(u64, u64)>,
+    /// Bookmarks (capped).
+    pub bookmarks: Vec<BookmarkSummary>,
+    /// Density label.
+    pub density: Option<String>,
+}
+
 /// Build a capped view-context snapshot for agent/tools.
-pub fn build_view_context(
-    corpus_id: impl Into<String>,
-    corpus_name: Option<String>,
-    filters: ExplorerFilters,
-    lanes: Vec<LaneView>,
-    link_mode: bool,
-    time_quality: TimeQuality,
-    selected_seqs: impl IntoIterator<Item = u64>,
-    visible_seq_range: Option<(u64, u64)>,
-    bookmarks: Vec<BookmarkSummary>,
-    density: Option<String>,
-) -> ViewContextSnapshot {
-    let mut selected: Vec<u64> = selected_seqs.into_iter().collect();
+pub fn build_view_context(input: ViewContextInput) -> ViewContextSnapshot {
+    let mut selected = input.selected_seqs;
     selected.sort_unstable();
     selected.dedup();
     selected.truncate(MAX_VIEW_SEQS);
 
-    let mut bms = bookmarks;
+    let mut bms = input.bookmarks;
     bms.truncate(MAX_VIEW_BOOKMARKS);
 
-    let mut lane_list = lanes;
+    let mut lane_list = input.lanes;
     if lane_list.len() > 4 {
         lane_list.truncate(4);
     }
 
     ViewContextSnapshot {
         schema_version: ViewContextSnapshot::SCHEMA_VERSION,
-        corpus_id: corpus_id.into(),
-        corpus_name,
-        filters,
+        corpus_id: input.corpus_id,
+        corpus_name: input.corpus_name,
+        filters: input.filters,
         lanes: lane_list,
-        link_mode,
-        time_quality,
+        link_mode: input.link_mode,
+        time_quality: input.time_quality,
         selected_seqs: selected,
-        visible_seq_range,
+        visible_seq_range: input.visible_seq_range,
         bookmarks: bms,
-        density,
+        density: input.density,
     }
 }
 
@@ -167,22 +181,14 @@ pub fn view_context_brief(v: &ViewContextSnapshot, max_chars: usize) -> String {
         parts.push(format!("bookmarks={}", v.bookmarks.len()));
     }
     for lane in &v.lanes {
-        parts.push(format!(
-            "lane:{}:[{}]",
-            lane.id,
-            lane.sources.join(",")
-        ));
+        parts.push(format!("lane:{}:[{}]", lane.id, lane.sources.join(",")));
     }
     let s = parts.join("; ");
     if s.len() <= max_chars {
         s
     } else {
-        // Prefer char boundary.
-        let mut end = max_chars.min(s.len());
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
+        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }
 
@@ -298,11 +304,7 @@ pub fn parse_log_nav(value: &serde_json::Value) -> CoreResultNav<LogNavAction> {
     serde_json::from_value(v).map_err(|e| NavError::Parse(e.to_string()))
 }
 
-fn rename_key(
-    _obj: &mut serde_json::Map<String, serde_json::Value>,
-    _from: &str,
-    _to: &str,
-) {
+fn rename_key(_obj: &mut serde_json::Map<String, serde_json::Value>, _from: &str, _to: &str) {
     // no-op placeholder; aliases handled above
 }
 
@@ -366,26 +368,26 @@ mod tests {
 
     #[test]
     fn build_view_context_caps_seqs() {
-        let v = build_view_context(
-            "c1",
-            Some("incident".into()),
-            ExplorerFilters {
+        let v = build_view_context(ViewContextInput {
+            corpus_id: "c1".into(),
+            corpus_name: Some("incident".into()),
+            filters: ExplorerFilters {
                 levels: vec!["error".into()],
                 time_from: Some(100),
                 ..Default::default()
             },
-            vec![LaneView {
+            lanes: vec![LaneView {
                 id: "lane-0".into(),
                 label: "api".into(),
                 sources: vec!["api.log".into()],
             }],
-            true,
-            TimeQuality::Wall,
-            0..200u64,
-            Some((10, 50)),
-            vec![],
-            Some("compact".into()),
-        );
+            link_mode: true,
+            time_quality: TimeQuality::Wall,
+            selected_seqs: (0..200u64).collect(),
+            visible_seq_range: Some((10, 50)),
+            bookmarks: vec![],
+            density: Some("compact".into()),
+        });
         assert_eq!(v.schema_version, 1);
         assert_eq!(v.selected_seqs.len(), MAX_VIEW_SEQS);
         assert_eq!(v.corpus_id, "c1");

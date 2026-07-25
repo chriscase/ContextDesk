@@ -1812,14 +1812,16 @@ export async function hostLogAddBookmark(
 ): Promise<LogBookmarkDto> {
   if (!isTauri()) throw new Error("Bookmarks require Tauri host");
   return invoke<LogBookmarkDto>("log_add_bookmark", {
-    corpusId,
-    seqFrom: args.seqFrom,
-    seqTo: args.seqTo,
-    label: args.label,
-    note: args.note ?? null,
-    color: args.color ?? null,
-    tsFrom: args.tsFrom ?? null,
-    tsTo: args.tsTo ?? null,
+    args: {
+      corpusId,
+      seqFrom: args.seqFrom,
+      seqTo: args.seqTo,
+      label: args.label,
+      note: args.note ?? null,
+      color: args.color ?? null,
+      tsFrom: args.tsFrom ?? null,
+      tsTo: args.tsTo ?? null,
+    },
   });
 }
 

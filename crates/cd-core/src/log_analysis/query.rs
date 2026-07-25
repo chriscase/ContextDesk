@@ -526,14 +526,20 @@ fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
     }
     if !q.services.is_empty() {
         let placeholders: Vec<_> = q.services.iter().map(|_| "?").collect();
-        clauses.push(format!("COALESCE(service, '') IN ({})", placeholders.join(",")));
+        clauses.push(format!(
+            "COALESCE(service, '') IN ({})",
+            placeholders.join(",")
+        ));
         for s in &q.services {
             binds.push(Value::Text(s.clone()));
         }
     }
     if !q.hosts.is_empty() {
         let placeholders: Vec<_> = q.hosts.iter().map(|_| "?").collect();
-        clauses.push(format!("COALESCE(host, '') IN ({})", placeholders.join(",")));
+        clauses.push(format!(
+            "COALESCE(host, '') IN ({})",
+            placeholders.join(",")
+        ));
         for h in &q.hosts {
             binds.push(Value::Text(h.clone()));
         }
