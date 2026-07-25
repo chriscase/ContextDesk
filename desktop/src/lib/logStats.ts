@@ -47,3 +47,36 @@ export function levelEntries(
     .map(([level, count]) => ({ level, count }))
     .sort((a, b) => b.count - a.count);
 }
+
+/**
+ * Format a timeline bucket start for display.
+ * Real unix times (≥ ~2001) show as locale datetime; synthetic seq-as-ts show as order.
+ */
+export function formatTimelineBucketStart(start: number, widthSecs: number): string {
+  // Heuristic: real wall-clock unix seconds are large; ingest fallback uses seq (0,1,2…).
+  if (start >= 1_000_000_000) {
+    try {
+      const d = new Date(start * 1000);
+      const end = new Date((start + widthSecs) * 1000);
+      const opts: Intl.DateTimeFormatOptions = {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      };
+      return `${d.toLocaleString(undefined, opts)} – ${end.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })}`;
+    } catch {
+      return `t=${start}`;
+    }
+  }
+  return `events #${start}–${start + widthSecs - 1} (no wall-clock ts in logs)`;
+}
+
+/** One-line purpose caption for the volume timeline (not a log browser). */
+export const TIMELINE_PURPOSE =
+  "Event volume over time (spikes = where to look). This is not a full log browser — use Search / chat tools for lines and filters.";

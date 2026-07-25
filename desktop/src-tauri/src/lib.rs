@@ -3959,6 +3959,8 @@ struct LogTimelineBucketDto {
     start: i64,
     width: i64,
     count: u64,
+    /// Counts by level within the bucket (error/warn/info/…).
+    by_level: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -4267,6 +4269,7 @@ fn log_timeline(
             start: b.start,
             width: b.width,
             count: b.count,
+            by_level: b.by_level.into_iter().collect(),
         })
         .collect())
 }

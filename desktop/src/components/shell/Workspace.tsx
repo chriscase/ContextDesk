@@ -47,6 +47,8 @@ type Props = {
   todosKey: string | null;
   helpRequest?: HelpOpenRequest | null;
   onOpenHelp?: (pageId: string) => void;
+  /** Seed chat about a selected log corpus (tools over full dump paste). */
+  onChatAboutCorpus?: (composerSeed: string) => void;
 };
 
 /** Workspace pane host (#146). */
@@ -61,6 +63,7 @@ export function Workspace({
   todosKey,
   helpRequest,
   onOpenHelp,
+  onChatAboutCorpus,
 }: Props) {
   return (
     <div className="workspace">
@@ -113,7 +116,10 @@ export function Workspace({
           aria-labelledby="pane-tab-logs"
           className="pane-panel"
         >
-          <LogPane onOpenHelp={onOpenHelp} />
+          <LogPane
+            onOpenHelp={onOpenHelp}
+            onChatAboutCorpus={onChatAboutCorpus}
+          />
         </div>
       ) : null}
       {pane === "harvest" ? (

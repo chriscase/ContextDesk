@@ -27,11 +27,15 @@ vi.mock("../../lib/dialogs", () => ({
 }));
 
 describe("LogPane", () => {
-  it("renders toolbar import/export actions and empty state", async () => {
+  it("renders folder and zip import actions and empty state", async () => {
     render(<LogPane />);
     expect(screen.getByTestId("log-pane")).toBeTruthy();
-    // Toolbar + empty-state both offer Import logs
-    expect(screen.getAllByRole("button", { name: /Import logs/i }).length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByRole("button", { name: /Import folder/i }).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByRole("button", { name: /Import file \/ zip/i }).length,
+    ).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole("button", { name: /Import package/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Export package/i })).toBeTruthy();
     expect(await screen.findByText(/No corpora yet/i)).toBeTruthy();

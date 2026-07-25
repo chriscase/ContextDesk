@@ -1528,9 +1528,13 @@ export type LogClusterDto = {
 };
 
 export type LogTimelineBucketDto = {
+  /** Bucket start (unix seconds, or ingest-order synthetic if logs lacked timestamps). */
   start: number;
+  /** Bucket width in seconds. */
   width: number;
   count: number;
+  /** Optional per-level counts (error/warn/info/…). */
+  byLevel?: Record<string, number>;
 };
 
 export type LogSearchHitDto = {

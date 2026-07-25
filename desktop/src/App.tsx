@@ -678,6 +678,11 @@ export function App() {
               <Workspace
                 pane={shell.pane}
                 onPaneChange={shell.setPane}
+                onChatAboutCorpus={(text) => {
+                  ensureActiveSession();
+                  shell.setPane("chat");
+                  setWizardSeedRequest({ id: Date.now(), text });
+                }}
                 archive={{
                   refreshKey: archiveRefreshKey,
                   activeSessionId: resolvedSessionId,

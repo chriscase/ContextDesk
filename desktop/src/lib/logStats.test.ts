@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatBytes,
   formatReduction,
+  formatTimelineBucketStart,
   levelEntries,
   statsBlurb,
 } from "./logStats";
@@ -28,5 +29,18 @@ describe("logStats", () => {
     const e = levelEntries({ error: 10, info: 100, warn: 5 });
     expect(e[0]?.level).toBe("info");
     expect(e[1]?.level).toBe("error");
+  });
+});
+
+describe("formatTimelineBucketStart", () => {
+  it("shows human times for real unix seconds", () => {
+    const s = formatTimelineBucketStart(1_700_000_000, 60);
+    expect(s).not.toMatch(/no wall-clock/);
+    expect(s.length).toBeGreaterThan(8);
+  });
+
+  it("shows order buckets when timestamps are synthetic", () => {
+    const s = formatTimelineBucketStart(12, 60);
+    expect(s).toMatch(/no wall-clock|events #/);
   });
 });

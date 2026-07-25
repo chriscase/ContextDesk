@@ -30,8 +30,10 @@ import {
 import {
   formatBytes,
   formatReduction,
+  formatTimelineBucketStart,
   levelEntries,
   statsBlurb,
+  TIMELINE_PURPOSE,
 } from "../../lib/logStats";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
@@ -55,9 +57,11 @@ type DetailTab = "overview" | "search" | "templates" | "analysis";
 type Props = {
   pickDirectory?: () => Promise<string | null>;
   onOpenHelp?: (pageId: string) => void;
+  /** Seed chat + switch to chat pane (large corpora use tools, not full paste). */
+  onChatAboutCorpus?: (composerSeed: string) => void;
 };
 
-export function LogPane({ pickDirectory, onOpenHelp }: Props) {
+export function LogPane({ pickDirectory, onOpenHelp, onChatAboutCorpus }: Props) {
   const [corpora, setCorpora] = useState<LogCorpusSummaryDto[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
@@ -135,20 +139,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   const active = corpora.find((c) => c.id === activeId) ?? null;
 
-  async function onImportLogs() {
-    const picker =
-      pickDirectory ?? (() => openDirectoryDialog("Choose log directory"));
-    const dir = await picker();
-    let path = dir;
-    if (!path) {
-      path = await openFileDialog("Choose log file or zip", [
-        { name: "Logs", extensions: ["log", "txt", "json", "jsonl", "zip"] },
-      ]);
-    }
-    if (!path) return;
+  async function runCorpusIngest(path: string) {
     const ok = await dialogConfirm(
       "SoftWrite: ingest into a disposable analysis corpus (parse → template → DuckDB). " +
-        "Directories and large dumps are fully supported here (no 200-file chat-pack limit). Continue?",
+        "Folder and .zip dumps are supported; there is no 200-file chat-pack limit. Continue?",
       { title: "Import logs" },
     );
     if (!ok) return;
@@ -160,6 +154,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     try {
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
+      if (r.lines === 0) {
+        setNote(
+          `${statsBlurb(r)} — 0 lines parsed; open Debug if available, or try a different path.`,
+        );
+      }
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
@@ -168,6 +167,24 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       setBusy(false);
       setIngesting(false);
     }
+  }
+
+  /** Folder dump → same corpus pipeline as a single file/zip. */
+  async function onImportFolder() {
+    const picker =
+      pickDirectory ?? (() => openDirectoryDialog("Choose log directory"));
+    const dir = await picker();
+    if (!dir) return;
+    await runCorpusIngest(dir);
+  }
+
+  /** Single log file or .zip of logs → corpus pipeline. */
+  async function onImportFileOrZip() {
+    const path = await openFileDialog("Choose log file or zip", [
+      { name: "Logs / zip", extensions: ["log", "txt", "json", "jsonl", "zip"] },
+    ]);
+    if (!path) return;
+    await runCorpusIngest(path);
   }
 
   async function onImportPackage() {
@@ -258,8 +275,21 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       <header className="pane-chrome">
         <h2 className="pane-chrome__title">Logs</h2>
         <div className="pane-chrome__actions">
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportLogs()}>
-            Import logs…
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportFolder()}
+          >
+            Import folder…
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportFileOrZip()}
+          >
+            Import file / zip…
           </button>
           <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportPackage()}>
             Import package…
@@ -304,8 +334,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           {corpora.length === 0 ? (
             <div className="pane-empty">
               <p className="muted">No corpora yet.</p>
-              <button type="button" onClick={() => void onImportLogs()}>
-                Import logs…
+              <button type="button" onClick={() => void onImportFolder()}>
+                Import folder…
+              </button>
+              <button type="button" onClick={() => void onImportFileOrZip()}>
+                Import file / zip…
               </button>
             </div>
           ) : (
@@ -357,6 +390,24 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 <code className="chip">{active.id.slice(0, 8)}…</code>
                 {active.sourceLabel ? (
                   <span className="muted">source: {active.sourceLabel}</span>
+                ) : null}
+                {onChatAboutCorpus ? (
+                  <button
+                    type="button"
+                    className="btn btn--primary btn--sm"
+                    onClick={() => {
+                      const seed =
+                        `I have analysis corpus \`${active.id}\` active (name: ${active.name}). ` +
+                        (active.stats
+                          ? `Ingest summary: ${statsBlurb(active.stats)}. `
+                          : "") +
+                        `Use log tools (cluster_problems, timeline, search_logs, etc.) with this corpus — do not ask me for a corpus id. ` +
+                        `Cluster main problems, outline timeline around ERROR spikes, and hypothesize root cause with template citations.`;
+                      onChatAboutCorpus(seed);
+                    }}
+                  >
+                    Chat about this corpus
+                  </button>
                 ) : null}
               </header>
 
@@ -446,20 +497,42 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                     </div>
                   ) : null}
                   {timeline.length > 0 ? (
-                    <div>
-                      <h4>Timeline</h4>
+                    <div className="log-timeline" data-testid="log-timeline">
+                      <h4>Volume timeline</h4>
+                      <p className="muted log-timeline__purpose">{TIMELINE_PURPOSE}</p>
                       <ul className="log-timeline-bars">
-                        {timeline.map((b) => (
-                          <li key={b.start} title={`t=${b.start} n=${b.count}`}>
-                            <span
-                              className="log-timeline-bars__fill"
-                              style={{
-                                width: `${Math.max(4, (100 * b.count) / maxTl)}%`,
-                              }}
-                            />
-                            <span className="log-timeline-bars__n">{b.count}</span>
-                          </li>
-                        ))}
+                        {timeline.map((b) => {
+                          const label = formatTimelineBucketStart(
+                            b.start,
+                            b.width || 60,
+                          );
+                          const levels = b.byLevel
+                            ? levelEntries(b.byLevel)
+                                .slice(0, 3)
+                                .map((x) => `${x.level}:${x.count}`)
+                                .join(" · ")
+                            : "";
+                          return (
+                            <li
+                              key={b.start}
+                              title={`${label} · ${b.count} events${levels ? ` · ${levels}` : ""}`}
+                            >
+                              <span className="log-timeline-bars__when">{label}</span>
+                              <span
+                                className="log-timeline-bars__fill"
+                                style={{
+                                  width: `${Math.max(4, (100 * b.count) / maxTl)}%`,
+                                }}
+                              />
+                              <span className="log-timeline-bars__n">
+                                {b.count.toLocaleString()}
+                                {levels ? (
+                                  <span className="muted"> {levels}</span>
+                                ) : null}
+                              </span>
+                            </li>
+                          );
+                        })}
                       </ul>
                     </div>
                   ) : null}
