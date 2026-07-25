@@ -4,7 +4,10 @@ use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::parse::{detect_format, parse_line, LogFormat};
 use super::redact_log::{redact_message, redact_params};
-use super::store::{template_content_hash, LogCorpus, LogEvent, TemplateRow, TopTemplateSnapshot};
+use super::store::{
+    template_content_hash, CorpusEmbeddingStatus, EmbeddingState, LogCorpus, LogEvent, TemplateRow,
+    TopTemplateSnapshot,
+};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
@@ -136,6 +139,8 @@ pub struct IngestReport {
     pub stats: IngestStats,
     /// Top templates by count (for summary UI).
     pub top_templates: Vec<(u64, String, u64, u8)>,
+    /// Persisted semantic-vector availability.
+    pub embedding: CorpusEmbeddingStatus,
 }
 
 /// Ingest a file or directory into a new corpus under `cache_root`.
@@ -170,7 +175,21 @@ pub fn ingest_path_with_observer(
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
-    ingest_path_inner(cache_root, path, name, embed, embed_model, progress, cancel)
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        embed,
+        embed_model,
+        if embed.is_some() {
+            LogEmbedMode::Local
+        } else {
+            LogEmbedMode::None
+        },
+        None,
+        progress,
+        cancel,
+    )
 }
 
 /// Ingest with an explicit [`LogEmbedPolicy`] (#359).
@@ -223,6 +242,8 @@ pub fn ingest_path_with_policy_and_observer(
         name,
         backend.as_deref(),
         policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
         progress,
         cancel,
     )
@@ -627,12 +648,15 @@ fn ingest_from_zip(
     Ok(files_done)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_path_inner(
     cache_root: &Path,
     path: &Path,
     name: &str,
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
 ) -> CoreResult<IngestReport> {
@@ -642,6 +666,8 @@ fn ingest_path_inner(
         name,
         embed,
         embed_model,
+        embed_mode,
+        defer_above_source_bytes,
         progress,
         cancel,
         None,
@@ -655,6 +681,8 @@ fn ingest_path_inner_with_fault(
     name: &str,
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     fault: IngestFaultHook<'_>,
@@ -704,6 +732,8 @@ fn ingest_path_inner_with_fault(
         name,
         embed,
         embed_model,
+        embed_mode,
+        defer_above_source_bytes,
         progress,
         cancel,
         fault,
@@ -742,11 +772,12 @@ fn ingest_path_into_cache(
     name: &str,
     embed: Option<&dyn EmbedBackend>,
     embed_model: &str,
+    embed_mode: LogEmbedMode,
+    defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
-    let _ = embed_model;
     let kind = ProcessProgressKind::LogIngest;
     let source_label = progress_basename(path);
 
@@ -1009,8 +1040,10 @@ fn ingest_path_into_cache(
 
     // Embed templates only (#359). Cap bulk SoftWrite so import is not forced
     // through a full multi-k embed pass (semantic can be filled later).
+    let deferred = embed_mode == LogEmbedMode::Local
+        && defer_above_source_bytes.is_some_and(|limit| stats.source_bytes > limit);
     let mut embedded = 0usize;
-    if let Some(backend) = embed {
+    if let Some(backend) = embed.filter(|_| !deferred) {
         check_ingest_fault(fault, IngestCheckpoint::DuringEmbedding)?;
         let mut templates = corpus.list_templates();
         templates.sort_by_key(|r| std::cmp::Reverse(r.info.count));
@@ -1078,6 +1111,35 @@ fn ingest_path_into_cache(
         0.0
     };
     stats.embedded = embedded;
+    let embedding = CorpusEmbeddingStatus {
+        state: if deferred {
+            EmbeddingState::Deferred
+        } else if stats.templates > 0 && embedded == stats.templates {
+            EmbeddingState::Complete
+        } else if embedded > 0 {
+            EmbeddingState::Partial
+        } else {
+            EmbeddingState::KeywordOnly
+        },
+        model_id: (embedded > 0 || deferred).then(|| embed_model.to_string()),
+        embedded_templates: embedded as u64,
+        total_templates: stats.templates as u64,
+        reason: Some(
+            if deferred {
+                "bulk_source_bytes_threshold"
+            } else if embed.is_none() && embed_mode == LogEmbedMode::Local {
+                "local_model_unavailable"
+            } else if embed_mode == LogEmbedMode::None {
+                "embedding_not_requested"
+            } else if embedded < stats.templates {
+                "template_cap_or_backend_failure"
+            } else {
+                "local_embedding_complete"
+            }
+            .into(),
+        ),
+        updated_at: crate::embed::now_unix_secs(),
+    };
 
     let mut top: Vec<_> = corpus
         .list_templates()
@@ -1111,12 +1173,14 @@ fn ingest_path_into_cache(
         Some(source_label.clone()),
         stats.to_corpus_stats(),
         top_snap,
+        embedding.clone(),
     )?;
 
     Ok(IngestReport {
         corpus_id: corpus.id().to_string(),
         stats,
         top_templates: top,
+        embedding,
     })
 }
 
@@ -1445,6 +1509,8 @@ mod tests {
                 "must-not-publish",
                 Some(&backend),
                 "concept",
+                LogEmbedMode::Local,
+                None,
                 &NoopProcessProgress,
                 None,
                 Some(&hook),
@@ -1694,6 +1760,45 @@ mod tests {
         let report = ingest_path(dir.path(), &logs, "no-embed", None, "none").unwrap();
         assert_eq!(report.stats.embedded, 0);
         assert!(report.stats.lines >= 100);
+    }
+
+    #[test]
+    fn local_policy_embeds_ordinary_input_and_defers_above_exact_byte_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("app.log");
+        std::fs::write(&logs, "ts=1700000000 level=error msg=connection refused\n").unwrap();
+        let backend: Arc<dyn EmbedBackend> = Arc::new(ConceptEmbedBackend::new(32));
+
+        let mut ordinary = LogEmbedPolicy::local_default();
+        ordinary.model_id = "concept-local".into();
+        ordinary.defer_above_source_bytes = Some(u64::MAX);
+        let embedded = ingest_path_with_policy(
+            dir.path(),
+            &logs,
+            "ordinary",
+            &ordinary,
+            Some(backend.clone()),
+        )
+        .unwrap();
+        assert!(embedded.stats.embedded > 0);
+        assert_eq!(embedded.embedding.state, EmbeddingState::Complete);
+        assert_eq!(
+            embedded.embedding.model_id.as_deref(),
+            Some("concept-local")
+        );
+
+        let mut bulk = ordinary;
+        bulk.defer_above_source_bytes = Some(1);
+        let deferred =
+            ingest_path_with_policy(dir.path(), &logs, "bulk", &bulk, Some(backend)).unwrap();
+        assert_eq!(deferred.stats.embedded, 0);
+        assert_eq!(deferred.embedding.state, EmbeddingState::Deferred);
+        assert_eq!(
+            LogCorpus::open(dir.path(), &deferred.corpus_id)
+                .unwrap()
+                .embedding_status(),
+            deferred.embedding
+        );
     }
 
     #[test]

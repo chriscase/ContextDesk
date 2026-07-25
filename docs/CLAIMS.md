@@ -56,7 +56,8 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Log explorer query API (paged/facets/search) | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #482 |
 | Log explorer bookmarks + log_nav | Shipped | crates/cd-core/src/log_analysis/bookmarks.rs:list_bookmarks | #481 #485 |
 | Log SoftWrite stream zip/lines + cancel | Shipped | crates/cd-core/src/log_analysis/ingest.rs:ingest_from_zip | #498–#502 #496 |
-| Log SoftWrite bulk skip embed | Shipped | desktop/src-tauri/src/lib.rs:ingest_log_path | #502 #496 |
+| Log local embedding + deterministic deferred mode | Shipped | crates/cd-core/src/log_analysis/embed_policy.rs:LOCAL_EMBED_DEFER_SOURCE_BYTES | #502 #518 |
+| Atomic trusted log re-analysis | Shipped | crates/cd-core/src/log_analysis/reanalyze.rs:reanalyze_corpus_embeddings | #518 |
 | Log explorer time-sort composite keyset only | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #504 #494 |
 | Log Explorer in-app escape hatch | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #503 |
 | Bookmarks not in package v1 | Shipped | docs/help/log-analysis/log-explorer.md | #509 |

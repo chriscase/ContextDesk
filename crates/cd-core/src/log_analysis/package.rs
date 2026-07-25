@@ -1053,6 +1053,13 @@ fn legacy_corpus_meta(
         origin_corpus_id: Some(origin_id.to_string()),
         stats: manifest.stats.clone(),
         top_templates: Vec::new(),
+        embedding: serde_json::from_value(
+            value
+                .get("embedding")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .unwrap_or_default(),
     }
 }
 

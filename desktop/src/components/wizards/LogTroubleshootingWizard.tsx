@@ -160,6 +160,7 @@ export function LogTroubleshootingWizard({
               tsMax: summary.stats.tsMax,
               formatCounts: summary.stats.formatCounts ?? {},
               topTemplates: summary.topTemplates ?? [],
+              embedding: summary.embedding ?? null,
             });
           } else {
             setIngestReport(null);
@@ -551,6 +552,18 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
         <div>
           <dt>Embedded</dt>
           <dd>{report.embedded?.toLocaleString?.() ?? report.embedded ?? "—"}</dd>
+        </div>
+        <div>
+          <dt>Analysis mode</dt>
+          <dd>
+            {(report.embedding?.embeddedTemplates ?? 0) > 0
+              ? report.embedding?.state === "complete"
+                ? "Semantic · complete"
+                : "Semantic · partial"
+              : report.embedding?.state === "deferred"
+                ? "Keyword-only · deferred"
+                : "Keyword-only"}
+          </dd>
         </div>
       </dl>
       {report.partial ? (

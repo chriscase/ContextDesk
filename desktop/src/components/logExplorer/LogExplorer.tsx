@@ -147,6 +147,9 @@ export function LogExplorer({ corpusId }: Props) {
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
+  const semanticAvailable =
+    (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
+    0;
 
   // Breakpoint observer
   useEffect(() => {
@@ -464,7 +467,7 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       const hits = await hostLogSearchEvents(corpusId, {
         query: searchDraft || filters.keyword || undefined,
-        semantic: true,
+        semantic: semanticAvailable,
         k: 100,
         filter: filtersToQuery(filters, { keyword: null }),
       });
@@ -486,7 +489,9 @@ export function LogExplorer({ corpusId }: Props) {
       setTotalMatched(evs.length);
       setHighlight(new Set(evs.map((e) => e.seq)));
       setStatus(
-        `Search: ${evs.length} event hits (template-first semantic + keyword)`,
+        semanticAvailable
+          ? `Search: ${evs.length} event hits (template-first semantic + keyword)`
+          : `Search: ${evs.length} event hits (keyword-only; local re-analysis is not complete)`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
@@ -946,7 +951,11 @@ export function LogExplorer({ corpusId }: Props) {
           <div className="log-explorer__section-title">Search</div>
           <input
             className="log-explorer__search"
-            placeholder="Keyword / semantic…"
+            placeholder={
+              semanticAvailable
+                ? "Keyword / semantic…"
+                : "Keyword search (semantic unavailable)…"
+            }
             value={searchDraft}
             onChange={(e) => setSearchDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -964,6 +973,11 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Search
           </button>
+          <p className="log-explorer__chat-preview" role="note">
+            {semanticAvailable
+              ? "Semantic template search available"
+              : "Keyword-only corpus · re-analyze locally from Logs to enable semantic search"}
+          </p>
 
           <div className="log-explorer__section-title">Levels</div>
           <div className="log-explorer__facet">

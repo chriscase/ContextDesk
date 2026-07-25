@@ -952,6 +952,18 @@ impl ToolHost {
             .or_else(|| self.embed_backend.clone())
     }
 
+    /// Product-local ONNX log backend only (never the shared/provider fallback).
+    pub fn local_log_embed_backend(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::embed::EmbedBackend>> {
+        self.log_embed_backend.clone()
+    }
+
+    /// Model id paired with [`Self::local_log_embed_backend`].
+    pub fn local_log_embed_model(&self) -> &str {
+        &self.log_embed_model
+    }
+
     /// Model id for log template vectors. #359
     pub fn log_embed_model(&self) -> &str {
         if self.log_embed_backend.is_some() {

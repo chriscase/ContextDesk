@@ -2045,9 +2045,7 @@ fn validate_log_explorer_turn_context(
     request: LogExplorerTurnContextReq,
 ) -> Result<cd_core::agent::LogExplorerTurnContext, String> {
     if session.linked_corpus_id.as_deref() != Some(request.corpus_id.as_str()) {
-        return Err(
-            "Log Explorer context does not match this chat session's linked corpus".into(),
-        );
+        return Err("Log Explorer context does not match this chat session's linked corpus".into());
     }
     cd_core::agent::LogExplorerTurnContext::new(window_id, request.corpus_id, request.brief)
         .map_err(|e| e.to_string())
@@ -3909,6 +3907,7 @@ struct LogCorpusSummaryDto {
     source_label: Option<String>,
     stats: Option<LogCorpusStatsDto>,
     top_templates: Vec<LogTopTemplateDto>,
+    embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
 #[derive(serde::Serialize)]
@@ -3966,6 +3965,7 @@ struct LogIngestReportDto {
     ts_max: Option<i64>,
     format_counts: std::collections::BTreeMap<String, u64>,
     top_templates: Vec<LogTopTemplateDto>,
+    embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
 #[derive(serde::Serialize)]
@@ -4042,6 +4042,7 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
         source_label: s.source_label,
         stats: s.stats.as_ref().map(stats_dto),
         top_templates: top,
+        embedding: c.embedding_status(),
     }
 }
 
@@ -4146,14 +4147,26 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
 
 /// Key used in `AppState.cancels` for SoftWrite log ingest (#498).
 const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
+const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
+
+fn desktop_local_log_embed_plan(
+    host: &ToolHost,
+) -> (
+    cd_core::log_analysis::LogEmbedPolicy,
+    Option<std::sync::Arc<dyn cd_core::embed::EmbedBackend>>,
+) {
+    let mut policy = cd_core::log_analysis::LogEmbedPolicy::local_default();
+    policy.model_id = host.local_log_embed_model().to_string();
+    (policy, host.local_log_embed_backend())
+}
 
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
 /// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
 ///
 /// Runs on a blocking thread pool so the UI event loop is not starved (macOS
-/// "Not Responding" during large zip/dir imports). Bulk SoftWrite **skips
-/// template embed by default** (#502) so import finishes without a full embed
-/// pass; keyword/structured analysis still works.
+/// "Not Responding" during large zip/dir imports). Ordinary imports use the
+/// product-local ONNX backend; actual streamed input over 64 MiB is deferred.
+/// Keyword/structured analysis remains available in deferred mode.
 #[tauri::command]
 async fn ingest_log_path(
     app: tauri::AppHandle,
@@ -4163,12 +4176,10 @@ async fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    // Bulk SoftWrite: no embed (None mode). User can re-analyze later if needed.
-    let policy = cd_core::log_analysis::LogEmbedPolicy {
-        mode: cd_core::log_analysis::LogEmbedMode::None,
-        cloud_content_leaves_machine: false,
-        cloud_base_url: None,
-        model_id: "none".into(),
+    let (policy, embed_backend) = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        desktop_local_log_embed_plan(host)
     };
     let progress = TauriProcessProgress { app: app.clone() };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
@@ -4184,7 +4195,7 @@ async fn ingest_log_path(
             std::path::Path::new(&path),
             &name_owned,
             &policy,
-            None, // no embed backend on bulk SoftWrite
+            embed_backend,
             &progress,
             Some(&cancel_for_job),
         )
@@ -4234,7 +4245,74 @@ async fn ingest_log_path(
                 severity,
             })
             .collect(),
+        embedding: report.embedding,
     })
+}
+
+/// Trusted local re-analysis of template vectors; raw events are not reparsed.
+#[tauri::command]
+async fn reanalyze_log_corpus(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<cd_core::log_analysis::CorpusEmbeddingStatus, String> {
+    ensure_host(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let known = cd_core::log_analysis::LogCorpus::list_ids(&cache).map_err(|e| e.to_string())?;
+    if !known.iter().any(|known_id| known_id == &corpus_id) {
+        return Err("log corpus not found".into());
+    }
+    let (backend, model_id) = {
+        let host = state.host.lock().expect("host");
+        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+        (
+            host.local_log_embed_backend().ok_or_else(|| {
+                "Local ONNX embedding model is unavailable. Restart after the model is installed."
+                    .to_string()
+            })?,
+            host.local_log_embed_model().to_string(),
+        )
+    };
+    let progress = TauriProcessProgress { app };
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(LOG_REANALYZE_CANCEL_KEY) {
+            return Err("a log re-analysis is already running".into());
+        }
+        cancels.insert(LOG_REANALYZE_CANCEL_KEY.into(), cancel.inner_arc());
+    }
+    let cancel_for_job = cancel.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        cd_core::log_analysis::reanalyze_corpus_embeddings(
+            &cache,
+            &corpus_id,
+            backend.as_ref(),
+            &model_id,
+            &progress,
+            Some(&cancel_for_job),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("re-analysis task join: {error}"));
+    state
+        .cancels
+        .lock()
+        .expect("cancels")
+        .remove(LOG_REANALYZE_CANCEL_KEY);
+    result?
+}
+
+/// Cancel the active trusted local template re-analysis.
+#[tauri::command]
+fn cancel_log_reanalysis(state: State<'_, AppState>) -> Result<bool, String> {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(LOG_REANALYZE_CANCEL_KEY) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Request cancel of an in-flight SoftWrite log ingest (#498).
@@ -5411,6 +5489,8 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             cancel_log_ingest,
+            reanalyze_log_corpus,
+            cancel_log_reanalysis,
             log_cluster_problems,
             log_timeline,
             log_search,
@@ -5548,5 +5628,33 @@ mod chat_session_host_tests {
             },
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod log_embedding_host_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_ingest_plan_uses_dedicated_local_backend_and_bulk_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = cd_core::workspace::Workspace::new("logs", vec![dir.path().to_path_buf()]);
+        let index = cd_core::index::KeywordIndex::build(&workspace).unwrap();
+        let mut host = ToolHost::new(workspace, index, None);
+        host.set_log_embed_backend(
+            Some(std::sync::Arc::new(
+                cd_core::embed::ConceptEmbedBackend::new(32),
+            )),
+            "fixture-local",
+        );
+
+        let (policy, backend) = desktop_local_log_embed_plan(&host);
+        assert_eq!(policy.mode, cd_core::log_analysis::LogEmbedMode::Local);
+        assert_eq!(policy.model_id, "fixture-local");
+        assert_eq!(
+            policy.defer_above_source_bytes,
+            Some(cd_core::log_analysis::LOCAL_EMBED_DEFER_SOURCE_BYTES)
+        );
+        assert!(backend.is_some());
     }
 }

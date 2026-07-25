@@ -7,6 +7,7 @@ import {
   hostExportLogCorpusPackage,
   hostImportLogCorpusPackagePath,
   hostCancelLogIngest,
+  hostCancelLogReanalysis,
   hostIngestLogPath,
   hostListLogCorpora,
   hostListLogTemplates,
@@ -15,6 +16,7 @@ import {
   hostLogSearch,
   hostLogTimeline,
   hostOpenLogExplorer,
+  hostReanalyzeLogCorpus,
   hostSetActiveLogCorpus,
   type LogClusterDto,
   type LogCorpusSummaryDto,
@@ -66,6 +68,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [tab, setTab] = useState<DetailTab>("overview");
   const [busy, setBusy] = useState(false);
   const [ingesting, setIngesting] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [clusters, setClusters] = useState<LogClusterDto[]>([]);
@@ -139,6 +142,18 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   }, [activeId, loadAnalysis]);
 
   const active = corpora.find((c) => c.id === activeId) ?? null;
+  const activeEmbedding = active?.embedding ?? {
+    state:
+      (active?.stats?.embedded ?? 0) > 0
+        ? ("partial" as const)
+        : ("keyword_only" as const),
+    modelId: null,
+    embeddedTemplates: active?.stats?.embedded ?? 0,
+    totalTemplates: active?.templateCount ?? 0,
+    reason: "legacy_metadata",
+    updatedAt: 0,
+  };
+  const semanticAvailable = activeEmbedding.embeddedTemplates > 0;
 
   async function onImportLogs() {
     const picker =
@@ -215,6 +230,33 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onReanalyze() {
+    if (!activeId) return;
+    const ok = await dialogConfirm(
+      "Re-analyze this corpus with the local ONNX model? Log content stays on this machine, events are not reparsed, and the current keyword corpus remains usable until the new index is complete.",
+      { title: "Local template re-analysis" },
+    );
+    if (!ok) return;
+    setBusy(true);
+    setReanalyzing(true);
+    setError(null);
+    setNote(null);
+    setProgress(null);
+    try {
+      const status = await hostReanalyzeLogCorpus(activeId);
+      setNote(
+        `Local re-analysis complete: ${status.embeddedTemplates.toLocaleString()}/${status.totalTemplates.toLocaleString()} templates embedded.`,
+      );
+      await refresh();
+      await selectCorpus(activeId);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+      setReanalyzing(false);
     }
   }
 
@@ -299,6 +341,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           </button>
           <button
             type="button"
+            className="btn btn--ghost"
+            disabled={busy || !activeId || activeEmbedding.state === "complete"}
+            data-testid="reanalyze-log-corpus"
+            onClick={() => void onReanalyze()}
+          >
+            Re-analyze locally…
+          </button>
+          <button
+            type="button"
             className="btn btn--primary"
             disabled={busy || !activeId}
             data-testid="open-log-explorer"
@@ -343,15 +394,19 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         </div>
       </header>
 
-      {ingesting || progress ? (
+      {ingesting || reanalyzing || progress ? (
         <ProcessProgressPanel
           progress={progress ? hostProgressToWizard(progress) : null}
           kind="log_ingest"
-          error={ingesting ? error : null}
+          error={ingesting || reanalyzing ? error : null}
+          cancelLabel={reanalyzing ? "Cancel re-analysis" : "Cancel ingest"}
           onCancel={
-            ingesting
+            ingesting || reanalyzing
               ? () => {
-                  void hostCancelLogIngest().then((ok) => {
+                  const cancel = reanalyzing
+                    ? hostCancelLogReanalysis
+                    : hostCancelLogIngest;
+                  void cancel().then((ok) => {
                     if (ok) setNote("Cancel requested…");
                   });
                 }
@@ -500,6 +555,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <dt>Embedded</dt>
                           <dd>{active.stats.embedded.toLocaleString()}</dd>
                         </div>
+                        <div>
+                          <dt>Analysis mode</dt>
+                          <dd data-testid="log-embedding-state">
+                            {activeEmbedding.state === "complete"
+                              ? "Semantic · complete"
+                              : activeEmbedding.state === "partial"
+                                ? "Semantic · partial"
+                                : activeEmbedding.state === "deferred"
+                                  ? "Keyword-only · deferred"
+                                  : "Keyword-only"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Embedding model</dt>
+                          <dd>{activeEmbedding.modelId ?? "None"}</dd>
+                        </div>
                       </dl>
                       {active.stats.partial ? (
                         <div
@@ -575,13 +646,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
               {tab === "search" ? (
                 <div className="log-detail__body" data-testid="log-search">
+                  <p className="muted" role="note">
+                    {semanticAvailable
+                      ? `Semantic template search is available (${activeEmbedding.embeddedTemplates}/${activeEmbedding.totalTemplates} templates).`
+                      : "Keyword search only. Run local re-analysis to enable semantic template search."}
+                  </p>
                   <div className="pane__toolbar">
                     <input
                       className="field__control"
                       type="search"
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
-                      placeholder="paraphrase an error…"
+                      placeholder={
+                        semanticAvailable
+                          ? "paraphrase an error…"
+                          : "search exact log terms…"
+                      }
                       aria-label="Log search query"
                       onKeyDown={(e) => {
                         if (e.key === "Enter") void onSearch();

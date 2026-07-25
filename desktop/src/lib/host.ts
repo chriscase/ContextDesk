@@ -1482,6 +1482,18 @@ export type LogCorpusStatsDto = {
   formatCounts: Record<string, number>;
 };
 
+export type LogEmbeddingState =
+  "keyword_only" | "deferred" | "partial" | "complete";
+
+export type LogEmbeddingStatusDto = {
+  state: LogEmbeddingState;
+  modelId: string | null;
+  embeddedTemplates: number;
+  totalTemplates: number;
+  reason: string | null;
+  updatedAt: number;
+};
+
 export type LogTopTemplateDto = {
   id: number;
   pattern: string;
@@ -1499,6 +1511,7 @@ export type LogCorpusSummaryDto = {
   sourceLabel: string | null;
   stats: LogCorpusStatsDto | null;
   topTemplates: LogTopTemplateDto[];
+  embedding?: LogEmbeddingStatusDto | null;
 };
 
 export type LogIngestReportDto = {
@@ -1522,6 +1535,7 @@ export type LogIngestReportDto = {
   tsMax: number | null;
   formatCounts: Record<string, number>;
   topTemplates: LogTopTemplateDto[];
+  embedding?: LogEmbeddingStatusDto | null;
 };
 
 export type LogPackageImportDto = {
@@ -1580,6 +1594,19 @@ export async function hostIngestLogPath(
 export async function hostCancelLogIngest(): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_ingest");
+}
+
+/** Trusted local template-vector re-analysis; events are not reparsed. */
+export async function hostReanalyzeLogCorpus(
+  corpusId: string,
+): Promise<LogEmbeddingStatusDto> {
+  if (!isTauri()) throw new Error("Log re-analysis requires the desktop app");
+  return invoke<LogEmbeddingStatusDto>("reanalyze_log_corpus", { corpusId });
+}
+
+export async function hostCancelLogReanalysis(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_log_reanalysis");
 }
 
 /** Multi-phase process progress (#445) — redacted; no full home paths. */

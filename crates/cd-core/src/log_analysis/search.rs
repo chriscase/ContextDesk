@@ -55,6 +55,13 @@ pub fn search_logs(
     q: &SearchLogsQuery,
     embed: Option<&dyn EmbedBackend>,
 ) -> CoreResult<Vec<SearchHit>> {
+    // A configured model does not make a keyword-only corpus semantic. Gate on
+    // persisted/derived vector availability so tools and UI cannot overclaim.
+    let embed = if corpus.embedding_status().embedded_templates > 0 {
+        embed
+    } else {
+        None
+    };
     let k = q.k.clamp(1, 100);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
@@ -290,6 +297,33 @@ mod tests {
                 || hits[0].pattern.to_lowercase().contains("connection"),
             "top hit should be connection-refused cluster: {:?}",
             hits[0]
+        );
+    }
+
+    #[test]
+    fn configured_backend_does_not_claim_semantic_scores_for_keyword_only_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("app.log");
+        std::fs::write(&log, "level=error message=connection refused\n").unwrap();
+        let report = ingest_path(dir.path(), &log, "keyword", None, "none").unwrap();
+        let corpus = LogCorpus::open(dir.path(), &report.corpus_id).unwrap();
+        let backend = ConceptEmbedBackend::new(64);
+        let hits = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("connection".into()),
+                semantic: true,
+                k: 5,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.semantic_score == 0.0));
+        assert_eq!(
+            corpus.embedding_status().state,
+            super::super::store::EmbeddingState::KeywordOnly
         );
     }
 }

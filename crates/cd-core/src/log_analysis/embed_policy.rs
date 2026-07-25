@@ -8,6 +8,9 @@
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
 
+/// Local ingest defers template embedding after 64 MiB of actual streamed input.
+pub const LOCAL_EMBED_DEFER_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// How a corpus embeds templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -36,10 +39,17 @@ pub struct LogEmbedPolicy {
     /// Model id label stored with vectors / cache keys.
     #[serde(default = "default_model_id")]
     pub model_id: String,
+    /// Deterministic local bulk threshold; `None` means no source-byte deferral.
+    #[serde(default = "default_local_defer_threshold")]
+    pub defer_above_source_bytes: Option<u64>,
 }
 
 fn default_model_id() -> String {
     "local-onnx-default".into()
+}
+
+fn default_local_defer_threshold() -> Option<u64> {
+    Some(LOCAL_EMBED_DEFER_SOURCE_BYTES)
 }
 
 impl Default for LogEmbedPolicy {
@@ -49,6 +59,7 @@ impl Default for LogEmbedPolicy {
             cloud_content_leaves_machine: false,
             cloud_base_url: None,
             model_id: default_model_id(),
+            defer_above_source_bytes: default_local_defer_threshold(),
         }
     }
 }
@@ -66,7 +77,16 @@ impl LogEmbedPolicy {
             cloud_content_leaves_machine: confirmed,
             cloud_base_url: Some(base_url.into()),
             model_id: "cloud-embed".into(),
+            defer_above_source_bytes: None,
         }
+    }
+
+    /// Whether actual streamed source bytes trigger local deferred mode.
+    pub fn should_defer(&self, source_bytes: u64) -> bool {
+        self.mode == LogEmbedMode::Local
+            && self
+                .defer_above_source_bytes
+                .is_some_and(|limit| source_bytes > limit)
     }
 
     /// Validate policy before any cloud HTTP call.
@@ -124,5 +144,13 @@ mod tests {
         assert_eq!(p.mode, LogEmbedMode::Local);
         assert!(!p.cloud_content_leaves_machine);
         p.assert_embed_allowed().unwrap();
+    }
+
+    #[test]
+    fn local_bulk_threshold_is_strict_and_deterministic() {
+        let p = LogEmbedPolicy::local_default();
+        assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES - 1));
+        assert!(!p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES));
+        assert!(p.should_defer(LOCAL_EMBED_DEFER_SOURCE_BYTES + 1));
     }
 }

@@ -143,6 +143,25 @@ function deferred<T>() {
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
     vi.mocked(host.hostLogFacets).mockResolvedValue({
       sources: { "api.log": 5, "worker.log": 5 },
       levels: { error: 3, info: 7 },
@@ -177,6 +196,7 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("api.log")).toBeTruthy();
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
+    expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
   it.each([
@@ -343,6 +363,43 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-time-quality")).toBe("order_only");
     expect(screen.getByText(/search\.log event 0/)).toBeTruthy();
     expect(screen.queryByText(/late\.log event 0/)).toBeNull();
+    expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({ semantic: false }),
+    );
+  });
+
+  it("enables semantic search only when persisted template vectors exist", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "semantic fixture",
+      eventCount: 10,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "complete",
+        modelId: "fixture-local",
+        embeddedTemplates: 2,
+        totalTemplates: 2,
+        reason: "trusted_local_reanalysis",
+        updatedAt: 1,
+      },
+    });
+    render(<LogExplorer corpusId="c1" />);
+    expect(
+      await screen.findByText("Semantic template search available"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() =>
+      expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ semantic: true }),
+      ),
+    );
   });
 
   it("creates, sends, persists, and reopens a linked chat", async () => {

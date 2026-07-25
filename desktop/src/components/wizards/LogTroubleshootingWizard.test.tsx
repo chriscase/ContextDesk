@@ -61,6 +61,14 @@ const richReport: LogIngestReportDto = {
   tsMin: 1_700_000_000,
   tsMax: 1_700_000_300,
   formatCounts: { json: 1_200 },
+  embedding: {
+    state: "partial",
+    modelId: "local-onnx-default",
+    embeddedTemplates: 8,
+    totalTemplates: 12,
+    reason: "template_cap_or_backend_failure",
+    updatedAt: 1_700_000_301,
+  },
   topTemplates: [
     {
       id: 7,
@@ -137,6 +145,7 @@ function expectRichStatsHero() {
   expect(within(hero).getByText("2.0 KB")).toBeTruthy();
   expect(within(hero).getByText("1.0 KB")).toBeTruthy();
   expect(within(hero).getByText("8")).toBeTruthy();
+  expect(within(hero).getByText("Semantic · partial")).toBeTruthy();
   expect(within(hero).getByText("error 20")).toBeTruthy();
   expect(within(hero).getByText("warn 5")).toBeTruthy();
   expect(
@@ -268,6 +277,7 @@ describe("LogTroubleshootingWizard product path", () => {
         formatCounts: richReport.formatCounts,
       },
       topTemplates: richReport.topTemplates,
+      embedding: richReport.embedding,
     };
     hostMocks.getCorpus.mockResolvedValue(persisted);
     const { onComplete } = renderWizard();

@@ -77,14 +77,22 @@ After SoftWrite ingest, open **Log Explorer** from the Logs library for
 filters, multi-lane evidence, bookmarks, and corpus-linked chat. See
 help://log-explorer. SoftWrite bulk import streams zip/lines and can be
 cancelled; template embedding is deferred/capped so large dumps finish SoftWrite
-without a mandatory full embed pass.
+without a mandatory full embed pass. Ordinary imports use the local ONNX model
+when it is installed. Inputs over 64 MiB of actual streamed log bytes are marked
+**deferred**; smaller imports embed at most the 256 most frequent templates.
+The corpus Overview always shows its actual semantic state and model.
+
+For a keyword-only or deferred corpus, choose **Re-analyze locally…** in Logs.
+After confirmation, ContextDesk embeds up to 2,048 templates without reparsing
+or duplicating events. Cancellation or failure keeps the previous keyword
+corpus and index. Semantic search is labeled available only after vectors exist.
 
 ## Current limits
 
 This is batch, post-mortem analysis. Live tailing, continuous alerts, and
 remote S3/Loki/Elastic/Kubernetes log-source connectors are not shipped in this
 pipeline. A cloud embedding option, when used, requires an explicit
-content-leaves-this-machine decision; bulk SoftWrite defaults to no embed.
+content-leaves-this-machine decision and remains separate from local re-analysis.
 Bookmarks are not included in portable package v1.
 
 > Important:
