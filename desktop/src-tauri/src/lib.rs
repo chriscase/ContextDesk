@@ -4103,10 +4103,7 @@ async fn ingest_log_path(
     let cancel = cd_core::process_progress::CancelFlag::new();
     {
         let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.insert(
-            LOG_INGEST_CANCEL_KEY.into(),
-            cancel.inner_arc(),
-        );
+        cancels.insert(LOG_INGEST_CANCEL_KEY.into(), cancel.inner_arc());
     }
     let cancel_for_job = cancel.clone();
     let report = tokio::task::spawn_blocking(move || {
