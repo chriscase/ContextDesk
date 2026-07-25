@@ -320,10 +320,11 @@
 
 .log-explorer__row {
   display: grid;
-  grid-template-columns: 5.5rem 3.5rem 1fr;
+  grid-template-columns: 5.5rem 3.5rem minmax(5rem, 9rem) minmax(12rem, 1fr);
   gap: 0.4rem;
   padding: 0.2rem 0.5rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle, #2a2d33) 55%, transparent);
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--border-subtle, #2a2d33) 55%, transparent);
   cursor: pointer;
   align-items: baseline;
 }
@@ -380,6 +381,13 @@
 }
 
 .log-explorer__msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-explorer__source {
+  color: var(--fg-muted, #9aa0a6);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

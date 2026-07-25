@@ -2827,12 +2827,19 @@ fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, 
 }
 
 /// Persist full UI session (auto-save path). Seeds agent history.
+fn should_persist_chat_session(session: &Session) -> bool {
+    // Ordinary empty drafts stay ephemeral. An explicitly corpus-linked chat is
+    // different: the user created it from Log Explorer and the link itself is
+    // durable state needed before the first agent turn.
+    !session.messages.is_empty() || session.linked_corpus_id.is_some()
+}
+
 #[tauri::command]
 fn save_chat_session(state: State<'_, AppState>, mut session: Session) -> Result<Session, String> {
     session.maybe_auto_title_from_first_user();
     session.touch();
     // Do not persist empty never-messaged drafts under placeholder titles.
-    if session.messages.is_empty() {
+    if !should_persist_chat_session(&session) {
         return Ok(session);
     }
     let store = session_store(&state)?;
@@ -5453,5 +5460,20 @@ mod help_host_tests {
                 .map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline")
         );
+    }
+}
+
+#[cfg(test)]
+mod chat_session_host_tests {
+    use super::*;
+
+    #[test]
+    fn linked_empty_chat_is_durable_but_ordinary_empty_draft_is_not() {
+        let ordinary = Session::new("Chat");
+        assert!(!should_persist_chat_session(&ordinary));
+
+        let mut linked = Session::new("Logs · fixture");
+        linked.set_linked_corpus_id(Some("corpus-1".into()));
+        assert!(should_persist_chat_session(&linked));
     }
 }

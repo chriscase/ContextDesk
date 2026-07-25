@@ -1,5 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import * as host from "../../lib/host";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
@@ -83,6 +90,85 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
     const vlist = screen.getAllByTestId("virtualized-event-list")[0]!;
     expect(vlist.getAttribute("data-virtualized")).toBe("true");
+    expect(within(vlist).getByText("api.log")).toBeTruthy();
+    expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
+  });
+
+  it("creates, sends, persists, and reopens a linked chat", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: stored.linked_corpus_id,
+              },
+            ]
+          : [],
+    );
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_sessionId, _text, _forceLocal, _model, _provider, onEvent) => {
+        const events: host.EventDto[] = [
+          { kind: "turn_started", payload: { model: "fixture-model" } },
+          { kind: "text_delta", payload: { text: "The API failed first." } },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => {
+      expect(stored?.linked_corpus_id).toBe("c1");
+      expect(stored?.messages).toHaveLength(0);
+    });
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "What failed?" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    const thread = screen.getByTestId("log-explorer-chat-thread");
+    await within(thread).findByText("The API failed first.");
+    await waitFor(() => {
+      expect(host.agentTurn).toHaveBeenCalledWith(
+        stored?.id,
+        "What failed?",
+        false,
+        null,
+        null,
+        expect.any(Function),
+      );
+      expect(stored?.messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+      expect(stored?.messages[0]?.content).toBe("What failed?");
+      expect(stored?.messages[1]?.content).toBe("The API failed first.");
+    });
+
+    fireEvent.click(screen.getByText(stored!.title));
+    expect(await within(thread).findByText("What failed?")).toBeTruthy();
+    expect(
+      await within(thread).findByText("The API failed first."),
+    ).toBeTruthy();
   });
 });
