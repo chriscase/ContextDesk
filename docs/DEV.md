@@ -16,7 +16,22 @@ Build outputs (`target/`, `node_modules/`, `dist/`, `*.tsbuildinfo`, Vite/ESLint
 | `desktop/src-tauri/Cargo.lock` | Nested Tauri workspace; path-deps `cd-core` | **Also** update when `cd-core` deps change (easy to forget) |
 | `desktop/package-lock.json` | `npm install` / package bumps | Commit with package.json changes; prefer `npm ci` day-to-day |
 | `desktop/src-tauri/tauri.conf.json` | `gen-tauri-conf.mjs` on every `tauri dev`/`build` | Should be **idempotent** (no diff if branding unchanged). If dirty, commit intentional branding/CSP changes only |
-| `desktop/src-tauri/gen/schemas/*` | Tauri CLI schema dump | Tracked for offline/CI; only commit when Tauri version bumps intentionally |
+| `desktop/src-tauri/gen/schemas/*` | Tauri build-generated schema dump | Tracked for offline/CI; commit with intentional Tauri version or capability-source changes |
+
+### Tauri capability schema parity
+
+`desktop/src-tauri/capabilities/default.json` is the reviewed source of truth.
+After changing it, regenerate the checked-in schema through Tauri's supported
+build path (do not hand-edit generated JSON):
+
+```sh
+cargo check --manifest-path desktop/src-tauri/Cargo.toml
+git diff --exit-code -- desktop/src-tauri/gen/schemas/capabilities.json
+```
+
+The first command rewrites `gen/schemas/capabilities.json` when source and
+generated state differ. Commit that generated diff with the capability change,
+then run both commands again; the second run must produce no diff.
 
 ### Source-run update (Settings → General)
 
