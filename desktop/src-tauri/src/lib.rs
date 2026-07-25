@@ -4431,17 +4431,13 @@ fn open_log_explorer(
         return Ok(label);
     }
     let url = format!("index.html?window=log-explorer&corpus={corpus_id}");
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        tauri::WebviewUrl::App(url.into()),
-    )
-    .title(title)
-    .inner_size(1400.0, 900.0)
-    .min_inner_size(720.0, 480.0)
-    .resizable(true)
-    .build()
-    .map_err(|e| e.to_string())?;
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(720.0, 480.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(label)
 }
 
