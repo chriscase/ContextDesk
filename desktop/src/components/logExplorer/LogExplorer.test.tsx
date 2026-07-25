@@ -20,7 +20,6 @@ vi.mock("../../lib/host", () => ({
     createdAt: 0,
   })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
-  hostSetLogViewContext: vi.fn(async () => {}),
   hostLogListBookmarks: vi.fn(async () => []),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
@@ -407,6 +406,11 @@ describe("LogExplorer shell", () => {
         null,
         null,
         expect.any(Function),
+        null,
+        expect.objectContaining({
+          corpus_id: "c1",
+          brief: expect.stringContaining("corpusId=c1"),
+        }),
       );
       expect(stored?.messages.map((message) => message.role)).toEqual([
         "user",
@@ -420,6 +424,150 @@ describe("LogExplorer shell", () => {
     expect(await within(thread).findByText("What failed?")).toBeTruthy();
     expect(
       await within(thread).findByText("The API failed first."),
+    ).toBeTruthy();
+  });
+
+  it("keeps two Explorer chat snapshots isolated when one window unmounts", async () => {
+    const stored = new Map<string, host.ChatSessionDto>();
+    const pendingTurns: Array<{
+      promise: Promise<host.EventDto[]>;
+      resolve: (value: host.EventDto[]) => void;
+    }> = [];
+    vi.mocked(host.agentTurn).mockImplementation(async () => {
+      const pending = deferred<host.EventDto[]>();
+      pendingTurns.push(pending);
+      return pending.promise;
+    });
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored.set(session.id, session);
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(
+      async (id) => stored.get(id) ?? null,
+    );
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async (corpusId) =>
+        [...stored.values()]
+          .filter((session) => session.linked_corpus_id === corpusId)
+          .map((session) => ({
+            id: session.id,
+            title: session.title,
+            archived: false,
+            pinned: false,
+            created_at: session.created_at,
+            updated_at: session.updated_at,
+            message_count: session.messages.length,
+            preview: session.messages.at(-1)?.content ?? "",
+            linked_corpus_id: session.linked_corpus_id,
+          })),
+    );
+
+    const explorerA = render(<LogExplorer corpusId="corpus-a" />);
+    const explorerB = render(<LogExplorer corpusId="corpus-b" />);
+    await within(explorerA.container).findByText(/auth failure/);
+    await within(explorerB.container).findByText(/auth failure/);
+
+    fireEvent.click(within(explorerA.container).getByTestId("new-linked-chat"));
+    await waitFor(() =>
+      expect(
+        [...stored.values()].some(
+          (session) => session.linked_corpus_id === "corpus-a",
+        ),
+      ).toBe(true),
+    );
+    fireEvent.change(
+      within(explorerA.container).getByLabelText("Chat message"),
+      { target: { value: "Question A" } },
+    );
+    fireEvent.click(
+      within(explorerA.container).getByTestId("send-linked-chat"),
+    );
+    await waitFor(() =>
+      expect(host.agentTurn).toHaveBeenCalledWith(
+        expect.any(String),
+        "Question A",
+        false,
+        null,
+        null,
+        expect.any(Function),
+        null,
+        expect.objectContaining({
+          corpus_id: "corpus-a",
+          brief: expect.stringContaining("corpusId=corpus-a"),
+        }),
+      ),
+    );
+
+    explorerA.unmount();
+
+    fireEvent.click(within(explorerB.container).getByTestId("new-linked-chat"));
+    await waitFor(() =>
+      expect(
+        [...stored.values()].some(
+          (session) => session.linked_corpus_id === "corpus-b",
+        ),
+      ).toBe(true),
+    );
+    fireEvent.change(
+      within(explorerB.container).getByLabelText("Chat message"),
+      { target: { value: "Question B" } },
+    );
+    fireEvent.click(
+      within(explorerB.container).getByTestId("send-linked-chat"),
+    );
+    await waitFor(() =>
+      expect(host.agentTurn).toHaveBeenCalledWith(
+        expect.any(String),
+        "Question B",
+        false,
+        null,
+        null,
+        expect.any(Function),
+        null,
+        expect.objectContaining({
+          corpus_id: "corpus-b",
+          brief: expect.stringContaining("corpusId=corpus-b"),
+        }),
+      ),
+    );
+
+    const contexts = vi
+      .mocked(host.agentTurn)
+      .mock.calls.map((call) => call[7])
+      .filter((context) => context != null);
+    expect(contexts).toEqual([
+      expect.objectContaining({ corpus_id: "corpus-a" }),
+      expect.objectContaining({ corpus_id: "corpus-b" }),
+    ]);
+
+    await act(async () => {
+      for (const pending of pendingTurns) pending.resolve([]);
+      await Promise.all(pendingTurns.map((pending) => pending.promise));
+    });
+    await waitFor(() => {
+      expect(
+        [...stored.values()].find(
+          (session) => session.linked_corpus_id === "corpus-a",
+        )?.messages[0]?.content,
+      ).toBe("Question A");
+      expect(
+        [...stored.values()].find(
+          (session) => session.linked_corpus_id === "corpus-b",
+        )?.messages[0]?.content,
+      ).toBe("Question B");
+    });
+
+    explorerB.unmount();
+    const reloadedA = render(<LogExplorer corpusId="corpus-a" />);
+    await within(reloadedA.container).findByText(/auth failure/);
+    const sessionA = [...stored.values()].find(
+      (session) => session.linked_corpus_id === "corpus-a",
+    )!;
+    fireEvent.click(within(reloadedA.container).getByText(sessionA.title));
+    expect(
+      await within(
+        within(reloadedA.container).getByTestId("log-explorer-chat-thread"),
+      ).findByText("Question A"),
     ).toBeTruthy();
   });
 });

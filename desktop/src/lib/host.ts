@@ -238,6 +238,7 @@ export async function agentTurn(
   providerProfileId?: string | null,
   onEvent?: (ev: EventDto) => void,
   pinnedSkillId?: string | null,
+  logExplorerContext?: LogExplorerTurnContextDto | null,
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -246,6 +247,7 @@ export async function agentTurn(
     chat_model: chatModel?.trim() || null,
     provider_profile_id: providerProfileId?.trim() || null,
     pinned_skill_id: pinnedSkillId?.trim() || null,
+    log_explorer_context: logExplorerContext ?? null,
   };
 
   if (!isTauri()) {
@@ -1670,16 +1672,10 @@ export async function hostGetActiveLogCorpus(): Promise<string | null> {
   return invoke<string | null>("get_active_log_corpus");
 }
 
-/**
- * Push capped Log Explorer viewport brief into the host so agent turns
- * receive optimized view context (filters/lanes/selection — not dump paste).
- */
-export async function hostSetLogViewContext(
-  brief: string | null,
-): Promise<void> {
-  if (!isTauri()) return;
-  await invoke("set_log_view_context", { brief });
-}
+export type LogExplorerTurnContextDto = {
+  corpus_id: string;
+  brief: string;
+};
 
 export async function hostGetLogCorpus(
   corpusId: string,

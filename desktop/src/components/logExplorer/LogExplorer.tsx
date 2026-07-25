@@ -24,7 +24,6 @@ import {
   hostLogSearchEvents,
   hostSaveChatSession,
   hostSetActiveLogCorpus,
-  hostSetLogViewContext,
   type EventQueryDto,
   type ExplorerEventDto,
   type LogBookmarkDto,
@@ -393,13 +392,6 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarks,
   ]);
 
-  useEffect(() => {
-    void hostSetLogViewContext(viewBrief);
-    return () => {
-      void hostSetLogViewContext(null);
-    };
-  }, [viewBrief]);
-
   // Link/gap when multi-lane + link on
   useEffect(() => {
     if (!linkMode || laneCount < 2) {
@@ -662,9 +654,6 @@ export function LogExplorer({ corpusId }: Props) {
       content: text,
     };
     setChatMessages((m) => [...m, userMsg]);
-    // Ensure host has latest viewport for this turn
-    await hostSetLogViewContext(viewBrief);
-    await hostSetActiveLogCorpus(corpusId);
     let assistantText = "";
     const assistantId = crypto.randomUUID();
     setChatMessages((m) => [
@@ -687,6 +676,11 @@ export function LogExplorer({ corpusId }: Props) {
               ),
             );
           }
+        },
+        null,
+        {
+          corpus_id: corpusId,
+          brief: viewBrief,
         },
       );
       const full = await hostLoadChatSession(sessionId!);

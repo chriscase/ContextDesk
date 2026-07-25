@@ -2028,6 +2028,29 @@ struct AgentTurnReq {
     /// Session-pinned skill id (#343); inject playbook when set.
     #[serde(default)]
     pinned_skill_id: Option<String>,
+    /// Present only for a turn started from a Log Explorer linked chat.
+    #[serde(default)]
+    log_explorer_context: Option<LogExplorerTurnContextReq>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogExplorerTurnContextReq {
+    corpus_id: String,
+    brief: String,
+}
+
+fn validate_log_explorer_turn_context(
+    session: &Session,
+    window_id: &str,
+    request: LogExplorerTurnContextReq,
+) -> Result<cd_core::agent::LogExplorerTurnContext, String> {
+    if session.linked_corpus_id.as_deref() != Some(request.corpus_id.as_str()) {
+        return Err(
+            "Log Explorer context does not match this chat session's linked corpus".into(),
+        );
+    }
+    cd_core::agent::LogExplorerTurnContext::new(window_id, request.corpus_id, request.brief)
+        .map_err(|e| e.to_string())
 }
 
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
@@ -2595,6 +2618,7 @@ async fn propose_save_skill_cmd(
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
     req: AgentTurnReq,
     on_event: tauri::ipc::Channel<EventDto>,
 ) -> Result<(), String> {
@@ -2666,6 +2690,20 @@ async fn agent_turn(
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
 
+    let log_explorer_context = match req.log_explorer_context {
+        Some(request) => {
+            let session = session_store(&state)?
+                .load(&req.session_id)
+                .map_err(|e| e.to_string())?;
+            Some(validate_log_explorer_turn_context(
+                &session,
+                window.label(),
+                request,
+            )?)
+        }
+        None => None,
+    };
+
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
@@ -2695,6 +2733,10 @@ async fn agent_turn(
         host.set_session_context_base(Some(base));
     }
     host.set_active_session_id(Some(req.session_id.clone()));
+    let previous_log_corpus = host.active_log_corpus().map(str::to_string);
+    if let Some(context) = log_explorer_context.as_ref() {
+        host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    }
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -2711,7 +2753,7 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel(
+        cd_core::research::research_turn_with_cancel_and_context(
             &mut host,
             &profile,
             api_key,
@@ -2720,11 +2762,13 @@ async fn agent_turn(
             &req.session_id,
             false,
             Some(cancel.clone()),
+            log_explorer_context,
             Some(&mut sink),
         )
         .await
         .map_err(|e| e.to_string())
     };
+    host.set_active_log_corpus(previous_log_corpus);
     {
         let mut host_guard = state.host.lock().expect("host");
         *host_guard = Some(host);
@@ -4325,16 +4369,6 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
     Ok(host.active_log_corpus().map(|s| s.to_string()))
 }
 
-/// Push Log Explorer viewport brief into the host for agent turn injection (#480).
-#[tauri::command]
-fn set_log_view_context(state: State<'_, AppState>, brief: Option<String>) -> Result<(), String> {
-    ensure_host(&state)?;
-    let mut host = state.host.lock().expect("host");
-    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
-    host.set_log_view_context_brief(brief);
-    Ok(())
-}
-
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
 
 /// Paged/keyset event query for the Log Explorer.
@@ -5383,7 +5417,6 @@ pub fn run() {
             discard_log_corpus,
             set_active_log_corpus,
             get_active_log_corpus,
-            set_log_view_context,
             log_query_events,
             log_facets,
             log_search_events,
@@ -5475,5 +5508,45 @@ mod chat_session_host_tests {
         let mut linked = Session::new("Logs · fixture");
         linked.set_linked_corpus_id(Some("corpus-1".into()));
         assert!(should_persist_chat_session(&linked));
+    }
+
+    #[test]
+    fn explorer_turn_context_must_match_the_durable_session_link() {
+        let mut linked = Session::new("Logs · fixture");
+        linked.set_linked_corpus_id(Some("corpus-a".into()));
+
+        let context = validate_log_explorer_turn_context(
+            &linked,
+            "log-explorer-a",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-a".into(),
+                brief: "levels=error; selectedSeqs=[1,2]".into(),
+            },
+        )
+        .expect("matching linked context");
+        assert_eq!(context.window_id, "log-explorer-a");
+        assert_eq!(context.corpus_id, "corpus-a");
+
+        let mismatch = validate_log_explorer_turn_context(
+            &linked,
+            "log-explorer-b",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-b".into(),
+                brief: "levels=info".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("does not match"), "{mismatch}");
+
+        let ordinary = Session::new("Chat");
+        assert!(validate_log_explorer_turn_context(
+            &ordinary,
+            "main",
+            LogExplorerTurnContextReq {
+                corpus_id: "corpus-a".into(),
+                brief: "levels=error".into(),
+            },
+        )
+        .is_err());
     }
 }

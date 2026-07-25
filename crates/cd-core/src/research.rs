@@ -667,6 +667,35 @@ pub async fn research_turn_with_cancel(
     session_id: &str,
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel_and_context(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        cancel,
+        None,
+        live,
+    )
+    .await
+}
+
+/// Research turn with an immutable, caller-validated Log Explorer snapshot.
+#[allow(clippy::too_many_arguments)] // explicit turn context is safer than ambient host state
+pub async fn research_turn_with_cancel_and_context(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
@@ -743,6 +772,7 @@ pub async fn research_turn_with_cancel(
         Some(profile.chat_model.clone()),
     );
     opts.cancel = cancel;
+    opts.log_explorer_context = log_explorer_context;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).

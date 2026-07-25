@@ -151,9 +151,6 @@ pub struct ToolHost {
     log_cache_dir: Option<PathBuf>,
     /// Default corpus for log tools when `corpus` arg is omitted (wizard handoff).
     active_log_corpus: Option<String>,
-    /// Capped Log Explorer viewport brief for agent turns (#480).
-    /// Set when explorer is focused; injected into system (not dump paste).
-    log_view_context_brief: Option<String>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -225,7 +222,6 @@ impl ToolHost {
             log_analysis_enabled: false,
             log_cache_dir: None,
             active_log_corpus: None,
-            log_view_context_brief: None,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -830,39 +826,6 @@ impl ToolHost {
     /// Whether log analysis tools are registered.
     pub fn log_analysis_enabled(&self) -> bool {
         self.log_analysis_enabled
-    }
-
-    /// Set capped explorer viewport brief for the next agent turns (filters/lanes/selection).
-    ///
-    /// Pass `None` to clear when explorer closes. Truncated to 2_000 chars.
-    pub fn set_log_view_context_brief(&mut self, brief: Option<String>) {
-        self.log_view_context_brief = brief.and_then(|s| {
-            let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                let truncated: String = t.chars().take(2_000).collect();
-                Some(truncated)
-            }
-        });
-    }
-
-    /// Current log explorer viewport brief, if any.
-    pub fn log_view_context_brief(&self) -> Option<&str> {
-        self.log_view_context_brief.as_deref()
-    }
-
-    /// Bounded system hint for the model about the engineer's Log Explorer viewport.
-    pub fn log_explorer_agent_hint(&self) -> Option<String> {
-        let brief = self.log_view_context_brief.as_deref()?;
-        let corpus = self.active_log_corpus.as_deref().unwrap_or("(see brief)");
-        Some(format!(
-            "\nLog Explorer is focused on corpus {corpus}. \
-             Engineer viewport (use log tools; do not ask for dump paste): {brief}. \
-             You may propose opt-in navigation as JSON: \
-             {{\"type\":\"log_nav\",\"corpusId\":\"…\",\"sources\":[…],\"tsFrom\":…,\"tsTo\":…,\"highlightSeq\":[…],\"label\":\"…\"}}. \
-             User must click to apply.\n"
-        ))
     }
 
     /// Set the default log corpus for tools that omit `corpus` (wizard / UI handoff).
@@ -5642,22 +5605,6 @@ mod tests {
             )
             .await;
         assert!(bad.is_err(), "self-approve must fail");
-    }
-
-    #[test]
-    fn log_explorer_view_context_hint_for_agent() {
-        let (_tmp, mut host) = host_with_docs();
-        assert!(host.log_explorer_agent_hint().is_none());
-        host.set_active_log_corpus(Some("corp-1".into()));
-        host.set_log_view_context_brief(Some(
-            "corpusId=corp-1; levels=error; sources=api.log; selectedSeqs=[1,2]".into(),
-        ));
-        let hint = host.log_explorer_agent_hint().expect("hint");
-        assert!(hint.contains("corp-1"), "{hint}");
-        assert!(hint.contains("log_nav"), "{hint}");
-        assert!(hint.contains("api.log"), "{hint}");
-        host.set_log_view_context_brief(None);
-        assert!(host.log_explorer_agent_hint().is_none());
     }
 
     #[test]
