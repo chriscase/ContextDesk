@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
+import checkoutTruth from "../../../../fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json";
 import * as host from "../../lib/host";
 import { LogExplorer } from "./LogExplorer";
 
@@ -482,6 +483,179 @@ describe("LogExplorer shell", () => {
     expect(
       await within(thread).findByText("The API failed first."),
     ).toBeTruthy();
+  });
+
+  it("investigates the Log Lab mystery without exposing evaluator truth", async () => {
+    const decisiveClues = checkoutTruth.investigation.decisive_clues;
+    const fixtureSources = Object.fromEntries(
+      Object.entries(checkoutTruth.expected.files_by_path).map(
+        ([source, expected]) => [source, expected.events],
+      ),
+    );
+    const fixtureEvents: host.ExplorerEventDto[] = decisiveClues.map(
+      (clue, index) => ({
+        seq: index + 100,
+        ts: checkoutTruth.investigation.affected_interval.from + index * 20,
+        timeQuality: "wall",
+        level: clue.event_id === "edge-504" ? "error" : "info",
+        service: clue.source.split("/")[0] ?? "fixture",
+        host: null,
+        templateId: index + 1,
+        traceId:
+          clue.event_id === "worker-loop" || clue.event_id === "edge-504"
+            ? "trace-checkout-42"
+            : null,
+        message: `event_id=${clue.event_id} ${clue.query}`,
+        source: clue.source,
+      }),
+    );
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: fixtureSources,
+      levels: { info: fixtureEvents.length - 1, error: 1 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query?.sources ?? [];
+        const events =
+          sources.length === 0
+            ? fixtureEvents
+            : fixtureEvents.filter((event) => sources.includes(event.source));
+        return {
+          events,
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: events.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+    vi.mocked(host.hostLogSearchEvents).mockImplementation(
+      async (_corpusId, search) =>
+        fixtureEvents
+          .filter((event) =>
+            event.message.includes(search?.query ?? "job-7f3a"),
+          )
+          .map((event) => ({
+            event,
+            score: 1,
+            matchKind: "keyword",
+            templateId: event.templateId,
+          })),
+    );
+
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: stored.linked_corpus_id,
+              },
+            ]
+          : [],
+    );
+    vi.mocked(host.hostLogAddBookmark).mockImplementation(
+      async (_corpusId, args) => ({
+        id: "log-lab-bookmark",
+        label: args.label,
+        note: null,
+        seqFrom: args.seqFrom,
+        seqTo: args.seqTo,
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_sessionId, _text, _forceLocal, _model, _provider, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "text_delta",
+            payload: {
+              text: "The retry loop and pool shrink caused the outage.",
+            },
+          },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(<LogExplorer corpusId="log-lab-checkout-cascade" />);
+    const root = await screen.findByTestId("log-explorer");
+    expect(root.getAttribute("data-time-quality")).toBe("wall");
+    expect(
+      (await screen.findAllByText("audit/deploy.jsonl")).length,
+    ).toBeGreaterThan(1);
+    expect(screen.getAllByText("worker/worker.log").length).toBeGreaterThan(1);
+    expect(screen.queryByText("/Users/")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Search logs"), {
+      target: { value: "job-7f3a" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText(/event_id=worker-loop/)).toBeTruthy();
+    expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+      "log-lab-checkout-cascade",
+      expect.objectContaining({ query: "job-7f3a" }),
+    );
+
+    fireEvent.click(screen.getByText(/event_id=worker-loop/));
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    await waitFor(() =>
+      expect(host.hostLogAddBookmark).toHaveBeenCalledWith(
+        "log-lab-checkout-cascade",
+        expect.objectContaining({
+          seqFrom: 101,
+          seqTo: 101,
+          label: "seq 101",
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() =>
+      expect(stored?.linked_corpus_id).toBe("log-lab-checkout-cascade"),
+    );
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: checkoutTruth.investigation.canonical_questions[0] },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    expect(
+      await screen.findByText(
+        "The retry loop and pool shrink caused the outage.",
+      ),
+    ).toBeTruthy();
+
+    const context = vi.mocked(host.agentTurn).mock.calls.at(-1)?.[7];
+    expect(context).toEqual(
+      expect.objectContaining({
+        corpus_id: "log-lab-checkout-cascade",
+        brief: expect.stringContaining("selectedSeqs=[101]"),
+      }),
+    );
+    const serializedContext = JSON.stringify(context);
+    expect(serializedContext).not.toContain(
+      checkoutTruth.investigation.root_cause,
+    );
+    expect(serializedContext).not.toContain('"decisive_clues"');
+    expect(serializedContext).not.toContain('"rubric"');
   });
 
   it("keeps two Explorer chat snapshots isolated when one window unmounts", async () => {
