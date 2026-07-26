@@ -136,11 +136,17 @@ export function LogExplorer({ corpusId }: Props) {
       }
     >
   >({});
-  /** Per-lane scroll anchor adjust (rows prepended) for stable visual position. */
-  const [laneScrollAdjust, setLaneScrollAdjust] = useState<
-    Record<string, number>
-  >({});
   const pagingInflight = useRef<Record<string, "older" | "newer" | null>>({});
+  const [lanePaging, setLanePaging] = useState<
+    Record<
+      string,
+      {
+        loading: "older" | "newer" | null;
+        error: string | null;
+        failedDirection: "older" | "newer" | null;
+      }
+    >
+  >({});
   const [focusLaneId, setFocusLaneId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
@@ -373,6 +379,7 @@ export function LogExplorer({ corpusId }: Props) {
     );
     setBusy(true);
     setError(null);
+    setLanePaging({});
     setLaneTimeStates(unloaded);
     setLaneMatched(
       Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
@@ -408,7 +415,6 @@ export function LogExplorer({ corpusId }: Props) {
             hasNewer: page.nextCursor != null,
           },
         });
-        setLaneScrollAdjust({ "lane-0": 0 });
         setStatus(
           `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
         );
@@ -650,8 +656,8 @@ export function LogExplorer({ corpusId }: Props) {
         afterTs: seeded.afterTs,
         beforeSeq: seeded.beforeSeq,
         beforeTs: seeded.beforeTs,
-        hasOlder: seeded.beforeSeq != null,
-        hasNewer: seeded.afterSeq != null,
+        hasOlder: nb.prevCursor != null,
+        hasNewer: nb.nextCursor != null,
       },
     }));
     if (nb.corpusTotal > 0) setCorpusTotal(nb.corpusTotal);
@@ -1092,7 +1098,14 @@ export function LogExplorer({ corpusId }: Props) {
     if (pagingInflight.current[laneId]) return;
     pagingInflight.current[laneId] = "newer";
     const requestId = eventsRequestRef.current;
-    setBusy(true);
+    setLanePaging((previous) => ({
+      ...previous,
+      [laneId]: {
+        loading: "newer",
+        error: null,
+        failedDirection: null,
+      },
+    }));
     try {
       const page = await hostLogQueryEvents(
         corpusId,
@@ -1127,16 +1140,10 @@ export function LogExplorer({ corpusId }: Props) {
           afterTs: window.afterTs,
           beforeSeq: window.beforeSeq,
           beforeTs: window.beforeTs,
-          hasOlder: window.beforeSeq != null,
+          hasOlder: cur.hasOlder || droppedFromHead > 0,
           hasNewer: page.nextCursor != null,
         },
       }));
-      if (droppedFromHead > 0) {
-        setLaneScrollAdjust((prev) => ({
-          ...prev,
-          [laneId]: (prev[laneId] ?? 0) - droppedFromHead,
-        }));
-      }
       if (laneId === "lane-0") setNextCursor(page.nextCursor);
       if (page.events.length > 0) {
         setLaneTimeStates((previous) => {
@@ -1161,15 +1168,29 @@ export function LogExplorer({ corpusId }: Props) {
           return next;
         });
       }
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: null,
+          failedDirection: null,
+        },
+      }));
       setStatus(
         `Lane ${laneId}: +${page.events.length} newer · ${window.events.length} resident`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
-      setError(String(e));
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: String(e),
+          failedDirection: "newer",
+        },
+      }));
     } finally {
       pagingInflight.current[laneId] = null;
-      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -1179,7 +1200,14 @@ export function LogExplorer({ corpusId }: Props) {
     if (pagingInflight.current[laneId]) return;
     pagingInflight.current[laneId] = "older";
     const requestId = eventsRequestRef.current;
-    setBusy(true);
+    setLanePaging((previous) => ({
+      ...previous,
+      [laneId]: {
+        loading: "older",
+        error: null,
+        failedDirection: null,
+      },
+    }));
     try {
       const page = await hostLogQueryEvents(
         corpusId,
@@ -1200,7 +1228,7 @@ export function LogExplorer({ corpusId }: Props) {
         beforeTs: cur.beforeTs,
         totalMatched: totalMatched,
       };
-      const { window, prepended } = prependOlder(
+      const { window, droppedFromTail } = prependOlder(
         resident,
         page,
         DEFAULT_MAX_RESIDENT,
@@ -1215,24 +1243,32 @@ export function LogExplorer({ corpusId }: Props) {
           beforeSeq: window.beforeSeq,
           beforeTs: window.beforeTs,
           hasOlder: page.prevCursor != null,
-          hasNewer: cur.hasNewer || page.events.length > 0,
+          hasNewer: cur.hasNewer || droppedFromTail > 0,
         },
       }));
-      if (prepended > 0) {
-        setLaneScrollAdjust((prev) => ({
-          ...prev,
-          [laneId]: (prev[laneId] ?? 0) + prepended,
-        }));
-      }
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: null,
+          failedDirection: null,
+        },
+      }));
       setStatus(
         `Lane ${laneId}: +${page.events.length} older · ${window.events.length} resident`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
-      setError(String(e));
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: String(e),
+          failedDirection: "older",
+        },
+      }));
     } finally {
       pagingInflight.current[laneId] = null;
-      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -1995,22 +2031,59 @@ export function LogExplorer({ corpusId }: Props) {
                     expandedSeqs={expandedSeqs}
                     onToggleExpand={toggleExpand}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
-                    scrollAnchorAdjust={laneScrollAdjust[lane.id] ?? 0}
                     onRowClick={onRowClick}
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}
                   />
-                  <div className="log-explorer__lane-paging">
+                  {lanePaging[lane.id]?.error ? (
+                    <div
+                      className="log-explorer__lane-page-error"
+                      role="alert"
+                      data-testid={`lane-page-error-${lane.id}`}
+                    >
+                      <span>
+                        Could not load{" "}
+                        {lanePaging[lane.id]?.failedDirection ?? "adjacent"}{" "}
+                        events: {lanePaging[lane.id]?.error}
+                      </span>
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        onClick={() =>
+                          lanePaging[lane.id]?.failedDirection === "older"
+                            ? void loadOlderLane(lane.id)
+                            : void loadMoreLane(lane.id)
+                        }
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : null}
+                  <div
+                    className="log-explorer__lane-paging"
+                    aria-live="polite"
+                    aria-label={`${lane.label} paging status`}
+                  >
+                    {!laneCursors[lane.id]?.hasOlder ? (
+                      <span className="log-explorer__paging-boundary">
+                        Beginning
+                      </span>
+                    ) : null}
                     {laneCursors[lane.id]?.hasOlder ? (
                       <button
                         type="button"
                         className="log-explorer__btn"
                         data-testid={`load-older-${lane.id}`}
-                        disabled={busy}
+                        disabled={lanePaging[lane.id]?.loading != null}
                         onClick={() => void loadOlderLane(lane.id)}
                       >
                         Load older
                       </button>
+                    ) : null}
+                    {lanePaging[lane.id]?.loading ? (
+                      <span className="log-explorer__paging-loading">
+                        Loading {lanePaging[lane.id]?.loading}…
+                      </span>
                     ) : null}
                     {laneCursors[lane.id]?.hasNewer ? (
                       <button
@@ -2018,11 +2091,14 @@ export function LogExplorer({ corpusId }: Props) {
                         className="log-explorer__btn"
                         data-testid={`load-more-${lane.id}`}
                         data-lane-load-more={lane.id}
-                        disabled={busy}
+                        disabled={lanePaging[lane.id]?.loading != null}
                         onClick={() => void loadMoreLane(lane.id)}
                       >
                         Load newer
                       </button>
+                    ) : null}
+                    {!laneCursors[lane.id]?.hasNewer ? (
+                      <span className="log-explorer__paging-boundary">End</span>
                     ) : null}
                   </div>
                 </section>

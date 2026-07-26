@@ -108,17 +108,24 @@ export function prependOlder(
     totalMatched: number;
   },
   maxResident = DEFAULT_MAX_RESIDENT,
-): { window: ResidentWindow; prepended: number } {
+): {
+  window: ResidentWindow;
+  prepended: number;
+  droppedFromTail: number;
+} {
   const before = win.events.length;
   let events = mergeAscending(page.events, win.events);
   const prepended = Math.max(0, events.length - before);
+  let droppedFromTail = 0;
   if (events.length > maxResident) {
+    droppedFromTail = events.length - maxResident;
     events = events.slice(0, maxResident);
   }
   const last = events[events.length - 1];
   const first = events[0];
   return {
     prepended,
+    droppedFromTail,
     window: {
       events,
       afterSeq: last?.seq ?? win.afterSeq,

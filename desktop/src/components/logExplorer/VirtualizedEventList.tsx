@@ -9,7 +9,7 @@
  */
 import {
   useCallback,
-  useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -42,8 +42,6 @@ type Props = {
   /** Column widths in rem: [ts, level, source, message]. */
   colWidths?: [number, number, number, number];
   scrollToSeq?: number | null;
-  /** Rows prepended — keep visual anchor stable (#538). */
-  scrollAnchorAdjust?: number;
   expandedSeqs?: Set<number>;
   onToggleExpand?: (seq: number) => void;
   onRowClick: (e: ExplorerEventDto, multi: boolean) => void;
@@ -80,7 +78,6 @@ export function VirtualizedEventList({
   lineMode = "compact",
   colWidths = [7.5, 3.5, 8, 1],
   scrollToSeq,
-  scrollAnchorAdjust = 0,
   expandedSeqs,
   onToggleExpand,
   onRowClick,
@@ -154,21 +151,45 @@ export function VirtualizedEventList({
     if (el) setViewportH(el.clientHeight || 400);
   }, []);
 
-  const lastAnchor = useRef(0);
-  useEffect(() => {
-    const deltaRows = scrollAnchorAdjust - lastAnchor.current;
-    lastAnchor.current = scrollAnchorAdjust;
-    if (deltaRows === 0 || !parentRef.current) return;
-    const count = Math.min(Math.abs(deltaRows), heights.length);
-    const measured =
-      heights.slice(0, count).reduce((a, b) => a + b, 0) ||
-      count * compactH;
-    const deltaPx = deltaRows > 0 ? measured : -measured;
-    parentRef.current.scrollTop = Math.max(
-      0,
-      parentRef.current.scrollTop + deltaPx,
-    );
-  }, [scrollAnchorAdjust, heights, compactH]);
+  const previousLayout = useRef<{
+    seqs: number[];
+    offsets: number[];
+    heights: number[];
+  } | null>(null);
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    const prior = previousLayout.current;
+    if (el && prior && prior.seqs.length > 0) {
+      const oldTop = el.scrollTop;
+      let anchorIndex = prior.seqs.length - 1;
+      for (let index = 0; index < prior.seqs.length; index += 1) {
+        const bottom =
+          (prior.offsets[index] ?? 0) + (prior.heights[index] ?? compactH);
+        if (bottom > oldTop) {
+          anchorIndex = index;
+          break;
+        }
+      }
+      const anchorSeq = prior.seqs[anchorIndex];
+      const nextIndex = events.findIndex((event) => event.seq === anchorSeq);
+      if (nextIndex >= 0) {
+        const withinRow = oldTop - (prior.offsets[anchorIndex] ?? 0);
+        const nextTop = Math.max(
+          0,
+          (offsets[nextIndex] ?? 0) + withinRow,
+        );
+        if (nextTop !== oldTop) {
+          el.scrollTop = nextTop;
+          setScrollTop(nextTop);
+        }
+      }
+    }
+    previousLayout.current = {
+      seqs: events.map((event) => event.seq),
+      offsets: [...offsets],
+      heights: [...heights],
+    };
+  }, [events, offsets, heights, compactH]);
 
   const lastScrollSeq = useRef<number | null>(null);
   if (scrollToSeq != null && scrollToSeq !== lastScrollSeq.current) {

@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
@@ -43,10 +43,9 @@ describe("VirtualizedEventList", () => {
     expect(rendered).toBeLessThan(events.length);
   });
 
-  it("applies only the incremental prepend/eviction anchor adjustment", () => {
-    const events = makeEvents(20);
+  it("preserves a stable event pixel anchor across prepend and head eviction", () => {
+    const events = makeEvents(12).slice(2);
     const props = {
-      events,
       timeQuality: "wall" as const,
       selected: new Set<number>(),
       highlight: new Set<number>(),
@@ -54,30 +53,104 @@ describe("VirtualizedEventList", () => {
       onRowClick: vi.fn(),
     };
     const { rerender } = render(
-      <VirtualizedEventList {...props} scrollAnchorAdjust={0} />,
+      <VirtualizedEventList {...props} events={events} />,
     );
     const list = screen.getByTestId("virtualized-event-list");
     Object.defineProperty(list, "scrollTop", {
       configurable: true,
       writable: true,
-      value: 100,
+      value: 56,
     });
 
     act(() => {
-      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={2} />);
+      rerender(
+        <VirtualizedEventList {...props} events={makeEvents(12)} />,
+      );
     });
-    expect((list as HTMLDivElement).scrollTop).toBe(156);
+    expect((list as HTMLDivElement).scrollTop).toBe(112);
 
-    // A second +2 rows is cumulative=4, but must add only another 56px.
+    // Append one newer row while evicting one row from the head.
     act(() => {
-      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={4} />);
+      rerender(
+        <VirtualizedEventList
+          {...props}
+          events={makeEvents(13).slice(1)}
+        />,
+      );
     });
-    expect((list as HTMLDivElement).scrollTop).toBe(212);
+    expect((list as HTMLDivElement).scrollTop).toBe(84);
+  });
 
-    // Head eviction moves the cumulative adjustment back by one row.
-    act(() => {
-      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={3} />);
+  it("uses measured variable row offsets when preserving the anchor", () => {
+    const base = makeEvents(8).slice(2);
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={base} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 96,
     });
-    expect((list as HTMLDivElement).scrollTop).toBe(184);
+
+    act(() => {
+      rerender(
+        <VirtualizedEventList {...props} events={makeEvents(8)} />,
+      );
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(288);
+  });
+
+  it("requests older and newer pages when the viewport reaches either edge", () => {
+    const onNearTop = vi.fn();
+    const onNearBottom = vi.fn();
+    const { unmount } = render(
+      <VirtualizedEventList
+        events={makeEvents(100)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearTop={onNearTop}
+      />,
+    );
+    const topList = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(topList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2_800 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    fireEvent.scroll(topList);
+    expect(onNearTop).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(
+      <VirtualizedEventList
+        events={makeEvents(100)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearBottom={onNearBottom}
+      />,
+    );
+    const bottomList = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(bottomList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2_800 },
+      scrollTop: { configurable: true, writable: true, value: 2_400 },
+    });
+    fireEvent.scroll(bottomList);
+    expect(onNearBottom).toHaveBeenCalledTimes(1);
   });
 });

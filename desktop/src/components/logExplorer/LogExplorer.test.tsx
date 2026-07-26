@@ -835,6 +835,222 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-time-quality")).toBe("order_only");
   });
 
+  it("pages backward and forward through the real lane while preserving resident rows", async () => {
+    const pageEvent = (
+      seq: number,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: "info",
+      service: "api",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message,
+      source: "api.log",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.beforeSeq === 101) {
+          return {
+            events: [pageEvent(99, "older 99"), pageEvent(100, "older 100")],
+            prevCursor: null,
+            prevTs: null,
+            nextCursor: 100,
+            nextTs: 1_700_000_100,
+            totalMatched: 6,
+            timeQuality: "wall",
+          };
+        }
+        if (query?.afterSeq === 102) {
+          return {
+            events: [pageEvent(103, "newer 103"), pageEvent(104, "newer 104")],
+            prevCursor: 103,
+            prevTs: 1_700_000_103,
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 6,
+            timeQuality: "wall",
+          };
+        }
+        return {
+          events: [pageEvent(101, "middle 101"), pageEvent(102, "middle 102")],
+          prevCursor: 101,
+          prevTs: 1_700_000_101,
+          nextCursor: 102,
+          nextTs: 1_700_000_102,
+          totalMatched: 6,
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-older-lane-0"));
+    expect(await screen.findByText("older 99")).toBeTruthy();
+    expect(screen.getByText("middle 101")).toBeTruthy();
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        beforeSeq: 101,
+        beforeTs: 1_700_000_101,
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("load-more-lane-0"));
+    expect(await screen.findByText("newer 104")).toBeTruthy();
+    expect(screen.getByText("older 100")).toBeTruthy();
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        afterSeq: 102,
+        afterTs: 1_700_000_102,
+      }),
+    );
+    expect(screen.queryByTestId("load-older-lane-0")).toBeNull();
+    expect(screen.queryByTestId("load-more-lane-0")).toBeNull();
+  });
+
+  it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
+    let newerAttempts = 0;
+    const middle = defaultEventPage();
+    middle.nextCursor = 2;
+    middle.nextTs = middle.events[1]!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.afterSeq === 2) {
+          newerAttempts += 1;
+          if (newerAttempts === 1) throw new Error("fixture page unavailable");
+          return {
+            events: [
+              {
+                ...middle.events[1]!,
+                seq: 3,
+                ts: middle.events[1]!.ts + 1,
+                message: "retry recovered",
+              },
+            ],
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 3,
+            timeQuality: "wall",
+          };
+        }
+        return middle;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    const alert = await screen.findByTestId("lane-page-error-lane-0");
+    expect(within(alert).getByText(/fixture page unavailable/)).toBeTruthy();
+    expect(screen.getByText("auth failure")).toBeTruthy();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("retry recovered")).toBeTruthy();
+    expect(screen.queryByTestId("lane-page-error-lane-0")).toBeNull();
+    expect(newerAttempts).toBe(2);
+  });
+
+  it("paginates lanes independently while a peer lane is still loading", async () => {
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+    const slowApi = deferred<host.EventPageDto>();
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        if (query?.afterSeq != null && source === "api.log") {
+          return slowApi.promise;
+        }
+        if (query?.afterSeq != null && source === "worker.log") {
+          return {
+            ...eventPage("worker.log", "wall", 1, 1_700_000_101, 2),
+            nextCursor: null,
+            nextTs: null,
+          };
+        }
+        if (source === "api.log") {
+          const page = eventPage("api.log", "wall", 1, 1_700_000_000, 2);
+          page.nextCursor = page.events[0]!.seq;
+          page.nextTs = page.events[0]!.ts;
+          return page;
+        }
+        if (source === "worker.log") {
+          const page = eventPage("worker.log", "wall", 1, 1_700_000_100, 2);
+          page.nextCursor = page.events[0]!.seq;
+          page.nextTs = page.events[0]!.ts;
+          return page;
+        }
+        return defaultEventPage();
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    const apiMore = await screen.findByTestId("load-more-lane-0");
+    const workerMore = await screen.findByTestId("load-more-lane-1");
+    fireEvent.click(apiMore);
+    await waitFor(() =>
+      expect((apiMore as HTMLButtonElement).disabled).toBe(true),
+    );
+
+    fireEvent.click(workerMore);
+    await waitFor(() =>
+      expect(screen.queryByTestId("load-more-lane-1")).toBeNull(),
+    );
+    expect((apiMore as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      slowApi.resolve({
+        ...eventPage("api.log", "wall", 1, 1_700_000_001, 2),
+        nextCursor: null,
+        nextTs: null,
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("load-more-lane-0")).toBeNull(),
+    );
+  });
+
+  it("invalidates a late paging response when filters start a new generation", async () => {
+    const paging = deferred<host.EventPageDto>();
+    const initial = defaultEventPage();
+    initial.nextCursor = 2;
+    initial.nextTs = initial.events[1]!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.afterSeq === 2) return paging.promise;
+        if (query?.keyword === "fresh") {
+          return eventPage("fresh.log", "wall");
+        }
+        return initial;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "fresh" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    expect(await screen.findByText(/fresh\.log event 0/)).toBeTruthy();
+
+    await act(async () => {
+      paging.resolve(eventPage("stale-page.log", "wall"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/stale-page\.log event 0/)).toBeNull();
+    expect(screen.getByText(/fresh\.log event 0/)).toBeTruthy();
+  });
+
   it("documents semantic availability without treating Find as semantic search", async () => {
     vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
       id: "c1",
