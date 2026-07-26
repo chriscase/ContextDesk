@@ -1923,13 +1923,15 @@ export async function hostLogSearchEventsAdvanced(
     return { hits: [], partial: false, scanned: 0 };
   }
   return invoke<EventSearchResultDto>("log_search_events", {
-    corpusId,
-    query: opts.query ?? null,
-    semantic: opts.semantic ?? true,
-    k: opts.k ?? null,
-    filter: opts.filter ?? null,
-    matchMode: opts.matchMode ?? "literal",
-    caseSensitive: opts.caseSensitive ?? false,
+    args: {
+      corpusId,
+      query: opts.query ?? null,
+      semantic: opts.semantic ?? true,
+      k: opts.k ?? null,
+      filter: opts.filter ?? null,
+      matchMode: opts.matchMode ?? "literal",
+      caseSensitive: opts.caseSensitive ?? false,
+    },
   });
 }
 
