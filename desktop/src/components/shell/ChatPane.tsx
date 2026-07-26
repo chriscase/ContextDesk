@@ -339,7 +339,9 @@ export function ChatPane(props: ChatPaneProps) {
                             <>
                               <button
                                 type="button"
-                                className="chat-wizard-card"
+                                className="chat-action-card chat-wizard-card"
+                                data-testid="chat-guided-workflow"
+                                data-action="launch-workflow"
                                 onClick={() =>
                                   onStartWizard("log-troubleshooting")
                                 }
@@ -349,7 +351,9 @@ export function ChatPane(props: ChatPaneProps) {
                               </button>
                               <button
                                 type="button"
-                                className="chat-wizard-card"
+                                className="chat-action-card chat-wizard-card"
+                                data-testid="chat-guided-workflow"
+                                data-action="launch-workflow"
                                 onClick={() => onStartWizard("memory-primer")}
                               >
                                 <strong>Memory primer</strong>
@@ -360,7 +364,9 @@ export function ChatPane(props: ChatPaneProps) {
                           {onOpenGuidedSetup ? (
                             <button
                               type="button"
-                              className="chat-wizard-card"
+                              className="chat-action-card chat-wizard-card"
+                                data-testid="chat-guided-workflow"
+                                data-action="launch-workflow"
                               onClick={onOpenGuidedSetup}
                             >
                               <strong>All guided setups…</strong>
@@ -386,7 +392,9 @@ export function ChatPane(props: ChatPaneProps) {
                           <button
                             key={s.label}
                             type="button"
-                            className="chat-starter"
+                            className="chat-action-card chat-starter"
+                            data-testid="chat-starter"
+                            data-action="fill-composer"
                             disabled={busy || preflightBlocking}
                             title={s.prompt}
                             onClick={() => fillStarter(s.prompt)}

@@ -1,35 +1,182 @@
+/**
+ * Contextual Help popover (#541).
+ * Hierarchy: control → tip → rich click-open Help → full Help deep link.
+ * Portal + measured flip/shift; Escape restores focus; one open at a time.
+ */
 import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { IconHelp } from "./icons";
+import { parseHelpLocator } from "../lib/help";
+
+export type HelpTipContent = {
+  title: string;
+  definition?: string;
+  useWhen?: string;
+  options?: { name: string; when: string }[];
+  safety?: string;
+  privacy?: string;
+  example?: string;
+  shortcut?: string;
+  /** Canonical Help locator, e.g. help://log-explorer#find-vs-filter */
+  helpLocator?: string;
+};
 
 export type HelpTipProps = {
   /** Short accessible name for the control, e.g. "X search setup". */
   label: string;
   /** Popover heading. */
   title: string;
-  /** Body — steps, paragraphs, lists. */
-  children: ReactNode;
+  /** Body — steps, paragraphs, lists (legacy freeform). */
+  children?: ReactNode;
+  /** Structured content blocks (preferred when available). */
+  content?: HelpTipContent;
   /** Optional class on the root wrapper. */
   className?: string;
+  /** Open full Help at this locator when "Open full Help" is clicked. */
+  onOpenHelp?: (pageId: string, anchor?: string) => void;
 };
+
+/** Module-level bus: only one HelpTip open at a time. */
+const OPEN_EVENT = "contextdesk:help-tip-open";
+
+function placementStyle(
+  trigger: DOMRect,
+  panel: DOMRect,
+  gap = 8,
+): CSSProperties {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let top = trigger.bottom + gap;
+  let left = trigger.left;
+
+  // Flip above if not enough room below.
+  if (top + panel.height > vh - 8 && trigger.top - gap - panel.height > 8) {
+    top = trigger.top - gap - panel.height;
+  }
+  // Shift horizontally into viewport.
+  if (left + panel.width > vw - 8) {
+    left = Math.max(8, vw - 8 - panel.width);
+  }
+  if (left < 8) left = 8;
+  // Clamp vertically if still overflowing.
+  if (top + panel.height > vh - 8) {
+    top = Math.max(8, vh - 8 - panel.height);
+  }
+  if (top < 8) top = 8;
+
+  return {
+    position: "fixed",
+    top,
+    left,
+    zIndex: 10050,
+  };
+}
+
+function StructuredBody({ content }: { content: HelpTipContent }) {
+  return (
+    <>
+      {content.definition ? <p>{content.definition}</p> : null}
+      {content.useWhen ? (
+        <p>
+          <strong>Use this when</strong> {content.useWhen}
+        </p>
+      ) : null}
+      {content.options && content.options.length > 0 ? (
+        <ul>
+          {content.options.map((o) => (
+            <li key={o.name}>
+              <strong>{o.name}</strong> — {o.when}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {content.example ? (
+        <p>
+          <strong>Example</strong> <code>{content.example}</code>
+        </p>
+      ) : null}
+      {content.shortcut ? (
+        <p>
+          <strong>Shortcut</strong> <kbd>{content.shortcut}</kbd>
+        </p>
+      ) : null}
+      {content.safety ? (
+        <p className="help-tip__callout help-tip__callout--safety">
+          {content.safety}
+        </p>
+      ) : null}
+      {content.privacy ? (
+        <p className="help-tip__callout help-tip__callout--privacy">
+          {content.privacy}
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 /**
  * Compact help icon that opens a setup popover (click to toggle).
- * Closes on outside click, Escape, or second click.
+ * Closes on outside click, Escape, or second click. Renders in a portal so
+ * it is not clipped by overflow containers.
  */
-export function HelpTip({ label, title, children, className }: HelpTipProps) {
+export function HelpTip({
+  label,
+  title,
+  children,
+  content,
+  className,
+  onOpenHelp,
+}: HelpTipProps) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<CSSProperties>({});
   const rootRef = useRef<HTMLSpanElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
+  const instanceId = useId();
 
   const close = useCallback(() => setOpen(false), []);
+
+  // One-open-at-a-time: close when another tip opens.
+  useEffect(() => {
+    const onOther = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (detail !== instanceId) setOpen(false);
+    };
+    window.addEventListener(OPEN_EVENT, onOther);
+    return () => window.removeEventListener(OPEN_EVENT, onOther);
+  }, [instanceId]);
+
+  useEffect(() => {
+    if (!open) return;
+    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: instanceId }));
+  }, [open, instanceId]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const trigger = btnRef.current?.getBoundingClientRect();
+      const panel = panelRef.current?.getBoundingClientRect();
+      if (!trigger || !panel) return;
+      setPos(placementStyle(trigger, panel));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open, title, children, content]);
 
   useEffect(() => {
     if (!open) return;
@@ -41,11 +188,11 @@ export function HelpTip({ label, title, children, className }: HelpTipProps) {
       }
     };
     const onPointer = (e: MouseEvent | PointerEvent) => {
-      const el = rootRef.current;
-      if (!el) return;
-      if (e.target instanceof Node && !el.contains(e.target)) {
-        close();
-      }
+      const t = e.target;
+      if (!(t instanceof Node)) return;
+      if (rootRef.current?.contains(t)) return;
+      if (panelRef.current?.contains(t)) return;
+      close();
     };
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("pointerdown", onPointer, true);
@@ -55,10 +202,65 @@ export function HelpTip({ label, title, children, className }: HelpTipProps) {
     };
   }, [open, close]);
 
+  const heading = content?.title ?? title;
+  const locator = content?.helpLocator;
+  const parsed = locator ? parseHelpLocator(locator) : null;
+
+  const panel =
+    open && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={panelRef}
+            id={panelId}
+            className="help-tip__popover help-tip__popover--portal"
+            role="dialog"
+            aria-modal="false"
+            aria-label={heading}
+            data-testid="help-tip-popover"
+            style={pos}
+          >
+            <div className="help-tip__head">
+              <strong className="help-tip__title">{heading}</strong>
+              <button
+                type="button"
+                className="help-tip__close"
+                aria-label="Close help"
+                onClick={() => {
+                  close();
+                  btnRef.current?.focus();
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <div className="help-tip__body">
+              {content ? <StructuredBody content={content} /> : children}
+            </div>
+            {parsed && onOpenHelp ? (
+              <div className="help-tip__footer">
+                <button
+                  type="button"
+                  className="help-tip__full-link"
+                  data-testid="help-tip-full-link"
+                  onClick={() => {
+                    onOpenHelp(parsed.pageId, parsed.anchor);
+                    close();
+                  }}
+                >
+                  Open full Help
+                </button>
+              </div>
+            ) : null}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <span
       className={["help-tip", className].filter(Boolean).join(" ")}
       ref={rootRef}
+      data-testid="help-tip"
     >
       <button
         ref={btnRef}
@@ -67,6 +269,7 @@ export function HelpTip({ label, title, children, className }: HelpTipProps) {
         aria-label={`Help: ${label}`}
         aria-expanded={open}
         aria-controls={panelId}
+        aria-haspopup="dialog"
         title={`Help: ${label}`}
         onClick={(e) => {
           e.preventDefault();
@@ -76,27 +279,7 @@ export function HelpTip({ label, title, children, className }: HelpTipProps) {
       >
         <IconHelp />
       </button>
-      {open ? (
-        <div
-          id={panelId}
-          className="help-tip__popover"
-          role="dialog"
-          aria-label={title}
-        >
-          <div className="help-tip__head">
-            <strong className="help-tip__title">{title}</strong>
-            <button
-              type="button"
-              className="help-tip__close"
-              aria-label="Close help"
-              onClick={close}
-            >
-              ×
-            </button>
-          </div>
-          <div className="help-tip__body">{children}</div>
-        </div>
-      ) : null}
+      {panel}
     </span>
   );
 }

@@ -68,6 +68,50 @@
   line-height: 1.45;
 }
 
+/* Portal mode: position is measured (fixed); ignore absolute anchors. */
+.help-tip__popover--portal {
+  position: fixed;
+  top: auto;
+  left: auto;
+  right: auto;
+  max-width: min(24rem, calc(100vw - 1rem));
+}
+
+.help-tip__callout {
+  margin: 0.5rem 0 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm, 4px);
+  border-left: 3px solid var(--warning, #d29922);
+  background: color-mix(in srgb, var(--warning, #d29922) 12%, transparent);
+}
+
+.help-tip__callout--privacy {
+  border-left-color: var(--accent, #58a6ff);
+  background: color-mix(in srgb, var(--accent, #58a6ff) 12%, transparent);
+}
+
+.help-tip__footer {
+  margin-top: 0.55rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border-subtle, var(--border));
+}
+
+.help-tip__full-link {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.help-tip__full-link:hover {
+  color: var(--text);
+}
+
 .help-tip__body p {
   margin: 0 0 0.55rem;
   font-size: 0.82rem;
