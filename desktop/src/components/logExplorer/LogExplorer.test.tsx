@@ -606,6 +606,103 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("keeps overlapping, empty, and paged lane counts honest across reverse response order", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "fixture",
+      eventCount: 35,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: {
+        "shared.log": 6,
+        "empty.log": 0,
+        "paged.log": 100,
+      },
+      levels: { info: 106 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    const pending = Array.from({ length: 4 }, () =>
+      deferred<host.EventPageDto>(),
+    );
+    let laneRequest = 0;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if ((query?.sources?.length ?? 0) === 0) {
+          return eventPage("all.log", "wall", 2, 1_700_000_000, 35);
+        }
+        return pending[laneRequest++]!.promise;
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "Shared A", sources: ["shared.log"] },
+        { id: "lane-1", label: "Shared B", sources: ["shared.log"] },
+        { id: "lane-2", label: "Empty", sources: ["empty.log"] },
+        { id: "lane-3", label: "Paged", sources: ["paged.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("paged.log");
+    fireEvent.click(screen.getByTitle("4 evidence lanes"));
+    await waitFor(() => expect(laneRequest).toBe(4));
+
+    const shared = eventPage("shared.log", "wall", 2, 1_700_000_000, 6);
+    shared.nextCursor = shared.events.at(-1)!.seq;
+    shared.nextTs = shared.events.at(-1)!.ts;
+    const paged = eventPage("paged.log", "wall", 1, 1_700_000_100, 100);
+    paged.nextCursor = paged.events[0]!.seq;
+    paged.nextTs = paged.events[0]!.ts;
+    await act(async () => {
+      pending[3]!.resolve(paged);
+      pending[1]!.resolve({ ...shared, events: [...shared.events] });
+      pending[0]!.resolve(shared);
+      pending[2]!.resolve(
+        eventPage("empty.log", "wall", 0, 1_700_000_050, 0),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-3").textContent).toContain(
+        "100 matched · 1+ resident",
+      ),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "6 matched · 2+ resident",
+    );
+    expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+      "6 matched · 2+ resident",
+    );
+    expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
+      "0 matched · 0 resident",
+    );
+    const global = screen.getByTestId("log-explorer-global-counts");
+    expect(global.textContent).toContain("35 corpus events");
+    expect(global.textContent).toContain("4 lane queries");
+    expect(global.textContent).not.toMatch(/112 matched|112 events/);
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /resident rows 5/,
+    );
+  });
+
   it("keeps linking off when a visible lane is empty or failed", async () => {
     vi.mocked(host.hostLogFacets).mockResolvedValue({
       sources: { "api.log": 1, "worker.log": 0, "db.log": 1 },
