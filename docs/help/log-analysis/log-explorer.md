@@ -35,7 +35,8 @@ import/export, and open investigation. It is not a million-row browser.
 | Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
 | Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; manual **Load older/newer** remains as fallback |
 | Timestamps | Adaptive UTC display (time-of-day on single-day corpora); full timestamp in the row tooltip; order-only never fabricates calendar time |
-| Long lines | **compact** / **wrap** / **full** line modes; Expand on truncated rows; resizable event inspector with Copy |
+| Columns | Drag or keyboard-resize Time / Level / Source columns; **Auto-fit cols** / **Reset cols**; widths persist in local preferences |
+| Long lines | **compact** / **wrap** / **full** line modes (preference persisted); Expand on truncated rows; virtualization accounts for expanded height; event inspector is drag-resizable (keyboard ↑/↓) with Copy |
 | Narrow layout | Filters and Chat open as drawers/tabs; single lane; event viewport keeps most of the height |
 | Evidence lanes | 1–4 source groups; optional timestamp link + gap bands |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |

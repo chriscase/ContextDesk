@@ -58,6 +58,14 @@ import {
   prependOlder,
   seedFromPage,
 } from "../../lib/logExplorer/residentWindow";
+import {
+  autoFitColWidths,
+  DEFAULT_COL_WIDTHS,
+  loadColWidths,
+  resizeCol,
+  saveColWidths,
+  type ColWidths,
+} from "../../lib/logExplorer/columnWidths";
 import { HelpTip } from "../HelpTip";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
@@ -159,11 +167,32 @@ export function LogExplorer({ corpusId }: Props) {
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
   >("idle");
-  const [lineMode, setLineMode] = useState<LineMode>("compact");
+  const [lineMode, setLineMode] = useState<LineMode>(() => {
+    try {
+      const v = localStorage.getItem("contextdesk.logExplorer.lineMode.v1");
+      if (v === "compact" || v === "wrap" || v === "full") return v;
+    } catch {
+      /* ignore */
+    }
+    return "compact";
+  });
   const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set());
+  const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
-  const [detailH, setDetailH] = useState(180);
+  const [detailH, setDetailH] = useState(() => {
+    try {
+      const n = Number(localStorage.getItem("contextdesk.logExplorer.detailH.v1"));
+      if (Number.isFinite(n) && n >= 120 && n <= 640) return n;
+    } catch {
+      /* ignore */
+    }
+    return 180;
+  });
+  const detailDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const colDragRef = useRef<{ index: 0 | 1 | 2; startX: number; startW: number } | null>(
+    null,
+  );
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -175,6 +204,58 @@ export function LogExplorer({ corpusId }: Props) {
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+
+  useEffect(() => {
+    saveColWidths(colWidths);
+  }, [colWidths]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("contextdesk.logExplorer.lineMode.v1", lineMode);
+    } catch {
+      /* ignore */
+    }
+  }, [lineMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("contextdesk.logExplorer.detailH.v1", String(detailH));
+    } catch {
+      /* ignore */
+    }
+  }, [detailH]);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (colDragRef.current) {
+        const { index, startX, startW } = colDragRef.current;
+        const deltaRem = (e.clientX - startX) / 16;
+        setColWidths((w) => {
+          const next = [...w] as ColWidths;
+          next[index] = startW + deltaRem;
+          return resizeCol(next, index, 0);
+        });
+      }
+      if (detailDragRef.current) {
+        const dy = detailDragRef.current.startY - e.clientY;
+        setDetailH(
+          Math.min(640, Math.max(120, detailDragRef.current.startH + dy)),
+        );
+      }
+    };
+    const onUp = () => {
+      colDragRef.current = null;
+      detailDragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
 
   // Breakpoint observer
   useEffect(() => {
@@ -1197,12 +1278,87 @@ export function LogExplorer({ corpusId }: Props) {
           <button
             type="button"
             className="log-explorer__btn"
+            data-testid="col-autofit"
+            title="Auto-fit columns to source lengths"
+            onClick={() => {
+              const sources = Object.keys(facets?.sources ?? {});
+              setColWidths(autoFitColWidths(sources));
+              setStatus("Columns auto-fitted");
+            }}
+          >
+            Auto-fit cols
+          </button>
+          <button
+            type="button"
+            className="log-explorer__btn"
+            data-testid="col-reset"
+            title="Reset column widths to defaults"
+            onClick={() => {
+              setColWidths([...DEFAULT_COL_WIDTHS]);
+              setStatus("Column widths reset");
+            }}
+          >
+            Reset cols
+          </button>
+          <button
+            type="button"
+            className="log-explorer__btn"
             onClick={() => void bookmarkSelection()}
           >
             Bookmark (B)
           </button>
         </div>
       </header>
+
+      <div
+        className="log-explorer__col-headers"
+        data-testid="log-explorer-col-headers"
+        role="row"
+        style={{
+          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(8rem, 1fr)`,
+        }}
+      >
+        {(
+          [
+            { label: "Time", index: 0 as const },
+            { label: "Lvl", index: 1 as const },
+            { label: "Source", index: 2 as const },
+          ] as const
+        ).map((col) => (
+          <div key={col.label} className="log-explorer__col-header" role="columnheader">
+            <span>{col.label}</span>
+            <button
+              type="button"
+              className="log-explorer__col-resizer"
+              data-testid={`col-resize-${col.index}`}
+              aria-label={`Resize ${col.label} column`}
+              title="Drag or use ← → to resize"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                colDragRef.current = {
+                  index: col.index,
+                  startX: e.clientX,
+                  startW: colWidths[col.index],
+                };
+                document.body.style.cursor = "col-resize";
+                document.body.style.userSelect = "none";
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  setColWidths((w) => resizeCol(w, col.index, -0.5));
+                } else if (e.key === "ArrowRight") {
+                  e.preventDefault();
+                  setColWidths((w) => resizeCol(w, col.index, 0.5));
+                }
+              }}
+            />
+          </div>
+        ))}
+        <div className="log-explorer__col-header" role="columnheader">
+          Message
+        </div>
+      </div>
 
       {breakpoint === "narrow" && (
         <div
@@ -1571,6 +1727,7 @@ export function LogExplorer({ corpusId }: Props) {
                     highlight={highlight}
                     density={density}
                     lineMode={lineMode}
+                    colWidths={colWidths}
                     expandedSeqs={expandedSeqs}
                     onToggleExpand={toggleExpand}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
@@ -1612,8 +1769,34 @@ export function LogExplorer({ corpusId }: Props) {
             <div
               className="log-explorer__detail"
               data-testid="log-explorer-detail"
-              style={{ maxHeight: detailH }}
+              style={{ height: detailH, maxHeight: detailH }}
             >
+              <div
+                className="log-explorer__detail-resize"
+                data-testid="detail-resize-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize event inspector"
+                tabIndex={0}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  detailDragRef.current = {
+                    startY: e.clientY,
+                    startH: detailH,
+                  };
+                  document.body.style.cursor = "row-resize";
+                  document.body.style.userSelect = "none";
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setDetailH((h) => Math.min(640, h + 20));
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setDetailH((h) => Math.max(120, h - 20));
+                  }
+                }}
+              />
               <div className="log-explorer__detail-toolbar">
                 <strong>Event inspector · seq {detail.seq}</strong>
                 <button
@@ -1628,14 +1811,6 @@ export function LogExplorer({ corpusId }: Props) {
                   }}
                 >
                   Copy
-                </button>
-                <button
-                  type="button"
-                  className="log-explorer__btn"
-                  data-testid="detail-taller"
-                  onClick={() => setDetailH((h) => Math.min(480, h + 60))}
-                >
-                  Taller
                 </button>
                 <button
                   type="button"
