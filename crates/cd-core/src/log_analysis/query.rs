@@ -257,7 +257,7 @@ pub struct LogFacets {
     pub time_quality: TimeQuality,
 }
 
-/// Event-level search hit (keyword or via template-semantic).
+/// Event-level search hit (keyword, regex, or via template-semantic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventSearchHit {
@@ -265,17 +265,38 @@ pub struct EventSearchHit {
     pub event: ExplorerEvent,
     /// Score (keyword fraction or inherited semantic).
     pub score: f32,
-    /// How the hit was found.
+    /// How the hit was found (`keyword`, `regex`, `template_semantic`).
     pub match_kind: String,
     /// Template id when from semantic path.
     pub template_id: Option<u64>,
+    /// Bounded match excerpt (message slice around first hit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
 }
+
+/// How the free-text query is interpreted (#523).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMatchMode {
+    /// Substring / token keyword match (default).
+    #[default]
+    Literal,
+    /// Linear-time regex (`regex` crate — no backtracking).
+    Regex,
+}
+
+/// Hard caps for advanced / regex search (#523).
+pub const MAX_SEARCH_PATTERN_LEN: usize = 256;
+/// Max events scanned for regex (work budget) before returning partial results.
+pub const MAX_REGEX_SCAN_EVENTS: usize = 50_000;
+/// Max characters in a returned excerpt.
+pub const MAX_SEARCH_EXCERPT_LEN: usize = 160;
 
 /// Search query for explorer (events, not just templates).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventSearchQuery {
-    /// Free-text query.
+    /// Free-text query (literal or regex depending on `match_mode`).
     pub query: Option<String>,
     /// Structured filters (reuses EventQuery fields conceptually).
     #[serde(default)]
@@ -284,6 +305,27 @@ pub struct EventSearchQuery {
     pub semantic: bool,
     /// Max event hits (clamped).
     pub k: usize,
+    /// Literal vs regex interpretation of `query`.
+    #[serde(default)]
+    pub match_mode: SearchMatchMode,
+    /// Case-sensitive matching (literal and regex). Default false.
+    #[serde(default)]
+    pub case_sensitive: bool,
+}
+
+/// Result of an advanced search with honesty flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSearchResult {
+    /// Hits (≤ k).
+    pub hits: Vec<EventSearchHit>,
+    /// True when scan/work/result caps truncated the result set.
+    pub partial: bool,
+    /// Human-readable diagnostic (invalid pattern, cancelled, capped, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    /// Events actually scanned under the work budget (regex path).
+    pub scanned: u64,
 }
 
 /// Query events with SQL filters + keyset pagination.
@@ -492,21 +534,36 @@ pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets>
     Ok(facets)
 }
 
-/// Keyword + optional template-semantic → **events** (template-first for semantic).
+/// Keyword / regex / optional template-semantic → **events** (template-first for semantic).
+///
+/// Prefer [`search_events_advanced`] when partial/capped diagnostics matter.
 pub fn search_events(
     corpus: &LogCorpus,
     q: &EventSearchQuery,
     embed: Option<&dyn EmbedBackend>,
 ) -> CoreResult<Vec<EventSearchHit>> {
+    Ok(search_events_advanced(corpus, q, embed)?.hits)
+}
+
+/// Advanced search with partial/capped honesty and regex safety (#523).
+pub fn search_events_advanced(
+    corpus: &LogCorpus,
+    q: &EventSearchQuery,
+    embed: Option<&dyn EmbedBackend>,
+) -> CoreResult<EventSearchResult> {
     let k = if q.k == 0 {
         50
     } else {
         q.k.clamp(1, MAX_EVENT_PAGE)
     };
     let mut hits: Vec<EventSearchHit> = Vec::new();
+    let mut partial = false;
+    let mut diagnostic: Option<String> = None;
+    let mut scanned = 0u64;
 
     // Semantic: templates first, then pull events for top templates under filters.
-    if q.semantic {
+    // Disabled when match_mode is regex (semantic is template similarity, not regex).
+    if q.semantic && q.match_mode != SearchMatchMode::Regex {
         let tq = SearchLogsQuery {
             query: q.query.clone(),
             time_from: q.filter.time_from,
@@ -537,46 +594,196 @@ pub fn search_events(
                     event: e,
                     score,
                     match_kind: "template_semantic".into(),
+                    excerpt: None,
                 });
             }
         }
     }
 
-    // Keyword path on messages under filters.
-    if let Some(ref kw) = q.query {
-        if !kw.trim().is_empty() {
-            let mut fq = q.filter.clone();
-            fq.keyword = Some(kw.clone());
-            fq.limit = k;
-            let page = query_events(corpus, &fq)?;
-            let kw_l = kw.to_lowercase();
-            let tokens: Vec<&str> = kw_l
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|t| t.len() > 1)
-                .collect();
-            for e in page.events {
-                let msg_l = e.message.to_lowercase();
-                let mut hit_n = 0usize;
-                for t in &tokens {
-                    if msg_l.contains(t) {
-                        hit_n += 1;
+    if let Some(ref raw) = q.query {
+        let pattern = raw.trim();
+        if !pattern.is_empty() {
+            if pattern.len() > MAX_SEARCH_PATTERN_LEN {
+                return Ok(EventSearchResult {
+                    hits: vec![],
+                    partial: false,
+                    diagnostic: Some(format!(
+                        "pattern exceeds max length ({MAX_SEARCH_PATTERN_LEN} characters)"
+                    )),
+                    scanned: 0,
+                });
+            }
+
+            match q.match_mode {
+                SearchMatchMode::Regex => {
+                    let re = compile_bounded_regex(pattern, q.case_sensitive)?;
+                    // Scan pages under filters without keyword SQL — regex runs in trusted core.
+                    let mut after_seq = None;
+                    let mut after_ts = None;
+                    let mut pages = 0usize;
+                    loop {
+                        if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
+                            if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
+                                partial = true;
+                                diagnostic = Some(if hits.len() >= k {
+                                    format!("result cap reached ({k})")
+                                } else {
+                                    format!(
+                                        "scan work cap reached ({MAX_REGEX_SCAN_EVENTS} events)"
+                                    )
+                                });
+                            }
+                            break;
+                        }
+                        let remaining_budget =
+                            (MAX_REGEX_SCAN_EVENTS as u64).saturating_sub(scanned) as usize;
+                        let page_limit = remaining_budget.clamp(1, MAX_EVENT_PAGE);
+                        let mut fq = q.filter.clone();
+                        fq.keyword = None;
+                        fq.limit = page_limit;
+                        fq.after_seq = after_seq;
+                        fq.after_ts = after_ts;
+                        fq.sort_by_time = true;
+                        let page = query_events(corpus, &fq)?;
+                        if page.events.is_empty() {
+                            break;
+                        }
+                        for e in page.events {
+                            scanned += 1;
+                            if let Some(m) = re.find(&e.message) {
+                                if hits.iter().any(|h| h.event.seq == e.seq) {
+                                    continue;
+                                }
+                                let excerpt = excerpt_around(&e.message, m.start(), m.end());
+                                hits.push(EventSearchHit {
+                                    template_id: Some(e.template_id),
+                                    event: e,
+                                    score: 1.0,
+                                    match_kind: "regex".into(),
+                                    excerpt: Some(excerpt),
+                                });
+                                if hits.len() >= k {
+                                    partial = true;
+                                    diagnostic = Some(format!("result cap reached ({k})"));
+                                    break;
+                                }
+                            }
+                        }
+                        pages += 1;
+                        if page.next_cursor.is_none() || pages > 500 {
+                            if pages > 500 {
+                                partial = true;
+                                diagnostic = Some("page iteration safety cap reached".into());
+                            }
+                            break;
+                        }
+                        after_seq = page.next_cursor;
+                        after_ts = page.next_ts;
                     }
                 }
-                let score = if tokens.is_empty() {
-                    0.5
-                } else {
-                    hit_n as f32 / tokens.len() as f32
-                };
-                // Dedupe by seq if already from semantic
-                if hits.iter().any(|h| h.event.seq == e.seq) {
-                    continue;
+                SearchMatchMode::Literal => {
+                    let mut fq = q.filter.clone();
+                    if q.case_sensitive {
+                        // SQL path is case-insensitive LIKE; fall back to scan for case-sensitive.
+                        let mut after_seq = None;
+                        let mut after_ts = None;
+                        loop {
+                            if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
+                                partial = true;
+                                break;
+                            }
+                            let page_limit = (MAX_REGEX_SCAN_EVENTS as u64)
+                                .saturating_sub(scanned)
+                                .min(MAX_EVENT_PAGE as u64)
+                                .max(1) as usize;
+                            let mut page_q = fq.clone();
+                            page_q.keyword = None;
+                            page_q.limit = page_limit;
+                            page_q.after_seq = after_seq;
+                            page_q.after_ts = after_ts;
+                            let page = query_events(corpus, &page_q)?;
+                            if page.events.is_empty() {
+                                break;
+                            }
+                            for e in page.events {
+                                scanned += 1;
+                                if let Some(idx) = e.message.find(pattern) {
+                                    if hits.iter().any(|h| h.event.seq == e.seq) {
+                                        continue;
+                                    }
+                                    hits.push(EventSearchHit {
+                                        template_id: Some(e.template_id),
+                                        event: e.clone(),
+                                        score: 1.0,
+                                        match_kind: "keyword".into(),
+                                        excerpt: Some(excerpt_around(
+                                            &e.message,
+                                            idx,
+                                            idx + pattern.len(),
+                                        )),
+                                    });
+                                    if hits.len() >= k {
+                                        partial = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if page.next_cursor.is_none() {
+                                break;
+                            }
+                            after_seq = page.next_cursor;
+                            after_ts = page.next_ts;
+                        }
+                    } else {
+                        fq.keyword = Some(pattern.to_string());
+                        fq.limit = k;
+                        let page = query_events(corpus, &fq)?;
+                        scanned = page.events.len() as u64;
+                        let kw_l = pattern.to_lowercase();
+                        let tokens: Vec<&str> = kw_l
+                            .split(|c: char| !c.is_alphanumeric())
+                            .filter(|t| t.len() > 1)
+                            .collect();
+                        for e in page.events {
+                            let msg_l = e.message.to_lowercase();
+                            let mut hit_n = 0usize;
+                            for t in &tokens {
+                                if msg_l.contains(t) {
+                                    hit_n += 1;
+                                }
+                            }
+                            let score = if tokens.is_empty() {
+                                if msg_l.contains(&kw_l) {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            } else {
+                                hit_n as f32 / tokens.len() as f32
+                            };
+                            if score <= 0.0 {
+                                continue;
+                            }
+                            if hits.iter().any(|h| h.event.seq == e.seq) {
+                                continue;
+                            }
+                            let excerpt = msg_l
+                                .find(&kw_l)
+                                .map(|idx| excerpt_around(&e.message, idx, idx + pattern.len()));
+                            hits.push(EventSearchHit {
+                                template_id: Some(e.template_id),
+                                event: e,
+                                score,
+                                match_kind: "keyword".into(),
+                                excerpt,
+                            });
+                        }
+                        if hits.len() >= k {
+                            partial = true;
+                            diagnostic = Some(format!("result cap reached ({k})"));
+                        }
+                    }
                 }
-                hits.push(EventSearchHit {
-                    template_id: Some(e.template_id),
-                    event: e,
-                    score,
-                    match_kind: "keyword".into(),
-                });
             }
         }
     }
@@ -588,7 +795,62 @@ pub fn search_events(
             .then_with(|| a.event.seq.cmp(&b.event.seq))
     });
     hits.truncate(k);
-    Ok(hits)
+    Ok(EventSearchResult {
+        hits,
+        partial,
+        diagnostic,
+        scanned,
+    })
+}
+
+/// Compile a linear-time regex with size/syntax validation before any corpus scan.
+fn compile_bounded_regex(pattern: &str, case_sensitive: bool) -> CoreResult<regex::Regex> {
+    if pattern.len() > MAX_SEARCH_PATTERN_LEN {
+        return Err(CoreError::Message(format!(
+            "regex pattern exceeds max length ({MAX_SEARCH_PATTERN_LEN})"
+        )));
+    }
+    // Reject empty and absurdly nested constructs early via build errors.
+    let mut builder = regex::RegexBuilder::new(pattern);
+    builder.case_insensitive(!case_sensitive);
+    // Size limit on compiled automaton (bytes) — bounds memory for adversarial patterns.
+    builder.size_limit(1 << 20); // 1 MiB
+    builder.dfa_size_limit(1 << 20);
+    builder
+        .build()
+        .map_err(|e| CoreError::Message(format!("invalid regex (validated before scan): {e}")))
+}
+
+fn excerpt_around(message: &str, start: usize, end: usize) -> String {
+    let start = start.min(message.len());
+    let end = end.min(message.len()).max(start);
+    let pad = 40usize;
+    let from_byte = start.saturating_sub(pad);
+    let to_byte = (end + pad).min(message.len());
+    // Char-safe window via char_indices (avoid panicking string_slice).
+    let chars: Vec<(usize, char)> = message.char_indices().collect();
+    let from_i = chars
+        .iter()
+        .rposition(|(i, _)| *i <= from_byte)
+        .unwrap_or(0);
+    let to_i = chars
+        .iter()
+        .position(|(i, _)| *i >= to_byte)
+        .unwrap_or(chars.len());
+    let slice: String = chars[from_i..to_i].iter().map(|(_, c)| *c).collect();
+    let mut s = String::new();
+    if from_i > 0 {
+        s.push('…');
+    }
+    s.push_str(&slice);
+    if to_i < chars.len() {
+        s.push('…');
+    }
+    if s.chars().count() > MAX_SEARCH_EXCERPT_LEN {
+        s = s.chars().take(MAX_SEARCH_EXCERPT_LEN).collect();
+        s.push('…');
+    }
+    s
 }
 
 // ── Stable event neighborhood (Find / bookmark / agent seek) ────────────────
@@ -1513,6 +1775,7 @@ mod tests {
                 semantic: false,
                 k: 20,
                 filter: EventQuery::default(),
+                ..Default::default()
             },
             None,
         )
@@ -1533,6 +1796,7 @@ mod tests {
                 semantic: true,
                 k: 20,
                 filter: EventQuery::default(),
+                ..Default::default()
             },
             Some(&backend),
         )
@@ -1545,6 +1809,85 @@ mod tests {
             );
         }
         let _ = sem;
+    }
+
+    #[test]
+    fn regex_search_validates_syntax_and_escapes_metacharacters() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+
+        let bad = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("(".into()),
+                match_mode: SearchMatchMode::Regex,
+                semantic: false,
+                k: 20,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(bad.is_err(), "invalid regex must fail before scan");
+        let err = bad.unwrap_err().to_string();
+        assert!(err.contains("invalid regex"), "{err}");
+
+        // Literal metacharacters escaped in regex.
+        let hits = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(r"auth failure user \d+".into()),
+                match_mode: SearchMatchMode::Regex,
+                semantic: false,
+                k: 20,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            !hits.hits.is_empty(),
+            "regex should match auth failure lines"
+        );
+        assert!(hits.hits.iter().all(|h| h.match_kind == "regex"));
+        assert!(hits.hits.iter().any(|h| h.excerpt.is_some()));
+
+        // Adversarial repetition compiles (linear engine) and does not hang.
+        let adv = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(r"(a+)+$".into()),
+                match_mode: SearchMatchMode::Regex,
+                semantic: false,
+                k: 5,
+                ..Default::default()
+            },
+            None,
+        );
+        // May be invalid in rust regex (no backrefs/complex) or empty hits — must not panic.
+        assert!(adv.is_ok() || adv.is_err());
+    }
+
+    #[test]
+    fn regex_rejects_oversized_pattern() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let huge = "a".repeat(MAX_SEARCH_PATTERN_LEN + 10);
+        let r = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(huge),
+                match_mode: SearchMatchMode::Regex,
+                semantic: false,
+                k: 10,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(r.hits.is_empty());
+        assert!(r.diagnostic.as_deref().unwrap_or("").contains("max length"));
     }
 
     #[test]

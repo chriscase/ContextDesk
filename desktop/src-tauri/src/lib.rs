@@ -4492,29 +4492,45 @@ fn log_facets(
     cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
 }
 
-/// Keyword + template-semantic event search (template-first semantic).
-#[tauri::command]
-fn log_search_events(
-    state: State<'_, AppState>,
+/// IPC args for advanced log search (#523).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogSearchEventsArgs {
     corpus_id: String,
     query: Option<String>,
     semantic: Option<bool>,
     k: Option<u32>,
     filter: Option<cd_core::log_analysis::EventQuery>,
-) -> Result<Vec<cd_core::log_analysis::EventSearchHit>, String> {
+    match_mode: Option<String>,
+    case_sensitive: Option<bool>,
+}
+
+/// Keyword / regex / template-semantic event search (template-first semantic).
+/// Returns advanced result with partial/capped diagnostics (#523).
+#[tauri::command]
+fn log_search_events(
+    state: State<'_, AppState>,
+    args: LogSearchEventsArgs,
+) -> Result<cd_core::log_analysis::EventSearchResult, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let host = state.host.lock().expect("host");
     let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let q = cd_core::log_analysis::EventSearchQuery {
-        query,
-        semantic: semantic.unwrap_or(true),
-        k: k.unwrap_or(50) as usize,
-        filter: filter.unwrap_or_default(),
+    let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let mode = match args.match_mode.as_deref() {
+        Some("regex") => cd_core::log_analysis::SearchMatchMode::Regex,
+        _ => cd_core::log_analysis::SearchMatchMode::Literal,
     };
-    cd_core::log_analysis::search_events(&c, &q, host.log_embed_backend().as_deref())
+    let q = cd_core::log_analysis::EventSearchQuery {
+        query: args.query,
+        semantic: args.semantic.unwrap_or(true),
+        k: args.k.unwrap_or(50) as usize,
+        filter: args.filter.unwrap_or_default(),
+        match_mode: mode,
+        case_sensitive: args.case_sensitive.unwrap_or(false),
+    };
+    cd_core::log_analysis::search_events_advanced(&c, &q, host.log_embed_backend().as_deref())
         .map_err(|e| e.to_string())
 }
 
