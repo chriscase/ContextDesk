@@ -9,6 +9,10 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
+#[path = "log_lab_behavior.rs"]
+mod log_lab_behavior;
+pub use log_lab_behavior::*;
+
 pub type LabResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 pub const TRUTH_SCHEMA_VERSION: u32 = 1;
@@ -209,7 +213,7 @@ pub fn generate_scale(
     summarize_generation(root, profile, event_count)
 }
 
-fn ensure_empty_generation_target(root: &Path) -> LabResult<()> {
+pub(super) fn ensure_empty_generation_target(root: &Path) -> LabResult<()> {
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         return Err(format!(
             "generation target must be absent or empty: {}",
@@ -966,7 +970,7 @@ fn truth_schema() -> Value {
     })
 }
 
-fn json_line(
+pub(super) fn json_line(
     ts: i64,
     level: &str,
     service: &str,
@@ -985,7 +989,7 @@ fn json_line(
     .to_string()
 }
 
-fn logfmt(
+pub(super) fn logfmt(
     ts: i64,
     level: &str,
     service: &str,
@@ -1020,7 +1024,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> LabResult<()> {
     Ok(())
 }
 
-fn write_json(path: &Path, value: &Value) -> LabResult<()> {
+pub(super) fn write_json(path: &Path, value: &Value) -> LabResult<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
     write_bytes(path, &bytes)
@@ -1238,7 +1242,10 @@ pub fn tree_hashes(root: &Path) -> LabResult<BTreeMap<String, String>> {
     hashes_for_paths(root, &files)
 }
 
-fn hashes_for_paths(root: &Path, paths: &[PathBuf]) -> LabResult<BTreeMap<String, String>> {
+pub(super) fn hashes_for_paths(
+    root: &Path,
+    paths: &[PathBuf],
+) -> LabResult<BTreeMap<String, String>> {
     let mut hashes = BTreeMap::new();
     for path in paths {
         let rel = path
@@ -1300,7 +1307,11 @@ fn count_import_events(root: &Path) -> LabResult<usize> {
     Ok(count)
 }
 
-fn summarize_generation(root: &Path, profile: &str, events: usize) -> LabResult<GenerationSummary> {
+pub(super) fn summarize_generation(
+    root: &Path,
+    profile: &str,
+    events: usize,
+) -> LabResult<GenerationSummary> {
     let hashes = tree_hashes(root)?;
     let mut tree_hasher = Sha256::new();
     let mut bytes = 0u64;

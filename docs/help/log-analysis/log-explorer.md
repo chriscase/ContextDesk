@@ -43,6 +43,31 @@ import/export, and open investigation. It is not a million-row browser.
 | Agent context | **Context shared with agent** discloses filters/lanes/selection counts; full dumps stay out of chat context |
 | Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
 
+## Log Lab scale profiles (synthetic)
+
+For offline/local scale testing, generate synthetic corpora with the Log Lab
+example (never commit large output):
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- --profile ui-medium --estimate-only
+cargo run -p cd-core --example generate_log_lab -- \
+  --output /tmp/contextdesk-log-lab-ui-medium --profile ui-medium --record-perf
+```
+
+| Profile | Use |
+| --- | --- |
+| `small` | Checked-in mystery scenarios |
+| `medium` | Legacy regular 100k smoke |
+| `ui-medium` | 100k, 8 sources, multi-day, Find/bookmark sentinels |
+| `seven-day` | Sparse/burst over seven days (event count independent of span) |
+| `paging-stress` | Boundary sentinels for paging/eviction |
+| `large` | Opt-in million-event stress (local only) |
+
+Import `scenarios/behavior-scale/import/` (or a compact scenario's `import/`),
+never the scenario parent. Performance numbers from `--record-perf` are
+one-machine observations, not universal claims. Full generator docs:
+`fixtures/log-lab/README.md`.
+
 ## SoftWrite import vs session pack
 
 | Path | Limit | Use |
