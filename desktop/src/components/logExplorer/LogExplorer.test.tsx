@@ -232,6 +232,15 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("focuses Find with the platform find shortcut", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    const input = screen.getByTestId("log-explorer-find");
+    expect(document.activeElement).not.toBe(input);
+    fireEvent.keyDown(root, { key: "f", metaKey: true });
+    expect(document.activeElement).toBe(input);
+  });
+
   it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
     const bookmark: host.LogBookmarkDto = {
       id: "bm-worker",
@@ -1085,6 +1094,200 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({ semantic: false }),
       ),
     );
+  });
+
+  it("navigates cursor-paged Find results without materializing every hit", async () => {
+    const findEvent = (seq: number): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: seq % 2 === 0 ? "error" : "info",
+      service: "api",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message: `needle result ${seq}`,
+      source: "api.log",
+    });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, query) => {
+        const after = query?.filter?.afterSeq;
+        const events =
+          after === 11
+            ? [findEvent(12), findEvent(13)]
+            : [findEvent(10), findEvent(11)];
+        return {
+          hits: events.map((event) => ({
+            event,
+            score: 1,
+            matchKind: "keyword",
+            templateId: event.templateId,
+          })),
+          nextCursor: after === 11 ? null : 11,
+          nextTs: after === 11 ? null : findEvent(11).ts,
+          totalMatched: 4,
+          partial: after !== 11,
+          scanned: events.length,
+        };
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const target = findEvent(query.targetSeq);
+        return {
+          status: "found",
+          target,
+          targetIndex: 0,
+          events: [target],
+          totalMatched: 10,
+          corpusTotal: 10,
+          timeQuality: "wall",
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        k: 50,
+        filter: expect.objectContaining({
+          afterSeq: null,
+          afterTs: null,
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    expect(
+      await screen.findByText(/Match 2 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    expect(
+      await screen.findByText(/Match 3 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        filter: expect.objectContaining({
+          afterSeq: 11,
+          afterTs: findEvent(11).ts,
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-prev"));
+    expect(
+      await screen.findByText(/Match 2 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        filter: expect.objectContaining({
+          afterSeq: null,
+          afterTs: null,
+        }),
+      }),
+    );
+
+    const errorFacet = screen.getByText("error").closest("label");
+    expect(errorFacet).toBeTruthy();
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({
+          filter: expect.objectContaining({
+            levels: ["error"],
+            afterSeq: null,
+            afterTs: null,
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("does not allow a late Find response to replace a newer query", async () => {
+    const oldSearch = deferred<host.EventSearchResultDto>();
+    const resultEvent = (seq: number, message: string): host.ExplorerEventDto => ({
+      ...defaultEventPage().events[0]!,
+      seq,
+      ts: 1_700_000_000 + seq,
+      message,
+    });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.query === "old") return oldSearch.promise;
+        const event = resultEvent(20, "new result");
+        return {
+          hits: [
+            {
+              event,
+              score: 1,
+              matchKind: "keyword",
+              templateId: event.templateId,
+            },
+          ],
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: 1,
+          partial: false,
+          scanned: 1,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const find = screen.getByTestId("log-explorer-find");
+    fireEvent.change(find, { target: { value: "old" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ query: "old" }),
+      ),
+    );
+
+    fireEvent.change(find, { target: { value: "new" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+
+    await act(async () => {
+      const staleEvent = resultEvent(10, "old stale result");
+      oldSearch.resolve({
+        hits: [
+          {
+            event: staleEvent,
+            score: 1,
+            matchKind: "keyword",
+            templateId: staleEvent.templateId,
+          },
+        ],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 99,
+        partial: false,
+        scanned: 99,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
   });
 
   it("creates, sends, persists, and reopens a linked chat", async () => {

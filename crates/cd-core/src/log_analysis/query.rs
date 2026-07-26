@@ -319,6 +319,15 @@ pub struct EventSearchQuery {
 pub struct EventSearchResult {
     /// Hits (≤ k).
     pub hits: Vec<EventSearchHit>,
+    /// Composite cursor for the next chronological result page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// Timestamp paired with `next_cursor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_ts: Option<i64>,
+    /// Exact total for SQL-backed literal search; unavailable for bounded scans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_matched: Option<u64>,
     /// True when scan/work/result caps truncated the result set.
     pub partial: bool,
     /// Human-readable diagnostic (invalid pattern, cancelled, capped, …).
@@ -560,6 +569,10 @@ pub fn search_events_advanced(
     let mut partial = false;
     let mut diagnostic: Option<String> = None;
     let mut scanned = 0u64;
+    let mut next_cursor = None;
+    let mut next_ts = None;
+    let mut total_matched = None;
+    let mut last_scanned: Option<(i64, u64)> = None;
 
     // Semantic: templates first, then pull events for top templates under filters.
     // Disabled when match_mode is regex (semantic is template similarity, not regex).
@@ -606,6 +619,9 @@ pub fn search_events_advanced(
             if pattern.len() > MAX_SEARCH_PATTERN_LEN {
                 return Ok(EventSearchResult {
                     hits: vec![],
+                    next_cursor: None,
+                    next_ts: None,
+                    total_matched: Some(0),
                     partial: false,
                     diagnostic: Some(format!(
                         "pattern exceeds max length ({MAX_SEARCH_PATTERN_LEN} characters)"
@@ -618,8 +634,8 @@ pub fn search_events_advanced(
                 SearchMatchMode::Regex => {
                     let re = compile_bounded_regex(pattern, q.case_sensitive)?;
                     // Scan pages under filters without keyword SQL — regex runs in trusted core.
-                    let mut after_seq = None;
-                    let mut after_ts = None;
+                    let mut after_seq = q.filter.after_seq;
+                    let mut after_ts = q.filter.after_ts;
                     let mut pages = 0usize;
                     loop {
                         if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
@@ -643,6 +659,8 @@ pub fn search_events_advanced(
                         fq.limit = page_limit;
                         fq.after_seq = after_seq;
                         fq.after_ts = after_ts;
+                        fq.before_seq = None;
+                        fq.before_ts = None;
                         fq.sort_by_time = true;
                         let page = query_events(corpus, &fq)?;
                         if page.events.is_empty() {
@@ -650,6 +668,7 @@ pub fn search_events_advanced(
                         }
                         for e in page.events {
                             scanned += 1;
+                            last_scanned = Some((e.ts, e.seq));
                             if let Some(m) = re.find(&e.message) {
                                 if hits.iter().any(|h| h.event.seq == e.seq) {
                                     continue;
@@ -685,8 +704,8 @@ pub fn search_events_advanced(
                     let mut fq = q.filter.clone();
                     if q.case_sensitive {
                         // SQL path is case-insensitive LIKE; fall back to scan for case-sensitive.
-                        let mut after_seq = None;
-                        let mut after_ts = None;
+                        let mut after_seq = q.filter.after_seq;
+                        let mut after_ts = q.filter.after_ts;
                         loop {
                             if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
                                 partial = true;
@@ -701,12 +720,16 @@ pub fn search_events_advanced(
                             page_q.limit = page_limit;
                             page_q.after_seq = after_seq;
                             page_q.after_ts = after_ts;
+                            page_q.before_seq = None;
+                            page_q.before_ts = None;
+                            page_q.sort_by_time = true;
                             let page = query_events(corpus, &page_q)?;
                             if page.events.is_empty() {
                                 break;
                             }
                             for e in page.events {
                                 scanned += 1;
+                                last_scanned = Some((e.ts, e.seq));
                                 if let Some(idx) = e.message.find(pattern) {
                                     if hits.iter().any(|h| h.event.seq == e.seq) {
                                         continue;
@@ -738,6 +761,9 @@ pub fn search_events_advanced(
                         fq.keyword = Some(pattern.to_string());
                         fq.limit = k;
                         let page = query_events(corpus, &fq)?;
+                        if !q.semantic {
+                            total_matched = Some(page.total_matched);
+                        }
                         scanned = page.events.len() as u64;
                         let kw_l = pattern.to_lowercase();
                         let tokens: Vec<&str> = kw_l
@@ -788,15 +814,36 @@ pub fn search_events_advanced(
         }
     }
 
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.event.seq.cmp(&b.event.seq))
-    });
+    if q.semantic {
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.event.seq.cmp(&b.event.seq))
+        });
+    } else {
+        hits.sort_by(|a, b| {
+            a.event
+                .ts
+                .cmp(&b.event.ts)
+                .then_with(|| a.event.seq.cmp(&b.event.seq))
+        });
+    }
     hits.truncate(k);
+    if !q.semantic && partial {
+        if let Some(last) = hits.last() {
+            next_cursor = Some(last.event.seq);
+            next_ts = Some(last.event.ts);
+        } else if let Some((ts, seq)) = last_scanned {
+            next_cursor = Some(seq);
+            next_ts = Some(ts);
+        }
+    }
     Ok(EventSearchResult {
         hits,
+        next_cursor,
+        next_ts,
+        total_matched,
         partial,
         diagnostic,
         scanned,
@@ -1866,6 +1913,105 @@ mod tests {
         );
         // May be invalid in rust regex (no backrefs/complex) or empty hits — must not panic.
         assert!(adv.is_ok() || adv.is_err());
+    }
+
+    #[test]
+    fn search_result_cursor_pages_literal_without_gaps_or_duplicates() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let mut after_seq = None;
+        let mut after_ts = None;
+        let mut seen = Vec::new();
+        let mut pages = 0;
+
+        loop {
+            let result = search_events_advanced(
+                &corpus,
+                &EventSearchQuery {
+                    query: Some("auth failure".into()),
+                    semantic: false,
+                    k: 7,
+                    filter: EventQuery {
+                        after_seq,
+                        after_ts,
+                        sort_by_time: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(result.total_matched, Some(40));
+            for pair in result.hits.windows(2) {
+                assert!(
+                    pair[0].event.ts < pair[1].event.ts
+                        || (pair[0].event.ts == pair[1].event.ts
+                            && pair[0].event.seq < pair[1].event.seq)
+                );
+            }
+            seen.extend(result.hits.iter().map(|hit| hit.event.seq));
+            pages += 1;
+            match (result.next_cursor, result.next_ts) {
+                (Some(seq), Some(ts)) => {
+                    after_seq = Some(seq);
+                    after_ts = Some(ts);
+                }
+                (None, None) => break,
+                cursors => panic!("incomplete composite search cursor: {cursors:?}"),
+            }
+            assert!(pages < 20, "search cursor failed to reach end");
+        }
+
+        assert_eq!(pages, 6);
+        assert_eq!(seen.len(), 40);
+        let unique: std::collections::HashSet<_> = seen.iter().copied().collect();
+        assert_eq!(unique.len(), seen.len());
+    }
+
+    #[test]
+    fn search_result_cursor_pages_regex_without_gaps_or_duplicates() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let mut after_seq = None;
+        let mut after_ts = None;
+        let mut seen = Vec::new();
+
+        for _ in 0..20 {
+            let result = search_events_advanced(
+                &corpus,
+                &EventSearchQuery {
+                    query: Some(r"auth failure user \d+".into()),
+                    match_mode: SearchMatchMode::Regex,
+                    semantic: false,
+                    k: 9,
+                    filter: EventQuery {
+                        after_seq,
+                        after_ts,
+                        sort_by_time: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            seen.extend(result.hits.iter().map(|hit| hit.event.seq));
+            match (result.next_cursor, result.next_ts) {
+                (Some(seq), Some(ts)) => {
+                    after_seq = Some(seq);
+                    after_ts = Some(ts);
+                }
+                (None, None) => break,
+                cursors => panic!("incomplete composite regex cursor: {cursors:?}"),
+            }
+        }
+
+        assert_eq!(seen.len(), 40);
+        let unique: std::collections::HashSet<_> = seen.iter().copied().collect();
+        assert_eq!(unique.len(), seen.len());
     }
 
     #[test]

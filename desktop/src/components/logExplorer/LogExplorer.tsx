@@ -90,6 +90,18 @@ type Props = {
   corpusId: string;
 };
 
+const FIND_PAGE_SIZE = 50;
+
+type FindCursor = {
+  seq: number;
+  ts: number;
+};
+
+type FindPageHistory = {
+  start: FindCursor | null;
+  base: number;
+};
+
 function filtersToQuery(
   f: ExplorerFilters,
   extra?: Partial<EventQueryDto>,
@@ -191,6 +203,14 @@ export function LogExplorer({ corpusId }: Props) {
   const [findMatches, setFindMatches] = useState<number[]>([]);
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
+  const [findTotalExact, setFindTotalExact] = useState(false);
+  const [findBase, setFindBase] = useState(0);
+  const [findNextCursor, setFindNextCursor] = useState<FindCursor | null>(
+    null,
+  );
+  const [findPageStart, setFindPageStart] = useState<FindCursor | null>(null);
+  const [findHistory, setFindHistory] = useState<FindPageHistory[]>([]);
+  const [findActiveQuery, setFindActiveQuery] = useState<string | null>(null);
   /** Prior filters/lanes saved while a bookmark temporary reveal is active (#531). */
   const [revealRestore, setRevealRestore] = useState<{
     filters: ExplorerFilters;
@@ -231,9 +251,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [filterW, setFilterW] = useState(220);
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
+  const findRequestRef = useRef(0);
+  const findActiveRef = useRef(false);
+  const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
+    () => {},
+  );
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
@@ -241,6 +267,14 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     saveColWidths(colWidths);
   }, [colWidths]);
+
+  useEffect(
+    () => () => {
+      findRequestRef.current += 1;
+      findActiveRef.current = false;
+    },
+    [],
+  );
 
   useEffect(() => {
     try {
@@ -704,16 +738,38 @@ export function LogExplorer({ corpusId }: Props) {
    * Does NOT replace the resident table with only hits.
    * Uses direct neighborhood seek for non-resident matches (no 40-page scan).
    */
-  const runFind = async () => {
+  const clearFindResults = (message?: string) => {
+    findRequestRef.current += 1;
+    findActiveRef.current = false;
+    setFindActiveQuery(null);
+    setFindMatches([]);
+    setFindIndex(0);
+    setFindTotal(0);
+    setFindTotalExact(false);
+    setFindBase(0);
+    setFindNextCursor(null);
+    setFindPageStart(null);
+    setFindHistory([]);
+    setFindPartial(false);
+    setHighlight(new Set());
+    if (message) setStatus(message);
+  };
+
+  const requestFindPage = async (
+    start: FindCursor | null,
+    base: number,
+    history: FindPageHistory[],
+    target: "first" | "last",
+    scopedFilters: ExplorerFilters,
+  ) => {
     const q = findDraft.trim();
     if (!q) {
-      setFindMatches([]);
-      setFindIndex(0);
-      setFindTotal(0);
-      setHighlight(new Set());
-      setStatus("Find cleared");
+      clearFindResults("Find cleared");
       return;
     }
+    const requestId = ++findRequestRef.current;
+    findActiveRef.current = true;
+    setFindActiveQuery(q);
     setBusy(true);
     setError(null);
     try {
@@ -722,20 +778,37 @@ export function LogExplorer({ corpusId }: Props) {
         semantic: findUseSemantic && findMatchMode === "literal",
         matchMode: findMatchMode,
         caseSensitive: findCaseSensitive,
-        // Cap is a partial/capped result signal; navigation still seeks by seq.
-        k: 500,
+        // Only one bounded result page is retained in the webview.
+        k: FIND_PAGE_SIZE,
         // Compose with active filter facets but not a second keyword reduce.
-        filter: filtersToQuery(filters, { keyword: null }),
+        filter: filtersToQuery(scopedFilters, {
+          keyword: null,
+          afterSeq: start?.seq ?? null,
+          afterTs: start?.ts ?? null,
+          beforeSeq: null,
+          beforeTs: null,
+        }),
       });
+      if (requestId !== findRequestRef.current) return;
       const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
+      const index = target === "last" ? Math.max(0, seqs.length - 1) : 0;
       setFindMatches(seqs);
-      setFindTotal(seqs.length);
-      setFindIndex(seqs.length > 0 ? 0 : 0);
+      setFindTotal(result.totalMatched ?? base + seqs.length);
+      setFindTotalExact(result.totalMatched != null);
+      setFindBase(base);
+      setFindIndex(index);
       setFindPartial(result.partial);
+      setFindPageStart(start);
+      setFindHistory(history);
+      setFindNextCursor(
+        result.nextCursor != null && result.nextTs != null
+          ? { seq: result.nextCursor, ts: result.nextTs }
+          : null,
+      );
       setHighlight(new Set(seqs));
       if (seqs.length > 0) {
-        const first = seqs[0]!;
+        const first = seqs[index]!;
         const resident = laneEvents["lane-0"] ?? [];
         if (!resident.some((e) => e.seq === first)) {
           await seekToSeq(first);
@@ -745,42 +818,115 @@ export function LogExplorer({ corpusId }: Props) {
       }
       const modeLabel = findMatchMode === "regex" ? "regex" : "literal";
       const extra = [
-        result.partial ? "partial/capped" : null,
+        result.partial && result.nextCursor == null ? "partial/capped" : null,
         result.diagnostic,
       ]
         .filter(Boolean)
         .join(" · ");
+      const ordinal = base + index + 1;
+      const totalLabel =
+        result.totalMatched != null
+          ? String(result.totalMatched)
+          : result.nextCursor != null
+            ? `${base + seqs.length}+`
+            : String(base + seqs.length);
       setStatus(
         seqs.length
-          ? `Find (${modeLabel}): match 1 of ${seqs.length}${
-              result.partial ? "+" : ""
-            } for “${q}”${extra ? ` (${extra})` : ""} (context preserved)`
+          ? `Find (${modeLabel}): match ${ordinal} of ${totalLabel} for “${q}”${
+              extra ? ` (${extra})` : ""
+            } (context preserved; ${seqs.length} result identities resident)`
           : `Find (${modeLabel}): no matches for “${q}”${
               result.diagnostic ? ` — ${result.diagnostic}` : ""
             }`,
       );
     } catch (e) {
+      if (requestId !== findRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === findRequestRef.current) setBusy(false);
     }
   };
 
-  const findStep = (dir: 1 | -1) => {
-    if (findMatches.length === 0) return;
-    const next =
-      (findIndex + dir + findMatches.length) % findMatches.length;
+  const runFind = async () => {
+    await requestFindPage(null, 0, [], "first", filters);
+  };
+
+  findRefreshRef.current = (nextFilters) => {
+    if (!findActiveRef.current) return;
+    void requestFindPage(null, 0, [], "first", nextFilters);
+  };
+
+  useEffect(() => {
+    findRefreshRef.current(filters);
+  }, [filters]);
+
+  const findStep = async (dir: 1 | -1) => {
+    if (findMatches.length === 0) {
+      if (dir === 1 && findNextCursor) {
+        await requestFindPage(
+          findNextCursor,
+          findBase,
+          [...findHistory, { start: findPageStart, base: findBase }],
+          "first",
+          filters,
+        );
+      } else if (dir === -1) {
+        const previous = findHistory.at(-1);
+        if (previous) {
+          await requestFindPage(
+            previous.start,
+            previous.base,
+            findHistory.slice(0, -1),
+            "last",
+            filters,
+          );
+        }
+      }
+      return;
+    }
+    if (dir === 1 && findIndex === findMatches.length - 1) {
+      if (!findNextCursor) {
+        setStatus("Find: end of results");
+        return;
+      }
+      await requestFindPage(
+        findNextCursor,
+        findBase + findMatches.length,
+        [...findHistory, { start: findPageStart, base: findBase }],
+        "first",
+        filters,
+      );
+      return;
+    }
+    if (dir === -1 && findIndex === 0) {
+      const previous = findHistory.at(-1);
+      if (!previous) {
+        setStatus("Find: beginning of results");
+        return;
+      }
+      await requestFindPage(
+        previous.start,
+        previous.base,
+        findHistory.slice(0, -1),
+        "last",
+        filters,
+      );
+      return;
+    }
+    const next = findIndex + dir;
     setFindIndex(next);
     const seq = findMatches[next]!;
     const resident = laneEvents["lane-0"] ?? [];
     if (!resident.some((e) => e.seq === seq)) {
-      void seekToSeq(seq).then(() => {
-        setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
-      });
+      await seekToSeq(seq);
     } else {
       setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-      setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
     }
+    setStatus(
+      `Find: match ${findBase + next + 1} of ${
+        findTotalExact ? findTotal : `${Math.max(findTotal, findBase + findMatches.length)}+`
+      }`,
+    );
   };
 
   /** Filter: reduce visible events by keyword ∩ facets (#523). */
@@ -856,6 +1002,16 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const onKeyDown = (ev: ReactKeyboardEvent) => {
+    if (
+      (ev.metaKey || ev.ctrlKey) &&
+      ev.key.toLowerCase() === "f"
+    ) {
+      ev.preventDefault();
+      setNarrowFiltersOpen(true);
+      setNarrowChatOpen(false);
+      findInputRef.current?.focus();
+      return;
+    }
     if (ev.key === "b" || ev.key === "B") {
       if (
         (ev.target as HTMLElement)?.tagName === "INPUT" ||
@@ -1645,6 +1801,7 @@ export function LogExplorer({ corpusId }: Props) {
             <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />
           </div>
           <input
+            ref={findInputRef}
             className="log-explorer__search"
             placeholder={
               findMatchMode === "regex"
@@ -1652,7 +1809,16 @@ export function LogExplorer({ corpusId }: Props) {
                 : "Find in corpus (keeps surrounding rows)…"
             }
             value={findDraft}
-            onChange={(e) => setFindDraft(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setFindDraft(next);
+              if (
+                findActiveQuery != null &&
+                next.trim() !== findActiveQuery
+              ) {
+                clearFindResults("Find term changed — press Find to apply");
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") void runFind();
             }}
@@ -1672,8 +1838,11 @@ export function LogExplorer({ corpusId }: Props) {
               type="button"
               className="log-explorer__btn"
               data-testid="log-explorer-find-prev"
-              disabled={findMatches.length === 0}
-              onClick={() => findStep(-1)}
+              disabled={
+                findHistory.length === 0 &&
+                (findMatches.length === 0 || findIndex === 0)
+              }
+              onClick={() => void findStep(-1)}
             >
               Prev
             </button>
@@ -1681,8 +1850,12 @@ export function LogExplorer({ corpusId }: Props) {
               type="button"
               className="log-explorer__btn"
               data-testid="log-explorer-find-next"
-              disabled={findMatches.length === 0}
-              onClick={() => findStep(1)}
+              disabled={
+                !findNextCursor &&
+                (findMatches.length === 0 ||
+                  findIndex === findMatches.length - 1)
+              }
+              onClick={() => void findStep(1)}
             >
               Next
             </button>
@@ -1712,7 +1885,14 @@ export function LogExplorer({ corpusId }: Props) {
                   type="radio"
                   name="find-mode"
                   checked={findMatchMode === "literal"}
-                  onChange={() => setFindMatchMode("literal")}
+                  onChange={() => {
+                    setFindMatchMode("literal");
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Find mode changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-mode-literal"
                 />
                 Literal text
@@ -1722,7 +1902,14 @@ export function LogExplorer({ corpusId }: Props) {
                   type="radio"
                   name="find-mode"
                   checked={findMatchMode === "regex"}
-                  onChange={() => setFindMatchMode("regex")}
+                  onChange={() => {
+                    setFindMatchMode("regex");
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Find mode changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-mode-regex"
                 />
                 Regex (bounded)
@@ -1731,7 +1918,14 @@ export function LogExplorer({ corpusId }: Props) {
                 <input
                   type="checkbox"
                   checked={findCaseSensitive}
-                  onChange={(e) => setFindCaseSensitive(e.target.checked)}
+                  onChange={(e) => {
+                    setFindCaseSensitive(e.target.checked);
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Case option changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-case-sensitive"
                 />
                 Case sensitive
@@ -1743,7 +1937,14 @@ export function LogExplorer({ corpusId }: Props) {
                   disabled={
                     !semanticAvailable || findMatchMode === "regex"
                   }
-                  onChange={(e) => setFindUseSemantic(e.target.checked)}
+                  onChange={(e) => {
+                    setFindUseSemantic(e.target.checked);
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Semantic option changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-semantic"
                 />
                 Template semantic
@@ -1760,9 +1961,11 @@ export function LogExplorer({ corpusId }: Props) {
               className="log-explorer__chat-preview"
               data-testid="log-explorer-find-count"
             >
-              Match {findIndex + 1} of {findTotal}
-              {findPartial ? "+" : ""}
-              {findPartial ? " (partial)" : ""}
+              Match {findBase + findIndex + 1} of{" "}
+              {findTotalExact ? findTotal : `${findTotal}+`}
+              {findPartial && !findNextCursor ? " (partial)" : ""}
+              {" · "}
+              {findMatches.length} result identities resident
             </div>
           ) : null}
 

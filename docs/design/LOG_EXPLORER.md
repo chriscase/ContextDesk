@@ -90,7 +90,7 @@ Per corpus under app cache:
 | `log_query_events` | Paged/keyset events with filter + sort |
 | `log_facets` | Sources, levels, services, hosts under filter |
 | `log_timeline` | Filtered volume buckets (+ by_level) — already partial |
-| `log_search_events` | Keyword/regex + template-semantic → event hits |
+| `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor |
 | Bookmarks CRUD | Line or range anchors on corpus |
 | Chat link | List/create sessions with `linkedCorpusId` |
 | View context snapshot | Serialize filters/lanes/selection for agent |

@@ -1798,6 +1798,11 @@ export type EventSearchHitDto = {
 
 export type EventSearchResultDto = {
   hits: EventSearchHitDto[];
+  /** Composite cursor for the next chronological search-result page. */
+  nextCursor?: number | null;
+  nextTs?: number | null;
+  /** Exact for SQL literal search; unavailable for bounded regex/semantic scans. */
+  totalMatched?: number | null;
   partial: boolean;
   diagnostic?: string | null;
   scanned: number;

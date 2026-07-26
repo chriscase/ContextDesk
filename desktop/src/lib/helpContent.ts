@@ -13,7 +13,7 @@ export const HELP_FIND_VS_FILTER: HelpTipContent = {
   options: [
     {
       name: "Find",
-      when: "You want next/prev over hits without losing neighboring evidence.",
+      when: "You want next/prev over backend-paged hits without losing neighboring evidence.",
     },
     {
       name: "Filter",
@@ -23,7 +23,7 @@ export const HELP_FIND_VS_FILTER: HelpTipContent = {
   example: "Find job-7f3a → step hits; Filter ERROR + worker source → 2 rows",
   shortcut: "⌘/Ctrl+F focuses Find when the Explorer is active",
   safety:
-    "Find may be capped (partial results). Refine the query if the status says capped.",
+    "Only one bounded result page is retained. Next/Prev request chronological cursor pages; a regex scan-budget warning is partial and should be refined or continued.",
   helpLocator: "help://log-explorer#find-vs-filter",
 };
 
