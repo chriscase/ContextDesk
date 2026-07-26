@@ -2,10 +2,19 @@
  * Compact corpus-linked chat rail for Log Explorer (#529, #530, #543).
  * Owns follow-latest scroll, multi-chat switcher, tool visibility, and
  * privacy-safe agent-context disclosure — not raw debug dumps.
+ *
+ * Long-transcript policy (#543):
+ * - Persistence retains every message (no deletion).
+ * - The rail mounts a virtualized window via `useMessageWindow` once the
+ *   thread exceeds VIRTUALIZE_THRESHOLD rows; streaming/pending turns stay
+ *   force-mounted; per-chat draft/scroll/follow state survives switches.
+ * - `openChat` uses a monotonic request generation so a slow load for chat A
+ *   cannot overwrite chat B after the user switches.
  */
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -30,6 +39,7 @@ import {
   extractLogNavFromText,
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
+import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { ToolCallList } from "../ToolCallList";
 
 export type AgentContextSummary = {
@@ -64,6 +74,106 @@ function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
 }
 
+/** True when a completed load should still apply to the rail. */
+export function shouldApplyChatLoad(
+  requestGen: number,
+  currentGen: number,
+  loadedId: string,
+  activeId: string | null,
+): boolean {
+  return requestGen === currentGen && activeId === loadedId;
+}
+
+function mapSessionMessages(session: {
+  messages: {
+    id: string;
+    role: string;
+    content: string;
+    tools?: ChatMsg["tools"];
+    citations?: ChatMsg["citations"];
+    trail?: ChatMsg["trail"];
+  }[];
+}): ChatMsg[] {
+  return session.messages.map((m) => ({
+    id: m.id,
+    role: m.role as "user" | "assistant",
+    content: m.content,
+    tools: m.tools,
+    citations: m.citations,
+    trail: m.trail,
+  }));
+}
+
+function LinkedChatBubble({
+  message,
+  developerMode,
+  onHeightChange,
+  virtualized,
+  top,
+}: {
+  message: ChatMsg;
+  developerMode: boolean;
+  onHeightChange?: (id: string, height: number) => void;
+  virtualized: boolean;
+  top: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!onHeightChange || !ref.current) return;
+    const el = ref.current;
+    const report = () => {
+      const h = el.getBoundingClientRect().height;
+      if (h > 0) onHeightChange(message.id, h);
+    };
+    report();
+    const ro =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => report())
+        : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [
+    message.id,
+    message.content,
+    message.streaming,
+    message.tools,
+    onHeightChange,
+  ]);
+
+  return (
+    <div
+      ref={ref}
+      className={`log-explorer__chat-bubble log-explorer__chat-bubble--${message.role}`}
+      data-testid={`linked-chat-msg-${message.role}`}
+      data-msg-id={message.id}
+      style={
+        virtualized
+          ? {
+              position: "absolute",
+              top,
+              left: 0,
+              right: 0,
+            }
+          : undefined
+      }
+    >
+      <div className="log-explorer__chat-role">
+        {message.role}
+        {message.streaming ? " · streaming" : ""}
+      </div>
+      {message.tools && message.tools.length > 0 ? (
+        <ToolCallList tools={message.tools} collapseAfter={4} />
+      ) : null}
+      <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
+      {message.trail && message.trail.length > 0 && developerMode ? (
+        <div className="log-explorer__chat-trail" aria-label="Search trail">
+          {message.trail.join(" → ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function LinkedChatRail({
   corpusId,
   corpusName,
@@ -94,11 +204,18 @@ export function LinkedChatRail({
   );
   /** Per-chat drafts so switching chats does not lose unsent text. */
   const draftsRef = useRef<Record<string, string>>({});
+  /** Per-chat scroll offsets so returning to a chat restores position. */
+  const scrollByChatRef = useRef<Record<string, number>>({});
+  /** Monotonic generation for openChat loads (#543 race safety). */
+  const openGenRef = useRef(0);
+  const switcherToggleRef = useRef<HTMLButtonElement>(null);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const activeChatIdRef = useRef<string | null>(null);
   activeChatIdRef.current = activeChatId;
+
+  const windowed = useMessageWindow(messages, threadRef);
 
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
@@ -152,34 +269,81 @@ export function LinkedChatRail({
   };
 
   const openChat = async (id: string) => {
-    // Persist draft for the chat we leave.
+    // Persist draft + scroll for the chat we leave.
     if (activeChatId) {
       draftsRef.current[activeChatId] = draft;
+      if (threadRef.current) {
+        scrollByChatRef.current[activeChatId] = threadRef.current.scrollTop;
+      }
     }
+    const gen = ++openGenRef.current;
     setActiveChatId(id);
     setSwitcherOpen(false);
     setError(null);
+    setStatus(null);
     setDraft(draftsRef.current[id] ?? "");
-    // New selection starts followed at bottom (intentional, not leaked state).
-    setFollowByChat((m) => ({ ...m, [id]: m[id] ?? true }));
+    // Clear immediately so B never shows A's messages while loading.
+    setMessages([]);
+    // New selection defaults to follow unless we have a saved scroll position.
+    const savedScroll = scrollByChatRef.current[id];
+    if (savedScroll == null || savedScroll <= 0) {
+      setFollowByChat((m) => ({ ...m, [id]: m[id] ?? true }));
+    }
     try {
       const full = await hostLoadChatSession(id);
+      if (
+        !shouldApplyChatLoad(
+          gen,
+          openGenRef.current,
+          id,
+          activeChatIdRef.current,
+        )
+      ) {
+        return;
+      }
       if (full) {
         const s = sessionFromDto(full);
-        setMessages(
-          s.messages.map((m) => ({
-            id: m.id,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-            tools: m.tools,
-            citations: m.citations,
-            trail: m.trail,
-          })),
-        );
+        setMessages(mapSessionMessages(s));
       } else {
         setMessages([]);
       }
+      // Restore per-chat scroll after paint when we had a saved offset.
+      if (savedScroll != null && savedScroll > 0) {
+        requestAnimationFrame(() => {
+          if (
+            !shouldApplyChatLoad(
+              gen,
+              openGenRef.current,
+              id,
+              activeChatIdRef.current,
+            )
+          ) {
+            return;
+          }
+          const el = threadRef.current;
+          if (!el) return;
+          el.scrollTop = savedScroll;
+          setFollowByChat((m) => ({
+            ...m,
+            [id]: isNearBottom(el),
+          }));
+          setDetachedByChat((m) => ({
+            ...m,
+            [id]: !isNearBottom(el),
+          }));
+        });
+      }
     } catch (e) {
+      if (
+        !shouldApplyChatLoad(
+          gen,
+          openGenRef.current,
+          id,
+          activeChatIdRef.current,
+        )
+      ) {
+        return;
+      }
       setError(String(e));
       setMessages([]);
     }
@@ -294,16 +458,7 @@ export function LinkedChatRail({
       }
       if (activeChatIdRef.current === sessionId) {
         const persisted = sessionFromDto(saved);
-        setMessages(
-          persisted.messages.map((m) => ({
-            id: m.id,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-            tools: m.tools,
-            citations: m.citations,
-            trail: m.trail,
-          })),
-        );
+        setMessages(mapSessionMessages(persisted));
       }
 
       const found = extractLogNavFromText(assistant.content);
@@ -373,6 +528,39 @@ export function LinkedChatRail({
     }
   };
 
+  const onSwitcherKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setSwitcherOpen(false);
+      switcherToggleRef.current?.focus();
+      return;
+    }
+    const options = Array.from(
+      e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]'),
+    );
+    if (options.length === 0) return;
+    const current = document.activeElement as HTMLElement | null;
+    const idx = options.findIndex((el) => el === current);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = options[(idx + 1 + options.length) % options.length]!;
+      next.focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = options[(idx - 1 + options.length) % options.length]!;
+      next.focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      options[0]?.focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      options[options.length - 1]?.focus();
+    } else if (e.key === "Enter" && idx >= 0) {
+      e.preventDefault();
+      options[idx]?.click();
+    }
+  };
+
   const applyDevJson = () => {
     const found = extractLogNavFromText(devJson);
     if (found.length) {
@@ -404,9 +592,11 @@ export function LinkedChatRail({
           <button
             type="button"
             className="log-explorer__btn"
+            ref={switcherToggleRef}
             data-testid="linked-chat-switcher-toggle"
             aria-expanded={switcherOpen}
             aria-controls="linked-chat-switcher"
+            aria-haspopup="listbox"
             onClick={() => setSwitcherOpen((o) => !o)}
           >
             Chats
@@ -429,6 +619,10 @@ export function LinkedChatRail({
           data-testid="linked-chat-switcher"
           role="listbox"
           aria-label="Linked chats for this corpus"
+          aria-activedescendant={
+            activeChatId ? `linked-chat-option-${activeChatId}` : undefined
+          }
+          onKeyDown={onSwitcherKeyDown}
         >
           {chats.length >= SWITCHER_SEARCH_THRESHOLD && (
             <input
@@ -453,8 +647,10 @@ export function LinkedChatRail({
                 <li key={c.id}>
                   <button
                     type="button"
+                    id={`linked-chat-option-${c.id}`}
                     role="option"
                     aria-selected={c.id === activeChatId}
+                    tabIndex={c.id === activeChatId ? 0 : -1}
                     className={`log-explorer__chat-item${
                       c.id === activeChatId
                         ? " log-explorer__chat-item--active"
@@ -491,27 +687,34 @@ export function LinkedChatRail({
               bounded log tools — not a full dump paste.
             </div>
           ) : (
-            messages.map((m) => (
-              <div
-                key={m.id}
-                className={`log-explorer__chat-bubble log-explorer__chat-bubble--${m.role}`}
-                data-testid={`linked-chat-msg-${m.role}`}
-              >
-                <div className="log-explorer__chat-role">
-                  {m.role}
-                  {m.streaming ? " · streaming" : ""}
-                </div>
-                {m.tools && m.tools.length > 0 ? (
-                  <ToolCallList tools={m.tools} collapseAfter={4} />
-                ) : null}
-                <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-                {m.trail && m.trail.length > 0 && developerMode ? (
-                  <div className="log-explorer__chat-trail" aria-label="Search trail">
-                    {m.trail.join(" → ")}
-                  </div>
-                ) : null}
-              </div>
-            ))
+            <div
+              className="log-explorer__chat-transcript"
+              data-testid="linked-chat-transcript"
+              data-virtualized={windowed.virtualized ? "true" : "false"}
+              data-message-count={messages.length}
+              data-mounted-count={windowed.mounted.length}
+              style={
+                windowed.virtualized
+                  ? {
+                      position: "relative",
+                      height: windowed.totalHeight,
+                    }
+                  : undefined
+              }
+            >
+              {windowed.mounted.map(({ msg, top }) => (
+                <LinkedChatBubble
+                  key={msg.id}
+                  message={msg}
+                  developerMode={developerMode}
+                  virtualized={windowed.virtualized}
+                  top={top}
+                  onHeightChange={
+                    windowed.virtualized ? windowed.onHeightChange : undefined
+                  }
+                />
+              ))}
+            </div>
           )}
           <div ref={bottomRef} data-testid="linked-chat-thread-bottom" />
         </div>
