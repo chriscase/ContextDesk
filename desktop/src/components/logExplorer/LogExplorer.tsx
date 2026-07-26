@@ -57,6 +57,7 @@ import {
   prependOlder,
   seedFromPage,
 } from "../../lib/logExplorer/residentWindow";
+import { HelpTip } from "../HelpTip";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
   VirtualizedEventList,
@@ -1214,7 +1215,20 @@ export function LogExplorer({ corpusId }: Props) {
           className="log-explorer__filters"
           data-testid="log-explorer-filters"
         >
-          <div className="log-explorer__section-title">Find</div>
+          <div className="log-explorer__section-title">
+            Find{" "}
+            <HelpTip label="Find vs Filter" title="Find vs Filter">
+              <p>
+                <strong>Find</strong> highlights matches and steps next/prev
+                while keeping surrounding investigation context.
+              </p>
+              <p>
+                <strong>Filter</strong> reduces the table to matching rows and
+                intersects levels, sources, and time. Use both together: filter
+                to ERROR, then find a ticket id.
+              </p>
+            </HelpTip>
+          </div>
           <input
             className="log-explorer__search"
             placeholder="Find in corpus (keeps surrounding rows)…"
