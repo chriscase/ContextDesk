@@ -185,10 +185,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [findMatches, setFindMatches] = useState<number[]>([]);
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
-  /** Prior filters/view saved while a bookmark temporary reveal is active (#531). */
-  const [revealRestore, setRevealRestore] = useState<ExplorerFilters | null>(
-    null,
-  );
+  /** Prior filters/lanes saved while a bookmark temporary reveal is active (#531). */
+  const [revealRestore, setRevealRestore] = useState<{
+    filters: ExplorerFilters;
+    lanes: LaneConfig[];
+    laneCount: number;
+  } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
   >("idle");
@@ -626,9 +628,10 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
-  /** Apply a neighborhood page into lane-0 residency + cursors. */
+  /** Apply a neighborhood page into one lane's residency + cursors. */
   const applyNeighborhoodToLane = (
     nb: Awaited<ReturnType<typeof hostLogQueryEventNeighborhood>>,
+    laneId = "lane-0",
   ) => {
     if (nb.events.length === 0) return;
     const seeded = seedFromPage({
@@ -639,10 +642,10 @@ export function LogExplorer({ corpusId }: Props) {
       prevTs: nb.prevTs ?? null,
       totalMatched: nb.totalMatched,
     });
-    setLaneEvents((prev) => ({ ...prev, "lane-0": seeded.events }));
+    setLaneEvents((prev) => ({ ...prev, [laneId]: seeded.events }));
     setLaneCursors((prev) => ({
       ...prev,
-      "lane-0": {
+      [laneId]: {
         afterSeq: seeded.afterSeq,
         afterTs: seeded.afterTs,
         beforeSeq: seeded.beforeSeq,
@@ -652,23 +655,24 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     if (nb.corpusTotal > 0) setCorpusTotal(nb.corpusTotal);
-    setLaneMatched((m) => ({ ...m, "lane-0": nb.totalMatched }));
+    setLaneMatched((m) => ({ ...m, [laneId]: nb.totalMatched }));
     if (laneCount === 1) setTotalMatched(nb.totalMatched);
   };
 
   /** Seek a stable event into the resident window via neighborhood API. */
   const seekToSeq = async (
     seq: number,
-    opts?: { clearFilters?: boolean },
+    opts?: {
+      clearFilters?: boolean;
+      laneId?: string;
+      sources?: string[];
+    },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
-    const filter = opts?.clearFilters
-      ? filtersToQuery({
-          ...filters,
-          levels: [],
-          sources: [],
-          keyword: null,
-        })
-      : filtersToQuery(filters, { keyword: filters.keyword });
+    const base = opts?.clearFilters ? emptyFilters() : filters;
+    const filter = filtersToQuery(base, {
+      keyword: base.keyword,
+      sources: opts?.sources ?? base.sources,
+    });
     const nb = await hostLogQueryEventNeighborhood(corpusId, {
       targetSeq: seq,
       before: 50,
@@ -677,8 +681,10 @@ export function LogExplorer({ corpusId }: Props) {
       sortByTime: true,
     });
     if (nb.status === "found") {
-      applyNeighborhoodToLane(nb);
-      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+      const laneId = opts?.laneId ?? "lane-0";
+      applyNeighborhoodToLane(nb, laneId);
+      setFocusLaneId(laneId);
+      setLaneScrollSeq((m) => ({ ...m, [laneId]: seq }));
       if (nb.target) {
         setDetail(nb.target);
         setSelected(new Set([seq]));
@@ -889,27 +895,20 @@ export function LogExplorer({ corpusId }: Props) {
       ),
     );
 
-    const resident = Object.values(laneEvents)
-      .flat()
-      .some((e) => e.seq >= b.seqFrom && e.seq <= b.seqTo);
-    if (resident) {
-      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-      setBookmarkRevealState("visible");
-      setStatus(`Bookmark visible: ${b.label}`);
-      return;
-    }
-
     setBusy(true);
     setError(null);
     try {
-      // Try under current filters first.
-      let status = await seekToSeq(seq);
-      if (status === "found") {
-        setBookmarkRevealState("visible");
-        setStatus(`Bookmark visible under current filters: ${b.label}`);
-        return;
-      }
-      if (status === "missing") {
+      // Resolve the stable target under current global filters. Hidden results
+      // still return the target identity so the correct source lane can be
+      // selected or temporarily composed.
+      const resolved = await hostLogQueryEventNeighborhood(corpusId, {
+        targetSeq: seq,
+        before: 0,
+        after: 0,
+        filter: filtersToQuery(filters),
+        sortByTime: true,
+      });
+      if (resolved.status === "missing" || !resolved.target) {
         setBookmarkRevealState("missing");
         setStatus(
           `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
@@ -917,19 +916,74 @@ export function LogExplorer({ corpusId }: Props) {
         return;
       }
 
-      // Hidden by filters — temporarily clear and seek again.
-      if (!revealRestore) {
-        setRevealRestore({ ...filters });
+      const visibleLanes = lanes.slice(0, laneCount);
+      const matchingLane =
+        visibleLanes.find(
+          (lane) =>
+            lane.sources.length > 0 &&
+            lane.sources.includes(resolved.target!.source),
+        ) ?? visibleLanes.find((lane) => lane.sources.length === 0);
+
+      if (resolved.status === "found" && matchingLane) {
+        const residentTarget = (laneEvents[matchingLane.id] ?? []).find(
+          (event) => event.seq === seq,
+        );
+        if (residentTarget) {
+          setFocusLaneId(matchingLane.id);
+          setLaneScrollSeq((m) => ({ ...m, [matchingLane.id]: seq }));
+          setDetail(residentTarget);
+          setSelected(new Set([seq]));
+          setBookmarkRevealState("visible");
+          setStatus(`Bookmark visible: ${b.label}`);
+          return;
+        }
+        const status = await seekToSeq(seq, {
+          laneId: matchingLane.id,
+          sources:
+            matchingLane.sources.length > 0
+              ? matchingLane.sources
+              : filters.sources,
+        });
+        if (status !== "found") {
+          throw new Error("Bookmark target changed while it was being revealed");
+        }
+        setBookmarkRevealState("visible");
+        setStatus(`Bookmark visible under current filters: ${b.label}`);
+        return;
       }
-      const openFilters: ExplorerFilters = {
-        ...filters,
-        levels: [],
-        sources: [],
-        keyword: null,
-      };
+
+      // Hidden by filters or absent from current lane composition: preserve
+      // the complete prior view and explicitly create a temporary reveal.
+      if (!revealRestore) {
+        setRevealRestore({
+          filters: { ...filters },
+          lanes: lanes.map((lane) => ({
+            ...lane,
+            sources: [...lane.sources],
+          })),
+          laneCount,
+        });
+      }
+      const openFilters = emptyFilters();
+      let revealLanes = lanes;
+      let revealLane = matchingLane;
+      if (!revealLane) {
+        const first = lanes[0] ?? defaultLanes(1)[0]!;
+        revealLane = {
+          ...first,
+          label: `Bookmark · ${resolved.target.source}`,
+          sources: [resolved.target.source],
+        };
+        revealLanes = [revealLane, ...lanes.slice(1)];
+        setLanes(revealLanes);
+      }
       setFilters(openFilters);
       setFilterDraft("");
-      status = await seekToSeq(seq, { clearFilters: true });
+      const status = await seekToSeq(seq, {
+        clearFilters: true,
+        laneId: revealLane.id,
+        sources: [resolved.target.source],
+      });
       if (status === "found") {
         setBookmarkRevealState("revealed");
         setStatus(
@@ -954,8 +1008,10 @@ export function LogExplorer({ corpusId }: Props) {
 
   const restorePriorView = () => {
     if (revealRestore) {
-      setFilters(revealRestore);
-      setFilterDraft(revealRestore.keyword ?? "");
+      setFilters(revealRestore.filters);
+      setFilterDraft(revealRestore.filters.keyword ?? "");
+      setLanes(revealRestore.lanes);
+      setLaneCount(revealRestore.laneCount);
       setRevealRestore(null);
       setBookmarkRevealState("idle");
       setStatus("Restored prior Explorer view");

@@ -64,6 +64,13 @@ vi.mock("../../lib/host", () => ({
   })),
   hostLogSearchEvents: vi.fn(async () => []),
   hostLogSearchEventsAdvanced: vi.fn(async () => ({ hits: [], partial: false, scanned: 0 })),
+  hostLogQueryEventNeighborhood: vi.fn(async () => ({
+    status: "missing",
+    events: [],
+    totalMatched: 0,
+    corpusTotal: 0,
+    timeQuality: "order_only",
+  })),
   hostLogAddBookmark: vi.fn(),
   hostLogDeleteBookmark: vi.fn(),
   hostSaveChatSession: vi.fn(),
@@ -184,8 +191,16 @@ describe("LogExplorer shell", () => {
       timeQuality: "wall",
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
     vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({ hits: [], partial: false, scanned: 0 });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "missing",
+      events: [],
+      totalMatched: 0,
+      corpusTotal: 10,
+      timeQuality: "wall",
+    });
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
@@ -215,6 +230,247 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
+  });
+
+  it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
+    const bookmark: host.LogBookmarkDto = {
+      id: "bm-worker",
+      label: "worker evidence",
+      note: null,
+      seqFrom: 2,
+      seqTo: 2,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const allEvents = defaultEventPage().events;
+    const target = allEvents.find((event) => event.seq === 2)!;
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([bookmark]);
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sourceFilter = query?.sources ?? [];
+        const events =
+          sourceFilter.length === 0
+            ? allEvents
+            : allEvents.filter((event) =>
+                sourceFilter.includes(event.source),
+              );
+        return {
+          events,
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+          totalMatched: events.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query.filter?.sources ?? [];
+        const found = sources.length === 0 || sources.includes(target.source);
+        return {
+          status: found ? "found" : "hidden_by_filter",
+          target,
+          events: found ? [target] : [],
+          targetIndex: found ? 0 : null,
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+          totalMatched: found ? 1 : 0,
+          corpusTotal: 2,
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /api\.log/i }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ sources: ["api.log"] }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("job ok")).toBeNull(),
+    );
+
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-worker"),
+    );
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: 2,
+          filter: expect.objectContaining({ sources: ["worker.log"] }),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("job ok").length).toBeGreaterThan(0);
+    expect(
+      screen.getByTestId("bookmark-restore-view").textContent,
+    ).toContain("temp reveal");
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ sources: ["api.log"] }),
+      ),
+    );
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+  });
+
+  it("reports a missing bookmark target without claiming navigation success", async () => {
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      {
+        id: "bm-missing",
+        label: "removed event",
+        note: null,
+        seqFrom: 404,
+        seqTo: 404,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "missing",
+      target: null,
+      events: [],
+      targetIndex: null,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched: 0,
+      corpusTotal: 2,
+      timeQuality: "wall",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-missing"),
+    );
+    expect(await screen.findByTestId("bookmark-missing")).toBeTruthy();
+    expect(screen.getByText(/not found in corpus/)).toBeTruthy();
+    expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
+  });
+
+  it("temporarily composes the correct lane for a bookmark outside all visible lanes", async () => {
+    const target: host.ExplorerEventDto = {
+      seq: 77,
+      ts: 1_700_000_077,
+      timeQuality: "wall",
+      level: "error",
+      service: "queue",
+      host: null,
+      templateId: 77,
+      traceId: "trace-77",
+      message: "queue poison evidence",
+      source: "queue.log",
+    };
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      {
+        id: "bm-queue",
+        label: "queue clue",
+        note: null,
+        seqFrom: 77,
+        seqTo: 77,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query?.sources ?? [];
+        const page =
+          sources.includes("queue.log")
+            ? {
+                ...eventPage("queue.log", "wall"),
+                events: [target],
+                totalMatched: 1,
+              }
+            : sources.length > 0
+              ? eventPage(sources[0]!, "wall")
+              : defaultEventPage();
+        return page;
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "found",
+      target,
+      events: [target],
+      targetIndex: 0,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched: 1,
+      corpusTotal: 11,
+      timeQuality: "wall",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "2L" }),
+    );
+    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    const editor = screen.getByTestId("lane-editor");
+    const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
+    expect(laneRows.length).toBe(2);
+    fireEvent.click(
+      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+        name: /api\.log/i,
+      }),
+    );
+    fireEvent.click(
+      within(laneRows[1] as HTMLElement).getByRole("checkbox", {
+        name: /worker\.log/i,
+      }),
+    );
+    await waitFor(() => {
+      const sourceCalls = vi
+        .mocked(host.hostLogQueryEvents)
+        .mock.calls.map(([, query]) => query?.sources ?? []);
+      expect(sourceCalls).toContainEqual(["api.log"]);
+      expect(sourceCalls).toContainEqual(["worker.log"]);
+    });
+
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-queue"),
+    );
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: 77,
+          filter: expect.objectContaining({ sources: ["queue.log"] }),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("queue poison evidence").length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      screen.getAllByText(/Bookmark · queue\.log/).length,
+    ).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() => {
+      const sourceCalls = vi
+        .mocked(host.hostLogQueryEvents)
+        .mock.calls.map(([, query]) => query?.sources ?? []);
+      expect(sourceCalls.at(-2)).toEqual(["api.log"]);
+      expect(sourceCalls.at(-1)).toEqual(["worker.log"]);
+    });
   });
 
   it.each([
