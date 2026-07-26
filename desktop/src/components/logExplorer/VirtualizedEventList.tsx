@@ -1,9 +1,22 @@
 /**
  * Windowed virtual list for log events (#483).
  * Only renders rows in the visible scroll window (+ overscan).
+ * Edge proximity notifies parent for bidirectional paging (#538).
  */
-import { useCallback, useMemo, useRef, useState, type UIEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type UIEvent,
+} from "react";
 import type { ExplorerEventDto, TimeQuality } from "../../lib/host";
+import {
+  EDGE_TRIGGER_ROWS,
+  nearBottom,
+  nearTop,
+} from "../../lib/logExplorer/residentWindow";
 import { formatEventTime, timeQualityLabel } from "../../lib/logExplorer/types";
 
 const DEFAULT_ROW = 28;
@@ -16,7 +29,11 @@ type Props = {
   highlight: Set<number>;
   density: "comfortable" | "compact";
   scrollToSeq?: number | null;
+  /** Rows prepended — keep visual anchor stable (#538). */
+  scrollAnchorAdjust?: number;
   onRowClick: (e: ExplorerEventDto, multi: boolean) => void;
+  onNearTop?: () => void;
+  onNearBottom?: () => void;
   "aria-label"?: string;
 };
 
@@ -32,24 +49,54 @@ export function VirtualizedEventList({
   highlight,
   density,
   scrollToSeq,
+  scrollAnchorAdjust = 0,
   onRowClick,
+  onNearTop,
+  onNearBottom,
   "aria-label": ariaLabel = "Log events",
 }: Props) {
   const rowH = density === "compact" ? 22 : DEFAULT_ROW;
   const parentRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(400);
+  const edgeCooldown = useRef(0);
 
-  const onScroll = useCallback((e: UIEvent<HTMLDivElement>) => {
-    setScrollTop(e.currentTarget.scrollTop);
-    setViewportH(e.currentTarget.clientHeight);
-  }, []);
+  const onScroll = useCallback(
+    (e: UIEvent<HTMLDivElement>) => {
+      const el = e.currentTarget;
+      setScrollTop(el.scrollTop);
+      setViewportH(el.clientHeight);
+      const now = Date.now();
+      if (now - edgeCooldown.current < 200) return;
+      if (nearTop(el.scrollTop, rowH)) {
+        edgeCooldown.current = now;
+        onNearTop?.();
+      } else if (
+        nearBottom(el.scrollTop, el.clientHeight, el.scrollHeight, rowH)
+      ) {
+        edgeCooldown.current = now;
+        onNearBottom?.();
+      }
+    },
+    [onNearBottom, onNearTop, rowH],
+  );
 
   // Measure viewport once mounted / on resize
   const setRef = useCallback((el: HTMLDivElement | null) => {
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
     if (el) setViewportH(el.clientHeight || 400);
   }, []);
+
+  // Preserve visual position when older rows are prepended (#538).
+  const lastAnchor = useRef(0);
+  useEffect(() => {
+    if (scrollAnchorAdjust > 0 && parentRef.current) {
+      if (scrollAnchorAdjust !== lastAnchor.current) {
+        parentRef.current.scrollTop += scrollAnchorAdjust * rowH;
+        lastAnchor.current = scrollAnchorAdjust;
+      }
+    }
+  }, [scrollAnchorAdjust, rowH]);
 
   // Scroll to seq when requested
   const lastScrollSeq = useRef<number | null>(null);
@@ -93,6 +140,7 @@ export function VirtualizedEventList({
       data-virtualized="true"
       data-total={events.length}
       data-rendered={slice.length}
+      data-edge-trigger-rows={EDGE_TRIGGER_ROWS}
       onScroll={onScroll}
     >
       <div

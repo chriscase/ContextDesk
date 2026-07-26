@@ -114,6 +114,27 @@
   min-height: 0;
 }
 
+.log-explorer__lane-paging {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  padding: 0.25rem 0;
+}
+
+.log-explorer__find-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.25rem 0;
+}
+
+.log-explorer__active-facets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.35rem 0;
+}
+
 /* #543: chat rail is a flex column — thread owns height; list is not stacked forever. */
 .log-explorer__chat--rail {
   display: flex;
