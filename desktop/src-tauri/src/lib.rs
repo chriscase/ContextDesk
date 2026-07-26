@@ -2731,9 +2731,13 @@ async fn agent_turn(
         host.set_session_context_base(Some(base));
     }
     host.set_active_session_id(Some(req.session_id.clone()));
+    // Linked turns bind the turn-scoped corpus; ordinary chats must not inherit
+    // Explorer ambient active corpus for the duration of the turn (#530).
     let previous_log_corpus = host.active_log_corpus().map(str::to_string);
     if let Some(context) = log_explorer_context.as_ref() {
         host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    } else {
+        host.set_active_log_corpus(None);
     }
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
