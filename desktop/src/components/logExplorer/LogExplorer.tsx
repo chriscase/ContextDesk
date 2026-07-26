@@ -145,6 +145,13 @@ export function LogExplorer({ corpusId }: Props) {
   const [findMatches, setFindMatches] = useState<number[]>([]);
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
+  /** Prior filters/view saved while a bookmark temporary reveal is active (#531). */
+  const [revealRestore, setRevealRestore] = useState<ExplorerFilters | null>(
+    null,
+  );
+  const [bookmarkRevealState, setBookmarkRevealState] = useState<
+    "idle" | "visible" | "revealed" | "missing"
+  >("idle");
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -642,6 +649,140 @@ export function LogExplorer({ corpusId }: Props) {
       }
       ev.preventDefault();
       void bookmarkSelection();
+    }
+  };
+
+  /** #533: drop selection/detail that is no longer in any resident lane. */
+  useEffect(() => {
+    const resident = new Set(
+      Object.values(laneEvents)
+        .flat()
+        .map((e) => e.seq),
+    );
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set([...prev].filter((s) => resident.has(s)));
+      if (next.size === prev.size) return prev;
+      if (next.size === 0) {
+        setStatus(
+          "Selection cleared — event no longer visible under filters/lanes",
+        );
+      }
+      return next;
+    });
+    setDetail((d) => (d && !resident.has(d.seq) ? null : d));
+  }, [laneEvents]);
+
+  /** #531: activate bookmark — reveal target even when filters hide it. */
+  const activateBookmark = async (b: LogBookmarkDto) => {
+    const seq = b.seqFrom;
+    const resident = Object.values(laneEvents)
+      .flat()
+      .some((e) => e.seq >= b.seqFrom && e.seq <= b.seqTo);
+    setHighlight(
+      new Set(
+        Array.from(
+          { length: Math.max(1, b.seqTo - b.seqFrom + 1) },
+          (_, i) => b.seqFrom + i,
+        ),
+      ),
+    );
+    setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+
+    if (resident) {
+      setBookmarkRevealState("visible");
+      setStatus(`Bookmark visible: ${b.label}`);
+      return;
+    }
+
+    // Temporarily clear source/level/keyword so the target can load.
+    if (!revealRestore) {
+      setRevealRestore({ ...filters });
+    }
+    const openFilters: ExplorerFilters = {
+      ...filters,
+      levels: [],
+      sources: [],
+      keyword: null,
+    };
+    setFilters(openFilters);
+    setFilterDraft("");
+    setBusy(true);
+    try {
+      // Seek a page that ends at/after the bookmark via before_cursor on seq+1
+      // or load around by sequential pages — use direct after from 0 with limit
+      // and keyword null, then check presence; if missing, try reverse from end.
+      const page = await hostLogQueryEvents(
+        corpusId,
+        filtersToQuery(openFilters, {
+          limit: 100,
+          sortByTime: true,
+        }),
+      );
+      // Walk forward until we pass the bookmark or exhaust.
+      let window = seedFromPage(page);
+      let guard = 0;
+      while (
+        !window.events.some((e) => e.seq === seq) &&
+        window.afterSeq != null &&
+        window.afterTs != null &&
+        guard < 40
+      ) {
+        guard += 1;
+        const next = await hostLogQueryEvents(
+          corpusId,
+          filtersToQuery(openFilters, {
+            afterSeq: window.afterSeq,
+            afterTs: window.afterTs,
+            limit: 100,
+            sortByTime: true,
+          }),
+        );
+        if (next.events.length === 0) break;
+        window = appendNewer(window, next, DEFAULT_MAX_RESIDENT).window;
+        if (next.nextCursor == null) break;
+      }
+      const found = window.events.find((e) => e.seq === seq);
+      setLaneEvents((prev) => ({ ...prev, "lane-0": window.events }));
+      setLaneCursors((prev) => ({
+        ...prev,
+        "lane-0": {
+          afterSeq: window.afterSeq,
+          afterTs: window.afterTs,
+          beforeSeq: window.beforeSeq,
+          beforeTs: window.beforeTs,
+          hasOlder: window.beforeSeq != null,
+          hasNewer: window.afterSeq != null,
+        },
+      }));
+      if (found) {
+        setDetail(found);
+        setSelected(new Set([seq]));
+        setBookmarkRevealState("revealed");
+        setStatus(
+          `Bookmark temporarily revealed: ${b.label} — restore prior view when done`,
+        );
+      } else {
+        setBookmarkRevealState("missing");
+        setStatus(
+          `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
+        );
+      }
+    } catch (e) {
+      setError(String(e));
+      setBookmarkRevealState("missing");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restorePriorView = () => {
+    if (revealRestore) {
+      setFilters(revealRestore);
+      setFilterDraft(revealRestore.keyword ?? "");
+      setRevealRestore(null);
+      setBookmarkRevealState("idle");
+      setStatus("Restored prior Explorer view");
     }
   };
 
@@ -1151,6 +1292,25 @@ export function LogExplorer({ corpusId }: Props) {
             className="log-explorer__bookmarks"
             data-testid="log-explorer-bookmarks"
           >
+            {revealRestore ? (
+              <button
+                type="button"
+                className="log-explorer__btn log-explorer__btn--active"
+                data-testid="bookmark-restore-view"
+                onClick={restorePriorView}
+              >
+                Restore prior view
+                {bookmarkRevealState === "revealed" ? " (temp reveal)" : ""}
+              </button>
+            ) : null}
+            {bookmarkRevealState === "missing" ? (
+              <div
+                className="log-explorer__chat-preview"
+                data-testid="bookmark-missing"
+              >
+                Bookmark target missing or unavailable
+              </div>
+            ) : null}
             {bookmarks.length === 0 ? (
               <div className="log-explorer__chat-preview">
                 None yet — select rows + B
@@ -1161,17 +1321,8 @@ export function LogExplorer({ corpusId }: Props) {
                   <button
                     type="button"
                     className="log-explorer__btn"
-                    onClick={() => {
-                      setHighlight(
-                        new Set(
-                          Array.from(
-                            { length: b.seqTo - b.seqFrom + 1 },
-                            (_, i) => b.seqFrom + i,
-                          ),
-                        ),
-                      );
-                      setStatus(`Jumped bookmark ${b.label}`);
-                    }}
+                    data-testid={`bookmark-activate-${b.id}`}
+                    onClick={() => void activateBookmark(b)}
                   >
                     {b.label}
                   </button>
