@@ -6,8 +6,19 @@ paths. It contains no customer, employer, developer-machine, production, or
 third-party log material.
 
 The compact fixtures are intentionally small enough for default offline tests.
-The generator also produces 100,000-event and configurable million-event
-profiles outside Git.
+The generator also produces scale and **behavior-rich** profiles outside Git:
+
+| Profile | Purpose | Default size |
+| --- | --- | --- |
+| `small` | Checked-in mystery scenarios | ~63 events |
+| `medium` | Legacy regular 100k import/paging smoke | 100,000 / 4 sources |
+| `ui-medium` | Multi-day investigation corpus (#542) | 100,000 / 8 sources / 3 days |
+| `seven-day` | Sparse/burst lane + navigator corpus | 25,000 / 8 sources / 7 days |
+| `paging-stress` | Boundary sentinels for eviction/seek | 12,000 / 6 sources |
+| `large` | Opt-in stress (never commit) | 1,000,000+ |
+
+Event count, wall-clock span, source count, and traffic shape are **independent**
+controls on behavior profiles (`--events`, `--span-secs`, `--sources`).
 
 ## Safety and provenance
 
@@ -35,10 +46,30 @@ cargo run -p cd-core --example generate_log_lab -- \
   --output /tmp/contextdesk-log-lab-small \
   --profile small
 
-# Generate the bounded medium smoke corpus (100,000 events).
+# Generate the bounded medium smoke corpus (100,000 events, legacy regular rate).
 cargo run -p cd-core --example generate_log_lab -- \
   --output /tmp/contextdesk-log-lab-medium \
   --profile medium
+
+# Behavior-rich UI medium (100k, 8 sources, multi-day, rare Find/bookmark sentinels).
+cargo run -p cd-core --example generate_log_lab -- \
+  --output /tmp/contextdesk-log-lab-ui-medium \
+  --profile ui-medium \
+  --record-perf
+
+# Seven-day sparse/burst (event count independent of calendar span).
+cargo run -p cd-core --example generate_log_lab -- \
+  --output /tmp/contextdesk-log-lab-seven-day \
+  --profile seven-day
+
+# Paging/eviction sentinels.
+cargo run -p cd-core --example generate_log_lab -- \
+  --output /tmp/contextdesk-log-lab-paging \
+  --profile paging-stress
+
+# Disk estimate only (no files written).
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile large --events 1000000 --estimate-only
 
 # Generate an explicitly local stress corpus. Large output is never committed.
 cargo run -p cd-core --example generate_log_lab -- \
@@ -48,9 +79,14 @@ cargo run -p cd-core --example generate_log_lab -- \
 ```
 
 Every successful run prints its file count, event count, byte count, and
-deterministic tree SHA-256. The integration regression generates the compact
-tree twice, compares it byte-for-byte, and compares it with the checked-in
-snapshot.
+deterministic tree SHA-256. Two identical runs with the same profile and
+controls are byte-for-byte identical. The integration regression generates the
+compact tree twice, compares it byte-for-byte, and compares it with the
+checked-in snapshot.
+
+`--record-perf` writes `performance-record.template.json` next to the corpus.
+Fill measured import/first-page/deep-seek/peak-memory fields on **your**
+machine; never treat one host as a universal performance threshold.
 
 ## Scenarios
 
@@ -108,13 +144,32 @@ values are removed. Tests must prove raw values are absent from persisted
 events, search, Explorer DTOs, linked-chat context, diagnostics, snapshots, and
 portable packages.
 
-### Generated `scale`
+### Generated `scale` (legacy medium / large)
 
 The medium and large profiles create four source files with deterministic
 timestamps, trace ids, levels, and repeated templates. Medium is the required
 100,000-event import/paging smoke test. Large is an opt-in local stress tool;
 record the machine, corpus size, elapsed time, CPU, and memory before making a
 performance statement.
+
+### Generated `behavior-scale` (`ui-medium`, `seven-day`, `paging-stress`)
+
+Behavior-rich profiles (#542) write under `scenarios/behavior-scale/` with a
+truth manifest that records:
+
+- generator/scenario versions, seed, counts, hashes;
+- source identities and per-source counts;
+- time quality, time span, traffic shape;
+- sentinel event tokens for Find/Filter and bookmarks (including beyond first
+  page and beyond ~4,000 events);
+- expected queries, lane gaps, shared timestamps, long/multiline samples;
+- rotation siblings when enabled.
+
+Import root: `scenarios/behavior-scale/import/` (never the scenario parent).
+
+Canonical sentinel tokens include `FIND_RARE_BEYOND_PAGE`,
+`FIND_RARE_BEYOND_4K`, `FIND_RARE_DEEP`, `BOOKMARK_PAGE_BOUNDARY`,
+`BOOKMARK_EVICT_WINDOW`, and `BOOKMARK_NEAR_END`.
 
 ## Import and investigate
 

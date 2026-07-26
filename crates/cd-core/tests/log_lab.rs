@@ -9,7 +9,11 @@ use cd_core::log_analysis::{
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
 };
-use log_lab_generator::{generate_scale, verify_safety, MEDIUM_EVENT_COUNT, MEDIUM_PROFILE};
+use log_lab_generator::{
+    generate_behavior, generate_scale, load_behavior_manifest, verify_safety,
+    write_performance_template, BehaviorControls, MEDIUM_EVENT_COUNT, MEDIUM_PROFILE,
+    UI_MEDIUM_PROFILE,
+};
 use serde_json::Value;
 use std::fs;
 use std::io::{Read, Write};
@@ -556,6 +560,155 @@ fn log_lab_medium_100k_streams_pages_and_cancels_without_publication() {
         elapsed.as_millis(),
         first.events.len(),
         second.events.len(),
+        generation.tree_sha256
+    );
+}
+
+#[test]
+fn log_lab_behavior_ui_profile_imports_pages_and_finds_deep_sentinels() {
+    // Full ui-medium defaults are 100k; use a reduced but still multi-page count
+    // so the default suite stays practical while proving the product path.
+    let events = 5_000usize;
+    let controls = BehaviorControls::for_profile(UI_MEDIUM_PROFILE, Some(events)).unwrap();
+    assert!(controls.source_count >= 6);
+    assert!(controls.span_secs >= 2 * 86_400);
+
+    let workspace = tempfile::tempdir().unwrap();
+    let generated = workspace.path().join("behavior");
+    let gen_started = Instant::now();
+    let generation = generate_behavior(&generated, &controls).unwrap();
+    let generation_ms = gen_started.elapsed().as_millis();
+    assert_eq!(generation.events, events);
+    verify_safety(&generated).unwrap();
+
+    let manifest = load_behavior_manifest(&generated).unwrap();
+    let deep_token = manifest["investigation"]["sentinels"]["find_deep"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let beyond_page = manifest["investigation"]["sentinels"]["find_beyond_first_page"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bookmark_evict = manifest["investigation"]["sentinels"]["bookmark_evict_window"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cache = workspace.path().join("cache");
+    let import_started = Instant::now();
+    let report = ingest_path(
+        &cache,
+        &generated.join("scenarios/behavior-scale/import"),
+        "behavior-ui",
+        None,
+        "none",
+    )
+    .unwrap();
+    let import_ms = import_started.elapsed().as_millis();
+    assert_eq!(report.stats.lines as usize, events);
+    assert!(report.stats.files as usize >= controls.source_count);
+
+    let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+    let page_started = Instant::now();
+    let first = query_events(
+        &corpus,
+        &EventQuery {
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let first_page_ms = page_started.elapsed().as_millis();
+    assert_eq!(first.events.len(), 100);
+    assert_eq!(first.total_matched as usize, events);
+
+    // Deep sentinel must be findable via keyword search without loading the full
+    // corpus into the caller (search returns bounded hits).
+    let seek_started = Instant::now();
+    let deep_hits = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(deep_token.clone()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let deep_seek_ms = seek_started.elapsed().as_millis();
+    assert!(
+        !deep_hits.is_empty(),
+        "deep sentinel {deep_token} must be searchable"
+    );
+    assert!(deep_hits
+        .iter()
+        .any(|hit| hit.event.message.contains(&deep_token)));
+
+    let page_hits = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(beyond_page.clone()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert!(!page_hits.is_empty(), "{beyond_page}");
+
+    let bookmark_hits = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(bookmark_evict.clone()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert!(!bookmark_hits.is_empty(), "{bookmark_evict}");
+    let clue = bookmark_hits
+        .iter()
+        .find(|hit| hit.event.message.contains(&bookmark_evict))
+        .unwrap();
+    let bookmark = add_line_bookmark(
+        &corpus,
+        clue.event.seq,
+        "eviction sentinel",
+        Some("behavior profile #542".into()),
+        None,
+        Some(clue.event.ts),
+    )
+    .unwrap();
+    assert_eq!(bookmark.seq_from, clue.event.seq);
+
+    let perf_path = write_performance_template(&generated, &controls, &generation).unwrap();
+    let mut perf: Value = serde_json::from_slice(&fs::read(&perf_path).unwrap()).unwrap();
+    perf["measurements"]["generation_ms"] = serde_json::json!(generation_ms);
+    perf["measurements"]["import_ms"] = serde_json::json!(import_ms);
+    perf["measurements"]["source_bytes"] = serde_json::json!(report.stats.source_bytes);
+    perf["measurements"]["first_page_ms"] = serde_json::json!(first_page_ms);
+    perf["measurements"]["deep_seek_ms"] = serde_json::json!(deep_seek_ms);
+    perf["build"]["mode"] = serde_json::json!("test");
+    fs::write(
+        workspace.path().join("performance-record.sample.json"),
+        serde_json::to_vec_pretty(&perf).unwrap(),
+    )
+    .unwrap();
+
+    eprintln!(
+        "PASS behavior-ui events={} sources={} generation_ms={} import_ms={} first_page_ms={} deep_seek_ms={} source_bytes={} tree_sha256={} (one-machine observation; not a universal claim)",
+        events,
+        report.stats.files,
+        generation_ms,
+        import_ms,
+        first_page_ms,
+        deep_seek_ms,
+        report.stats.source_bytes,
         generation.tree_sha256
     );
 }
