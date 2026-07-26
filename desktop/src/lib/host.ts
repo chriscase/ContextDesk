@@ -1771,8 +1771,11 @@ export type EventQueryDto = {
 export type EventPageDto = {
   events: ExplorerEventDto[];
   nextCursor: number | null;
-  /** Pair with nextCursor for time-sorted Load more. */
+  /** Pair with nextCursor for time-sorted Load more (newer). */
   nextTs?: number | null;
+  /** Pair with beforeSeq for reverse Load more (older) (#538). */
+  prevCursor?: number | null;
+  prevTs?: number | null;
   totalMatched: number;
   timeQuality: TimeQuality;
 };

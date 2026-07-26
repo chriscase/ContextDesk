@@ -79,6 +79,8 @@ pub fn corpus_time_quality(corpus: &LogCorpus) -> TimeQuality {
         events: vec![],
         next_cursor: None,
         next_ts: None,
+        prev_cursor: None,
+        prev_ts: None,
         total_matched: 0,
         time_quality: TimeQuality::OrderOnly,
     });
@@ -219,13 +221,20 @@ impl From<LogEvent> for ExplorerEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventPage {
-    /// Rows (≤ limit).
+    /// Rows (≤ limit), always in ascending display order (`ts`/`seq` ASC).
     pub events: Vec<ExplorerEvent>,
-    /// Pass as `after_seq` for next page. Only set when a full page was returned.
+    /// Pass as `after_seq` for the **newer** page. Set when a full forward page was returned.
     pub next_cursor: Option<u64>,
     /// Pass as `after_ts` with `next_cursor` when time-sorted. Only set on full page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_ts: Option<i64>,
+    /// Pass as `before_seq` for the **older** page. Set when a full reverse page was returned
+    /// (or when the first page is full and more older rows may exist before the window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<u64>,
+    /// Pass as `before_ts` with `prev_cursor` when time-sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_ts: Option<i64>,
     /// Approximate total matching under filters (COUNT).
     pub total_matched: u64,
     /// Corpus/window time quality hint.
@@ -291,7 +300,16 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
     };
 
     let (where_sql, binds) = build_where(q);
-    let order = if q.sort_by_time {
+    // Reverse page: only `before_*` (no `after_*`) — fetch the adjacent older
+    // window via DESC + reverse so ASC LIMIT does not return corpus head (#538).
+    let reverse_page = q.before_seq.is_some() && q.after_seq.is_none();
+    let order = if reverse_page {
+        if q.sort_by_time {
+            "ts DESC, seq DESC"
+        } else {
+            "seq DESC"
+        }
+    } else if q.sort_by_time {
         "ts ASC, seq ASC"
     } else {
         "seq ASC"
@@ -343,7 +361,7 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
          FROM events WHERE {page_where} ORDER BY {order} LIMIT {limit}"
     );
 
-    let (total_matched, events) = corpus.with_connection(|conn| {
+    let (total_matched, mut events) = corpus.with_connection(|conn| {
         let total_matched: i64 = {
             let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
             bind_and_query_row_i64(&mut stmt, &binds)?
@@ -353,8 +371,13 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
         Ok((total_matched, events))
     })?;
 
-    // Only offer next page when this page was full (more rows may exist).
-    let (next_cursor, next_ts) = if events.len() == limit {
+    if reverse_page {
+        events.reverse();
+    }
+
+    // Forward cursor: last row when this was a full forward (or initial) page.
+    let full = events.len() == limit;
+    let (next_cursor, next_ts) = if full && !reverse_page {
         let last = events.last();
         (
             last.map(|e| e.seq),
@@ -364,6 +387,30 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
                 None
             },
         )
+    } else if full && reverse_page {
+        // Reverse page is full — newer side still has the original window; no
+        // new forward cursor from this response alone.
+        (None, None)
+    } else {
+        (None, None)
+    };
+    // Older cursor: first row when reverse page was full, or first page full
+    // (more may exist before the window).
+    let (prev_cursor, prev_ts) = if full {
+        let first = events.first();
+        (
+            first.map(|e| e.seq),
+            if q.sort_by_time {
+                first.map(|e| e.ts)
+            } else {
+                None
+            },
+        )
+    } else if reverse_page && !events.is_empty() {
+        // Partial reverse page — still expose first for clients that re-query,
+        // but mark exhausted by using None when not full? Prefer None so UI
+        // stops auto-paging older.
+        (None, None)
     } else {
         (None, None)
     };
@@ -377,6 +424,8 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
         events,
         next_cursor,
         next_ts,
+        prev_cursor,
+        prev_ts,
         total_matched: total_matched.max(0) as u64,
         time_quality: tq,
     })
@@ -981,6 +1030,140 @@ mod tests {
         assert!(
             late_present,
             "all late-file events must appear in paged results"
+        );
+    }
+
+    /// #538: reverse keyset must return the adjacent older window, not corpus head.
+    #[test]
+    fn query_reverse_before_cursor_is_adjacent_older_window() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+
+        let first = query_events(
+            &corpus,
+            &EventQuery {
+                limit: 10,
+                sort_by_time: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(first.events.len(), 10);
+        assert!(first.next_cursor.is_some() && first.next_ts.is_some());
+        assert!(first.prev_cursor.is_some() && first.prev_ts.is_some());
+
+        let second = query_events(
+            &corpus,
+            &EventQuery {
+                limit: 10,
+                sort_by_time: true,
+                after_seq: first.next_cursor,
+                after_ts: first.next_ts,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.events.len(), 10);
+        let second_first = second.events.first().unwrap();
+
+        // Reverse from the second page head must recover the first page's last rows.
+        let older = query_events(
+            &corpus,
+            &EventQuery {
+                limit: 10,
+                sort_by_time: true,
+                before_seq: Some(second_first.seq),
+                before_ts: Some(second_first.ts),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(older.events.len(), 10, "adjacent older page size");
+        // Ascending order after reverse-fetch.
+        for w in older.events.windows(2) {
+            assert!(
+                w[0].ts < w[1].ts || (w[0].ts == w[1].ts && w[0].seq < w[1].seq),
+                "older page must be ASC"
+            );
+        }
+        // Must be exactly the first page contents (adjacent), not corpus head drift.
+        let first_seqs: Vec<u64> = first.events.iter().map(|e| e.seq).collect();
+        let older_seqs: Vec<u64> = older.events.iter().map(|e| e.seq).collect();
+        assert_eq!(
+            older_seqs, first_seqs,
+            "before-cursor reverse page must equal the preceding forward page"
+        );
+        // No overlap with second page.
+        let second_seqs: std::collections::HashSet<u64> =
+            second.events.iter().map(|e| e.seq).collect();
+        for s in &older_seqs {
+            assert!(!second_seqs.contains(s), "overlap seq {s}");
+        }
+    }
+
+    /// Owner regression: job-7f3a=13, ERROR=7, AND=4 (#523).
+    #[test]
+    fn owner_filter_intersection_job_7f3a_and_error() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cache = workspace.path().join("cache");
+        let import = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/log-lab/scenarios/checkout-cascade/import");
+        let report = ingest_path(&cache, &import, "checkout-cascade", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+
+        let keyword = query_events(
+            &corpus,
+            &EventQuery {
+                keyword: Some("job-7f3a".into()),
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            keyword.total_matched, 13,
+            "job-7f3a keyword hits must be 13, got {}",
+            keyword.total_matched
+        );
+
+        let errors = query_events(
+            &corpus,
+            &EventQuery {
+                levels: vec!["error".into()],
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            errors.total_matched, 7,
+            "ERROR rows must be 7, got {}",
+            errors.total_matched
+        );
+
+        let both = query_events(
+            &corpus,
+            &EventQuery {
+                keyword: Some("job-7f3a".into()),
+                levels: vec!["error".into()],
+                limit: MAX_EVENT_PAGE,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            both.total_matched, 4,
+            "job-7f3a AND ERROR must be 4 (not 7 or 13), got {}",
+            both.total_matched
+        );
+        // Toggling level must not drop keyword.
+        assert!(
+            both.events
+                .iter()
+                .all(|e| e.level.eq_ignore_ascii_case("error")
+                    && e.message.to_lowercase().contains("job-7f3a")),
+            "intersection rows must satisfy both predicates"
         );
     }
 

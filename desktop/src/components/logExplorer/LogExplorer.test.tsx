@@ -330,50 +330,43 @@ describe("LogExplorer shell", () => {
     expect(await screen.findByText(/potential gap region/)).toBeTruthy();
   });
 
-  it("does not let late facet or page responses strengthen conservative time quality", async () => {
-    const pendingFacets = deferred<host.LogFacetsDto>();
-    const pendingPage = deferred<host.EventPageDto>();
-    vi.mocked(host.hostLogFacets).mockReturnValue(pendingFacets.promise);
-    vi.mocked(host.hostLogQueryEvents).mockReturnValue(pendingPage.promise);
-    const orderOnlyPage = eventPage("search.log", "order_only");
-    vi.mocked(host.hostLogSearchEvents).mockResolvedValue(
-      orderOnlyPage.events.map((event) => ({
-        event,
-        score: 1,
-        matchKind: "keyword",
-        templateId: event.templateId,
-      })),
-    );
+  it("does not let a stale page response overwrite a newer filter load", async () => {
+    const pages: Array<{
+      promise: Promise<host.EventPageDto>;
+      resolve: (value: host.EventPageDto) => void;
+    }> = [];
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(async () => {
+      const pending = deferred<host.EventPageDto>();
+      pages.push(pending);
+      return pending.promise;
+    });
 
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    await waitFor(() =>
-      expect(root.getAttribute("data-time-quality")).toBe("order_only"),
-    );
+    await waitFor(() => expect(pages.length).toBeGreaterThanOrEqual(1));
+
+    // Trigger a second load via filter keyword while first is still pending.
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "job-7f3a" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    await waitFor(() => expect(pages.length).toBeGreaterThanOrEqual(2));
 
     await act(async () => {
-      pendingFacets.resolve({
-        sources: { "late.log": 1 },
-        levels: { info: 1 },
-        services: {},
-        hosts: {},
-        timeQuality: "wall",
-      });
-      pendingPage.resolve(eventPage("late.log", "wall"));
+      // Resolve older request second with wall late.log — must not win.
+      pages[1]!.resolve(eventPage("filter.log", "order_only"));
+      pages[0]!.resolve(eventPage("late.log", "wall"));
       await Promise.resolve();
     });
 
-    expect(root.getAttribute("data-time-quality")).toBe("order_only");
-    expect(screen.getByText(/search\.log event 0/)).toBeTruthy();
-    expect(screen.queryByText(/late\.log event 0/)).toBeNull();
-    expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
-      "c1",
-      expect.objectContaining({ semantic: false }),
+    await waitFor(() =>
+      expect(screen.getByText(/filter\.log event 0/)).toBeTruthy(),
     );
+    expect(screen.queryByText(/late\.log event 0/)).toBeNull();
+    expect(root.getAttribute("data-time-quality")).toBe("order_only");
   });
 
-  it("enables semantic search only when persisted template vectors exist", async () => {
+  it("documents semantic availability without treating Find as semantic search", async () => {
     vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
       id: "c1",
       name: "semantic fixture",
@@ -395,13 +388,16 @@ describe("LogExplorer shell", () => {
     });
     render(<LogExplorer corpusId="c1" />);
     expect(
-      await screen.findByText("Semantic template search available"),
+      await screen.findByText(/Template-semantic ranking is available/),
     ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "auth" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
     await waitFor(() =>
       expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
         "c1",
-        expect.objectContaining({ semantic: true }),
+        expect.objectContaining({ semantic: false }),
       ),
     );
   });
@@ -614,15 +610,18 @@ describe("LogExplorer shell", () => {
     expect(screen.getAllByText("worker/worker.log").length).toBeGreaterThan(1);
     expect(screen.queryByText("/Users/")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Search logs"), {
+    fireEvent.change(screen.getByLabelText("Find in logs"), {
       target: { value: "job-7f3a" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Search" }));
-    expect(await screen.findByText(/event_id=worker-loop/)).toBeTruthy();
-    expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
-      "log-lab-checkout-cascade",
-      expect.objectContaining({ query: "job-7f3a" }),
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+        "log-lab-checkout-cascade",
+        expect.objectContaining({ query: "job-7f3a" }),
+      ),
     );
+    // Find preserves context — does not replace the table with only hits.
+    expect(await screen.findByText(/event_id=worker-loop/)).toBeTruthy();
 
     fireEvent.click(screen.getByText(/event_id=worker-loop/));
     fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));

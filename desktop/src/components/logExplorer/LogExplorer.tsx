@@ -51,6 +51,12 @@ import {
   type LaneConfig,
   type LaneTimeState,
 } from "../../lib/logExplorer/types";
+import {
+  appendNewer,
+  DEFAULT_MAX_RESIDENT,
+  prependOlder,
+  seedFromPage,
+} from "../../lib/logExplorer/residentWindow";
 import { LinkedChatRail } from "./LinkedChatRail";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import "../../styles/components/log-explorer.css";
@@ -89,10 +95,25 @@ export function LogExplorer({ corpusId }: Props) {
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
-  /** Per-lane composite cursors for multi-lane page-to-end (#505). */
+  /** Per-lane composite cursors for bidirectional paging (#505/#538). */
   const [laneCursors, setLaneCursors] = useState<
-    Record<string, { afterSeq: number | null; afterTs: number | null }>
+    Record<
+      string,
+      {
+        afterSeq: number | null;
+        afterTs: number | null;
+        beforeSeq: number | null;
+        beforeTs: number | null;
+        hasOlder: boolean;
+        hasNewer: boolean;
+      }
+    >
   >({});
+  /** Per-lane scroll anchor adjust (rows prepended) for stable visual position. */
+  const [laneScrollAdjust, setLaneScrollAdjust] = useState<
+    Record<string, number>
+  >({});
+  const pagingInflight = useRef<Record<string, "older" | "newer" | null>>({});
   const [focusLaneId, setFocusLaneId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
@@ -118,7 +139,12 @@ export function LogExplorer({ corpusId }: Props) {
   >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
-  const [searchDraft, setSearchDraft] = useState("");
+  const [findDraft, setFindDraft] = useState("");
+  const [filterDraft, setFilterDraft] = useState("");
+  /** Find matches (ordered seqs) — does not reduce the table (#523). */
+  const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [findIndex, setFindIndex] = useState(0);
+  const [findTotal, setFindTotal] = useState(0);
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -232,21 +258,34 @@ export function LogExplorer({ corpusId }: Props) {
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
         setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
-        setLaneEvents({ "lane-0": page.events });
+        const seeded = seedFromPage(page);
+        setLaneEvents({ "lane-0": seeded.events });
         setLaneCursors({
           "lane-0": {
-            afterSeq: page.nextCursor,
-            afterTs: page.nextTs ?? null,
+            afterSeq: seeded.afterSeq,
+            afterTs: seeded.afterTs,
+            beforeSeq: seeded.beforeSeq,
+            beforeTs: seeded.beforeTs,
+            hasOlder: page.prevCursor != null,
+            hasNewer: page.nextCursor != null,
           },
         });
+        setLaneScrollAdjust({ "lane-0": 0 });
         setStatus(
-          `${page.totalMatched} matched · showing ${page.events.length}`,
+          `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
         );
       } else {
         const byLane: Record<string, ExplorerEventDto[]> = {};
         const cursors: Record<
           string,
-          { afterSeq: number | null; afterTs: number | null }
+          {
+            afterSeq: number | null;
+            afterTs: number | null;
+            beforeSeq: number | null;
+            beforeTs: number | null;
+            hasOlder: boolean;
+            hasNewer: boolean;
+          }
         > = {};
         const states: Record<string, LaneTimeState> = {};
         let total = 0;
@@ -273,15 +312,27 @@ export function LogExplorer({ corpusId }: Props) {
           if (result.status === "rejected") {
             failed += 1;
             byLane[lane.id] = [];
-            cursors[lane.id] = { afterSeq: null, afterTs: null };
+            cursors[lane.id] = {
+              afterSeq: null,
+              afterTs: null,
+              beforeSeq: null,
+              beforeTs: null,
+              hasOlder: false,
+              hasNewer: false,
+            };
             states[lane.id] = { status: "error", quality: null };
             continue;
           }
           const { page } = result.value;
-          byLane[lane.id] = page.events;
+          const seeded = seedFromPage(page);
+          byLane[lane.id] = seeded.events;
           cursors[lane.id] = {
-            afterSeq: page.nextCursor,
-            afterTs: page.nextTs ?? null,
+            afterSeq: seeded.afterSeq,
+            afterTs: seeded.afterTs,
+            beforeSeq: seeded.beforeSeq,
+            beforeTs: seeded.beforeTs,
+            hasOlder: page.prevCursor != null,
+            hasNewer: page.nextCursor != null,
           };
           total = Math.max(total, page.totalMatched);
           shown += page.events.length;
@@ -433,50 +484,91 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
-  const runSearch = async () => {
-    const requestId = ++eventsRequestRef.current;
+  /**
+   * Find: highlight matches in full investigation context (#523).
+   * Does NOT replace the resident table with only hits.
+   */
+  const runFind = async () => {
+    const q = findDraft.trim();
+    if (!q) {
+      setFindMatches([]);
+      setFindIndex(0);
+      setFindTotal(0);
+      setHighlight(new Set());
+      setStatus("Find cleared");
+      return;
+    }
     setBusy(true);
     setError(null);
-    setLaneTimeStates({
-      "lane-0": { status: "unloaded", quality: null },
-    });
-    setTimeQuality("order_only");
-    setGaps([]);
     try {
       const hits = await hostLogSearchEvents(corpusId, {
-        query: searchDraft || filters.keyword || undefined,
-        semantic: semanticAvailable,
-        k: 100,
+        query: q,
+        // Find is keyword/locator only — do not claim semantic when unavailable.
+        semantic: false,
+        k: 500,
+        // Compose with active filter facets but not a second keyword reduce.
         filter: filtersToQuery(filters, { keyword: null }),
       });
-      if (requestId !== eventsRequestRef.current) return;
-      const evs = hits.map((h) => h.event);
-      const state: LaneTimeState =
-        evs.length > 0
-          ? {
-              status: "loaded",
-              quality: leastReliableTimeQuality(
-                evs.map((event) => event.timeQuality),
-              ),
-            }
-          : { status: "empty", quality: null };
-      const states = { "lane-0": state };
-      setLaneEvents({ "lane-0": evs });
-      setLaneTimeStates(states);
-      setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
-      setTotalMatched(evs.length);
-      setHighlight(new Set(evs.map((e) => e.seq)));
+      const seqs = hits.map((h) => h.event.seq);
+      setFindMatches(seqs);
+      setFindTotal(seqs.length);
+      setFindIndex(seqs.length > 0 ? 0 : 0);
+      setHighlight(new Set(seqs));
+      if (seqs.length > 0) {
+        const first = seqs[0]!;
+        setLaneScrollSeq((m) => ({ ...m, "lane-0": first }));
+        // If not resident, request a window around the first match via before/after seed.
+        const resident = laneEvents["lane-0"] ?? [];
+        if (!resident.some((e) => e.seq === first)) {
+          const page = await hostLogQueryEvents(
+            corpusId,
+            filtersToQuery(filters, {
+              keyword: filters.keyword,
+              // Jump by loading around match via after of prev if available is hard;
+              // load first page with keyword null then user can page — better: seek by seq via before next.
+              limit: 100,
+              sortByTime: true,
+            }),
+          );
+          // Prefer a page that includes the match by reverse+forward is complex;
+          // seed and scroll when match is in page; else keep highlight + status.
+          if (page.events.some((e) => e.seq === first)) {
+            const seeded = seedFromPage(page);
+            setLaneEvents((prev) => ({ ...prev, "lane-0": seeded.events }));
+          }
+        }
+      }
       setStatus(
-        semanticAvailable
-          ? `Search: ${evs.length} event hits (template-first semantic + keyword)`
-          : `Search: ${evs.length} event hits (keyword-only; local re-analysis is not complete)`,
+        seqs.length
+          ? `Find: match 1 of ${seqs.length} for “${q}” (context preserved)`
+          : `Find: no matches for “${q}”`,
       );
     } catch (e) {
-      if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      if (requestId === eventsRequestRef.current) setBusy(false);
+      setBusy(false);
     }
+  };
+
+  const findStep = (dir: 1 | -1) => {
+    if (findMatches.length === 0) return;
+    const next =
+      (findIndex + dir + findMatches.length) % findMatches.length;
+    setFindIndex(next);
+    const seq = findMatches[next]!;
+    setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+    setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
+  };
+
+  /** Filter: reduce visible events by keyword ∩ facets (#523). */
+  const applyFilterKeyword = () => {
+    const kw = filterDraft.trim() || null;
+    setFilters((f) => ({ ...f, keyword: kw }));
+    setStatus(
+      kw
+        ? `Filter: keyword “${kw}” (intersects levels/sources/time)`
+        : "Filter: keyword cleared",
+    );
   };
 
   const onRowClick = (e: ExplorerEventDto, multi: boolean) => {
@@ -611,22 +703,27 @@ export function LogExplorer({ corpusId }: Props) {
     ],
   );
 
+  const laneSourceFilter = (laneId: string) => {
+    const lane = lanes.find((l) => l.id === laneId);
+    return lane && lane.sources.length > 0
+      ? lane.sources
+      : filters.sources.length > 0
+        ? filters.sources
+        : undefined;
+  };
+
   const loadMoreLane = async (laneId: string) => {
     const cur = laneCursors[laneId];
-    if (cur?.afterSeq == null) return;
-    const lane = lanes.find((l) => l.id === laneId);
+    if (!cur?.hasNewer || cur.afterSeq == null || cur.afterTs == null) return;
+    if (pagingInflight.current[laneId]) return;
+    pagingInflight.current[laneId] = "newer";
     const requestId = eventsRequestRef.current;
     setBusy(true);
     try {
       const page = await hostLogQueryEvents(
         corpusId,
         filtersToQuery(filters, {
-          sources:
-            lane && lane.sources.length > 0
-              ? lane.sources
-              : filters.sources.length > 0
-                ? filters.sources
-                : undefined,
+          sources: laneSourceFilter(laneId),
           afterSeq: cur.afterSeq,
           afterTs: cur.afterTs,
           sortByTime: true,
@@ -634,20 +731,28 @@ export function LogExplorer({ corpusId }: Props) {
         }),
       );
       if (requestId !== eventsRequestRef.current) return;
-      setLaneEvents((prev) => ({
-        ...prev,
-        [laneId]: [...(prev[laneId] ?? []), ...page.events],
-      }));
+      const resident = {
+        events: laneEvents[laneId] ?? [],
+        afterSeq: cur.afterSeq,
+        afterTs: cur.afterTs,
+        beforeSeq: cur.beforeSeq,
+        beforeTs: cur.beforeTs,
+        totalMatched: totalMatched,
+      };
+      const { window } = appendNewer(resident, page, DEFAULT_MAX_RESIDENT);
+      setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
-          afterSeq: page.nextCursor,
-          afterTs: page.nextTs ?? null,
+          afterSeq: window.afterSeq,
+          afterTs: window.afterTs,
+          beforeSeq: window.beforeSeq,
+          beforeTs: window.beforeTs,
+          hasOlder: window.beforeSeq != null,
+          hasNewer: page.nextCursor != null,
         },
       }));
-      if (laneId === "lane-0") {
-        setNextCursor(page.nextCursor);
-      }
+      if (laneId === "lane-0") setNextCursor(page.nextCursor);
       if (page.events.length > 0) {
         setLaneTimeStates((previous) => {
           const prior = previous[laneId];
@@ -672,12 +777,75 @@ export function LogExplorer({ corpusId }: Props) {
         });
       }
       setStatus(
-        `Lane ${laneId}: loaded +${page.events.length} (cursor ${page.nextCursor ?? "end"})`,
+        `Lane ${laneId}: +${page.events.length} newer · ${window.events.length} resident`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
+      pagingInflight.current[laneId] = null;
+      if (requestId === eventsRequestRef.current) setBusy(false);
+    }
+  };
+
+  const loadOlderLane = async (laneId: string) => {
+    const cur = laneCursors[laneId];
+    if (!cur?.hasOlder || cur.beforeSeq == null || cur.beforeTs == null) return;
+    if (pagingInflight.current[laneId]) return;
+    pagingInflight.current[laneId] = "older";
+    const requestId = eventsRequestRef.current;
+    setBusy(true);
+    try {
+      const page = await hostLogQueryEvents(
+        corpusId,
+        filtersToQuery(filters, {
+          sources: laneSourceFilter(laneId),
+          beforeSeq: cur.beforeSeq,
+          beforeTs: cur.beforeTs,
+          sortByTime: true,
+          limit: 100,
+        }),
+      );
+      if (requestId !== eventsRequestRef.current) return;
+      const resident = {
+        events: laneEvents[laneId] ?? [],
+        afterSeq: cur.afterSeq,
+        afterTs: cur.afterTs,
+        beforeSeq: cur.beforeSeq,
+        beforeTs: cur.beforeTs,
+        totalMatched: totalMatched,
+      };
+      const { window, prepended } = prependOlder(
+        resident,
+        page,
+        DEFAULT_MAX_RESIDENT,
+      );
+      setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
+      setLaneCursors((prev) => ({
+        ...prev,
+        [laneId]: {
+          afterSeq: window.afterSeq,
+          afterTs: window.afterTs,
+          beforeSeq: window.beforeSeq,
+          beforeTs: window.beforeTs,
+          hasOlder: page.prevCursor != null,
+          hasNewer: cur.hasNewer || page.events.length > 0,
+        },
+      }));
+      if (prepended > 0) {
+        setLaneScrollAdjust((prev) => ({
+          ...prev,
+          [laneId]: (prev[laneId] ?? 0) + prepended,
+        }));
+      }
+      setStatus(
+        `Lane ${laneId}: +${page.events.length} older · ${window.events.length} resident`,
+      );
+    } catch (e) {
+      if (requestId !== eventsRequestRef.current) return;
+      setError(String(e));
+    } finally {
+      pagingInflight.current[laneId] = null;
       if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
@@ -687,9 +855,8 @@ export function LogExplorer({ corpusId }: Props) {
       await loadMoreLane("lane-0");
       return;
     }
-    // Multi-lane: advance every lane that still has a cursor.
     for (const lane of lanes.slice(0, laneCount)) {
-      if (laneCursors[lane.id]?.afterSeq != null) {
+      if (laneCursors[lane.id]?.hasNewer) {
         await loadMoreLane(lane.id);
       }
     }
@@ -819,36 +986,130 @@ export function LogExplorer({ corpusId }: Props) {
           className="log-explorer__filters"
           data-testid="log-explorer-filters"
         >
-          <div className="log-explorer__section-title">Search</div>
+          <div className="log-explorer__section-title">Find</div>
           <input
             className="log-explorer__search"
-            placeholder={
-              semanticAvailable
-                ? "Keyword / semantic…"
-                : "Keyword search (semantic unavailable)…"
-            }
-            value={searchDraft}
-            onChange={(e) => setSearchDraft(e.target.value)}
+            placeholder="Find in corpus (keeps surrounding rows)…"
+            value={findDraft}
+            onChange={(e) => setFindDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                setFilters((f) => ({ ...f, keyword: searchDraft || null }));
-                void runSearch();
-              }
+              if (e.key === "Enter") void runFind();
             }}
-            aria-label="Search logs"
+            aria-label="Find in logs"
+            data-testid="log-explorer-find"
+          />
+          <div className="log-explorer__find-actions">
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="log-explorer-find-run"
+              onClick={() => void runFind()}
+            >
+              Find
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="log-explorer-find-prev"
+              disabled={findMatches.length === 0}
+              onClick={() => findStep(-1)}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="log-explorer-find-next"
+              disabled={findMatches.length === 0}
+              onClick={() => findStep(1)}
+            >
+              Next
+            </button>
+          </div>
+          {findTotal > 0 ? (
+            <div
+              className="log-explorer__chat-preview"
+              data-testid="log-explorer-find-count"
+            >
+              Match {findIndex + 1} of {findTotal}
+            </div>
+          ) : null}
+
+          <div className="log-explorer__section-title">Filter</div>
+          <input
+            className="log-explorer__search"
+            placeholder="Filter keyword (reduces rows)…"
+            value={filterDraft}
+            onChange={(e) => setFilterDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applyFilterKeyword();
+            }}
+            aria-label="Filter logs"
+            data-testid="log-explorer-filter"
           />
           <button
             type="button"
             className="log-explorer__btn"
-            onClick={() => void runSearch()}
+            data-testid="log-explorer-filter-apply"
+            onClick={() => applyFilterKeyword()}
           >
-            Search
+            Apply filter
           </button>
+          {(filters.keyword ||
+            filters.levels.length > 0 ||
+            filters.sources.length > 0) && (
+            <div
+              className="log-explorer__active-facets"
+              data-testid="log-explorer-active-facets"
+            >
+              {filters.keyword ? (
+                <button
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() => {
+                    setFilterDraft("");
+                    setFilters((f) => ({ ...f, keyword: null }));
+                  }}
+                >
+                  keyword:{filters.keyword} ×
+                </button>
+              ) : null}
+              {filters.levels.map((lvl) => (
+                <button
+                  key={lvl}
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() => toggleLevel(lvl)}
+                >
+                  level:{lvl} ×
+                </button>
+              ))}
+              {filters.sources.map((src) => (
+                <button
+                  key={src}
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() => toggleSource(src)}
+                >
+                  source:{src} ×
+                </button>
+              ))}
+            </div>
+          )}
           <p className="log-explorer__chat-preview" role="note">
+            Find highlights without removing rows. Filter reduces the table and
+            intersects levels/sources/time.
             {semanticAvailable
-              ? "Semantic template search available"
-              : "Keyword-only corpus · re-analyze locally from Logs to enable semantic search"}
+              ? " Template-semantic ranking is available for advanced search."
+              : " Keyword-only corpus · re-analyze for semantic."}
           </p>
+          <div
+            className="log-explorer__chat-preview"
+            data-testid="log-explorer-count-truth"
+          >
+            Matched {totalMatched.toLocaleString()} · resident{" "}
+            {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
+          </div>
 
           <div className="log-explorer__section-title">Levels</div>
           <div className="log-explorer__facet">
@@ -1014,20 +1275,36 @@ export function LogExplorer({ corpusId }: Props) {
                     highlight={highlight}
                     density={density}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
+                    scrollAnchorAdjust={laneScrollAdjust[lane.id] ?? 0}
                     onRowClick={onRowClick}
+                    onNearTop={() => void loadOlderLane(lane.id)}
+                    onNearBottom={() => void loadMoreLane(lane.id)}
                   />
-                  {laneCursors[lane.id]?.afterSeq != null ? (
-                    <button
-                      type="button"
-                      className="log-explorer__btn"
-                      data-testid={`load-more-${lane.id}`}
-                      data-lane-load-more={lane.id}
-                      disabled={busy}
-                      onClick={() => void loadMoreLane(lane.id)}
-                    >
-                      Load more ({lane.label})
-                    </button>
-                  ) : null}
+                  <div className="log-explorer__lane-paging">
+                    {laneCursors[lane.id]?.hasOlder ? (
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        data-testid={`load-older-${lane.id}`}
+                        disabled={busy}
+                        onClick={() => void loadOlderLane(lane.id)}
+                      >
+                        Load older
+                      </button>
+                    ) : null}
+                    {laneCursors[lane.id]?.hasNewer ? (
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        data-testid={`load-more-${lane.id}`}
+                        data-lane-load-more={lane.id}
+                        disabled={busy}
+                        onClick={() => void loadMoreLane(lane.id)}
+                      >
+                        Load newer
+                      </button>
+                    ) : null}
+                  </div>
                 </section>
               );
             })}
