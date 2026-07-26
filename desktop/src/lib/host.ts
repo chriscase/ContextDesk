@@ -1818,6 +1818,54 @@ export async function hostLogQueryEvents(
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
 }
 
+/** How a stable target resolved under filters. */
+export type TargetResolveStatus = "found" | "hidden_by_filter" | "missing";
+
+export type EventNeighborhoodQueryDto = {
+  targetSeq: number;
+  before?: number;
+  after?: number;
+  filter?: EventQueryDto;
+  sortByTime?: boolean;
+};
+
+export type EventNeighborhoodDto = {
+  status: TargetResolveStatus;
+  target?: ExplorerEventDto | null;
+  events: ExplorerEventDto[];
+  targetIndex?: number | null;
+  nextCursor?: number | null;
+  nextTs?: number | null;
+  prevCursor?: number | null;
+  prevTs?: number | null;
+  totalMatched: number;
+  corpusTotal: number;
+  timeQuality: TimeQuality;
+};
+
+/**
+ * Load a bounded neighborhood around a stable event identity.
+ * Used by Find, bookmark reveal, and agent navigation — never scans from corpus start.
+ */
+export async function hostLogQueryEventNeighborhood(
+  corpusId: string,
+  query: EventNeighborhoodQueryDto,
+): Promise<EventNeighborhoodDto> {
+  if (!isTauri()) {
+    return {
+      status: "missing",
+      events: [],
+      totalMatched: 0,
+      corpusTotal: 0,
+      timeQuality: "order_only",
+    };
+  }
+  return invoke<EventNeighborhoodDto>("log_query_event_neighborhood", {
+    corpusId,
+    query,
+  });
+}
+
 export async function hostLogFacets(
   corpusId: string,
   query: EventQueryDto = {},

@@ -47,9 +47,11 @@ pub use package::{
 };
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use query::{
-    classify_ts, corpus_time_quality, query_events, query_facets, search_events, EventPage,
-    EventQuery, EventSearchHit, EventSearchQuery, ExplorerEvent, LogFacets, TimeQuality,
-    DEFAULT_EVENT_PAGE, MAX_EVENT_PAGE, MIN_WALL_TS,
+    classify_ts, corpus_time_quality, query_event_neighborhood, query_events, query_facets,
+    search_events, EventNeighborhood, EventNeighborhoodQuery, EventPage, EventQuery,
+    EventSearchHit, EventSearchQuery, ExplorerEvent, LogFacets, TargetResolveStatus, TimeQuality,
+    DEFAULT_EVENT_PAGE, DEFAULT_NEIGHBORHOOD_RADIUS, MAX_EVENT_PAGE, MAX_NEIGHBORHOOD_RADIUS,
+    MIN_WALL_TS,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,

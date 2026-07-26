@@ -4466,6 +4466,19 @@ fn log_query_events(
     cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
 }
 
+/// Bounded neighborhood around a stable event identity (Find / bookmark seek).
+#[tauri::command]
+fn log_query_event_neighborhood(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventNeighborhoodQuery,
+) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_event_neighborhood(&c, &query).map_err(|e| e.to_string())
+}
+
 /// Facets under filters for explorer filter rail.
 #[tauri::command]
 fn log_facets(
@@ -5502,6 +5515,7 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_query_event_neighborhood,
             log_facets,
             log_search_events,
             log_list_bookmarks,
