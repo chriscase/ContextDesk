@@ -289,84 +289,118 @@ export function ChatPane(props: ChatPaneProps) {
                   </div>
                 ) : null}
                 {messages.length === 0 ? (
-                  <div className="empty-state empty-state--chat">
-                    <div className="empty-state__title">{branding.name}</div>
-                    <p className="empty-state__body">{branding.tagline}</p>
-                    <p className="empty-state__body">
-                      Ask about your workspace, code, or notes. Starters fill
-                      the composer — edit, then send. Guided setup is optional.
-                    </p>
-                    {onStartWizard || onOpenGuidedSetup ? (
-                      <div
-                        className="chat-wizard-cards"
-                        role="group"
-                        aria-label="Guided setup"
-                      >
-                        {onStartWizard ? (
-                          <>
-                            <button
-                              type="button"
-                              className="chat-wizard-card"
-                              onClick={() => onStartWizard("log-troubleshooting")}
-                            >
-                              <strong>Log troubleshooting</strong>
-                              <span>Ingest dumps with visual progress</span>
-                            </button>
-                            <button
-                              type="button"
-                              className="chat-wizard-card"
-                              onClick={() => onStartWizard("memory-primer")}
-                            >
-                              <strong>Memory primer</strong>
-                              <span>Review inbox vs durable store</span>
-                            </button>
-                          </>
-                        ) : null}
-                        {onOpenGuidedSetup ? (
+                  <div
+                    className="empty-state empty-state--chat"
+                    data-testid="first-chat-home"
+                  >
+                    <header className="empty-state__hero">
+                      <div>
+                        <div className="empty-state__title">{branding.name}</div>
+                        <p className="empty-state__body empty-state__lead">
+                          {branding.tagline}
+                        </p>
+                        <p className="empty-state__body">
+                          Ask about your workspace, logs, or notes. Starters
+                          fill the composer — edit, then send. Guided setup is
+                          optional and never blocks the first question.
+                        </p>
+                      </div>
+                      <div>
+                        <p className="empty-state__meta">
+                          Command palette{" "}
+                          <kbd className="empty-state__kbd">{kbdMod}K</kbd>
+                          {preflightBlocking ? " · setup incomplete" : null}
+                        </p>
+                        {preflightBlocking ? (
                           <button
                             type="button"
-                            className="chat-wizard-card"
-                            onClick={onOpenGuidedSetup}
+                            className="btn btn--primary"
+                            onClick={() => openSettings("health")}
                           >
-                            <strong>All guided setups…</strong>
-                            <span>Optional multi-step workflows</span>
+                            Fix setup issues
                           </button>
                         ) : null}
                       </div>
-                    ) : null}
-                    <div
-                      className="chat-starters"
-                      role="group"
-                      aria-label="Starter prompts"
-                    >
-                      {STARTERS.map((s) => (
-                        <button
-                          key={s.label}
-                          type="button"
-                          className="chat-starter"
-                          disabled={busy || preflightBlocking}
-                          title={s.prompt}
-                          onClick={() => fillStarter(s.prompt)}
+                    </header>
+                    {onStartWizard || onOpenGuidedSetup ? (
+                      <section aria-labelledby="first-chat-setup-label">
+                        <div
+                          className="empty-state__section-label"
+                          id="first-chat-setup-label"
                         >
-                          <span className="chat-starter__label">{s.label}</span>
-                          <span className="chat-starter__hint">{s.prompt}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="empty-state__meta">
-                      Command palette{" "}
-                      <kbd className="empty-state__kbd">{kbdMod}K</kbd>
-                      {preflightBlocking ? " · setup incomplete" : null}
-                    </p>
-                    {preflightBlocking ? (
-                      <button
-                        type="button"
-                        className="btn btn--primary"
-                        onClick={() => openSettings("health")}
-                      >
-                        Fix setup issues
-                      </button>
+                          Guided setup
+                        </div>
+                        <div
+                          className="chat-wizard-cards"
+                          role="group"
+                          aria-label="Guided setup"
+                        >
+                          {onStartWizard ? (
+                            <>
+                              <button
+                                type="button"
+                                className="chat-wizard-card"
+                                onClick={() =>
+                                  onStartWizard("log-troubleshooting")
+                                }
+                              >
+                                <strong>Log troubleshooting</strong>
+                                <span>Ingest dumps with visual progress</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="chat-wizard-card"
+                                onClick={() => onStartWizard("memory-primer")}
+                              >
+                                <strong>Memory primer</strong>
+                                <span>Review inbox vs durable store</span>
+                              </button>
+                            </>
+                          ) : null}
+                          {onOpenGuidedSetup ? (
+                            <button
+                              type="button"
+                              className="chat-wizard-card"
+                              onClick={onOpenGuidedSetup}
+                            >
+                              <strong>All guided setups…</strong>
+                              <span>Optional multi-step workflows</span>
+                            </button>
+                          ) : null}
+                        </div>
+                      </section>
                     ) : null}
+                    <section aria-labelledby="first-chat-starters-label">
+                      <div
+                        className="empty-state__section-label"
+                        id="first-chat-starters-label"
+                      >
+                        Starter prompts
+                      </div>
+                      <div
+                        className="chat-starters"
+                        role="group"
+                        aria-label="Starter prompts"
+                      >
+                        {STARTERS.map((s) => (
+                          <button
+                            key={s.label}
+                            type="button"
+                            className="chat-starter"
+                            disabled={busy || preflightBlocking}
+                            title={s.prompt}
+                            onClick={() => fillStarter(s.prompt)}
+                          >
+                            <span className="chat-starter__label">
+                              {s.label}
+                            </span>
+                            <span className="chat-starter__hint">
+                              {s.prompt}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
                   </div>
                 ) : (
                   <div

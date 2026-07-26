@@ -50,21 +50,35 @@
   z-index: 50;
   top: calc(100% + 6px);
   left: 0;
-  width: min(22rem, calc(100vw - 2rem));
-  max-height: min(60vh, 22rem);
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: min(70vh, 26rem);
   overflow: auto;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  border-radius: var(--radius-md, 8px);
   border: 1px solid var(--border);
   background: var(--bg-elevated, var(--bg-panel));
   box-shadow:
     0 0 0 1px rgb(0 0 0 / 0.2),
-    var(--shadow-md);
+    0 12px 32px rgba(0, 0, 0, 0.35);
   color: var(--text);
   text-align: left;
   text-transform: none;
   letter-spacing: normal;
   font-weight: 400;
+  line-height: 1.45;
+}
+
+.help-tip__body p {
+  margin: 0 0 0.55rem;
+  font-size: 0.82rem;
+}
+
+.help-tip__body p:last-child {
+  margin-bottom: 0;
+}
+
+.help-tip__body strong {
+  color: var(--text);
 }
 
 /* Prefer opening left when near the right edge of a connector block */

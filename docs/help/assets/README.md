@@ -25,3 +25,17 @@ Markdown table for accessible fallback.
 Forbidden content includes scripts, event attributes, `foreignObject`,
 embedded raster images, animation, remote `href`, remote `url()`, and external
 stylesheets.
+
+## Visual quality gate (#540)
+
+Syntactic SVG safety is **not** sufficient. Before shipping a diagram:
+
+1. Open the Help page that embeds it in a real dark UI (or `npm run dev` Help pane).
+2. Confirm labels are readable at the rendered size (no clipped words, no
+   overlapping text, no low-contrast grey-on-grey).
+3. Prefer short verbs in boxes; put process detail in a Markdown table under the
+   figure when needed.
+4. Reject “odd” AI word wrapping (mid-word breaks, stacked single letters,
+   decorative junk text).
+5. Run `node scripts/check_help_corpus.mjs` (or the desktop test suite that
+   includes help corpus validation).

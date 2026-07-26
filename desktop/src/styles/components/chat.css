@@ -623,9 +623,9 @@ ol.md-inline-list {
   font-size: var(--text-xs);
 }
 
+/* #539: first-chat home — responsive product surface, not a skinny centered column */
 .empty-state {
   max-width: 28rem;
-  /* Keep short so first send doesn't fight a huge empty-state height jump */
   margin: 4vh auto 0;
   text-align: center;
   color: var(--text-muted);
@@ -633,25 +633,51 @@ ol.md-inline-list {
 }
 
 .empty-state--chat {
-  max-width: 26rem;
+  width: min(56rem, 100%);
+  max-width: min(56rem, 100%);
+  margin: clamp(1rem, 4vh, 2.5rem) auto 0;
+  padding: 0 clamp(0.75rem, 2vw, 1.5rem) 1.5rem;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.empty-state__hero {
+  display: grid;
+  gap: 0.35rem 1.25rem;
+  align-items: end;
+}
+
+@media (min-width: 720px) {
+  .empty-state__hero {
+    grid-template-columns: minmax(0, 1.2fr) minmax(12rem, 0.8fr);
+  }
 }
 
 .empty-state__title {
-  font-size: var(--text-lg);
-  font-weight: 600;
+  font-size: clamp(1.25rem, 2.2vw, 1.65rem);
+  font-weight: 650;
   color: var(--text);
-  margin-bottom: var(--space-2);
+  margin: 0;
   letter-spacing: -0.03em;
+  line-height: 1.2;
 }
 
 .empty-state__body {
   font-size: var(--text-sm);
   line-height: 1.55;
-  margin: 0 0 var(--space-3);
+  margin: 0;
+  max-width: 40rem;
+}
+
+.empty-state__lead {
+  color: var(--text);
+  font-size: clamp(0.9rem, 1.4vw, 1.02rem);
 }
 
 .empty-state__meta {
-  margin: var(--space-3) 0 0;
+  margin: 0;
   font-size: var(--text-2xs);
   color: var(--text-faint);
   line-height: 1.4;
@@ -669,17 +695,79 @@ ol.md-inline-list {
 }
 
 .empty-state .btn {
-  margin-top: var(--space-2);
+  margin-top: 0;
+  justify-self: start;
 }
 
-/* Empty-chat starter chips (#300 residual) */
-.chat-starters {
+.empty-state__section-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin: 0 0 0.4rem;
+}
+
+.chat-wizard-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.chat-wizard-card {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  min-height: 4.5rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--motion-fast),
+    background var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.chat-wizard-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-wizard-card strong {
+  font-size: var(--text-sm);
+}
+
+.chat-wizard-card span {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  line-height: 1.35;
+}
+
+/* Empty-chat starter chips — responsive multi-column on wide screens (#539) */
+.chat-starters {
+  display: grid;
+  grid-template-columns: 1fr;
   gap: var(--space-2);
   width: 100%;
-  margin: var(--space-1) 0 0;
+  margin: 0;
   text-align: left;
+}
+
+@media (min-width: 640px) {
+  .chat-starters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1100px) {
+  .chat-starters {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .chat-starter {
@@ -688,6 +776,7 @@ ol.md-inline-list {
   align-items: flex-start;
   gap: 2px;
   width: 100%;
+  min-height: 4.25rem;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-soft);
