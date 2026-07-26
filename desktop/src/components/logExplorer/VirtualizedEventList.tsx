@@ -2,6 +2,10 @@
  * Windowed virtual list for log events (#483).
  * Only renders rows in the visible scroll window (+ overscan).
  * Edge proximity notifies parent for bidirectional paging (#538).
+ *
+ * Variable-height policy (#537): wrap/full/expanded rows use larger heights;
+ * total scroll height and every row offset include those heights so expanded
+ * rows never overlap following content.
  */
 import {
   useCallback,
@@ -53,6 +57,20 @@ function levelClass(level: string): string {
   return `log-explorer__level log-explorer__level--${l}`;
 }
 
+function rowHeightFor(
+  _e: ExplorerEventDto,
+  lineMode: LineMode,
+  expanded: boolean,
+  compactH: number,
+  wrapH: number,
+): number {
+  const rowExpanded = expanded;
+  const wrapText = lineMode === "full" || lineMode === "wrap" || rowExpanded;
+  if (!wrapText) return compactH;
+  if (lineMode === "wrap" && !rowExpanded) return wrapH;
+  return EXPANDED_ROW;
+}
+
 export function VirtualizedEventList({
   events,
   timeQuality,
@@ -71,7 +89,10 @@ export function VirtualizedEventList({
   "aria-label": ariaLabel = "Log events",
 }: Props) {
   const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
-  const rowH = lineMode === "wrap" ? Math.max(baseRowH, 44) : baseRowH;
+  const compactH = baseRowH;
+  const wrapH = lineMode === "wrap" ? Math.max(baseRowH, 44) : baseRowH;
+  const edgeRowH = wrapH;
+
   const timeRange = useMemo(() => {
     if (events.length === 0) return { minTs: undefined, maxTs: undefined };
     let minTs = events[0]!.ts;
@@ -88,6 +109,26 @@ export function VirtualizedEventList({
   const [viewportH, setViewportH] = useState(400);
   const edgeCooldown = useRef(0);
 
+  const { heights, offsets, totalH } = useMemo(() => {
+    const heights: number[] = new Array(events.length);
+    const offsets: number[] = new Array(events.length);
+    let acc = 0;
+    for (let i = 0; i < events.length; i++) {
+      offsets[i] = acc;
+      const e = events[i]!;
+      const h = rowHeightFor(
+        e,
+        lineMode,
+        expandedSeqs?.has(e.seq) ?? false,
+        compactH,
+        wrapH,
+      );
+      heights[i] = h;
+      acc += h;
+    }
+    return { heights, offsets, totalH: acc };
+  }, [events, expandedSeqs, lineMode, compactH, wrapH]);
+
   const onScroll = useCallback(
     (e: UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget;
@@ -95,54 +136,73 @@ export function VirtualizedEventList({
       setViewportH(el.clientHeight);
       const now = Date.now();
       if (now - edgeCooldown.current < 200) return;
-      if (nearTop(el.scrollTop, rowH)) {
+      if (nearTop(el.scrollTop, edgeRowH)) {
         edgeCooldown.current = now;
         onNearTop?.();
       } else if (
-        nearBottom(el.scrollTop, el.clientHeight, el.scrollHeight, rowH)
+        nearBottom(el.scrollTop, el.clientHeight, el.scrollHeight, edgeRowH)
       ) {
         edgeCooldown.current = now;
         onNearBottom?.();
       }
     },
-    [onNearBottom, onNearTop, rowH],
+    [onNearBottom, onNearTop, edgeRowH],
   );
 
-  // Measure viewport once mounted / on resize
   const setRef = useCallback((el: HTMLDivElement | null) => {
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
     if (el) setViewportH(el.clientHeight || 400);
   }, []);
 
-  // Preserve visual position when older rows are prepended (#538).
   const lastAnchor = useRef(0);
   useEffect(() => {
     if (scrollAnchorAdjust > 0 && parentRef.current) {
       if (scrollAnchorAdjust !== lastAnchor.current) {
-        parentRef.current.scrollTop += scrollAnchorAdjust * rowH;
+        const px =
+          heights
+            .slice(0, Math.min(scrollAnchorAdjust, heights.length))
+            .reduce((a, b) => a + b, 0) || scrollAnchorAdjust * compactH;
+        parentRef.current.scrollTop += px;
         lastAnchor.current = scrollAnchorAdjust;
       }
     }
-  }, [scrollAnchorAdjust, rowH]);
+  }, [scrollAnchorAdjust, heights, compactH]);
 
-  // Scroll to seq when requested
   const lastScrollSeq = useRef<number | null>(null);
   if (scrollToSeq != null && scrollToSeq !== lastScrollSeq.current) {
     lastScrollSeq.current = scrollToSeq;
     const idx = events.findIndex((e) => e.seq === scrollToSeq);
     if (idx >= 0 && parentRef.current) {
-      const top = Math.max(0, idx * rowH - viewportH / 3);
-      // Defer to after paint
+      const top = Math.max(0, (offsets[idx] ?? 0) - viewportH / 3);
       queueMicrotask(() => {
         parentRef.current?.scrollTo({ top, behavior: "smooth" });
       });
     }
   }
 
-  const totalH = events.length * rowH;
-  const start = Math.max(0, Math.floor(scrollTop / rowH) - OVERSCAN);
-  const visibleCount = Math.ceil(viewportH / rowH) + OVERSCAN * 2;
-  const end = Math.min(events.length, start + visibleCount);
+  let start = 0;
+  {
+    let lo = 0;
+    let hi = events.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const bottom = (offsets[mid] ?? 0) + (heights[mid] ?? compactH);
+      if (bottom < scrollTop) lo = mid + 1;
+      else hi = mid;
+    }
+    start = Math.max(0, lo - OVERSCAN);
+  }
+  let end = start;
+  {
+    const viewBottom = scrollTop + viewportH;
+    while (
+      end < events.length &&
+      (offsets[end] ?? 0) < viewBottom + OVERSCAN * compactH
+    ) {
+      end++;
+    }
+    end = Math.min(events.length, end + OVERSCAN);
+  }
   const slice = useMemo(() => events.slice(start, end), [events, start, end]);
 
   if (events.length === 0) {
@@ -167,6 +227,7 @@ export function VirtualizedEventList({
       data-virtualized="true"
       data-total={events.length}
       data-rendered={slice.length}
+      data-total-height={totalH}
       data-edge-trigger-rows={EDGE_TRIGGER_ROWS}
       onScroll={onScroll}
     >
@@ -178,8 +239,10 @@ export function VirtualizedEventList({
           const index = start + i;
           const tq = e.timeQuality ?? timeQuality;
           const rowExpanded = expandedSeqs?.has(e.seq) ?? false;
-          const wrapText = lineMode !== "compact" || rowExpanded;
-          const h = wrapText ? EXPANDED_ROW : rowH;
+          const wrapText =
+            lineMode === "full" || lineMode === "wrap" || rowExpanded;
+          const h = heights[index] ?? compactH;
+          const top = offsets[index] ?? index * compactH;
           const long = e.message.length > 80 || e.message.includes("\n");
           return (
             <div
@@ -201,11 +264,11 @@ export function VirtualizedEventList({
                 .join(" ")}
               style={{
                 position: "absolute",
-                top: index * rowH,
+                top,
                 left: 0,
                 right: 0,
                 minHeight: h,
-                height: wrapText ? "auto" : rowH,
+                height: h,
                 gridTemplateColumns: gridCols,
               }}
               onClick={(ev) =>
