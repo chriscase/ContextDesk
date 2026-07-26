@@ -186,10 +186,22 @@ export function LinkedChatRail({
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [navChips, setNavChips] = useState<LogNavAction[]>([]);
+  /**
+   * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
+   * chat A must not leak into chat B when the user switches mid-turn (#543).
+   */
+  const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
+  const [errorByChat, setErrorByChat] = useState<
+    Record<string, string | null>
+  >({});
+  const [statusByChat, setStatusByChat] = useState<
+    Record<string, string | null>
+  >({});
+  const [navChipsByChat, setNavChipsByChat] = useState<
+    Record<string, LogNavAction[]>
+  >({});
+  /** Errors before a chat identity exists (list/create) remain rail-scoped. */
+  const [railError, setRailError] = useState<string | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState("");
   const [contextOpen, setContextOpen] = useState(false);
@@ -220,6 +232,16 @@ export function LinkedChatRail({
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
     : true;
+  const busy = activeChatId ? (busyByChat[activeChatId] ?? false) : false;
+  const error = activeChatId
+    ? (errorByChat[activeChatId] ?? railError)
+    : railError;
+  const status = activeChatId
+    ? (statusByChat[activeChatId] ?? null)
+    : null;
+  const navChips = activeChatId
+    ? (navChipsByChat[activeChatId] ?? [])
+    : [];
   const showJump =
     Boolean(activeChatId) &&
     (detachedByChat[activeChatId!] || !followActive);
@@ -229,7 +251,7 @@ export function LinkedChatRail({
       const list = await hostListChatSessionsForCorpus(corpusId);
       setChats(list ?? []);
     } catch (e) {
-      setError(String(e));
+      setRailError(String(e));
     }
   }, [corpusId]);
 
@@ -279,8 +301,8 @@ export function LinkedChatRail({
     const gen = ++openGenRef.current;
     setActiveChatId(id);
     setSwitcherOpen(false);
-    setError(null);
-    setStatus(null);
+    setRailError(null);
+    setErrorByChat((m) => ({ ...m, [id]: null }));
     setDraft(draftsRef.current[id] ?? "");
     // Clear immediately so B never shows A's messages while loading.
     setMessages([]);
@@ -344,13 +366,13 @@ export function LinkedChatRail({
       ) {
         return;
       }
-      setError(String(e));
+      setErrorByChat((m) => ({ ...m, [id]: String(e) }));
       setMessages([]);
     }
   };
 
   const createLinkedChat = async (): Promise<string | null> => {
-    setError(null);
+    setRailError(null);
     try {
       const s = newSession(`Logs · ${corpusName || corpusId.slice(0, 8)}`);
       s.linkedCorpusId = corpusId;
@@ -358,13 +380,16 @@ export function LinkedChatRail({
       if (saved) {
         await refreshChats();
         await openChat(saved.id);
-        setStatus(`Linked chat created: ${saved.title}`);
+        setStatusByChat((m) => ({
+          ...m,
+          [saved.id]: `Linked chat created: ${saved.title}`,
+        }));
         setFollowByChat((m) => ({ ...m, [saved.id]: true }));
         setDetachedByChat((m) => ({ ...m, [saved.id]: false }));
         return saved.id;
       }
     } catch (e) {
-      setError(String(e));
+      setRailError(String(e));
     }
     return null;
   };
@@ -377,8 +402,10 @@ export function LinkedChatRail({
       sessionId = await createLinkedChat();
       if (!sessionId) return;
     }
-    setBusy(true);
-    setError(null);
+    if (busyByChat[sessionId]) return;
+    setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
+    setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
+    setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
     setDraft("");
     draftsRef.current[sessionId] = "";
     // Sending always re-engages follow for this chat (#529).
@@ -463,8 +490,8 @@ export function LinkedChatRail({
 
       const found = extractLogNavFromText(assistant.content);
       if (found.length) {
-        setNavChips((prev) => {
-          const next = [...prev];
+        setNavChipsByChat((byChat) => {
+          const next = [...(byChat[sessionId!] ?? [])];
           for (const a of found) {
             if (
               !next.some(
@@ -476,18 +503,19 @@ export function LinkedChatRail({
               next.push(a);
             }
           }
-          return next;
+          return { ...byChat, [sessionId!]: next };
         });
       }
       await refreshChats();
       const usedTools = (assistant.tools?.length ?? 0) > 0;
-      setStatus(
-        usedTools
+      setStatusByChat((m) => ({
+        ...m,
+        [sessionId!]: usedTools
           ? "Linked investigation completed with log tools"
           : "Linked chat response saved",
-      );
+      }));
     } catch (e) {
-      setError(String(e));
+      setErrorByChat((m) => ({ ...m, [sessionId!]: String(e) }));
       if (activeChatIdRef.current === sessionId) {
         setMessages((msgs) =>
           msgs.map((x) =>
@@ -502,7 +530,7 @@ export function LinkedChatRail({
         );
       }
     } finally {
-      setBusy(false);
+      setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
     }
   };
 
@@ -564,11 +592,28 @@ export function LinkedChatRail({
   const applyDevJson = () => {
     const found = extractLogNavFromText(devJson);
     if (found.length) {
-      setNavChips((prev) => [...prev, ...found]);
+      if (!activeChatId) {
+        setRailError("Open a linked chat before adding navigation proposals");
+        return;
+      }
+      setNavChipsByChat((m) => ({
+        ...m,
+        [activeChatId]: [...(m[activeChatId] ?? []), ...found],
+      }));
       setDevJson("");
-      setStatus(`Parsed ${found.length} navigation proposal(s)`);
+      setStatusByChat((m) => ({
+        ...m,
+        [activeChatId]: `Parsed ${found.length} navigation proposal(s)`,
+      }));
     } else {
-      setError("No valid log_nav JSON found");
+      if (activeChatId) {
+        setErrorByChat((m) => ({
+          ...m,
+          [activeChatId]: "No valid log_nav JSON found",
+        }));
+      } else {
+        setRailError("No valid log_nav JSON found");
+      }
     }
   };
 
@@ -659,7 +704,10 @@ export function LinkedChatRail({
                     onClick={() => void openChat(c.id)}
                   >
                     <div className="log-explorer__chat-item-title">{c.title}</div>
-                    <div className="log-explorer__chat-preview">{c.preview}</div>
+                    <div className="log-explorer__chat-preview">
+                      {busyByChat[c.id] ? "Investigating… · " : ""}
+                      {c.preview}
+                    </div>
                   </button>
                 </li>
               ))}

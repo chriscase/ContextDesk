@@ -532,6 +532,116 @@ describe("LinkedChatRail", () => {
     expect(screen.queryByText(/load-A-failed/)).toBeNull();
   });
 
+  it("keeps pending turn status, errors, and navigation scoped to the originating chat", async () => {
+    const sessions = new Map([
+      ["a", sessionDto("a", "Chat A")],
+      ["b", sessionDto("b", "Chat B")],
+    ]);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        [...sessions.values()].map((s) => ({
+          id: s.id,
+          title: s.title,
+          archived: false,
+          pinned: false,
+          created_at: s.created_at,
+          updated_at: s.updated_at,
+          message_count: s.messages.length,
+          preview: s.messages.at(-1)?.content ?? "",
+          linked_corpus_id: "c1",
+        })),
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(
+      async (id) => sessions.get(id) ?? null,
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (dto) => {
+      sessions.set(dto.id, dto);
+      return dto;
+    });
+
+    let resolveA: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (id, _text, _fl, _m, _p, onEvent) => {
+        if (id === "a") {
+          return new Promise((resolve) => {
+            resolveA = (events) => {
+              for (const event of events) onEvent?.(event);
+              resolve(events);
+            };
+          });
+        }
+        const events: host.EventDto[] = [
+          { kind: "text_delta", payload: { text: "B completed normally." } },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const openNamedChat = async (name: string) => {
+      fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+      fireEvent.click(
+        within(screen.getByTestId("linked-chat-switcher")).getByText(name),
+      );
+    };
+
+    await openNamedChat("Chat A");
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "investigate A" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await waitFor(() =>
+      expect(screen.getByTestId("send-linked-chat").textContent).toMatch(
+        /Investigating/,
+      ),
+    );
+
+    // Switching to B must expose B's independent composer while A is pending.
+    await openNamedChat("Chat B");
+    expect((screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled).toBe(
+      false,
+    );
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "investigate B" },
+    });
+    expect((screen.getByTestId("send-linked-chat") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByText("B completed normally.");
+    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+
+    // A completes later with an A-only navigation proposal. B must not show it.
+    await act(async () => {
+      resolveA?.([
+        {
+          kind: "text_delta",
+          payload: {
+            text: 'A evidence {"type":"log_nav","corpusId":"c1","sources":["a.log"],"label":"A-only nav"}',
+          },
+        },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+    expect(screen.queryByText("A-only nav")).toBeNull();
+    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+
+    await openNamedChat("Chat A");
+    expect(await screen.findByText(/A evidence/)).toBeTruthy();
+    expect(screen.getByText("A-only nav")).toBeTruthy();
+    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+  });
+
   it("virtualizes long transcripts and keeps pending turns mounted", async () => {
     const history = Array.from({ length: 120 }, (_, i) => ({
       id: `m-${i}`,
