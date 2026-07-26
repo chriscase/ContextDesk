@@ -628,7 +628,9 @@ pub fn search_events_advanced(
                                 diagnostic = Some(if hits.len() >= k {
                                     format!("result cap reached ({k})")
                                 } else {
-                                    format!("scan work cap reached ({MAX_REGEX_SCAN_EVENTS} events)")
+                                    format!(
+                                        "scan work cap reached ({MAX_REGEX_SCAN_EVENTS} events)"
+                                    )
                                 });
                             }
                             break;
@@ -671,8 +673,7 @@ pub fn search_events_advanced(
                         if page.next_cursor.is_none() || pages > 500 {
                             if pages > 500 {
                                 partial = true;
-                                diagnostic =
-                                    Some("page iteration safety cap reached".into());
+                                diagnostic = Some("page iteration safety cap reached".into());
                             }
                             break;
                         }
@@ -766,9 +767,9 @@ pub fn search_events_advanced(
                             if hits.iter().any(|h| h.event.seq == e.seq) {
                                 continue;
                             }
-                            let excerpt = msg_l.find(&kw_l).map(|idx| {
-                                excerpt_around(&e.message, idx, idx + pattern.len())
-                            });
+                            let excerpt = msg_l
+                                .find(&kw_l)
+                                .map(|idx| excerpt_around(&e.message, idx, idx + pattern.len()));
                             hits.push(EventSearchHit {
                                 template_id: Some(e.template_id),
                                 event: e,
@@ -815,9 +816,9 @@ fn compile_bounded_regex(pattern: &str, case_sensitive: bool) -> CoreResult<rege
     // Size limit on compiled automaton (bytes) — bounds memory for adversarial patterns.
     builder.size_limit(1 << 20); // 1 MiB
     builder.dfa_size_limit(1 << 20);
-    builder.build().map_err(|e| {
-        CoreError::Message(format!("invalid regex (validated before scan): {e}"))
-    })
+    builder
+        .build()
+        .map_err(|e| CoreError::Message(format!("invalid regex (validated before scan): {e}")))
 }
 
 fn excerpt_around(message: &str, start: usize, end: usize) -> String {
@@ -1845,7 +1846,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(!hits.hits.is_empty(), "regex should match auth failure lines");
+        assert!(
+            !hits.hits.is_empty(),
+            "regex should match auth failure lines"
+        );
         assert!(hits.hits.iter().all(|h| h.match_kind == "regex"));
         assert!(hits.hits.iter().any(|h| h.excerpt.is_some()));
 
@@ -1884,11 +1888,7 @@ mod tests {
         )
         .unwrap();
         assert!(r.hits.is_empty());
-        assert!(r
-            .diagnostic
-            .as_deref()
-            .unwrap_or("")
-            .contains("max length"));
+        assert!(r.diagnostic.as_deref().unwrap_or("").contains("max length"));
     }
 
     #[test]
