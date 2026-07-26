@@ -12,7 +12,11 @@ import {
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as host from "../../lib/host";
-import { LinkedChatRail, type AgentContextSummary } from "./LinkedChatRail";
+import {
+  LinkedChatRail,
+  shouldApplyChatLoad,
+  type AgentContextSummary,
+} from "./LinkedChatRail";
 
 vi.mock("../../lib/host", () => ({
   hostListChatSessionsForCorpus: vi.fn(async () => []),
@@ -363,6 +367,271 @@ describe("LinkedChatRail", () => {
     expect(screen.queryByTestId("log-explorer-view-context")).toBeNull();
     expect(screen.getByTestId("linked-chat-agent-context")).toBeTruthy();
     expect(screen.queryByLabelText("Paste log_nav JSON")).toBeNull();
+  });
+
+  it("shouldApplyChatLoad rejects stale generations and mismatched ids", () => {
+    expect(shouldApplyChatLoad(2, 2, "b", "b")).toBe(true);
+    expect(shouldApplyChatLoad(1, 2, "a", "b")).toBe(false);
+    expect(shouldApplyChatLoad(2, 2, "a", "b")).toBe(false);
+    expect(shouldApplyChatLoad(3, 3, "b", null)).toBe(false);
+  });
+
+  it("late openChat for A cannot overwrite active chat B", async () => {
+    const chatA = sessionDto("a", "Chat A", [
+      { id: "a1", role: "user", content: "message-from-A-only" },
+    ]);
+    const chatB = sessionDto("b", "Chat B", [
+      { id: "b1", role: "user", content: "message-from-B-only" },
+    ]);
+    const resolvers = new Map<string, (value: host.ChatSessionDto | null) => void>();
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: "a",
+        title: "Chat A",
+        archived: false,
+        pinned: false,
+        created_at: chatA.created_at,
+        updated_at: chatA.updated_at,
+        message_count: 1,
+        preview: "A",
+        linked_corpus_id: "c1",
+      },
+      {
+        id: "b",
+        title: "Chat B",
+        archived: false,
+        pinned: false,
+        created_at: chatB.created_at,
+        updated_at: chatB.updated_at,
+        message_count: 1,
+        preview: "B",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(
+      (id) =>
+        new Promise((resolve) => {
+          resolvers.set(id, resolve);
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    // Request A, then B before A resolves.
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat A"),
+    );
+    fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat B"),
+    );
+
+    // B resolves first.
+    await act(async () => {
+      resolvers.get("b")?.(chatB);
+    });
+    await waitFor(() =>
+      expect(screen.getByText("message-from-B-only")).toBeTruthy(),
+    );
+    expect(screen.queryByText("message-from-A-only")).toBeNull();
+
+    // A resolves later — must not clobber B.
+    await act(async () => {
+      resolvers.get("a")?.(chatA);
+    });
+    // Allow microtasks to flush any stale setters.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("message-from-B-only")).toBeTruthy();
+    expect(screen.queryByText("message-from-A-only")).toBeNull();
+    expect(screen.getByTestId("linked-chat-header").textContent).toMatch(
+      /Chat B/,
+    );
+  });
+
+  it("late openChat error for A does not clear active chat B", async () => {
+    const chatB = sessionDto("b", "Chat B", [
+      { id: "b1", role: "assistant", content: "stable-B-content" },
+    ]);
+    const resolvers = new Map<
+      string,
+      {
+        resolve: (value: host.ChatSessionDto | null) => void;
+        reject: (err: Error) => void;
+      }
+    >();
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: "a",
+        title: "Chat A",
+        archived: false,
+        pinned: false,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        message_count: 0,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+      {
+        id: "b",
+        title: "Chat B",
+        archived: false,
+        pinned: false,
+        created_at: chatB.created_at,
+        updated_at: chatB.updated_at,
+        message_count: 1,
+        preview: "B",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(
+      (id) =>
+        new Promise((resolve, reject) => {
+          resolvers.set(id, { resolve, reject });
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat A"),
+    );
+    fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat B"),
+    );
+    await act(async () => {
+      resolvers.get("b")?.resolve(chatB);
+    });
+    await waitFor(() =>
+      expect(screen.getByText("stable-B-content")).toBeTruthy(),
+    );
+    await act(async () => {
+      resolvers.get("a")?.reject(new Error("load-A-failed"));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("stable-B-content")).toBeTruthy();
+    expect(screen.queryByText(/load-A-failed/)).toBeNull();
+  });
+
+  it("virtualizes long transcripts and keeps pending turns mounted", async () => {
+    const history = Array.from({ length: 120 }, (_, i) => ({
+      id: `m-${i}`,
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Long thread row ${i} ${"·".repeat(20)}`,
+    }));
+    const stored = sessionDto("long", "Long chat", history);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: stored.id,
+        title: stored.title,
+        archived: false,
+        pinned: false,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+        message_count: history.length,
+        preview: "tail",
+        linked_corpus_id: "c1",
+      },
+    ]);
+
+    render(
+      <div style={{ height: 480 }}>
+        <LinkedChatRail
+          corpusId="c1"
+          corpusName="fixture"
+          agentContext={baseContext}
+          onApplyNav={() => undefined}
+        />
+      </div>,
+    );
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Long chat"),
+    );
+    const transcript = await screen.findByTestId("linked-chat-transcript");
+    await waitFor(() =>
+      expect(transcript.getAttribute("data-message-count")).toBe("120"),
+    );
+    expect(transcript.getAttribute("data-virtualized")).toBe("true");
+    const mounted = Number(transcript.getAttribute("data-mounted-count"));
+    expect(mounted).toBeGreaterThan(0);
+    expect(mounted).toBeLessThan(120);
+    // Last row (pending/latest) remains force-mounted by the window policy.
+    expect(screen.getByText(/Long thread row 119/)).toBeTruthy();
+    // Early rows outside the window are not all mounted.
+    const earlyMatches = screen.queryAllByText(/Long thread row 0 /);
+    // Depending on scroll position, row 0 may or may not be in the overscan;
+    // the key proof is mounted < total.
+    expect(mounted + earlyMatches.length).toBeLessThanOrEqual(120);
+  });
+
+  it("switcher supports Escape dismissal and keyboard option focus", async () => {
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: "k1",
+        title: "Keyboard one",
+        archived: false,
+        pinned: false,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        message_count: 0,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+      {
+        id: "k2",
+        title: "Keyboard two",
+        archived: false,
+        pinned: false,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        message_count: 0,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    const toggle = await screen.findByTestId("linked-chat-switcher-toggle");
+    fireEvent.click(toggle);
+    const switcher = await screen.findByTestId("linked-chat-switcher");
+    const options = within(switcher).getAllByRole("option");
+    options[0]!.focus();
+    fireEvent.keyDown(switcher, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(options[1]);
+    fireEvent.keyDown(switcher, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-switcher")).toBeNull(),
+    );
+    expect(document.activeElement).toBe(toggle);
   });
 
   it("scopes drafts per chat when switching", async () => {
