@@ -637,7 +637,7 @@ pub fn search_events_advanced(
                         }
                         let remaining_budget =
                             (MAX_REGEX_SCAN_EVENTS as u64).saturating_sub(scanned) as usize;
-                        let page_limit = remaining_budget.min(MAX_EVENT_PAGE).max(1);
+                        let page_limit = remaining_budget.clamp(1, MAX_EVENT_PAGE);
                         let mut fq = q.filter.clone();
                         fq.keyword = None;
                         fq.limit = page_limit;
@@ -825,30 +825,29 @@ fn excerpt_around(message: &str, start: usize, end: usize) -> String {
     let start = start.min(message.len());
     let end = end.min(message.len()).max(start);
     let pad = 40usize;
-    let from = start.saturating_sub(pad);
-    let to = (end + pad).min(message.len());
-    // Align to char boundaries.
-    let from = message
-        .char_indices()
-        .map(|(i, _)| i)
-        .take_while(|&i| i <= from)
-        .last()
+    let from_byte = start.saturating_sub(pad);
+    let to_byte = (end + pad).min(message.len());
+    // Char-safe window via char_indices (avoid panicking string_slice).
+    let chars: Vec<(usize, char)> = message.char_indices().collect();
+    let from_i = chars
+        .iter()
+        .rposition(|(i, _)| *i <= from_byte)
         .unwrap_or(0);
-    let to = message
-        .char_indices()
-        .map(|(i, _)| i)
-        .find(|&i| i >= to)
-        .unwrap_or(message.len());
+    let to_i = chars
+        .iter()
+        .position(|(i, _)| *i >= to_byte)
+        .unwrap_or(chars.len());
+    let slice: String = chars[from_i..to_i].iter().map(|(_, c)| *c).collect();
     let mut s = String::new();
-    if from > 0 {
+    if from_i > 0 {
         s.push('…');
     }
-    s.push_str(&message[from..to]);
-    if to < message.len() {
+    s.push_str(&slice);
+    if to_i < chars.len() {
         s.push('…');
     }
-    if s.len() > MAX_SEARCH_EXCERPT_LEN {
-        s.truncate(MAX_SEARCH_EXCERPT_LEN);
+    if s.chars().count() > MAX_SEARCH_EXCERPT_LEN {
+        s = s.chars().take(MAX_SEARCH_EXCERPT_LEN).collect();
         s.push('…');
     }
     s
