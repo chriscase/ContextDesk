@@ -34,8 +34,10 @@ import/export, and open investigation. It is not a million-row browser.
 | Evidence lanes | 1–4 source groups; optional timestamp link + gap bands |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
 | Bookmarks | Line or range on the corpus (`bookmarks.json` sidecar) |
-| Chat | Linked chats via `linkedCorpusId`; agent gets viewport context, not dump paste |
-| Nav chips | Agent may propose `log_nav` JSON; **you** opt in to apply |
+| Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. The agent receives a privacy-safe viewport snapshot and runs **bounded log tools** (search, cluster, timeline, …) until it produces an evidence-based answer — not planning-only prose |
+| Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
+| Agent context | **Context shared with agent** discloses filters/lanes/selection counts; full dumps stay out of chat context |
+| Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
 
 ## SoftWrite import vs session pack
 
