@@ -58,7 +58,10 @@ import {
   seedFromPage,
 } from "../../lib/logExplorer/residentWindow";
 import { LinkedChatRail } from "./LinkedChatRail";
-import { VirtualizedEventList } from "./VirtualizedEventList";
+import {
+  VirtualizedEventList,
+  type LineMode,
+} from "./VirtualizedEventList";
 import "../../styles/components/log-explorer.css";
 
 type Props = {
@@ -152,6 +155,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
   >("idle");
+  const [lineMode, setLineMode] = useState<LineMode>("compact");
+  const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set());
+  const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
+  const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [detailH, setDetailH] = useState(180);
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -170,7 +178,13 @@ export function LogExplorer({ corpusId }: Props) {
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? window.innerWidth;
-      setBreakpoint(classifyBreakpoint(w));
+      const bp = classifyBreakpoint(w);
+      setBreakpoint(bp);
+      // #536: narrow is single-lane by contract.
+      if (bp === "narrow") {
+        setLaneCount(1);
+        setLinkMode(false);
+      }
     });
     ro.observe(el);
     setBreakpoint(classifyBreakpoint(el.clientWidth || window.innerWidth));
@@ -1026,6 +1040,12 @@ export function LogExplorer({ corpusId }: Props) {
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
   const bpClass = `log-explorer--${breakpoint}`;
+  const narrowClass = [
+    narrowFiltersOpen ? "log-explorer--filters-open" : "",
+    narrowChatOpen ? "log-explorer--chat-open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const bodyStyle =
     breakpoint === "narrow"
       ? undefined
@@ -1033,15 +1053,34 @@ export function LogExplorer({ corpusId }: Props) {
           gridTemplateColumns: `${filterW}px 6px 1fr 6px ${chatW}px`,
         } as React.CSSProperties);
 
+  const toggleExpand = (seq: number) => {
+    setExpandedSeqs((prev) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  };
+
+  // Per-lane truthful counts (#534).
+  const laneMatchedHint = (laneId: string) => {
+    const n = (laneEvents[laneId] ?? []).length;
+    const cur = laneCursors[laneId];
+    const more =
+      cur?.hasNewer || cur?.hasOlder ? "+" : "";
+    return `${n}${more} resident`;
+  };
+
   return (
     <div
       ref={rootRef}
-      className={["log-explorer", bpClass, densityClass]
+      className={["log-explorer", bpClass, densityClass, narrowClass]
         .filter(Boolean)
         .join(" ")}
       data-testid="log-explorer"
       data-breakpoint={breakpoint}
       data-density={density}
+      data-line-mode={lineMode}
       data-lane-count={laneCount}
       data-link-mode={linkMode ? "on" : "off"}
       data-time-quality={timeQuality}
@@ -1097,15 +1136,28 @@ export function LogExplorer({ corpusId }: Props) {
           >
             {density}
           </button>
-          {[1, 2, 3, 4].map((n) => (
+          {breakpoint !== "narrow" &&
+            [1, 2, 3, 4].map((n) => (
+              <button
+                key={n}
+                type="button"
+                className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
+                onClick={() => configureLanes(n)}
+                title={`${n} evidence lane${n > 1 ? "s" : ""}`}
+              >
+                {n}L
+              </button>
+            ))}
+          {(["compact", "wrap", "full"] as LineMode[]).map((mode) => (
             <button
-              key={n}
+              key={mode}
               type="button"
-              className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
-              onClick={() => configureLanes(n)}
-              title={`${n} evidence lane${n > 1 ? "s" : ""}`}
+              className={`log-explorer__btn ${lineMode === mode ? "log-explorer__btn--active" : ""}`}
+              data-testid={`line-mode-${mode}`}
+              onClick={() => setLineMode(mode)}
+              title={`Message lines: ${mode}`}
             >
-              {n}L
+              {mode}
             </button>
           ))}
           <button
@@ -1117,6 +1169,41 @@ export function LogExplorer({ corpusId }: Props) {
           </button>
         </div>
       </header>
+
+      {breakpoint === "narrow" && (
+        <div
+          className="log-explorer__narrow-tabs"
+          data-testid="log-explorer-narrow-tabs"
+        >
+          <button
+            type="button"
+            className={`log-explorer__btn ${narrowFiltersOpen ? "log-explorer__btn--active" : ""}`}
+            data-testid="narrow-filters-toggle"
+            aria-expanded={narrowFiltersOpen}
+            onClick={() => {
+              setNarrowFiltersOpen((o) => !o);
+              setNarrowChatOpen(false);
+            }}
+          >
+            Filters
+            {filters.levels.length + filters.sources.length > 0
+              ? ` (${filters.levels.length + filters.sources.length})`
+              : ""}
+          </button>
+          <button
+            type="button"
+            className={`log-explorer__btn ${narrowChatOpen ? "log-explorer__btn--active" : ""}`}
+            data-testid="narrow-chat-toggle"
+            aria-expanded={narrowChatOpen}
+            onClick={() => {
+              setNarrowChatOpen((o) => !o);
+              setNarrowFiltersOpen(false);
+            }}
+          >
+            Chat
+          </button>
+        </div>
+      )}
 
       <div
         className="log-explorer__body"
@@ -1406,8 +1493,14 @@ export function LogExplorer({ corpusId }: Props) {
                     >
                       {laneTimeLabel}
                     </span>
-                    <span className="log-explorer__chat-preview">
-                      {(laneEvents[lane.id] ?? []).length} rows
+                    <span
+                      className="log-explorer__chat-preview"
+                      data-testid={`lane-count-${lane.id}`}
+                    >
+                      {laneMatchedHint(lane.id)}
+                      {totalMatched > 0 && laneCount === 1
+                        ? ` · ${totalMatched} matched`
+                        : ""}
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>
@@ -1425,6 +1518,9 @@ export function LogExplorer({ corpusId }: Props) {
                     selected={selected}
                     highlight={highlight}
                     density={density}
+                    lineMode={lineMode}
+                    expandedSeqs={expandedSeqs}
+                    onToggleExpand={toggleExpand}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
                     scrollAnchorAdjust={laneScrollAdjust[lane.id] ?? 0}
                     onRowClick={onRowClick}
@@ -1464,16 +1560,52 @@ export function LogExplorer({ corpusId }: Props) {
             <div
               className="log-explorer__detail"
               data-testid="log-explorer-detail"
+              style={{ maxHeight: detailH }}
             >
+              <div className="log-explorer__detail-toolbar">
+                <strong>Event inspector · seq {detail.seq}</strong>
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="detail-copy"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(
+                      `${detail.seq}\t${detail.ts}\t${detail.level}\t${detail.source}\t${detail.message}`,
+                    );
+                    setStatus("Copied event to clipboard");
+                  }}
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="detail-taller"
+                  onClick={() => setDetailH((h) => Math.min(480, h + 60))}
+                >
+                  Taller
+                </button>
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="detail-close"
+                  onClick={() => setDetail(null)}
+                >
+                  Close
+                </button>
+              </div>
               <div>
-                <strong>seq {detail.seq}</strong> · {detail.source} ·{" "}
+                {detail.source} ·{" "}
                 <span className={levelClass(detail.level)}>{detail.level}</span>
               </div>
               <div className="log-explorer__ts">
                 {formatEventTime(detail.ts, detail.timeQuality)} ·{" "}
                 {timeQualityLabel(detail.timeQuality)}
               </div>
-              <pre style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0" }}>
+              <pre
+                style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0" }}
+                data-testid="detail-message"
+              >
                 {detail.message}
               </pre>
               {(nextCursor != null ||

@@ -17,10 +17,16 @@ import {
   nearBottom,
   nearTop,
 } from "../../lib/logExplorer/residentWindow";
-import { formatEventTime, timeQualityLabel } from "../../lib/logExplorer/types";
+import {
+  formatEventTime,
+  formatEventTimeTitle,
+} from "../../lib/logExplorer/types";
 
 const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
+const EXPANDED_ROW = 96;
+
+export type LineMode = "compact" | "wrap" | "full";
 
 type Props = {
   events: ExplorerEventDto[];
@@ -28,9 +34,14 @@ type Props = {
   selected: Set<number>;
   highlight: Set<number>;
   density: "comfortable" | "compact";
+  lineMode?: LineMode;
+  /** Column widths in rem: [ts, level, source, message]. */
+  colWidths?: [number, number, number, number];
   scrollToSeq?: number | null;
   /** Rows prepended — keep visual anchor stable (#538). */
   scrollAnchorAdjust?: number;
+  expandedSeqs?: Set<number>;
+  onToggleExpand?: (seq: number) => void;
   onRowClick: (e: ExplorerEventDto, multi: boolean) => void;
   onNearTop?: () => void;
   onNearBottom?: () => void;
@@ -48,14 +59,30 @@ export function VirtualizedEventList({
   selected,
   highlight,
   density,
+  lineMode = "compact",
+  colWidths = [7.5, 3.5, 8, 1],
   scrollToSeq,
   scrollAnchorAdjust = 0,
+  expandedSeqs,
+  onToggleExpand,
   onRowClick,
   onNearTop,
   onNearBottom,
   "aria-label": ariaLabel = "Log events",
 }: Props) {
-  const rowH = density === "compact" ? 22 : DEFAULT_ROW;
+  const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
+  const rowH = lineMode === "wrap" ? Math.max(baseRowH, 44) : baseRowH;
+  const timeRange = useMemo(() => {
+    if (events.length === 0) return { minTs: undefined, maxTs: undefined };
+    let minTs = events[0]!.ts;
+    let maxTs = events[0]!.ts;
+    for (const e of events) {
+      if (e.ts < minTs) minTs = e.ts;
+      if (e.ts > maxTs) maxTs = e.ts;
+    }
+    return { minTs, maxTs };
+  }, [events]);
+  const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(8rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(400);
@@ -150,6 +177,10 @@ export function VirtualizedEventList({
         {slice.map((e, i) => {
           const index = start + i;
           const tq = e.timeQuality ?? timeQuality;
+          const rowExpanded = expandedSeqs?.has(e.seq) ?? false;
+          const wrapText = lineMode !== "compact" || rowExpanded;
+          const h = wrapText ? EXPANDED_ROW : rowH;
+          const long = e.message.length > 80 || e.message.includes("\n");
           return (
             <div
               key={e.seq}
@@ -157,10 +188,14 @@ export function VirtualizedEventList({
               tabIndex={0}
               data-seq={e.seq}
               data-index={index}
+              data-expanded={wrapText ? "true" : "false"}
+              data-truncated={long && !wrapText ? "true" : "false"}
               className={[
                 "log-explorer__row",
                 selected.has(e.seq) ? "log-explorer__row--selected" : "",
                 highlight.has(e.seq) ? "log-explorer__row--highlight" : "",
+                wrapText ? "log-explorer__row--expanded" : "",
+                wrapText ? "log-explorer__row--wrap" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -169,7 +204,9 @@ export function VirtualizedEventList({
                 top: index * rowH,
                 left: 0,
                 right: 0,
-                height: rowH,
+                minHeight: h,
+                height: wrapText ? "auto" : rowH,
+                gridTemplateColumns: gridCols,
               }}
               onClick={(ev) =>
                 onRowClick(e, ev.metaKey || ev.ctrlKey || ev.shiftKey)
@@ -179,17 +216,52 @@ export function VirtualizedEventList({
                   ev.preventDefault();
                   onRowClick(e, ev.metaKey || ev.ctrlKey || ev.shiftKey);
                 }
+                if (ev.key === "x" || ev.key === "X") {
+                  ev.preventDefault();
+                  onToggleExpand?.(e.seq);
+                }
               }}
             >
-              <span className="log-explorer__ts" title={timeQualityLabel(tq)}>
-                {formatEventTime(e.ts, tq)}
+              <span
+                className="log-explorer__ts"
+                title={formatEventTimeTitle(e.ts, tq)}
+              >
+                {formatEventTime(e.ts, tq, timeRange)}
               </span>
               <span className={levelClass(e.level)}>{e.level}</span>
               <span className="log-explorer__source" title={e.source}>
                 {e.source}
               </span>
-              <span className="log-explorer__msg" title={e.message}>
-                {e.message}
+              <span className="log-explorer__msg-cell">
+                <span
+                  className={
+                    wrapText
+                      ? "log-explorer__msg log-explorer__msg--wrap"
+                      : "log-explorer__msg"
+                  }
+                  title={e.message}
+                >
+                  {e.message}
+                </span>
+                {long && lineMode === "compact" ? (
+                  <button
+                    type="button"
+                    className="log-explorer__expand-btn"
+                    data-testid={`expand-row-${e.seq}`}
+                    aria-expanded={rowExpanded}
+                    aria-label={
+                      rowExpanded
+                        ? `Collapse long message seq ${e.seq}`
+                        : `Expand long message seq ${e.seq}`
+                    }
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      onToggleExpand?.(e.seq);
+                    }}
+                  >
+                    {rowExpanded ? "Collapse" : "Expand"}
+                  </button>
+                ) : null}
               </span>
             </div>
           );

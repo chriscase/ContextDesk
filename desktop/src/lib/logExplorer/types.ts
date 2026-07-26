@@ -108,17 +108,61 @@ export function timeQualityLabel(q: TimeQuality): string {
   }
 }
 
-/** Format ts honestly for order_only vs wall. */
-export function formatEventTime(ts: number, quality: TimeQuality): string {
-  if (quality === "order_only" || ts < 946_684_800) {
-    return `seq-time ${ts}`;
-  }
+/** Canonical UTC timestamp string (full precision, no locale). */
+export function formatCanonicalUtc(ts: number): string {
   try {
-    return new Date(ts * 1000)
-      .toISOString()
-      .replace("T", " ")
-      .replace(/\.\d+Z$/, "Z");
+    return new Date(ts * 1000).toISOString().replace("T", " ");
   } catch {
     return String(ts);
   }
+}
+
+/**
+ * Adaptive visible time for dense rows (#535).
+ * Same UTC day → HH:mm:ss; multi-day → MM-DD HH:mm:ss; multi-year → full date+time.
+ * Order-only never fabricates calendar time.
+ */
+export function formatEventTime(
+  ts: number,
+  quality: TimeQuality,
+  opts?: { minTs?: number; maxTs?: number },
+): string {
+  if (quality === "order_only" || ts < 946_684_800) {
+    return `ord ${ts}`;
+  }
+  if (quality === "mixed" && ts < 946_684_800) {
+    return `ord ${ts}`;
+  }
+  try {
+    const d = new Date(ts * 1000);
+    const iso = d.toISOString(); // always UTC
+    const hhmmss = iso.slice(11, 19);
+    const ymd = iso.slice(0, 10);
+    const min = opts?.minTs;
+    const max = opts?.maxTs;
+    if (min != null && max != null && min >= 946_684_800 && max >= 946_684_800) {
+      const a = new Date(min * 1000).toISOString();
+      const b = new Date(max * 1000).toISOString();
+      const sameDay = a.slice(0, 10) === b.slice(0, 10);
+      const sameYear = a.slice(0, 4) === b.slice(0, 4);
+      if (sameDay) {
+        // Prefer discriminating time-of-day for single-day investigations.
+        return `${hhmmss}Z`;
+      }
+      if (sameYear) {
+        return `${ymd.slice(5)} ${hhmmss}Z`; // MM-DD HH:mm:ssZ
+      }
+    }
+    return `${ymd} ${hhmmss}Z`;
+  } catch {
+    return String(ts);
+  }
+}
+
+/** Accessible full timestamp title including quality. */
+export function formatEventTimeTitle(ts: number, quality: TimeQuality): string {
+  if (quality === "order_only" || ts < 946_684_800) {
+    return `order-only seq-time ${ts} (not calendar time)`;
+  }
+  return `${formatCanonicalUtc(ts)} · ${timeQualityLabel(quality)} · UTC`;
 }
