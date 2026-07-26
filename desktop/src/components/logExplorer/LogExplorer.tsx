@@ -19,8 +19,9 @@ import {
   hostLogListBookmarks,
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
-  hostLogSearchEvents,
+  hostLogSearchEventsAdvanced,
   hostSetActiveLogCorpus,
+  type SearchMatchMode,
   type EventQueryDto,
   type ExplorerEventDto,
   type LogBookmarkDto,
@@ -170,6 +171,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [findDraft, setFindDraft] = useState("");
+  const [findMatchMode, setFindMatchMode] = useState<SearchMatchMode>("literal");
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findUseSemantic, setFindUseSemantic] = useState(false);
+  const [findPartial, setFindPartial] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState("");
   /** Find matches (ordered seqs) — does not reduce the table (#523). */
   const [findMatches, setFindMatches] = useState<number[]>([]);
@@ -685,19 +691,22 @@ export function LogExplorer({ corpusId }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const hits = await hostLogSearchEvents(corpusId, {
+      const result = await hostLogSearchEventsAdvanced(corpusId, {
         query: q,
-        // Find is keyword/locator only — do not claim semantic when unavailable.
-        semantic: false,
+        semantic: findUseSemantic && findMatchMode === "literal",
+        matchMode: findMatchMode,
+        caseSensitive: findCaseSensitive,
         // Cap is a partial/capped result signal; navigation still seeks by seq.
         k: 500,
         // Compose with active filter facets but not a second keyword reduce.
         filter: filtersToQuery(filters, { keyword: null }),
       });
+      const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
       setFindMatches(seqs);
       setFindTotal(seqs.length);
       setFindIndex(seqs.length > 0 ? 0 : 0);
+      setFindPartial(result.partial);
       setHighlight(new Set(seqs));
       if (seqs.length > 0) {
         const first = seqs[0]!;
@@ -708,13 +717,21 @@ export function LogExplorer({ corpusId }: Props) {
           setLaneScrollSeq((m) => ({ ...m, "lane-0": first }));
         }
       }
-      const capped = seqs.length >= 500;
+      const modeLabel = findMatchMode === "regex" ? "regex" : "literal";
+      const extra = [
+        result.partial ? "partial/capped" : null,
+        result.diagnostic,
+      ]
+        .filter(Boolean)
+        .join(" · ");
       setStatus(
         seqs.length
-          ? `Find: match 1 of ${seqs.length}${capped ? "+" : ""} for “${q}”${
-              capped ? " (capped — refine query)" : ""
-            } (context preserved)`
-          : `Find: no matches for “${q}”`,
+          ? `Find (${modeLabel}): match 1 of ${seqs.length}${
+              result.partial ? "+" : ""
+            } for “${q}”${extra ? ` (${extra})` : ""} (context preserved)`
+          : `Find (${modeLabel}): no matches for “${q}”${
+              result.diagnostic ? ` — ${result.diagnostic}` : ""
+            }`,
       );
     } catch (e) {
       setError(String(e));
@@ -1497,7 +1514,11 @@ export function LogExplorer({ corpusId }: Props) {
           </div>
           <input
             className="log-explorer__search"
-            placeholder="Find in corpus (keeps surrounding rows)…"
+            placeholder={
+              findMatchMode === "regex"
+                ? "Regex (linear-time, bounded)…"
+                : "Find in corpus (keeps surrounding rows)…"
+            }
             value={findDraft}
             onChange={(e) => setFindDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -1533,13 +1554,83 @@ export function LogExplorer({ corpusId }: Props) {
             >
               Next
             </button>
+            <button
+              type="button"
+              className={`log-explorer__btn ${advancedOpen ? "log-explorer__btn--active" : ""}`}
+              data-testid="log-explorer-advanced-toggle"
+              aria-expanded={advancedOpen}
+              onClick={() => setAdvancedOpen((o) => !o)}
+            >
+              Advanced
+            </button>
           </div>
+          {advancedOpen ? (
+            <div
+              className="log-explorer__advanced-search"
+              data-testid="log-explorer-advanced-search"
+              role="group"
+              aria-label="Advanced search options"
+            >
+              <p className="log-explorer__chat-preview">
+                Explicit controls — no hidden query grammar. Regex uses a
+                linear-time engine with pattern-length, result, and scan caps.
+              </p>
+              <label className="log-explorer__facet-row">
+                <input
+                  type="radio"
+                  name="find-mode"
+                  checked={findMatchMode === "literal"}
+                  onChange={() => setFindMatchMode("literal")}
+                  data-testid="find-mode-literal"
+                />
+                Literal text
+              </label>
+              <label className="log-explorer__facet-row">
+                <input
+                  type="radio"
+                  name="find-mode"
+                  checked={findMatchMode === "regex"}
+                  onChange={() => setFindMatchMode("regex")}
+                  data-testid="find-mode-regex"
+                />
+                Regex (bounded)
+              </label>
+              <label className="log-explorer__facet-row">
+                <input
+                  type="checkbox"
+                  checked={findCaseSensitive}
+                  onChange={(e) => setFindCaseSensitive(e.target.checked)}
+                  data-testid="find-case-sensitive"
+                />
+                Case sensitive
+              </label>
+              <label className="log-explorer__facet-row">
+                <input
+                  type="checkbox"
+                  checked={findUseSemantic}
+                  disabled={
+                    !semanticAvailable || findMatchMode === "regex"
+                  }
+                  onChange={(e) => setFindUseSemantic(e.target.checked)}
+                  data-testid="find-semantic"
+                />
+                Template semantic
+                {!semanticAvailable ? " (unavailable)" : ""}
+              </label>
+              <p className="log-explorer__chat-preview">
+                Filters (level / source / time) in this rail always intersect
+                Find. Facet chips never discard the active predicate.
+              </p>
+            </div>
+          ) : null}
           {findTotal > 0 ? (
             <div
               className="log-explorer__chat-preview"
               data-testid="log-explorer-find-count"
             >
               Match {findIndex + 1} of {findTotal}
+              {findPartial ? "+" : ""}
+              {findPartial ? " (partial)" : ""}
             </div>
           ) : null}
 

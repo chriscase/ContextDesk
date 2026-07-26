@@ -573,6 +573,7 @@ dependencies = [
  "keyring",
  "notify",
  "object_store",
+ "regex",
  "reqwest 0.12.28",
  "reqwest 0.13.4",
  "rusqlite",

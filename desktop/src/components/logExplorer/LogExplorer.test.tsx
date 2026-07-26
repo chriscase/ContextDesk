@@ -63,6 +63,7 @@ vi.mock("../../lib/host", () => ({
     timeQuality: "wall",
   })),
   hostLogSearchEvents: vi.fn(async () => []),
+  hostLogSearchEventsAdvanced: vi.fn(async () => ({ hits: [], partial: false, scanned: 0 })),
   hostLogAddBookmark: vi.fn(),
   hostLogDeleteBookmark: vi.fn(),
   hostSaveChatSession: vi.fn(),
@@ -183,6 +184,7 @@ describe("LogExplorer shell", () => {
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({ hits: [], partial: false, scanned: 0 });
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
@@ -437,7 +439,7 @@ describe("LogExplorer shell", () => {
     });
     fireEvent.click(screen.getByTestId("log-explorer-find-run"));
     await waitFor(() =>
-      expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "c1",
         expect.objectContaining({ semantic: false }),
       ),
@@ -578,9 +580,9 @@ describe("LogExplorer shell", () => {
         };
       },
     );
-    vi.mocked(host.hostLogSearchEvents).mockImplementation(
-      async (_corpusId, search) =>
-        fixtureEvents
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, search) => {
+        const hits = fixtureEvents
           .filter((event) =>
             event.message.includes(search?.query ?? "job-7f3a"),
           )
@@ -589,7 +591,9 @@ describe("LogExplorer shell", () => {
             score: 1,
             matchKind: "keyword",
             templateId: event.templateId,
-          })),
+          }));
+        return { hits, partial: false, scanned: hits.length };
+      },
     );
 
     let stored: host.ChatSessionDto | null = null;
@@ -657,7 +661,7 @@ describe("LogExplorer shell", () => {
     });
     fireEvent.click(screen.getByTestId("log-explorer-find-run"));
     await waitFor(() =>
-      expect(host.hostLogSearchEvents).toHaveBeenCalledWith(
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
         "log-lab-checkout-cascade",
         expect.objectContaining({ query: "job-7f3a" }),
       ),

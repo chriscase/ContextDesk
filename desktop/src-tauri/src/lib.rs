@@ -4492,7 +4492,8 @@ fn log_facets(
     cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
 }
 
-/// Keyword + template-semantic event search (template-first semantic).
+/// Keyword / regex / template-semantic event search (template-first semantic).
+/// Returns advanced result with partial/capped diagnostics (#523).
 #[tauri::command]
 fn log_search_events(
     state: State<'_, AppState>,
@@ -4501,20 +4502,28 @@ fn log_search_events(
     semantic: Option<bool>,
     k: Option<u32>,
     filter: Option<cd_core::log_analysis::EventQuery>,
-) -> Result<Vec<cd_core::log_analysis::EventSearchHit>, String> {
+    match_mode: Option<String>,
+    case_sensitive: Option<bool>,
+) -> Result<cd_core::log_analysis::EventSearchResult, String> {
     ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let host = state.host.lock().expect("host");
     let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let mode = match match_mode.as_deref() {
+        Some("regex") => cd_core::log_analysis::SearchMatchMode::Regex,
+        _ => cd_core::log_analysis::SearchMatchMode::Literal,
+    };
     let q = cd_core::log_analysis::EventSearchQuery {
         query,
         semantic: semantic.unwrap_or(true),
         k: k.unwrap_or(50) as usize,
         filter: filter.unwrap_or_default(),
+        match_mode: mode,
+        case_sensitive: case_sensitive.unwrap_or(false),
     };
-    cd_core::log_analysis::search_events(&c, &q, host.log_embed_backend().as_deref())
+    cd_core::log_analysis::search_events_advanced(&c, &q, host.log_embed_backend().as_deref())
         .map_err(|e| e.to_string())
 }
 

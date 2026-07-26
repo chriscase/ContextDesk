@@ -1793,7 +1793,17 @@ export type EventSearchHitDto = {
   score: number;
   matchKind: string;
   templateId: number | null;
+  excerpt?: string | null;
 };
+
+export type EventSearchResultDto = {
+  hits: EventSearchHitDto[];
+  partial: boolean;
+  diagnostic?: string | null;
+  scanned: number;
+};
+
+export type SearchMatchMode = "literal" | "regex";
 
 export type LogBookmarkDto = {
   id: string;
@@ -1889,15 +1899,37 @@ export async function hostLogSearchEvents(
     semantic?: boolean;
     k?: number;
     filter?: EventQueryDto;
+    matchMode?: SearchMatchMode;
+    caseSensitive?: boolean;
   } = {},
 ): Promise<EventSearchHitDto[]> {
-  if (!isTauri()) return [];
-  return invoke<EventSearchHitDto[]>("log_search_events", {
+  const result = await hostLogSearchEventsAdvanced(corpusId, opts);
+  return result.hits;
+}
+
+/** Advanced search with partial/capped diagnostics (#523). */
+export async function hostLogSearchEventsAdvanced(
+  corpusId: string,
+  opts: {
+    query?: string;
+    semantic?: boolean;
+    k?: number;
+    filter?: EventQueryDto;
+    matchMode?: SearchMatchMode;
+    caseSensitive?: boolean;
+  } = {},
+): Promise<EventSearchResultDto> {
+  if (!isTauri()) {
+    return { hits: [], partial: false, scanned: 0 };
+  }
+  return invoke<EventSearchResultDto>("log_search_events", {
     corpusId,
     query: opts.query ?? null,
     semantic: opts.semantic ?? true,
     k: opts.k ?? null,
     filter: opts.filter ?? null,
+    matchMode: opts.matchMode ?? "literal",
+    caseSensitive: opts.caseSensitive ?? false,
   });
 }
 
