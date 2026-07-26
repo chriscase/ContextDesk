@@ -199,6 +199,29 @@
   gap: 0.2rem;
 }
 
+.log-explorer__chat-manage {
+  flex-shrink: 0;
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 6px;
+  padding: 0.45rem;
+  background: var(--bg-app, #0b0c0e);
+}
+
+.log-explorer__chat-manage-rename {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.7rem;
+}
+
+.log-explorer__chat-manage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
 .log-explorer__chat-item {
   width: 100%;
   text-align: left;

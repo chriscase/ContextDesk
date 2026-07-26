@@ -22,6 +22,9 @@ vi.mock("../../lib/host", () => ({
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostSaveChatSession: vi.fn(),
+  hostRenameChatSession: vi.fn(),
+  hostPinChatSession: vi.fn(),
+  hostArchiveChatSession: vi.fn(),
   agentTurn: vi.fn(async () => []),
 }));
 
@@ -78,7 +81,137 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
+    vi.mocked(host.hostPinChatSession).mockResolvedValue(null);
+    vi.mocked(host.hostArchiveChatSession).mockResolvedValue(null);
     vi.mocked(host.agentTurn).mockResolvedValue([]);
+  });
+
+  it("explains the bounded linked-chat context and privacy boundary", async () => {
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Help: How linked chat context works",
+      }),
+    );
+    const help = await screen.findByRole("dialog", {
+      name: "Linked chat and agent context",
+    });
+    expect(help.textContent).toContain("small immutable snapshot");
+    expect(help.textContent).toContain("bounded result pages");
+    expect(help.textContent).toContain("Raw corpus dumps");
+    expect(help.textContent).toContain(
+      "Switching chats cannot move a pending turn",
+    );
+  });
+
+  it("renames, pins, archives, and reopens only the active linked chat", async () => {
+    let stored = sessionDto("s1", "Incident chat");
+    const meta = (): host.SessionMetaDto => ({
+      id: stored.id,
+      title: stored.title,
+      archived: stored.archived,
+      pinned: stored.pinned,
+      created_at: stored.created_at,
+      updated_at: stored.updated_at,
+      message_count: stored.messages.length,
+      preview: "",
+      linked_corpus_id: "c1",
+    });
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () => [
+      meta(),
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostRenameChatSession).mockImplementation(
+      async (id, title) => {
+        expect(id).toBe("s1");
+        stored = { ...stored, title, title_locked: true };
+        return stored;
+      },
+    );
+    vi.mocked(host.hostPinChatSession).mockImplementation(
+      async (id, pinned) => {
+        expect(id).toBe("s1");
+        stored = { ...stored, pinned };
+        return stored;
+      },
+    );
+    vi.mocked(host.hostArchiveChatSession).mockImplementation(
+      async (id, archived) => {
+        expect(id).toBe("s1");
+        stored = { ...stored, archived };
+        return stored;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Incident chat",
+      ),
+    );
+    fireEvent.click(await screen.findByTestId("linked-chat-manage-toggle"));
+    const manage = await screen.findByRole("dialog", {
+      name: "Manage Incident chat",
+    });
+
+    fireEvent.change(within(manage).getByLabelText("Chat title"), {
+      target: { value: "Checkout evidence" },
+    });
+    fireEvent.click(within(manage).getByRole("button", { name: "Rename" }));
+    await waitFor(() =>
+      expect(host.hostRenameChatSession).toHaveBeenCalledWith(
+        "s1",
+        "Checkout evidence",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Checkout evidence")).toBeTruthy(),
+    );
+
+    fireEvent.click(within(manage).getByRole("button", { name: "Pin" }));
+    await waitFor(() =>
+      expect(host.hostPinChatSession).toHaveBeenCalledWith("s1", true),
+    );
+    await waitFor(() =>
+      expect(within(manage).getByRole("button", { name: "Unpin" })).toBeTruthy(),
+    );
+
+    fireEvent.click(within(manage).getByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(host.hostArchiveChatSession).toHaveBeenCalledWith("s1", true),
+    );
+    await waitFor(() =>
+      expect(within(manage).getByRole("button", { name: "Reopen" })).toBeTruthy(),
+    );
+    fireEvent.click(within(manage).getByRole("button", { name: "Reopen" }));
+    await waitFor(() =>
+      expect(host.hostArchiveChatSession).toHaveBeenLastCalledWith("s1", false),
+    );
+
+    fireEvent.keyDown(manage, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-manage")).toBeNull(),
+    );
+    expect(document.activeElement).toBe(
+      screen.getByTestId("linked-chat-manage-toggle"),
+    );
   });
 
   it("keeps a compact header for 0, 1, 5, and 50 chats without stacking the list", async () => {

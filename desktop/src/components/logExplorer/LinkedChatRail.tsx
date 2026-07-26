@@ -22,8 +22,11 @@ import {
 } from "react";
 import {
   agentTurn,
+  hostArchiveChatSession,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
+  hostPinChatSession,
+  hostRenameChatSession,
   hostSaveChatSession,
   type SessionMetaDto,
 } from "../../lib/host";
@@ -40,6 +43,8 @@ import {
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
+import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
 import { ToolCallList } from "../ToolCallList";
 
 export type AgentContextSummary = {
@@ -204,6 +209,9 @@ export function LinkedChatRail({
   const [railError, setRailError] = useState<string | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState("");
+  const [manageOpen, setManageOpen] = useState(false);
+  const [manageBusy, setManageBusy] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
   const [contextOpen, setContextOpen] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
   const [devJson, setDevJson] = useState("");
@@ -221,6 +229,7 @@ export function LinkedChatRail({
   /** Monotonic generation for openChat loads (#543 race safety). */
   const openGenRef = useRef(0);
   const switcherToggleRef = useRef<HTMLButtonElement>(null);
+  const manageToggleRef = useRef<HTMLButtonElement>(null);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -301,6 +310,7 @@ export function LinkedChatRail({
     const gen = ++openGenRef.current;
     setActiveChatId(id);
     setSwitcherOpen(false);
+    setManageOpen(false);
     setRailError(null);
     setErrorByChat((m) => ({ ...m, [id]: null }));
     setDraft(draftsRef.current[id] ?? "");
@@ -549,6 +559,32 @@ export function LinkedChatRail({
     activeMeta?.title ??
     (activeChatId ? "Linked chat" : "No chat selected");
 
+  const openManage = () => {
+    if (!activeMeta) return;
+    setRenameDraft(activeMeta.title);
+    setManageOpen((open) => !open);
+  };
+
+  const finishManageMutation = async (
+    action: () => Promise<unknown>,
+    success: string,
+  ) => {
+    if (!activeChatId || manageBusy) return;
+    const id = activeChatId;
+    setManageBusy(true);
+    setErrorByChat((m) => ({ ...m, [id]: null }));
+    try {
+      const result = await action();
+      if (!result) throw new Error("Chat update was not persisted");
+      await refreshChats();
+      setStatusByChat((m) => ({ ...m, [id]: success }));
+    } catch (e) {
+      setErrorByChat((m) => ({ ...m, [id]: String(e) }));
+    } finally {
+      setManageBusy(false);
+    }
+  };
+
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -631,6 +667,11 @@ export function LinkedChatRail({
           </div>
           <div className="log-explorer__chat-header-meta">
             Linked · {chats.length} chat{chats.length === 1 ? "" : "s"}
+            <HelpTip
+              label="How linked chat context works"
+              title="Linked chat and agent context"
+              content={HELP_LINKED_CHAT_CONTEXT}
+            />
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
@@ -645,6 +686,19 @@ export function LinkedChatRail({
             onClick={() => setSwitcherOpen((o) => !o)}
           >
             Chats
+          </button>
+          <button
+            type="button"
+            className="log-explorer__btn"
+            ref={manageToggleRef}
+            data-testid="linked-chat-manage-toggle"
+            disabled={!activeMeta}
+            aria-expanded={manageOpen}
+            aria-controls="linked-chat-manage"
+            aria-haspopup="dialog"
+            onClick={openManage}
+          >
+            Manage
           </button>
           <button
             type="button"
@@ -713,6 +767,88 @@ export function LinkedChatRail({
               ))}
             </ul>
           )}
+        </div>
+      )}
+
+      {manageOpen && activeMeta && (
+        <div
+          className="log-explorer__chat-manage"
+          id="linked-chat-manage"
+          role="dialog"
+          aria-label={`Manage ${activeMeta.title}`}
+          data-testid="linked-chat-manage"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setManageOpen(false);
+            manageToggleRef.current?.focus();
+          }}
+        >
+          <label className="log-explorer__chat-manage-rename">
+            <span>Chat title</span>
+            <input
+              className="log-explorer__search"
+              value={renameDraft}
+              disabled={manageBusy}
+              maxLength={120}
+              onChange={(event) => setRenameDraft(event.target.value)}
+            />
+          </label>
+          <div className="log-explorer__chat-manage-actions">
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={
+                manageBusy ||
+                !renameDraft.trim() ||
+                renameDraft.trim() === activeMeta.title
+              }
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostRenameChatSession(activeMeta.id, renameDraft.trim()),
+                  "Linked chat renamed",
+                )
+              }
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={manageBusy}
+              aria-pressed={activeMeta.pinned}
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostPinChatSession(activeMeta.id, !activeMeta.pinned),
+                  activeMeta.pinned ? "Linked chat unpinned" : "Linked chat pinned",
+                )
+              }
+            >
+              {activeMeta.pinned ? "Unpin" : "Pin"}
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={manageBusy}
+              aria-pressed={activeMeta.archived}
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostArchiveChatSession(
+                      activeMeta.id,
+                      !activeMeta.archived,
+                    ),
+                  activeMeta.archived
+                    ? "Linked chat reopened"
+                    : "Linked chat archived",
+                )
+              }
+            >
+              {activeMeta.archived ? "Reopen" : "Archive"}
+            </button>
+          </div>
         </div>
       )}
 

@@ -60,6 +60,33 @@ export const HELP_LANE_COMPOSE: HelpTipContent = {
   helpLocator: "help://log-explorer#lanes",
 };
 
+export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
+  title: "Linked chat and agent context",
+  definition:
+    "A linked chat belongs to this corpus. Each turn receives a small immutable snapshot of the visible lanes, active filters, selection and bookmark counts, and time-link state.",
+  useWhen:
+    "you want the agent to investigate the current corpus or need to understand what changes when you switch chats.",
+  options: [
+    {
+      name: "Context snapshot",
+      when: "Captured when the turn starts; later UI changes do not rewrite that turn.",
+    },
+    {
+      name: "Log tools",
+      when: "The agent searches and correlates bounded result pages instead of receiving the entire corpus.",
+    },
+    {
+      name: "Suggested navigation",
+      when: "The agent proposes a view change; nothing changes until you activate the validated action.",
+    },
+  ],
+  safety:
+    "Switching chats cannot move a pending turn, error, progress state, or navigation proposal into another chat.",
+  privacy:
+    "Raw corpus dumps, evaluator truth, credentials, and absolute source paths are not placed in the chat snapshot.",
+  helpLocator: "help://log-explorer#agent-context",
+};
+
 /** Coverage checklist for audits (#541). */
 export const HELP_COVERAGE_KEYS = [
   "find-vs-filter",

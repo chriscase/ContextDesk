@@ -43,8 +43,23 @@ import/export, and open investigation. It is not a million-row browser.
 | Bookmarks | Line or range on the corpus (`bookmarks.json` sidecar) |
 | Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot and runs **bounded log tools** (search, cluster, timeline, …) until it produces an evidence-based answer — not planning-only prose |
 | Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
-| Agent context | **Context shared with agent** discloses filters/lanes/selection counts; full dumps stay out of chat context |
+| Agent context | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context |
 | Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
+
+## Agent context
+
+Each linked-chat turn captures a small, immutable snapshot when the turn starts:
+the corpus identity, visible lane/source groups, active search and filters,
+selected and bookmarked counts, time quality, and link/alignment mode. Changing
+the Explorer after send does not rewrite the context of an already-running
+turn, and switching chats does not transfer its pending state.
+
+The snapshot is orientation, not a corpus dump. The agent uses bounded log
+tools to search, inspect neighborhoods, correlate sources, and retrieve
+evidence. Raw corpus contents, evaluator truth, credentials, and absolute
+source paths are not inserted wholesale. Agent navigation remains a proposal:
+ContextDesk validates it against the linked corpus and applies it only after
+the user activates the suggested action.
 
 ## Log Lab scale profiles (synthetic)
 
