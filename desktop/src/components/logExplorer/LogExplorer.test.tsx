@@ -144,6 +144,17 @@ function deferred<T>() {
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+      clear: () => store.clear(),
+    });
     vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
       id: "c1",
       name: "fixture",
@@ -239,6 +250,17 @@ describe("LogExplorer shell", () => {
         },
       );
 
+      // Pre-seed user-composed lanes (no automatic first-N assignment).
+      localStorage.setItem(
+        "contextdesk.logExplorer.lanes.v1:c1",
+        JSON.stringify(
+          Array.from({ length: lanes }, (_, i) => ({
+            id: `lane-${i}`,
+            label: sources[i],
+            sources: [sources[i]],
+          })),
+        ),
+      );
       render(<LogExplorer corpusId="c1" />);
       await screen.findByTitle(sources[lanes - 1]!);
       fireEvent.click(
@@ -275,6 +297,14 @@ describe("LogExplorer shell", () => {
       },
     );
 
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "api.log", sources: ["api.log"] },
+        { id: "lane-1", label: "worker.log", sources: ["worker.log"] },
+        { id: "lane-2", label: "db.log", sources: ["db.log"] },
+      ]),
+    );
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("db.log");
     fireEvent.click(screen.getByTitle("3 evidence lanes"));
@@ -294,12 +324,13 @@ describe("LogExplorer shell", () => {
     });
     expect(screen.getByText(/evidence lane failed to load/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Link OFF" }));
-    expect(root.getAttribute("data-link-mode")).toBe("off");
+    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    // Order-only aggregate refuses wall-clock link.
+    expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
   });
 
-  it("labels mixed-time gaps as potential while allowing linked navigation", async () => {
+  it("user-composed lanes assign sources without auto first-N assignment", async () => {
     vi.mocked(host.hostLogFacets).mockResolvedValue({
       sources: { "api.log": 1, "worker.log": 1 },
       levels: { info: 2 },
@@ -320,14 +351,25 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
     fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    // New behavior: both lanes start as All sources — not auto-split by first-N.
+    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    const editor = await screen.findByTestId("lane-editor");
+    expect(editor.textContent).toMatch(/All sources/);
+    // Compose lane-0 → api only, lane-1 → worker only.
+    const checks = within(editor).getAllByRole("checkbox");
+    // First source checkbox for lane-0
+    fireEvent.click(checks[0]!);
+    // Second lane's worker checkbox (after lane-0's sources)
+    fireEvent.click(checks[checks.length - 1]!);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("mixed"),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Link OFF" }));
-    await waitFor(() => expect(root.getAttribute("data-link-mode")).toBe("on"));
-    expect(await screen.findByText(/potential gap region/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-link-mode")).toBe("follow_cursor"),
+    );
   });
 
   it("does not let a stale page response overwrite a newer filter load", async () => {
