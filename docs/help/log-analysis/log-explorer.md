@@ -32,6 +32,9 @@ import/export, and open investigation. It is not a million-row browser.
 | --- | --- |
 | Find vs Filter | **Find** highlights matches and steps next/prev without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time (e.g. `job-7f3a` ∩ ERROR). Active facets show as removable chips |
 | Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; manual **Load older/newer** remains as fallback |
+| Timestamps | Adaptive UTC display (time-of-day on single-day corpora); full timestamp in the row tooltip; order-only never fabricates calendar time |
+| Long lines | **compact** / **wrap** / **full** line modes; Expand on truncated rows; resizable event inspector with Copy |
+| Narrow layout | Filters and Chat open as drawers/tabs; single lane; event viewport keeps most of the height |
 | Evidence lanes | 1–4 source groups; optional timestamp link + gap bands |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
 | Bookmarks | Line or range on the corpus (`bookmarks.json` sidecar) |

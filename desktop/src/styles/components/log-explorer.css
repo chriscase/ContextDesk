@@ -378,13 +378,58 @@
   color: var(--fg-muted, #9aa0a6);
 }
 
-.log-explorer--narrow .log-explorer__filters,
-.log-explorer--narrow .log-explorer__chat {
-  max-height: 36vh;
+/* #536: narrow = drawers, not permanent stacked panels. */
+.log-explorer--narrow .log-explorer__body {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
 }
 
-.log-explorer--narrow .log-explorer__chat--rail {
+.log-explorer--narrow .log-explorer__filters,
+.log-explorer--narrow .log-explorer__chat {
+  display: none;
+}
+
+.log-explorer--narrow.log-explorer--filters-open .log-explorer__filters {
+  display: flex;
+  position: absolute;
+  inset: 2.4rem 0 auto 0;
+  z-index: 20;
+  max-height: 55vh;
+  overflow: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.log-explorer--narrow.log-explorer--chat-open .log-explorer__chat {
+  display: flex;
+  position: absolute;
+  inset: auto 0 0 0;
+  z-index: 20;
+  max-height: 55vh;
   overflow: hidden;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.log-explorer--narrow .log-explorer__lanes {
+  min-height: 0;
+}
+
+.log-explorer--narrow .log-explorer__splitter {
+  display: none;
+}
+
+.log-explorer__narrow-tabs {
+  display: none;
+}
+
+.log-explorer--narrow .log-explorer__narrow-tabs {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border-subtle, #2a2d33);
+  background: var(--bg-elevated, #121418);
 }
 
 .log-explorer__filters {
@@ -536,13 +581,20 @@
 
 .log-explorer__row {
   display: grid;
-  grid-template-columns: 5.5rem 3.5rem minmax(5rem, 9rem) minmax(12rem, 1fr);
+  grid-template-columns: 7.5rem 3.5rem minmax(5rem, 9rem) minmax(12rem, 1fr);
   gap: 0.4rem;
   padding: 0.2rem 0.5rem;
   border-bottom: 1px solid
     color-mix(in srgb, var(--border-subtle, #2a2d33) 55%, transparent);
   cursor: pointer;
   align-items: baseline;
+  z-index: 0;
+}
+
+.log-explorer__row--expanded {
+  z-index: 2;
+  background: var(--bg-elevated, #121418);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
 
 .log-explorer--compact .log-explorer__row {
@@ -568,6 +620,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 4.5rem;
 }
 
 .log-explorer__level {
@@ -596,10 +649,42 @@
   color: #7a8088;
 }
 
+.log-explorer__msg-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
 .log-explorer__msg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.log-explorer__msg--wrap {
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 6rem;
+  text-overflow: unset;
+}
+
+.log-explorer__expand-btn {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  background: transparent;
+  color: var(--accent, #5b9fd4);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  cursor: pointer;
+}
+
+.log-explorer__row[data-truncated="true"] .log-explorer__msg::after {
+  content: "…";
+  color: var(--accent, #5b9fd4);
 }
 
 .log-explorer__source {
@@ -617,6 +702,19 @@
   font-size: 0.8rem;
   flex-shrink: 0;
   background: var(--bg-elevated, #121418);
+}
+
+.log-explorer__detail-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+/* keep block open for any following rules that shared the brace */
+.log-explorer__detail-placeholder {
+  display: none;
 }
 
 .log-explorer__chat-list {
