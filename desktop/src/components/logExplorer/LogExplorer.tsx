@@ -77,6 +77,7 @@ import {
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
 import { HelpTip } from "../HelpTip";
+import { HELP_FIND_VS_FILTER } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
   VirtualizedEventList,
@@ -1492,17 +1493,7 @@ export function LogExplorer({ corpusId }: Props) {
         >
           <div className="log-explorer__section-title">
             Find{" "}
-            <HelpTip label="Find vs Filter" title="Find vs Filter">
-              <p>
-                <strong>Find</strong> highlights matches and steps next/prev
-                while keeping surrounding investigation context.
-              </p>
-              <p>
-                <strong>Filter</strong> reduces the table to matching rows and
-                intersects levels, sources, and time. Use both together: filter
-                to ERROR, then find a ticket id.
-              </p>
-            </HelpTip>
+            <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />
           </div>
           <input
             className="log-explorer__search"
