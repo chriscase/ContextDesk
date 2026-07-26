@@ -189,7 +189,10 @@ describe("LogExplorer shell", () => {
     expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat-composer")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-bookmarks")).toBeTruthy();
-    expect(screen.getByTestId("log-explorer-view-context")).toBeTruthy();
+    expect(screen.getByTestId("linked-chat-header")).toBeTruthy();
+    expect(screen.getByTestId("linked-chat-agent-context")).toBeTruthy();
+    // Raw brief dump is developer-only; product surface is the structured disclosure.
+    expect(screen.queryByTestId("log-explorer-view-context")).toBeNull();
     // Events load via virtualized list
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
     const vlist = screen.getAllByTestId("virtualized-event-list")[0]!;
@@ -478,7 +481,12 @@ describe("LogExplorer shell", () => {
       expect(stored?.messages[1]?.content).toBe("The API failed first.");
     });
 
-    fireEvent.click(screen.getByText(stored!.title));
+    fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        stored!.title,
+      ),
+    );
     expect(await within(thread).findByText("What failed?")).toBeTruthy();
     expect(
       await within(thread).findByText("The API failed first."),
@@ -794,11 +802,83 @@ describe("LogExplorer shell", () => {
     const sessionA = [...stored.values()].find(
       (session) => session.linked_corpus_id === "corpus-a",
     )!;
+    fireEvent.click(
+      within(reloadedA.container).getByTestId("linked-chat-switcher-toggle"),
+    );
     fireEvent.click(within(reloadedA.container).getByText(sessionA.title));
     expect(
       await within(
         within(reloadedA.container).getByTestId("log-explorer-chat-thread"),
       ).findByText("Question A"),
     ).toBeTruthy();
+  });
+
+  it("shows tool progress from a real agent turn stream in the linked rail", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: stored.linked_corpus_id,
+              },
+            ]
+          : [],
+    );
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_sessionId, _text, _forceLocal, _model, _provider, onEvent) => {
+        const events: host.EventDto[] = [
+          { kind: "turn_started", payload: { model: "fixture-model" } },
+          {
+            kind: "tool",
+            payload: {
+              id: "t1",
+              name: "search_logs",
+              summary: "3 hits for job-7f3a",
+              ok: true,
+            },
+          },
+          {
+            kind: "text_delta",
+            payload: {
+              text: "job-7f3a exhausted the pool after db_pool_max shrank.",
+            },
+          },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(stored?.linked_corpus_id).toBe("c1"));
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "What caused the incident?" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    const thread = screen.getByTestId("log-explorer-chat-thread");
+    expect(await within(thread).findByText(/search_logs/)).toBeTruthy();
+    expect(
+      await within(thread).findByText(/job-7f3a exhausted the pool/),
+    ).toBeTruthy();
+    await waitFor(() => {
+      expect(stored?.messages.some((m) => m.role === "assistant")).toBe(true);
+    });
   });
 });

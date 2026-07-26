@@ -12,36 +12,23 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
-  agentTurn,
   hostGetLogCorpus,
-  hostListChatSessionsForCorpus,
-  hostLoadChatSession,
   hostLogAddBookmark,
   hostLogDeleteBookmark,
   hostLogFacets,
   hostLogListBookmarks,
   hostLogQueryEvents,
   hostLogSearchEvents,
-  hostSaveChatSession,
   hostSetActiveLogCorpus,
   type EventQueryDto,
   type ExplorerEventDto,
   type LogBookmarkDto,
   type LogCorpusSummaryDto,
   type LogFacetsDto,
-  type SessionMetaDto,
   type TimeQuality,
 } from "../../lib/host";
 import {
-  applyEventsToMessage,
-  newSession,
-  nowIso,
-  sessionFromDto,
-  sessionToDto,
-} from "../../lib/session";
-import {
   applyLogNav,
-  extractLogNavFromText,
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
 import {
@@ -64,14 +51,13 @@ import {
   type LaneConfig,
   type LaneTimeState,
 } from "../../lib/logExplorer/types";
+import { LinkedChatRail } from "./LinkedChatRail";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import "../../styles/components/log-explorer.css";
 
 type Props = {
   corpusId: string;
 };
-
-type ChatMsg = { id: string; role: "user" | "assistant"; content: string };
 
 function filtersToQuery(
   f: ExplorerFilters,
@@ -132,12 +118,6 @@ export function LogExplorer({ corpusId }: Props) {
   >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
-  const [chats, setChats] = useState<SessionMetaDto[]>([]);
-  const [activeChatId, setActiveChatId] = useState<string | null>(null);
-  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
-  const [chatDraft, setChatDraft] = useState("");
-  const [chatBusy, setChatBusy] = useState(false);
-  const [navChips, setNavChips] = useState<LogNavAction[]>([]);
   const [searchDraft, setSearchDraft] = useState("");
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
@@ -202,8 +182,6 @@ export function LogExplorer({ corpusId }: Props) {
       await hostSetActiveLogCorpus(corpusId);
       const bms = await hostLogListBookmarks(corpusId);
       setBookmarks(bms ?? []);
-      const linked = await hostListChatSessionsForCorpus(corpusId);
-      setChats(linked ?? []);
     } catch (e) {
       setError(String(e));
     }
@@ -578,7 +556,7 @@ export function LogExplorer({ corpusId }: Props) {
   const applyNav = (action: LogNavAction) => {
     const result = applyLogNav(filters, action, corpusId);
     if (!result.corpusMatch) {
-      setStatus("log_nav corpus mismatch — ignored");
+      setStatus("log_nav corpus mismatch — ignored (fail closed)");
       return;
     }
     setFilters(result.filters);
@@ -603,142 +581,35 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
-  const openChat = async (id: string) => {
-    setActiveChatId(id);
-    try {
-      const full = await hostLoadChatSession(id);
-      if (full) {
-        const s = sessionFromDto(full);
-        setChatMessages(
-          s.messages.map((m) => ({
-            id: m.id,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })),
-        );
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  /** Create linked chat and return its id (avoids stale React state in sendChat). */
-  const createLinkedChat = async (): Promise<string | null> => {
-    setError(null);
-    try {
-      const s = newSession(`Logs · ${summary?.name ?? corpusId.slice(0, 8)}`);
-      s.linkedCorpusId = corpusId;
-      const saved = await hostSaveChatSession(sessionToDto(s));
-      if (saved) {
-        const linked = await hostListChatSessionsForCorpus(corpusId);
-        setChats(linked ?? []);
-        await openChat(saved.id);
-        setStatus(`Linked chat created: ${saved.title}`);
-        return saved.id;
-      }
-    } catch (e) {
-      setError(String(e));
-    }
-    return null;
-  };
-
-  const sendChat = async () => {
-    const text = chatDraft.trim();
-    if (!text || chatBusy) return;
-    let sessionId = activeChatId;
-    if (!sessionId) {
-      sessionId = await createLinkedChat();
-      if (!sessionId) return;
-    }
-    setChatBusy(true);
-    setError(null);
-    setChatDraft("");
-    const userMsg: ChatMsg = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: text,
-    };
-    setChatMessages((m) => [...m, userMsg]);
-    let assistantText = "";
-    const assistantId = crypto.randomUUID();
-    setChatMessages((m) => [
-      ...m,
-      { id: assistantId, role: "assistant", content: "" },
-    ]);
-    try {
-      const events = await agentTurn(
-        sessionId!,
-        text,
-        false,
-        null,
-        null,
-        (ev) => {
-          if (ev.kind === "text_delta") {
-            assistantText += String(ev.payload?.text ?? "");
-            setChatMessages((msgs) =>
-              msgs.map((x) =>
-                x.id === assistantId ? { ...x, content: assistantText } : x,
-              ),
-            );
-          }
-        },
-        null,
-        {
-          corpus_id: corpusId,
-          brief: viewBrief,
-        },
-      );
-      const full = await hostLoadChatSession(sessionId!);
-      if (!full) {
-        throw new Error("Linked chat could not be reloaded after the turn");
-      }
-      const session = sessionFromDto(full);
-      const folded = applyEventsToMessage(
-        { id: assistantId, role: "assistant", content: "" },
-        events,
-      ).msg;
-      const assistant = {
-        ...folded,
-        content: folded.content || assistantText,
-      };
-      const updated = {
-        ...session,
-        messages: [...session.messages, userMsg, assistant],
-        lastReadMessageId: assistantId,
-        updatedAt: nowIso(),
-      };
-      const saved = await hostSaveChatSession(sessionToDto(updated));
-      if (!saved) {
-        throw new Error("Linked chat turn was not persisted");
-      }
-      const persisted = sessionFromDto(saved);
-      setChatMessages(
-        persisted.messages.map((m) => ({
-          id: m.id,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-        })),
-      );
-
-      // Extract log_nav from the final persisted assistant text.
-      const found = extractLogNavFromText(assistant.content);
-      if (found.length) setNavChips((prev) => [...prev, ...found]);
-      const linked = await hostListChatSessionsForCorpus(corpusId);
-      setChats(linked ?? []);
-      setStatus("Linked chat response saved");
-    } catch (e) {
-      setError(String(e));
-      setChatMessages((msgs) =>
-        msgs.map((x) =>
-          x.id === assistantId
-            ? { ...x, content: x.content || `(error: ${String(e)})` }
-            : x,
-        ),
-      );
-    } finally {
-      setChatBusy(false);
-    }
-  };
+  const agentContext = useMemo(
+    () => ({
+      corpusId,
+      timeQuality,
+      linkMode,
+      lanes: lanes
+        .slice(0, laneCount)
+        .map((l) => `${l.label || l.id}:[${l.sources.join(",") || "*"}]`),
+      levels: filters.levels,
+      sources: filters.sources,
+      keyword: filters.keyword,
+      selectedCount: selected.size,
+      bookmarkCount: bookmarks.length,
+      brief: viewBrief,
+    }),
+    [
+      corpusId,
+      timeQuality,
+      linkMode,
+      lanes,
+      laneCount,
+      filters.levels,
+      filters.sources,
+      filters.keyword,
+      selected.size,
+      bookmarks.length,
+      viewBrief,
+    ],
+  );
 
   const loadMoreLane = async (laneId: string) => {
     const cur = laneCursors[laneId];
@@ -1080,17 +951,6 @@ export function LogExplorer({ corpusId }: Props) {
                 region{gaps.length === 1 ? "" : "s"}
               </span>
             )}
-            {navChips.map((chip, i) => (
-              <button
-                key={i}
-                type="button"
-                className="log-explorer__nav-chip"
-                onClick={() => applyNav(chip)}
-                title="Apply agent navigation (opt-in)"
-              >
-                {chip.label || "log_nav"}
-              </button>
-            ))}
           </div>
           <div
             className={`log-explorer__lane-grid log-explorer__lane-grid--${laneCount}`}
@@ -1214,117 +1074,14 @@ export function LogExplorer({ corpusId }: Props) {
           />
         )}
 
-        <aside className="log-explorer__chat" data-testid="log-explorer-chat">
-          <div className="log-explorer__section-title">Chats for corpus</div>
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="new-linked-chat"
-            onClick={() => void createLinkedChat()}
-          >
-            New linked chat
-          </button>
-          <div className="log-explorer__chat-list">
-            {chats.length === 0 ? (
-              <div className="log-explorer__chat-preview">
-                No linked chats yet. Any chat may set linkedCorpusId.
-              </div>
-            ) : (
-              chats.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className={`log-explorer__chat-item ${
-                    activeChatId === c.id
-                      ? "log-explorer__chat-item--active"
-                      : ""
-                  }`}
-                  onClick={() => void openChat(c.id)}
-                >
-                  <div>{c.title}</div>
-                  <div className="log-explorer__chat-preview">{c.preview}</div>
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="log-explorer__section-title">Thread</div>
-          <div
-            className="log-explorer__chat-thread"
-            data-testid="log-explorer-chat-thread"
-          >
-            {chatMessages.length === 0 ? (
-              <div className="log-explorer__chat-preview">
-                Open or create a linked chat, then ask about this corpus. Agent
-                receives viewport context + log tools.
-              </div>
-            ) : (
-              chatMessages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`log-explorer__chat-bubble log-explorer__chat-bubble--${m.role}`}
-                >
-                  <div className="log-explorer__chat-role">{m.role}</div>
-                  <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
-                </div>
-              ))
-            )}
-          </div>
-          <div
-            className="log-explorer__chat-composer"
-            data-testid="log-explorer-chat-composer"
-          >
-            <textarea
-              className="log-explorer__search"
-              rows={3}
-              placeholder="Ask about these logs…"
-              value={chatDraft}
-              disabled={chatBusy}
-              onChange={(e) => setChatDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void sendChat();
-                }
-              }}
-              aria-label="Chat message"
-            />
-            <button
-              type="button"
-              className="log-explorer__btn log-explorer__btn--active"
-              data-testid="send-linked-chat"
-              disabled={chatBusy || !chatDraft.trim()}
-              onClick={() => void sendChat()}
-            >
-              {chatBusy ? "Thinking…" : "Send"}
-            </button>
-          </div>
-
-          <div className="log-explorer__section-title">Agent nav links</div>
-          <div className="log-explorer__chat-preview">
-            log_nav chips from the agent — apply is opt-in.
-          </div>
-          <textarea
-            className="log-explorer__search"
-            rows={2}
-            placeholder='{"type":"log_nav","corpusId":"…","sources":["api.log"],"label":"…"}'
-            onBlur={(e) => {
-              const found = extractLogNavFromText(e.target.value);
-              if (found.length) setNavChips((prev) => [...prev, ...found]);
-            }}
-            aria-label="Paste log_nav JSON"
-          />
-          <div className="log-explorer__section-title">
-            View context → agent
-          </div>
-          <pre
-            className="log-explorer__chat-preview"
-            style={{ whiteSpace: "pre-wrap" }}
-            data-testid="log-explorer-view-context"
-          >
-            {viewBrief}
-          </pre>
-        </aside>
+        <LinkedChatRail
+          corpusId={corpusId}
+          corpusName={summary?.name ?? corpusId.slice(0, 8)}
+          agentContext={agentContext}
+          onApplyNav={applyNav}
+          compactLayout={breakpoint === "narrow"}
+          developerMode={import.meta.env.MODE === "development"}
+        />
       </div>
 
       <div className="log-explorer__status" role="status">
