@@ -591,6 +591,317 @@ pub fn search_events(
     Ok(hits)
 }
 
+// ── Stable event neighborhood (Find / bookmark / agent seek) ────────────────
+
+/// Max events before/after the target in a neighborhood fetch.
+pub const MAX_NEIGHBORHOOD_RADIUS: usize = 200;
+/// Default radius on each side of the target.
+pub const DEFAULT_NEIGHBORHOOD_RADIUS: usize = 50;
+
+/// Whether the target was resolved and how it relates to active filters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetResolveStatus {
+    /// Target exists and matches the active filter set.
+    Found,
+    /// Target exists in the corpus but is excluded by current filters.
+    HiddenByFilter,
+    /// No event with this stable seq in the corpus.
+    Missing,
+}
+
+/// Request a bounded window around a stable event identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNeighborhoodQuery {
+    /// Stable event sequence to resolve.
+    pub target_seq: u64,
+    /// Events strictly before the target (clamped).
+    #[serde(default = "default_neighborhood_radius")]
+    pub before: usize,
+    /// Events strictly after the target (clamped).
+    #[serde(default = "default_neighborhood_radius")]
+    pub after: usize,
+    /// Active filters (same semantics as [`EventQuery`]).
+    #[serde(default)]
+    pub filter: EventQuery,
+    /// Sort by time then seq (default true).
+    #[serde(default = "default_true")]
+    pub sort_by_time: bool,
+}
+
+fn default_neighborhood_radius() -> usize {
+    DEFAULT_NEIGHBORHOOD_RADIUS
+}
+
+impl Default for EventNeighborhoodQuery {
+    fn default() -> Self {
+        Self {
+            target_seq: 0,
+            before: DEFAULT_NEIGHBORHOOD_RADIUS,
+            after: DEFAULT_NEIGHBORHOOD_RADIUS,
+            filter: EventQuery::default(),
+            sort_by_time: true,
+        }
+    }
+}
+
+/// Bounded neighborhood around a stable target event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNeighborhood {
+    /// Resolution of the requested target.
+    pub status: TargetResolveStatus,
+    /// The target event when present (even if hidden by filters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ExplorerEvent>,
+    /// Ascending window: older … target (if found under filters) … newer.
+    pub events: Vec<ExplorerEvent>,
+    /// Index of the target inside `events` when status is Found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_index: Option<usize>,
+    /// Forward keyset seq for continuing newer paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// Forward keyset ts paired with `next_cursor` when time-sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_ts: Option<i64>,
+    /// Reverse keyset seq for continuing older paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<u64>,
+    /// Reverse keyset ts paired with `prev_cursor` when time-sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_ts: Option<i64>,
+    /// Total events matching the active filter (not neighborhood size).
+    pub total_matched: u64,
+    /// Total events in the corpus (unfiltered).
+    pub corpus_total: u64,
+    /// Time-quality summary for the returned window.
+    pub time_quality: TimeQuality,
+}
+
+/// Resolve a stable event identity and return a bounded neighborhood.
+///
+/// Does **not** scan from corpus start: looks up `target_seq` directly, then
+/// fetches `before`/`after` via composite keyset queries. Distinguishes
+/// missing vs hidden-by-filter. Offline and bounded; never returns absolute paths.
+pub fn query_event_neighborhood(
+    corpus: &LogCorpus,
+    q: &EventNeighborhoodQuery,
+) -> CoreResult<EventNeighborhood> {
+    let before = q.before.clamp(0, MAX_NEIGHBORHOOD_RADIUS);
+    let after = q.after.clamp(0, MAX_NEIGHBORHOOD_RADIUS);
+    let corpus_total = corpus.event_count() as u64;
+
+    // 1) Direct identity lookup — indexed by seq, not a full corpus scan.
+    let Some(target) = fetch_event_by_seq(corpus, q.target_seq)? else {
+        return Ok(EventNeighborhood {
+            status: TargetResolveStatus::Missing,
+            target: None,
+            events: vec![],
+            target_index: None,
+            next_cursor: None,
+            next_ts: None,
+            prev_cursor: None,
+            prev_ts: None,
+            total_matched: 0,
+            corpus_total,
+            time_quality: corpus_time_quality_from_meta(corpus),
+        });
+    };
+
+    // 2) Does the target match active filters?
+    let mut filter = q.filter.clone();
+    filter.sort_by_time = q.sort_by_time;
+    let matches_filter = event_matches_filter(&target, &filter);
+
+    if !matches_filter {
+        // Hidden: still return the target alone so callers can explain / reveal.
+        return Ok(EventNeighborhood {
+            status: TargetResolveStatus::HiddenByFilter,
+            target: Some(target),
+            events: vec![],
+            target_index: None,
+            next_cursor: None,
+            next_ts: None,
+            prev_cursor: None,
+            prev_ts: None,
+            total_matched: count_matched(corpus, &filter)?,
+            corpus_total,
+            time_quality: corpus_time_quality_from_meta(corpus),
+        });
+    }
+
+    // 3) Older side: reverse keyset ending at target.
+    let older_page = if before > 0 {
+        let mut oq = filter.clone();
+        oq.before_seq = Some(target.seq);
+        oq.before_ts = if q.sort_by_time {
+            Some(target.ts)
+        } else {
+            None
+        };
+        oq.after_seq = None;
+        oq.after_ts = None;
+        oq.limit = before;
+        oq.sort_by_time = q.sort_by_time;
+        query_events(corpus, &oq)?
+    } else {
+        EventPage {
+            events: vec![],
+            next_cursor: None,
+            next_ts: None,
+            prev_cursor: None,
+            prev_ts: None,
+            total_matched: 0,
+            time_quality: TimeQuality::OrderOnly,
+        }
+    };
+    let mut older = older_page.events;
+
+    // 4) Newer side: forward keyset starting after target.
+    let newer = if after > 0 {
+        let mut nq = filter.clone();
+        nq.after_seq = Some(target.seq);
+        nq.after_ts = if q.sort_by_time {
+            Some(target.ts)
+        } else {
+            None
+        };
+        nq.before_seq = None;
+        nq.before_ts = None;
+        nq.limit = after;
+        nq.sort_by_time = q.sort_by_time;
+        query_events(corpus, &nq)?
+    } else {
+        EventPage {
+            events: vec![],
+            next_cursor: None,
+            next_ts: None,
+            prev_cursor: None,
+            prev_ts: None,
+            total_matched: 0,
+            time_quality: TimeQuality::OrderOnly,
+        }
+    };
+
+    // Directional cursors from the outer edges when more data may exist.
+    let (prev_cursor, prev_ts) = if older_page.prev_cursor.is_some() {
+        (older_page.prev_cursor, older_page.prev_ts)
+    } else if !older.is_empty() && older.len() == before {
+        (
+            older.first().map(|e| e.seq),
+            if q.sort_by_time {
+                older.first().map(|e| e.ts)
+            } else {
+                None
+            },
+        )
+    } else {
+        (None, None)
+    };
+    let (next_cursor, next_ts) = (newer.next_cursor, newer.next_ts);
+
+    let mut events = Vec::with_capacity(older.len() + 1 + newer.events.len());
+    events.append(&mut older);
+    let target_index = events.len();
+    events.push(target.clone());
+    events.extend(newer.events);
+
+    let tq = summarize_event_quality(&events);
+    let total_matched = count_matched(corpus, &filter)?;
+
+    Ok(EventNeighborhood {
+        status: TargetResolveStatus::Found,
+        target: Some(target),
+        events,
+        target_index: Some(target_index),
+        next_cursor,
+        next_ts,
+        prev_cursor,
+        prev_ts,
+        total_matched,
+        corpus_total,
+        time_quality: tq,
+    })
+}
+
+fn fetch_event_by_seq(corpus: &LogCorpus, seq: u64) -> CoreResult<Option<ExplorerEvent>> {
+    corpus.with_connection(|conn| {
+        let sql =
+            "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+                   FROM events WHERE seq = ? LIMIT 1";
+        let mut stmt = conn.prepare(sql).map_err(duck_err)?;
+        let binds = [Value::BigInt(seq as i64)];
+        let mut rows = bind_and_map_events(&mut stmt, &binds)?;
+        Ok(rows.pop())
+    })
+}
+
+fn count_matched(corpus: &LogCorpus, filter: &EventQuery) -> CoreResult<u64> {
+    let (where_sql, binds) = build_where(filter);
+    let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
+    corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
+        let n = bind_and_query_row_i64(&mut stmt, &binds)?;
+        Ok(n.max(0) as u64)
+    })
+}
+
+fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
+    if let Some(from) = filter.time_from {
+        if event.ts < from {
+            return false;
+        }
+    }
+    if let Some(to) = filter.time_to {
+        if event.ts >= to {
+            return false;
+        }
+    }
+    if let Some(tid) = filter.template_id {
+        if event.template_id != tid {
+            return false;
+        }
+    }
+    if !filter.template_ids.is_empty() && !filter.template_ids.contains(&event.template_id) {
+        return false;
+    }
+    if !filter.levels.is_empty() {
+        let lvl = event.level.to_ascii_lowercase();
+        if !filter.levels.iter().any(|l| l.eq_ignore_ascii_case(&lvl)) {
+            return false;
+        }
+    }
+    if !filter.sources.is_empty() && !filter.sources.iter().any(|s| s == &event.source) {
+        return false;
+    }
+    if !filter.services.is_empty() {
+        let svc = event.service.clone().unwrap_or_default();
+        if !filter.services.iter().any(|s| s == &svc) {
+            return false;
+        }
+    }
+    if !filter.hosts.is_empty() {
+        let host = event.host.clone().unwrap_or_default();
+        if !filter.hosts.iter().any(|h| h == &host) {
+            return false;
+        }
+    }
+    if let Some(ref tid) = filter.trace_id {
+        if event.trace_id.as_deref() != Some(tid.as_str()) {
+            return false;
+        }
+    }
+    if let Some(ref kw) = filter.keyword {
+        let kw = kw.trim();
+        if !kw.is_empty() && !event.message.to_lowercase().contains(&kw.to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
 // ── SQL builders (parameterized) ────────────────────────────────────────────
 
 use duckdb::types::Value;
@@ -1234,5 +1545,156 @@ mod tests {
             );
         }
         let _ = sem;
+    }
+
+    #[test]
+    fn neighborhood_resolves_target_without_scanning_from_start() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let all = query_events(
+            &corpus,
+            &EventQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(all.events.len() >= 10, "fixture too small");
+        let target = &all.events[all.events.len() / 2];
+
+        let nb = query_event_neighborhood(
+            &corpus,
+            &EventNeighborhoodQuery {
+                target_seq: target.seq,
+                before: 5,
+                after: 5,
+                filter: EventQuery::default(),
+                sort_by_time: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(nb.status, TargetResolveStatus::Found);
+        assert_eq!(nb.target.as_ref().map(|e| e.seq), Some(target.seq));
+        let idx = nb.target_index.expect("target index");
+        assert_eq!(nb.events[idx].seq, target.seq);
+        assert!(idx <= 5);
+        assert!(nb.events.len() <= 11);
+        assert!(nb.corpus_total >= nb.total_matched);
+        // Window is ordered ascending by time/seq.
+        for w in nb.events.windows(2) {
+            assert!(
+                w[0].ts < w[1].ts || (w[0].ts == w[1].ts && w[0].seq < w[1].seq),
+                "neighborhood not ordered"
+            );
+        }
+    }
+
+    #[test]
+    fn neighborhood_distinguishes_missing_and_hidden_by_filter() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                levels: vec!["info".into()],
+                limit: 50,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let target = page.events.first().expect("info event under level filter");
+
+        let missing = query_event_neighborhood(
+            &corpus,
+            &EventNeighborhoodQuery {
+                target_seq: u64::MAX - 7,
+                before: 3,
+                after: 3,
+                filter: EventQuery::default(),
+                sort_by_time: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(missing.status, TargetResolveStatus::Missing);
+        assert!(missing.events.is_empty());
+        assert!(missing.target.is_none());
+
+        let hidden = query_event_neighborhood(
+            &corpus,
+            &EventNeighborhoodQuery {
+                target_seq: target.seq,
+                before: 3,
+                after: 3,
+                filter: EventQuery {
+                    levels: vec!["error".into()],
+                    ..Default::default()
+                },
+                sort_by_time: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(hidden.status, TargetResolveStatus::HiddenByFilter);
+        assert_eq!(hidden.target.as_ref().map(|e| e.seq), Some(target.seq));
+        assert!(
+            hidden.events.is_empty(),
+            "hidden targets do not invent a filtered window"
+        );
+    }
+
+    #[test]
+    fn neighborhood_works_with_equal_timestamps_and_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut f = std::fs::File::create(logs.join("same_ts.log")).unwrap();
+        let base = 1_700_000_100_i64;
+        for i in 0..20 {
+            writeln!(
+                f,
+                r#"{{"ts":{base},"level":"{}","service":"svc","message":"eq-ts event {i}"}}"#,
+                if i == 10 { "error" } else { "info" },
+            )
+            .unwrap();
+        }
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "eq-ts", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let all = query_events(
+            &corpus,
+            &EventQuery {
+                limit: 50,
+                sort_by_time: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let target = all
+            .events
+            .iter()
+            .find(|e| e.message.contains("event 10"))
+            .unwrap();
+        let nb = query_event_neighborhood(
+            &corpus,
+            &EventNeighborhoodQuery {
+                target_seq: target.seq,
+                before: 4,
+                after: 4,
+                filter: EventQuery::default(),
+                sort_by_time: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(nb.status, TargetResolveStatus::Found);
+        assert!(nb.events.iter().any(|e| e.seq == target.seq));
+        // Equal timestamps still order by seq around the target.
+        let idx = nb.target_index.unwrap();
+        if idx > 0 {
+            assert!(nb.events[idx - 1].seq < target.seq);
+        }
+        if idx + 1 < nb.events.len() {
+            assert!(nb.events[idx + 1].seq > target.seq);
+        }
     }
 }

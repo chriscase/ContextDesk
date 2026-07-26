@@ -17,6 +17,7 @@ import {
   hostLogDeleteBookmark,
   hostLogFacets,
   hostLogListBookmarks,
+  hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEvents,
   hostSetActiveLogCorpus,
@@ -98,6 +99,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
+  /** Unfiltered corpus event total for truthful count labeling (#534). */
+  const [corpusTotal, setCorpusTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   /** Per-lane composite cursors for bidirectional paging (#505/#538). */
   const [laneCursors, setLaneCursors] = useState<
@@ -227,6 +230,7 @@ export function LogExplorer({ corpusId }: Props) {
     try {
       const s = await hostGetLogCorpus(corpusId);
       setSummary(s);
+      if (s) setCorpusTotal(s.eventCount ?? 0);
       await hostSetActiveLogCorpus(corpusId);
       const bms = await hostLogListBookmarks(corpusId);
       setBookmarks(bms ?? []);
@@ -506,9 +510,70 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
+  /** Apply a neighborhood page into lane-0 residency + cursors. */
+  const applyNeighborhoodToLane = (
+    nb: Awaited<ReturnType<typeof hostLogQueryEventNeighborhood>>,
+  ) => {
+    if (nb.events.length === 0) return;
+    const seeded = seedFromPage({
+      events: nb.events,
+      nextCursor: nb.nextCursor ?? null,
+      nextTs: nb.nextTs ?? null,
+      prevCursor: nb.prevCursor ?? null,
+      prevTs: nb.prevTs ?? null,
+      totalMatched: nb.totalMatched,
+    });
+    setLaneEvents((prev) => ({ ...prev, "lane-0": seeded.events }));
+    setLaneCursors((prev) => ({
+      ...prev,
+      "lane-0": {
+        afterSeq: seeded.afterSeq,
+        afterTs: seeded.afterTs,
+        beforeSeq: seeded.beforeSeq,
+        beforeTs: seeded.beforeTs,
+        hasOlder: seeded.beforeSeq != null,
+        hasNewer: seeded.afterSeq != null,
+      },
+    }));
+    if (nb.corpusTotal > 0) setCorpusTotal(nb.corpusTotal);
+    if (nb.totalMatched > 0) setTotalMatched(nb.totalMatched);
+  };
+
+  /** Seek a stable event into the resident window via neighborhood API. */
+  const seekToSeq = async (
+    seq: number,
+    opts?: { clearFilters?: boolean },
+  ): Promise<"found" | "hidden_by_filter" | "missing"> => {
+    const filter = opts?.clearFilters
+      ? filtersToQuery({
+          ...filters,
+          levels: [],
+          sources: [],
+          keyword: null,
+        })
+      : filtersToQuery(filters, { keyword: filters.keyword });
+    const nb = await hostLogQueryEventNeighborhood(corpusId, {
+      targetSeq: seq,
+      before: 50,
+      after: 50,
+      filter,
+      sortByTime: true,
+    });
+    if (nb.status === "found") {
+      applyNeighborhoodToLane(nb);
+      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+      if (nb.target) {
+        setDetail(nb.target);
+        setSelected(new Set([seq]));
+      }
+    }
+    return nb.status;
+  };
+
   /**
    * Find: highlight matches in full investigation context (#523).
    * Does NOT replace the resident table with only hits.
+   * Uses direct neighborhood seek for non-resident matches (no 40-page scan).
    */
   const runFind = async () => {
     const q = findDraft.trim();
@@ -527,6 +592,7 @@ export function LogExplorer({ corpusId }: Props) {
         query: q,
         // Find is keyword/locator only — do not claim semantic when unavailable.
         semantic: false,
+        // Cap is a partial/capped result signal; navigation still seeks by seq.
         k: 500,
         // Compose with active filter facets but not a second keyword reduce.
         filter: filtersToQuery(filters, { keyword: null }),
@@ -538,31 +604,19 @@ export function LogExplorer({ corpusId }: Props) {
       setHighlight(new Set(seqs));
       if (seqs.length > 0) {
         const first = seqs[0]!;
-        setLaneScrollSeq((m) => ({ ...m, "lane-0": first }));
-        // If not resident, request a window around the first match via before/after seed.
         const resident = laneEvents["lane-0"] ?? [];
         if (!resident.some((e) => e.seq === first)) {
-          const page = await hostLogQueryEvents(
-            corpusId,
-            filtersToQuery(filters, {
-              keyword: filters.keyword,
-              // Jump by loading around match via after of prev if available is hard;
-              // load first page with keyword null then user can page — better: seek by seq via before next.
-              limit: 100,
-              sortByTime: true,
-            }),
-          );
-          // Prefer a page that includes the match by reverse+forward is complex;
-          // seed and scroll when match is in page; else keep highlight + status.
-          if (page.events.some((e) => e.seq === first)) {
-            const seeded = seedFromPage(page);
-            setLaneEvents((prev) => ({ ...prev, "lane-0": seeded.events }));
-          }
+          await seekToSeq(first);
+        } else {
+          setLaneScrollSeq((m) => ({ ...m, "lane-0": first }));
         }
       }
+      const capped = seqs.length >= 500;
       setStatus(
         seqs.length
-          ? `Find: match 1 of ${seqs.length} for “${q}” (context preserved)`
+          ? `Find: match 1 of ${seqs.length}${capped ? "+" : ""} for “${q}”${
+              capped ? " (capped — refine query)" : ""
+            } (context preserved)`
           : `Find: no matches for “${q}”`,
       );
     } catch (e) {
@@ -578,8 +632,15 @@ export function LogExplorer({ corpusId }: Props) {
       (findIndex + dir + findMatches.length) % findMatches.length;
     setFindIndex(next);
     const seq = findMatches[next]!;
-    setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-    setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
+    const resident = laneEvents["lane-0"] ?? [];
+    if (!resident.some((e) => e.seq === seq)) {
+      void seekToSeq(seq).then(() => {
+        setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
+      });
+    } else {
+      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+      setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
+    }
   };
 
   /** Filter: reduce visible events by keyword ∩ facets (#523). */
@@ -688,12 +749,9 @@ export function LogExplorer({ corpusId }: Props) {
     setDetail((d) => (d && !resident.has(d.seq) ? null : d));
   }, [laneEvents]);
 
-  /** #531: activate bookmark — reveal target even when filters hide it. */
+  /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
   const activateBookmark = async (b: LogBookmarkDto) => {
     const seq = b.seqFrom;
-    const resident = Object.values(laneEvents)
-      .flat()
-      .some((e) => e.seq >= b.seqFrom && e.seq <= b.seqTo);
     setHighlight(
       new Set(
         Array.from(
@@ -702,86 +760,61 @@ export function LogExplorer({ corpusId }: Props) {
         ),
       ),
     );
-    setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
 
+    const resident = Object.values(laneEvents)
+      .flat()
+      .some((e) => e.seq >= b.seqFrom && e.seq <= b.seqTo);
     if (resident) {
+      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
       setBookmarkRevealState("visible");
       setStatus(`Bookmark visible: ${b.label}`);
       return;
     }
 
-    // Temporarily clear source/level/keyword so the target can load.
-    if (!revealRestore) {
-      setRevealRestore({ ...filters });
-    }
-    const openFilters: ExplorerFilters = {
-      ...filters,
-      levels: [],
-      sources: [],
-      keyword: null,
-    };
-    setFilters(openFilters);
-    setFilterDraft("");
     setBusy(true);
+    setError(null);
     try {
-      // Seek a page that ends at/after the bookmark via before_cursor on seq+1
-      // or load around by sequential pages — use direct after from 0 with limit
-      // and keyword null, then check presence; if missing, try reverse from end.
-      const page = await hostLogQueryEvents(
-        corpusId,
-        filtersToQuery(openFilters, {
-          limit: 100,
-          sortByTime: true,
-        }),
-      );
-      // Walk forward until we pass the bookmark or exhaust.
-      let window = seedFromPage(page);
-      let guard = 0;
-      while (
-        !window.events.some((e) => e.seq === seq) &&
-        window.afterSeq != null &&
-        window.afterTs != null &&
-        guard < 40
-      ) {
-        guard += 1;
-        const next = await hostLogQueryEvents(
-          corpusId,
-          filtersToQuery(openFilters, {
-            afterSeq: window.afterSeq,
-            afterTs: window.afterTs,
-            limit: 100,
-            sortByTime: true,
-          }),
-        );
-        if (next.events.length === 0) break;
-        window = appendNewer(window, next, DEFAULT_MAX_RESIDENT).window;
-        if (next.nextCursor == null) break;
+      // Try under current filters first.
+      let status = await seekToSeq(seq);
+      if (status === "found") {
+        setBookmarkRevealState("visible");
+        setStatus(`Bookmark visible under current filters: ${b.label}`);
+        return;
       }
-      const found = window.events.find((e) => e.seq === seq);
-      setLaneEvents((prev) => ({ ...prev, "lane-0": window.events }));
-      setLaneCursors((prev) => ({
-        ...prev,
-        "lane-0": {
-          afterSeq: window.afterSeq,
-          afterTs: window.afterTs,
-          beforeSeq: window.beforeSeq,
-          beforeTs: window.beforeTs,
-          hasOlder: window.beforeSeq != null,
-          hasNewer: window.afterSeq != null,
-        },
-      }));
-      if (found) {
-        setDetail(found);
-        setSelected(new Set([seq]));
-        setBookmarkRevealState("revealed");
-        setStatus(
-          `Bookmark temporarily revealed: ${b.label} — restore prior view when done`,
-        );
-      } else {
+      if (status === "missing") {
         setBookmarkRevealState("missing");
         setStatus(
           `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
         );
+        return;
+      }
+
+      // Hidden by filters — temporarily clear and seek again.
+      if (!revealRestore) {
+        setRevealRestore({ ...filters });
+      }
+      const openFilters: ExplorerFilters = {
+        ...filters,
+        levels: [],
+        sources: [],
+        keyword: null,
+      };
+      setFilters(openFilters);
+      setFilterDraft("");
+      status = await seekToSeq(seq, { clearFilters: true });
+      if (status === "found") {
+        setBookmarkRevealState("revealed");
+        setStatus(
+          `Bookmark temporarily revealed: ${b.label} — filters cleared; restore prior view when done`,
+        );
+      } else if (status === "missing") {
+        setBookmarkRevealState("missing");
+        setStatus(
+          `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
+        );
+      } else {
+        setBookmarkRevealState("missing");
+        setStatus(`Bookmark target still not visible: ${b.label}`);
       }
     } catch (e) {
       setError(String(e));
@@ -1349,8 +1382,13 @@ export function LogExplorer({ corpusId }: Props) {
             className="log-explorer__chat-preview"
             data-testid="log-explorer-count-truth"
           >
-            Matched {totalMatched.toLocaleString()} · resident{" "}
+            {/* #534: label totals separately — never use max-per-lane as global. */}
+            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·
+            matched {totalMatched.toLocaleString()} · resident{" "}
             {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
+            {laneCount > 1
+              ? ` · ${laneCount} lanes (per-lane counts in headers)`
+              : ""}
           </div>
 
           <div className="log-explorer__section-title">Levels</div>

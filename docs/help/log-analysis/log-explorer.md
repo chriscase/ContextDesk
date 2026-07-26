@@ -30,7 +30,9 @@ import/export, and open investigation. It is not a million-row browser.
 
 | Feature | Notes |
 | --- | --- |
-| Find vs Filter | **Find** highlights matches and steps next/prev without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time (e.g. `job-7f3a` ∩ ERROR). Active facets show as removable chips |
+| Find vs Filter | **Find** highlights matches and steps next/prev without removing surrounding rows. Non-resident matches load via a **direct event-neighborhood** seek (not a multi-page scan). **Filter** reduces the table and intersects levels/sources/time (e.g. `job-7f3a` ∩ ERROR). Active facets show as removable chips |
+| Counts | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total |
+| Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
 | Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; manual **Load older/newer** remains as fallback |
 | Timestamps | Adaptive UTC display (time-of-day on single-day corpora); full timestamp in the row tooltip; order-only never fabricates calendar time |
 | Long lines | **compact** / **wrap** / **full** line modes; Expand on truncated rows; resizable event inspector with Copy |
