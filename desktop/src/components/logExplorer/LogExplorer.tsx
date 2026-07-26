@@ -66,6 +66,16 @@ import {
   saveColWidths,
   type ColWidths,
 } from "../../lib/logExplorer/columnWidths";
+import {
+  defaultLanes,
+  loadLanes,
+  loadLinkMode,
+  resizeLaneList,
+  saveLanes,
+  saveLinkMode,
+  toggleLaneSource,
+  type TimeLinkMode,
+} from "../../lib/logExplorer/laneCompose";
 import { HelpTip } from "../HelpTip";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
@@ -137,11 +147,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
   const [breakpoint, setBreakpoint] = useState<Breakpoint>("normal");
-  const [linkMode, setLinkMode] = useState(false);
+  const [linkMode, setLinkMode] = useState<TimeLinkMode>(() =>
+    loadLinkMode(corpusId),
+  );
   const [laneCount, setLaneCount] = useState(1);
-  const [lanes, setLanes] = useState<LaneConfig[]>([
-    { id: "lane-0", label: "All sources", sources: [] },
-  ]);
+  const [lanes, setLanes] = useState<LaneConfig[]>(() => {
+    const saved = loadLanes(corpusId);
+    return saved && saved.length > 0 ? saved : defaultLanes(1);
+  });
+  const [laneEditorOpen, setLaneEditorOpen] = useState(false);
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
@@ -268,7 +282,7 @@ export function LogExplorer({ corpusId }: Props) {
       // #536: narrow is single-lane by contract.
       if (bp === "narrow") {
         setLaneCount(1);
-        setLinkMode(false);
+        setTimeLinkMode("independent");
       }
     });
     ro.observe(el);
@@ -533,7 +547,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   // Link/gap when multi-lane + link on
   useEffect(() => {
-    if (!linkMode || laneCount < 2) {
+    if (linkMode === "independent" || laneCount < 2) {
       setGaps([]);
       return;
     }
@@ -558,14 +572,15 @@ export function LogExplorer({ corpusId }: Props) {
   }, [linkMode, laneCount, lanes, laneEvents, timeQuality]);
 
   useEffect(() => {
-    if (timeQuality === "order_only" && linkMode) {
-      setLinkMode(false);
+    if (timeQuality === "order_only" && linkMode !== "independent") {
+      setLinkMode("independent");
+      saveLinkMode(corpusId, "independent");
       setGaps([]);
       setStatus(
-        "Linked scroll disabled: at least one visible lane has order-only or unavailable time",
+        "Time link disabled: order-only time cannot claim wall-clock alignment",
       );
     }
-  }, [linkMode, timeQuality]);
+  }, [linkMode, timeQuality, corpusId]);
 
   const toggleLevel = (level: string) => {
     setFilters((f) => {
@@ -743,7 +758,7 @@ export function LogExplorer({ corpusId }: Props) {
       else next.add(e.seq);
       return next;
     });
-    if (linkMode && laneCount > 1) {
+    if (linkMode !== "independent" && laneCount > 1) {
       const packed = lanes.slice(0, laneCount).map((l) => ({
         id: l.id,
         events: (laneEvents[l.id] ?? []).map((x): LaneEventRef => ({
@@ -947,7 +962,8 @@ export function LogExplorer({ corpusId }: Props) {
     () => ({
       corpusId,
       timeQuality,
-      linkMode,
+      // Agent snapshot keeps a boolean "linked" flag; mode name is in brief.
+      linkMode: linkMode !== "independent",
       lanes: lanes
         .slice(0, laneCount)
         .map((l) => `${l.label || l.id}:[${l.sources.join(",") || "*"}]`),
@@ -956,7 +972,7 @@ export function LogExplorer({ corpusId }: Props) {
       keyword: filters.keyword,
       selectedCount: selected.size,
       bookmarkCount: bookmarks.length,
-      brief: viewBrief,
+      brief: `${viewBrief}; timeLink=${linkMode}`,
     }),
     [
       corpusId,
@@ -1132,25 +1148,31 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
+  /** User-composed lanes: change count without inventing first-N source assignment (#486). */
   const configureLanes = (n: number) => {
     const count = clampLaneCount(n);
     setLaneCount(count);
-    const sources = Object.keys(facets?.sources ?? {});
-    if (count === 1) {
-      setLanes([{ id: "lane-0", label: "All sources", sources: [] }]);
-      setLaneScrollSeq({});
-      return;
-    }
-    const next: LaneConfig[] = [];
-    for (let i = 0; i < count; i++) {
-      const src = sources[i];
-      next.push({
-        id: `lane-${i}`,
-        label: src ? src : `Lane ${i + 1}`,
-        sources: src ? [src] : [],
-      });
-    }
-    setLanes(next);
+    setLanes((prev) => {
+      const next = resizeLaneList(prev, count);
+      saveLanes(corpusId, next);
+      return next;
+    });
+    if (count === 1) setLaneScrollSeq({});
+  };
+
+  const updateLaneSources = (laneId: string, source: string) => {
+    setLanes((prev) => {
+      const next = prev.map((l) =>
+        l.id === laneId ? toggleLaneSource(l, source) : l,
+      );
+      saveLanes(corpusId, next);
+      return next;
+    });
+  };
+
+  const setTimeLinkMode = (mode: TimeLinkMode) => {
+    setLinkMode(mode);
+    saveLinkMode(corpusId, mode);
   };
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
@@ -1197,7 +1219,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-density={density}
       data-line-mode={lineMode}
       data-lane-count={laneCount}
-      data-link-mode={linkMode ? "on" : "off"}
+      data-link-mode={linkMode}
       data-time-quality={timeQuality}
       data-resizable="true"
       onKeyDown={onKeyDown}
@@ -1221,26 +1243,51 @@ export function LogExplorer({ corpusId }: Props) {
           <span className="log-explorer__badge">{breakpoint}</span>
         </div>
         <div className="log-explorer__toolbar">
+          {(
+            [
+              ["independent", "Indep"],
+              ["follow_cursor", "Follow"],
+              ["align_time", "Align"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              className={`log-explorer__btn ${linkMode === mode ? "log-explorer__btn--active" : ""}`}
+              data-testid={`time-link-${mode}`}
+              title={
+                mode === "independent"
+                  ? "Lanes page and scroll independently"
+                  : mode === "follow_cursor"
+                    ? "Selecting an event seeks peers to nearest time (not row alignment)"
+                    : "Align lanes on a shared vertical time axis with explicit gap bands"
+              }
+              onClick={() => {
+                if (mode !== "independent" && timeQuality === "order_only") {
+                  setStatus(
+                    "Time link unavailable: order-only time cannot claim wall-clock alignment",
+                  );
+                  return;
+                }
+                if (mode !== "independent" && timeQuality === "mixed") {
+                  setStatus(
+                    "Time link uses mixed time quality; inspect each lane badge before interpreting gaps",
+                  );
+                }
+                setTimeLinkMode(mode);
+              }}
+            >
+              {label}
+            </button>
+          ))}
           <button
             type="button"
-            className={`log-explorer__btn ${linkMode ? "log-explorer__btn--active" : ""}`}
-            onClick={() => {
-              if (!linkMode && timeQuality === "order_only") {
-                setStatus(
-                  "Linked scroll unavailable: at least one visible lane has order-only or unavailable time",
-                );
-                return;
-              }
-              if (!linkMode && timeQuality === "mixed") {
-                setStatus(
-                  "Linked scroll uses mixed time quality; inspect each lane badge before interpreting gaps",
-                );
-              }
-              setLinkMode((v) => !v);
-            }}
-            title="Timestamp-linked scroll across lanes"
+            className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
+            data-testid="lane-editor-toggle"
+            onClick={() => setLaneEditorOpen((o) => !o)}
+            title="Compose which sources belong to each lane"
           >
-            Link {linkMode ? "ON" : "OFF"}
+            Lanes…
           </button>
           <button
             type="button"
@@ -1359,6 +1406,45 @@ export function LogExplorer({ corpusId }: Props) {
           Message
         </div>
       </div>
+
+      {laneEditorOpen && (
+        <div
+          className="log-explorer__lane-editor"
+          data-testid="lane-editor"
+          role="region"
+          aria-label="Lane source composition"
+        >
+          <div className="log-explorer__section-title">
+            Compose lanes (empty membership = all sources)
+          </div>
+          {lanes.slice(0, laneCount).map((lane) => (
+            <div key={lane.id} className="log-explorer__lane-editor-row">
+              <strong>{lane.label}</strong>
+              <div className="log-explorer__facet">
+                {Object.keys(facets?.sources ?? {})
+                  .sort()
+                  .slice(0, 40)
+                  .map((src) => (
+                    <label key={src} className="log-explorer__facet-row">
+                      <input
+                        type="checkbox"
+                        checked={lane.sources.includes(src)}
+                        onChange={() => updateLaneSources(lane.id, src)}
+                      />
+                      <span title={src}>{src}</span>
+                    </label>
+                  ))}
+              </div>
+              <div className="log-explorer__chat-preview">
+                {lane.sources.length === 0
+                  ? "All sources"
+                  : `${lane.sources.length} source(s)`}
+                {" · "}same source may appear in multiple lanes
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {breakpoint === "narrow" && (
         <div
@@ -1652,7 +1738,7 @@ export function LogExplorer({ corpusId }: Props) {
 
         <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
           <div className="log-explorer__lane-strip">
-            {linkMode && gaps.length > 0 && (
+            {linkMode !== "independent" && gaps.length > 0 && (
               <span className="log-explorer__badge log-explorer__badge--warn">
                 {gaps.length} {timeQuality === "mixed" ? "potential " : ""}gap
                 region{gaps.length === 1 ? "" : "s"}
@@ -1712,7 +1798,7 @@ export function LogExplorer({ corpusId }: Props) {
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>
-                  {linkMode &&
+                  {linkMode !== "independent" &&
                     gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
                       <div
                         className="log-explorer__gap-band"
