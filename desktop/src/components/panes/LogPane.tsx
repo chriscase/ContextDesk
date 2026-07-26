@@ -14,7 +14,6 @@ import {
   hostListenProcessProgress,
   hostLogClusterProblems,
   hostLogSearch,
-  hostLogTimeline,
   hostOpenLogExplorer,
   hostReanalyzeLogCorpus,
   hostSetActiveLogCorpus,
@@ -22,7 +21,6 @@ import {
   type LogCorpusSummaryDto,
   type LogSearchHitDto,
   type LogTemplateRowDto,
-  type LogTimelineBucketDto,
   type ProcessProgressDto,
 } from "../../lib/host";
 import {
@@ -72,7 +70,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [clusters, setClusters] = useState<LogClusterDto[]>([]);
-  const [timeline, setTimeline] = useState<LogTimelineBucketDto[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LogSearchHitDto[]>([]);
   const [templates, setTemplates] = useState<LogTemplateRowDto[]>([]);
@@ -118,17 +115,18 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
   }, []);
 
+  // #521: do not eagerly query/render the non-interactive overview timeline.
+  // Volume-over-time navigation belongs in Log Explorer; overview only loads
+  // clusters + templates (no hostLogTimeline on corpus select).
   const loadAnalysis = useCallback(async (id: string) => {
     setBusy(true);
     setError(null);
     try {
-      const [cl, tl, tpls] = await Promise.all([
+      const [cl, tpls] = await Promise.all([
         hostLogClusterProblems(id, 12),
-        hostLogTimeline(id, 60),
         hostListLogTemplates(id, 100),
       ]);
       setClusters(cl ?? []);
-      setTimeline(tl ?? []);
       setTemplates(tpls ?? []);
     } catch (e) {
       setError(String(e));
@@ -285,7 +283,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       if (activeId === id) {
         setActiveId(null);
         setClusters([]);
-        setTimeline([]);
         setHits([]);
         setTemplates([]);
       }
@@ -297,7 +294,6 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
   }
 
-  const maxTl = Math.max(1, ...timeline.map((b) => b.count));
 
   if (inAppExplorerId) {
     return (
@@ -623,24 +619,16 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       </ul>
                     </div>
                   ) : null}
-                  {timeline.length > 0 ? (
-                    <div>
-                      <h4>Timeline</h4>
-                      <ul className="log-timeline-bars">
-                        {timeline.map((b) => (
-                          <li key={b.start} title={`t=${b.start} n=${b.count}`}>
-                            <span
-                              className="log-timeline-bars__fill"
-                              style={{
-                                width: `${Math.max(4, (100 * b.count) / maxTl)}%`,
-                              }}
-                            />
-                            <span className="log-timeline-bars__n">{b.count}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
+                  <p
+                    className="muted"
+                    role="note"
+                    data-testid="log-overview-no-eager-timeline"
+                  >
+                    The Logs overview no longer loads a decorative volume chart
+                    on select (that path burned CPU without seeking or filtering).
+                    Use <strong>Open Explorer</strong> for backend-driven time
+                    navigation over events.
+                  </p>
                 </div>
               ) : null}
 

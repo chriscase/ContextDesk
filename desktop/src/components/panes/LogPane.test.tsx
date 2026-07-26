@@ -159,6 +159,79 @@ describe("LogPane", () => {
     ).toContain("Keyword-only · deferred");
   });
 
+  it("does not eagerly query or render the overview timeline on corpus select (#521)", async () => {
+    const corpus: LogCorpusSummaryDto = {
+      id: "timeline-skip-corpus",
+      name: "Busy incident",
+      eventCount: 50_000,
+      templateCount: 200,
+      engine: "duckdb",
+      createdAt: 1_700_000_000,
+      sourceLabel: "big-dump",
+      stats: {
+        files: 6,
+        discoveredFiles: 6,
+        excludedFiles: 0,
+        failedFiles: 0,
+        ignoredFiles: 0,
+        exclusionCounts: {},
+        exclusionExamples: [],
+        partial: false,
+        lines: 50_000,
+        templates: 200,
+        reductionRatio: 250,
+        embedded: 0,
+        sourceBytes: 1_000_000,
+        corpusBytes: 2_000_000,
+        levelCounts: { info: 40_000, error: 10_000 },
+        tsMin: 1,
+        tsMax: 2,
+        formatCounts: { json: 50_000 },
+      },
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 200,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([corpus]);
+    // If the old eager path returns, this would paint decorative bars.
+    hostMocks.timeline.mockResolvedValue(
+      Array.from({ length: 60 }, (_, i) => ({
+        start: 1_700_000_000 + i * 60,
+        count: 1000 + i,
+      })),
+    );
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Busy incident/i }),
+    );
+    const overview = await screen.findByTestId("log-overview");
+    await waitFor(() => {
+      expect(hostMocks.clusterProblems).toHaveBeenCalledWith(corpus.id, 12);
+      expect(hostMocks.listTemplates).toHaveBeenCalledWith(corpus.id, 100);
+    });
+    // Regression: selecting a corpus must not call hostLogTimeline.
+    expect(hostMocks.timeline).not.toHaveBeenCalled();
+    expect(
+      within(overview).getByTestId("log-overview-no-eager-timeline"),
+    ).toBeTruthy();
+    expect(overview.querySelector(".log-timeline-bars")).toBeNull();
+    // Multiple selects must not re-introduce the query.
+    fireEvent.click(screen.getByRole("button", { name: /Busy incident/i }));
+    await waitFor(() =>
+      expect(hostMocks.clusterProblems.mock.calls.length).toBeGreaterThanOrEqual(
+        1,
+      ),
+    );
+    expect(hostMocks.timeline).not.toHaveBeenCalled();
+  });
+
   it("requires confirmation and invokes trusted local re-analysis", async () => {
     const corpus: LogCorpusSummaryDto = {
       id: "00000000-0000-7000-8000-000000000001",
