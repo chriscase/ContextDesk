@@ -76,6 +76,7 @@ function eventPage(
   timeQuality: host.TimeQuality,
   eventCount = 1,
   ts = 1_700_000_000,
+  totalMatched = eventCount,
 ): host.EventPageDto {
   return {
     events: Array.from({ length: eventCount }, (_, index) => ({
@@ -95,7 +96,7 @@ function eventPage(
     })),
     nextCursor: null,
     nextTs: null,
-    totalMatched: eventCount,
+    totalMatched,
     timeQuality,
   };
 }
@@ -281,6 +282,74 @@ describe("LogExplorer shell", () => {
     },
   );
 
+  it("labels corpus, per-lane matched, and resident counts without inventing a global lane total", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "fixture",
+      eventCount: 35,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 6, "audit.log": 4 },
+      levels: { info: 10 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        if (source === "api.log") {
+          return eventPage("api.log", "wall", 6, 1_700_000_000, 6);
+        }
+        if (source === "audit.log") {
+          return eventPage("audit.log", "wall", 4, 1_700_000_100, 4);
+        }
+        return eventPage("all.log", "wall", 2, 1_700_000_000, 35);
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Audit", sources: ["audit.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("audit.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "6 matched · 6 resident",
+      );
+      expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+        "4 matched · 4 resident",
+      );
+    });
+    const global = screen.getByTestId("log-explorer-global-counts");
+    expect(global.textContent).toContain("35 corpus events");
+    expect(global.textContent).toContain("2 lane queries");
+    expect(global.textContent).not.toMatch(/\b6 events\b/);
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /matched per lane below · resident rows 10/,
+    );
+  });
+
   it("keeps linking off when a visible lane is empty or failed", async () => {
     vi.mocked(host.hostLogFacets).mockResolvedValue({
       sources: { "api.log": 1, "worker.log": 0, "db.log": 1 },
@@ -325,6 +394,9 @@ describe("LogExplorer shell", () => {
       ).toBe("error");
     });
     expect(screen.getByText(/evidence lane failed to load/)).toBeTruthy();
+    expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
+      "matched unavailable",
+    );
 
     fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
     // Order-only aggregate refuses wall-clock link.

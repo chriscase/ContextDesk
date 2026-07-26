@@ -161,6 +161,10 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
+  /** Exact matched count for each lane query; null means unavailable/failed. */
+  const [laneMatched, setLaneMatched] = useState<
+    Record<string, number | null>
+  >({});
   const [laneTimeStates, setLaneTimeStates] = useState<
     Record<string, LaneTimeState>
   >({});
@@ -368,6 +372,9 @@ export function LogExplorer({ corpusId }: Props) {
     setBusy(true);
     setError(null);
     setLaneTimeStates(unloaded);
+    setLaneMatched(
+      Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
+    );
     setTimeQuality("order_only");
     setGaps([]);
     try {
@@ -383,6 +390,7 @@ export function LogExplorer({ corpusId }: Props) {
             : { status: "empty", quality: null };
         const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
+        setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
         setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
@@ -416,7 +424,8 @@ export function LogExplorer({ corpusId }: Props) {
           }
         > = {};
         const states: Record<string, LaneTimeState> = {};
-        let total = 0;
+        const matchedByLane: Record<string, number | null> = {};
+        let maxLaneMatched = 0;
         let shown = 0;
         const requests = visibleLanes.map(async (lane) => {
           const q = filtersToQuery(filters, {
@@ -449,6 +458,7 @@ export function LogExplorer({ corpusId }: Props) {
               hasNewer: false,
             };
             states[lane.id] = { status: "error", quality: null };
+            matchedByLane[lane.id] = null;
             continue;
           }
           const { page } = result.value;
@@ -462,7 +472,8 @@ export function LogExplorer({ corpusId }: Props) {
             hasOlder: page.prevCursor != null,
             hasNewer: page.nextCursor != null,
           };
-          total = Math.max(total, page.totalMatched);
+          matchedByLane[lane.id] = page.totalMatched;
+          maxLaneMatched = Math.max(maxLaneMatched, page.totalMatched);
           shown += page.events.length;
           states[lane.id] =
             page.events.length > 0
@@ -470,9 +481,11 @@ export function LogExplorer({ corpusId }: Props) {
               : { status: "empty", quality: null };
         }
         setLaneEvents(byLane);
+        setLaneMatched(matchedByLane);
         setLaneCursors(cursors);
         setLaneTimeStates(states);
-        setTotalMatched(total);
+        // No global unique matched total is derivable from overlapping lanes.
+        setTotalMatched(0);
         setTimeQuality(
           aggregateLaneTimeQuality(
             visibleLanes.map((lane) => lane.id),
@@ -486,7 +499,7 @@ export function LogExplorer({ corpusId }: Props) {
           );
         }
         setStatus(
-          `${laneCount} lanes · ${shown} loaded (page) · up to ${total} matched per lane`,
+          `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
         );
       }
     } catch (e) {
@@ -639,7 +652,8 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     if (nb.corpusTotal > 0) setCorpusTotal(nb.corpusTotal);
-    if (nb.totalMatched > 0) setTotalMatched(nb.totalMatched);
+    setLaneMatched((m) => ({ ...m, "lane-0": nb.totalMatched }));
+    if (laneCount === 1) setTotalMatched(nb.totalMatched);
   };
 
   /** Seek a stable event into the resident window via neighborhood API. */
@@ -1043,8 +1057,13 @@ export function LogExplorer({ corpusId }: Props) {
         beforeTs: cur.beforeTs,
         totalMatched: totalMatched,
       };
-      const { window } = appendNewer(resident, page, DEFAULT_MAX_RESIDENT);
+      const { window, droppedFromHead } = appendNewer(
+        resident,
+        page,
+        DEFAULT_MAX_RESIDENT,
+      );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
+      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -1056,6 +1075,12 @@ export function LogExplorer({ corpusId }: Props) {
           hasNewer: page.nextCursor != null,
         },
       }));
+      if (droppedFromHead > 0) {
+        setLaneScrollAdjust((prev) => ({
+          ...prev,
+          [laneId]: (prev[laneId] ?? 0) - droppedFromHead,
+        }));
+      }
       if (laneId === "lane-0") setNextCursor(page.nextCursor);
       if (page.events.length > 0) {
         setLaneTimeStates((previous) => {
@@ -1125,6 +1150,7 @@ export function LogExplorer({ corpusId }: Props) {
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
+      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -1221,9 +1247,10 @@ export function LogExplorer({ corpusId }: Props) {
   const laneMatchedHint = (laneId: string) => {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
+    const matched = laneMatched[laneId];
     const more =
       cur?.hasNewer || cur?.hasOlder ? "+" : "";
-    return `${n}${more} resident`;
+    return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
 
   return (
@@ -1246,7 +1273,10 @@ export function LogExplorer({ corpusId }: Props) {
         <div className="log-explorer__title">
           Log Explorer · {summary?.name ?? corpusId.slice(0, 8)}
         </div>
-        <div className="log-explorer__meta">
+        <div
+          className="log-explorer__meta"
+          data-testid="log-explorer-global-counts"
+        >
           <span
             className={
               timeQuality === "order_only"
@@ -1257,7 +1287,17 @@ export function LogExplorer({ corpusId }: Props) {
           >
             {timeQualityLabel(timeQuality)}
           </span>
-          <span className="log-explorer__badge">{totalMatched} events</span>
+          <span className="log-explorer__badge">
+            {corpusTotal.toLocaleString()} corpus events
+          </span>
+          {laneCount === 1 && (
+            <span className="log-explorer__badge">
+              {totalMatched.toLocaleString()} matched
+            </span>
+          )}
+          {laneCount > 1 && (
+            <span className="log-explorer__badge">{laneCount} lane queries</span>
+          )}
           <span className="log-explorer__badge">{breakpoint}</span>
         </div>
         <div className="log-explorer__toolbar">
@@ -1707,8 +1747,11 @@ export function LogExplorer({ corpusId }: Props) {
             data-testid="log-explorer-count-truth"
           >
             {/* #534: label totals separately — never use max-per-lane as global. */}
-            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·
-            matched {totalMatched.toLocaleString()} · resident{" "}
+            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·{" "}
+            {laneCount === 1
+              ? `matched ${totalMatched.toLocaleString()} · `
+              : "matched per lane below · "}
+            resident rows{" "}
             {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
             {laneCount > 1
               ? ` · ${laneCount} lanes (per-lane counts in headers)`
@@ -1874,9 +1917,6 @@ export function LogExplorer({ corpusId }: Props) {
                       data-testid={`lane-count-${lane.id}`}
                     >
                       {laneMatchedHint(lane.id)}
-                      {totalMatched > 0 && laneCount === 1
-                        ? ` · ${totalMatched} matched`
-                        : ""}
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>

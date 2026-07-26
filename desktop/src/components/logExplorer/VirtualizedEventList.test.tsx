@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
@@ -41,5 +41,43 @@ describe("VirtualizedEventList", () => {
     expect(rendered).toBeGreaterThan(0);
     expect(rendered).toBeLessThan(120);
     expect(rendered).toBeLessThan(events.length);
+  });
+
+  it("applies only the incremental prepend/eviction anchor adjustment", () => {
+    const events = makeEvents(20);
+    const props = {
+      events,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} scrollAnchorAdjust={0} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 100,
+    });
+
+    act(() => {
+      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={2} />);
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(156);
+
+    // A second +2 rows is cumulative=4, but must add only another 56px.
+    act(() => {
+      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={4} />);
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(212);
+
+    // Head eviction moves the cumulative adjustment back by one row.
+    act(() => {
+      rerender(<VirtualizedEventList {...props} scrollAnchorAdjust={3} />);
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(184);
   });
 });

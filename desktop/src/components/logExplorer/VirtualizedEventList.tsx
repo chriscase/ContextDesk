@@ -156,16 +156,18 @@ export function VirtualizedEventList({
 
   const lastAnchor = useRef(0);
   useEffect(() => {
-    if (scrollAnchorAdjust > 0 && parentRef.current) {
-      if (scrollAnchorAdjust !== lastAnchor.current) {
-        const px =
-          heights
-            .slice(0, Math.min(scrollAnchorAdjust, heights.length))
-            .reduce((a, b) => a + b, 0) || scrollAnchorAdjust * compactH;
-        parentRef.current.scrollTop += px;
-        lastAnchor.current = scrollAnchorAdjust;
-      }
-    }
+    const deltaRows = scrollAnchorAdjust - lastAnchor.current;
+    lastAnchor.current = scrollAnchorAdjust;
+    if (deltaRows === 0 || !parentRef.current) return;
+    const count = Math.min(Math.abs(deltaRows), heights.length);
+    const measured =
+      heights.slice(0, count).reduce((a, b) => a + b, 0) ||
+      count * compactH;
+    const deltaPx = deltaRows > 0 ? measured : -measured;
+    parentRef.current.scrollTop = Math.max(
+      0,
+      parentRef.current.scrollTop + deltaPx,
+    );
   }, [scrollAnchorAdjust, heights, compactH]);
 
   const lastScrollSeq = useRef<number | null>(null);
