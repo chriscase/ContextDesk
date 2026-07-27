@@ -91,7 +91,10 @@ make the aggregate more trustworthy.
 Open **Navigator** to move across the entire filtered corpus without loading
 the intervening event bodies. The backend performs fixed-size SQL aggregation
 and returns at most 96 count buckets; empty spans stay empty. The shaded portion
-marks buckets represented in the current bounded resident window.
+marks buckets represented in the current bounded resident window. With two to
+four lanes, compact coverage rows summarize each lane independently and retain
+its own wall/mixed/order-only label; one lane cannot make another's clock more
+trustworthy.
 
 Click a bar or move and release the position slider. Explorer requests one
 event in that bucket and then loads its bounded neighborhood. Slider movement

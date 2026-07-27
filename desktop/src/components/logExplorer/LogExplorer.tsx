@@ -2440,6 +2440,11 @@ export function LogExplorer({ corpusId }: Props) {
                 beforeTs: null,
               })}
               residentEvents={Object.values(laneEvents).flat()}
+              lanes={lanes.slice(0, laneCount).map((lane) => ({
+                id: lane.id,
+                label: lane.label,
+                sources: lane.sources,
+              }))}
               onSeekSeq={async (seq) => {
                 const result = await seekToSeq(seq);
                 if (result !== "found") {

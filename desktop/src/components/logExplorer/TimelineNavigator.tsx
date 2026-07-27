@@ -20,7 +20,19 @@ type Props = {
   corpusId: string;
   filter: EventQueryDto;
   residentEvents: ExplorerEventDto[];
+  lanes?: {
+    id: string;
+    label: string;
+    sources: string[];
+  }[];
   onSeekSeq: (seq: number) => Promise<void> | void;
+};
+
+type LaneSummaryState = {
+  id: string;
+  label: string;
+  summary: TimelineSummaryDto | null;
+  error: string | null;
 };
 
 function bucketBounds(summary: TimelineSummaryDto, index: number) {
@@ -53,17 +65,22 @@ export function TimelineNavigator({
   corpusId,
   filter,
   residentEvents,
+  lanes = [],
   onSeekSeq,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState<TimelineSummaryDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [laneSummaries, setLaneSummaries] = useState<LaneSummaryState[]>([]);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [status, setStatus] = useState("Navigator closed");
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
   const filterKey = JSON.stringify(filter);
+  const laneKey = JSON.stringify(
+    lanes.map((lane) => ({ id: lane.id, sources: lane.sources })),
+  );
 
   useEffect(() => {
     if (!open) {
@@ -74,11 +91,52 @@ export function TimelineNavigator({
     setLoading(true);
     setError(null);
     setStatus("Loading bounded timeline summary…");
-    void hostLogTimelineSummary(corpusId, filter, NAVIGATOR_BUCKETS)
-      .then((next) => {
+    const laneRequests =
+      lanes.length > 1
+        ? lanes.slice(0, 4).map((lane) =>
+            hostLogTimelineSummary(
+              corpusId,
+              {
+                ...filter,
+                sources:
+                  lane.sources.length > 0
+                    ? lane.sources
+                    : (filter.sources ?? []),
+              },
+              NAVIGATOR_BUCKETS,
+            ),
+          )
+        : [];
+    void Promise.allSettled([
+      hostLogTimelineSummary(corpusId, filter, NAVIGATOR_BUCKETS),
+      ...laneRequests,
+    ])
+      .then((results) => {
         if (request !== summaryRequest.current) return;
+        const global = results[0];
+        if (!global || global.status === "rejected") {
+          throw global?.reason ?? new Error("Timeline summary unavailable");
+        }
+        const next = global.value;
         setSummary(next);
         setPreviewIndex(0);
+        setLaneSummaries(
+          lanes.length > 1
+            ? lanes.slice(0, 4).map((lane, index) => {
+                const result = results[index + 1];
+                return {
+                  id: lane.id,
+                  label: lane.label,
+                  summary:
+                    result?.status === "fulfilled" ? result.value : null,
+                  error:
+                    result?.status === "rejected"
+                      ? String(result.reason)
+                      : null,
+                };
+              })
+            : [],
+        );
         setStatus(
           next.totalMatched === 0
             ? "No events match the current filters"
@@ -89,6 +147,7 @@ export function TimelineNavigator({
         if (request !== summaryRequest.current) return;
         setError(String(cause));
         setSummary(null);
+        setLaneSummaries([]);
         setStatus("Timeline summary unavailable");
       })
       .finally(() => {
@@ -97,9 +156,9 @@ export function TimelineNavigator({
     return () => {
       if (request === summaryRequest.current) summaryRequest.current += 1;
     };
-    // filterKey intentionally represents the complete serializable predicate.
+    // Keys intentionally represent the complete serializable predicates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corpusId, filterKey, open]);
+  }, [corpusId, filterKey, laneKey, open]);
 
   const counts = useMemo(() => {
     const values = Array.from(
@@ -260,6 +319,59 @@ export function TimelineNavigator({
                 {bucketLabel(summary, previewIndex)} ·{" "}
                 {timeQualityLabel(summary.timeQuality)}
               </span>
+              {laneSummaries.length > 0 ? (
+                <div
+                  className="log-explorer__navigator-lane-coverage"
+                  data-testid="timeline-lane-coverage"
+                  aria-label="Per-lane timeline coverage"
+                >
+                  {laneSummaries.map((lane) => (
+                    <div
+                      key={lane.id}
+                      className="log-explorer__navigator-lane-row"
+                      data-lane-id={lane.id}
+                    >
+                      <span title={lane.label}>{lane.label}</span>
+                      {lane.summary ? (
+                        <>
+                          <div
+                            className="log-explorer__navigator-lane-slots"
+                            style={{
+                              gridTemplateColumns: `repeat(${lane.summary.bucketCount}, minmax(1px, 1fr))`,
+                            }}
+                          >
+                            {Array.from(
+                              { length: lane.summary.bucketCount },
+                              (_, index) => {
+                                const count =
+                                  lane.summary?.buckets.find(
+                                    (bucket) => bucket.index === index,
+                                  )?.count ?? 0;
+                                return (
+                                  <i
+                                    key={index}
+                                    data-count={count}
+                                    className={
+                                      count > 0
+                                        ? "log-explorer__navigator-lane-slot--filled"
+                                        : ""
+                                    }
+                                  />
+                                );
+                              },
+                            )}
+                          </div>
+                          <span>
+                            {timeQualityLabel(lane.summary.timeQuality)}
+                          </span>
+                        </>
+                      ) : (
+                        <span>coverage unavailable · {lane.error}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </>
           ) : null}
           <span
