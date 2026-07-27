@@ -16,10 +16,12 @@ import {
 import { openDirectoryDialog, openFileDialog } from "../../lib/dialogs";
 import {
   formatBytes,
-  formatReduction,
+  formatEventsPerTemplate,
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
+import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "./ProcessProgressPanel";
 import {
   buildLogTriageStarterPrompt,
@@ -557,8 +559,15 @@ function IngestStatsHero({ report }: { report: LogIngestReportDto }) {
           <dd>{report.templates.toLocaleString()}</dd>
         </div>
         <div>
-          <dt>Reduction</dt>
-          <dd>{formatReduction(report.reductionRatio)}</dd>
+          <dt>Pattern grouping</dt>
+          <dd>
+            {formatEventsPerTemplate(report.reductionRatio)}{" "}
+            <HelpTip
+              label="Events per template"
+              title="Events per template"
+              content={HELP_TEMPLATE_GROUPING}
+            />
+          </dd>
         </div>
         <div>
           <dt>Imported files</dt>

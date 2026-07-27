@@ -949,7 +949,7 @@ fn ingest_path_inner_with_fault(
             kind,
             ProcessProgressPhase::Completed,
             format!(
-                "ingested {} lines → {} templates ({:.1}× reduction)",
+                "ingested {} events → {} learned templates ({:.1} avg. events/template)",
                 report.stats.lines, report.stats.templates, report.stats.reduction_ratio
             ),
             false,
@@ -1830,8 +1830,20 @@ mod tests {
             phases.last().copied(),
             Some(ProcessProgressPhase::Completed)
         );
+        let updates = recorder.updates.lock().unwrap();
+        let completed = updates.last().expect("completed progress update");
+        assert!(
+            completed.message.contains("avg. events/template"),
+            "{}",
+            completed.message
+        );
+        assert!(
+            !completed.message.contains("reduction"),
+            "{}",
+            completed.message
+        );
         // No home-style absolute paths in messages
-        for u in recorder.updates.lock().unwrap().iter() {
+        for u in updates.iter() {
             assert!(
                 !u.message.contains("/Users/"),
                 "leaked path in message: {}",

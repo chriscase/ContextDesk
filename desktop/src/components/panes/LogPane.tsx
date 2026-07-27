@@ -31,10 +31,12 @@ import {
 } from "../../lib/dialogs";
 import {
   formatBytes,
-  formatReduction,
+  formatEventsPerTemplate,
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
+import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
@@ -444,7 +446,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       <span className="log-card__meta">
                         {c.eventCount.toLocaleString()} events ·{" "}
                         {c.templateCount.toLocaleString()} templates
-                        {red != null ? ` · ${formatReduction(red)}` : ""}
+                        {red != null
+                          ? ` · ${formatEventsPerTemplate(red)}`
+                          : ""}
                       </span>
                       {size != null ? (
                         <span className="log-card__size">{formatBytes(size)}</span>
@@ -516,8 +520,18 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <dd>{active.stats.templates.toLocaleString()}</dd>
                         </div>
                         <div>
-                          <dt>Reduction</dt>
-                          <dd>{formatReduction(active.stats.reductionRatio)}</dd>
+                          <dt>Pattern grouping</dt>
+                          <dd>
+                            {formatEventsPerTemplate(
+                              active.stats.reductionRatio,
+                            )}{" "}
+                            <HelpTip
+                              label="Events per template"
+                              title="Events per template"
+                              content={HELP_TEMPLATE_GROUPING}
+                              onOpenHelp={onOpenHelp}
+                            />
+                          </dd>
                         </div>
                         <div>
                           <dt>Imported files</dt>

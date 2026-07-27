@@ -43,6 +43,26 @@ time windows, counts, filters, and co-occurrence across many event rows.
 `VectorIndex` searches the much smaller set of template vectors. ContextDesk
 does not embed every raw line.
 
+## Events per template
+
+The Logs overview describes pattern grouping as **average events per template**:
+
+```text
+100,000 events ÷ 10 learned templates = 10,000 avg. events/template
+```
+
+This is a triage-work ratio, not disk compression. Drain templates replace
+changing tokens with placeholders, so structurally similar events can share a
+pattern even when their request ids, hosts, durations, or other parameters
+differ. Every original redacted event remains in DuckDB for search, filters,
+provenance, and inspection.
+
+A higher ratio usually means fewer recurring patterns to review and fewer
+template records to embed. It does not mean events were deleted or that source
+bytes shrank. Use the separate **Source** and **Corpus** sizes for storage, the
+embedding state for actual vector coverage, and top-template counts to see
+whether a few patterns dominate or a long tail remains.
+
 ## Tool guide
 
 | Tool | Tier | Use it for |
