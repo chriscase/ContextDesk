@@ -635,7 +635,12 @@ fn format_event(
 
     let host = host_for(source_index);
     let use_logfmt = source_index == 2 || source_index == 3 || source_path.ends_with(".log");
-    if use_logfmt && !is_multiline {
+    if !use_logfmt {
+        // Keep every row in a JSON/JSONL source valid JSON. Production ingest
+        // intentionally detects one format per file, so switching a multiline
+        // row to logfmt would turn its wall timestamp into synthetic order.
+        json_line(ts, level, service_for(source_path), &host, &trace, &body)
+    } else if !is_multiline {
         logfmt(
             ts,
             level,
@@ -644,9 +649,9 @@ fn format_event(
             &trace,
             &body.replace('\n', " | "),
         )
-    } else if is_multiline {
-        // Escape newlines inside a single logfmt/json-friendly line so importers
-        // still see one event with recoverable multiline content.
+    } else {
+        // Escape newlines inside one logfmt row so importers still see a single
+        // event with recoverable multiline content.
         format!(
             "ts={ts} level={level} service={} host={host} trace_id={trace} msg=\"{}\"",
             service_for(source_path),
@@ -654,8 +659,6 @@ fn format_event(
                 .replace('"', "\\\"")
                 .replace('\n', "\\n")
         )
-    } else {
-        json_line(ts, level, service_for(source_path), &host, &trace, &body)
     }
 }
 
