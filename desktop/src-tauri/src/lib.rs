@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const S3_ACCESS_KEY_REF: &str = "s3/default/access_key";
@@ -366,6 +366,26 @@ fn apply_host_connectors(host: &mut ToolHost, cfg: &AppConfig, state: &AppState)
                 }
             }
         }
+    }
+}
+
+fn spawn_initial_host_warmup(app: tauri::AppHandle) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("cd-host-warmup".into())
+        .spawn(move || {
+            let state = app.state::<AppState>();
+            if let Err(error) = ensure_host(&state) {
+                tracing::warn!(
+                    error = %error,
+                    "initial host warmup failed after app window startup"
+                );
+            }
+        })
+    {
+        tracing::warn!(
+            error = %e,
+            "failed to spawn initial host warmup; host will initialize on demand"
+        );
     }
 }
 
@@ -5222,7 +5242,7 @@ fn purge_memory_gdpr(
 }
 
 #[tauri::command]
-fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
+async fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or("no workspace")?;
     // Prefer durable store when attached (#274); fall back to memory_fs .md notes.
@@ -5251,7 +5271,10 @@ fn list_memory_notes(state: State<'_, AppState>) -> Result<Vec<MemoryFile>, Stri
             }
         }
     }
-    list_memory_files(&ws).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || list_memory_files(&ws))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5417,8 +5440,6 @@ pub fn run() {
         })),
         help: Mutex::new(None),
     };
-    let _ = ensure_host(&state);
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Opt-in signed updates (#173). Check/install only via Settings — never silent.
@@ -5441,6 +5462,7 @@ pub fn run() {
                     host.set_help_index(help);
                 }
             }
+            spawn_initial_host_warmup(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -5620,6 +5642,53 @@ mod help_host_tests {
                 .first()
                 .map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline")
+        );
+    }
+}
+
+#[cfg(test)]
+mod startup_host_tests {
+    #[test]
+    fn packaged_startup_warms_host_after_window_setup_not_before() {
+        let src = include_str!("lib.rs");
+        let run_start = src.find("pub fn run()").expect("run function");
+        let run_src = &src[run_start..];
+        let builder_start = run_src
+            .find("tauri::Builder::default()")
+            .expect("tauri builder");
+        let pre_builder = &run_src[..builder_start];
+
+        assert!(
+            !pre_builder.contains("ensure_host(&state)"),
+            "packaged startup must not synchronously initialize the host before Tauri can create a window"
+        );
+        assert!(
+            run_src.contains("spawn_initial_host_warmup(app.handle().clone())"),
+            "startup must still warm the host after the app/window setup path is available"
+        );
+        assert!(
+            src.contains(".name(\"cd-host-warmup\".into())"),
+            "background host warmup should stay named for native diagnostics"
+        );
+    }
+
+    #[test]
+    fn memory_note_fallback_listing_runs_off_the_app_main_thread() {
+        let src = include_str!("lib.rs");
+        let fn_start = src
+            .find("async fn list_memory_notes")
+            .expect("async list_memory_notes command");
+        let fn_src = &src[fn_start..];
+        let fallback_call = fn_src
+            .find("list_memory_files(&ws)")
+            .expect("memory_fs fallback");
+        let spawn_blocking = fn_src
+            .find("tauri::async_runtime::spawn_blocking")
+            .expect("blocking worker fallback");
+
+        assert!(
+            spawn_blocking < fallback_call,
+            "workspace memory note fallback must not read directories/files on the app main thread"
         );
     }
 }
