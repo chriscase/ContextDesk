@@ -128,7 +128,7 @@ Per corpus under app cache:
 | `log_query_events` | Paged/keyset events with filter + sort |
 | `log_facets` | Sources, levels, services, hosts under filter |
 | `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the lazy range navigator; no event bodies |
-| `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor |
+| `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor and supports request-scoped cooperative cancellation |
 | Bookmarks CRUD | Line or range anchors on corpus |
 | Chat link | List/create sessions with `linkedCorpusId` |
 | View context snapshot | Serialize filters/lanes/selection for agent |

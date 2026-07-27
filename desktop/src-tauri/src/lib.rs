@@ -4560,6 +4560,7 @@ fn log_facets(
 #[serde(rename_all = "camelCase")]
 struct LogSearchEventsArgs {
     corpus_id: String,
+    request_id: String,
     query: Option<String>,
     semantic: Option<bool>,
     k: Option<u32>,
@@ -4568,16 +4569,37 @@ struct LogSearchEventsArgs {
     case_sensitive: Option<bool>,
 }
 
+const LOG_SEARCH_CANCEL_PREFIX: &str = "log_search:";
+
+fn log_search_cancel_key(request_id: &str) -> Result<String, String> {
+    if request_id.is_empty()
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("invalid log search request id".into());
+    }
+    Ok(format!("{LOG_SEARCH_CANCEL_PREFIX}{request_id}"))
+}
+
 /// Keyword / regex / template-semantic event search (template-first semantic).
 /// Returns advanced result with partial/capped diagnostics (#523).
 #[tauri::command]
-fn log_search_events(
+async fn log_search_events(
     state: State<'_, AppState>,
     args: LogSearchEventsArgs,
 ) -> Result<cd_core::log_analysis::EventSearchResult, String> {
     let cache = log_cache_dir(&state)?;
-    let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
-        .map_err(|e| e.to_string())?;
+    let cancel_key = log_search_cancel_key(&args.request_id)?;
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(&cancel_key) {
+            return Err("log search request id is already active".into());
+        }
+        cancels.insert(cancel_key.clone(), cancel.clone());
+    }
     let mode = match args.match_mode.as_deref() {
         Some("regex") => cd_core::log_analysis::SearchMatchMode::Regex,
         _ => cd_core::log_analysis::SearchMatchMode::Literal,
@@ -4596,8 +4618,36 @@ fn log_search_events(
         match_mode: mode,
         case_sensitive: args.case_sensitive.unwrap_or(false),
     };
-    cd_core::log_analysis::search_events_advanced(&c, &q, embed_backend.as_deref())
-        .map_err(|e| e.to_string())
+    let corpus_id = args.corpus_id;
+    let cancel_for_job = cancel.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id)
+            .map_err(|error| error.to_string())?;
+        let is_cancelled = || cancel_for_job.load(std::sync::atomic::Ordering::SeqCst);
+        cd_core::log_analysis::search_events_advanced_with_cancel(
+            &corpus,
+            &q,
+            embed_backend.as_deref(),
+            Some(&is_cancelled),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("log search task join: {error}"));
+    state.cancels.lock().expect("cancels").remove(&cancel_key);
+    result?
+}
+
+/// Signal cooperative cancellation for one in-flight Explorer Find request.
+#[tauri::command]
+fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<bool, String> {
+    let cancel_key = log_search_cancel_key(&request_id)?;
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(&cancel_key) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// List bookmarks for a corpus.
@@ -5597,6 +5647,7 @@ pub fn run() {
             log_query_event_neighborhood,
             log_facets,
             log_search_events,
+            cancel_log_search,
             log_list_bookmarks,
             log_add_bookmark,
             log_delete_bookmark,
@@ -5675,7 +5726,7 @@ mod help_host_tests {
 
 #[cfg(test)]
 mod startup_host_tests {
-    use super::normalize_log_corpus_id;
+    use super::{log_search_cancel_key, normalize_log_corpus_id};
 
     #[test]
     fn packaged_startup_warms_host_after_window_setup_not_before() {
@@ -5790,6 +5841,18 @@ mod startup_host_tests {
     }
 
     #[test]
+    fn log_search_cancel_keys_are_bounded_and_namespaced() {
+        assert_eq!(
+            log_search_cancel_key("find-123").unwrap(),
+            "log_search:find-123"
+        );
+        for invalid in ["", "contains space", "../escape"] {
+            assert!(log_search_cancel_key(invalid).is_err(), "{invalid}");
+        }
+        assert!(log_search_cancel_key(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
     fn log_explorer_local_search_and_bookmarks_do_not_force_host_construction() {
         let src = include_str!("lib.rs");
         let log_search_start = src.find("fn log_search(").expect("log_search command");
@@ -5832,6 +5895,18 @@ mod startup_host_tests {
         assert!(
             !event_search_src.contains("ensure_host(&state)"),
             "Explorer Find must not strand the packaged window on host setup"
+        );
+        assert!(
+            event_search_src.contains("tokio::task::spawn_blocking"),
+            "Explorer Find must keep bounded scans off the app event loop"
+        );
+        assert!(
+            event_search_src.contains("search_events_advanced_with_cancel"),
+            "Explorer Find must pass the request cancellation flag into trusted core"
+        );
+        assert!(
+            event_search_src.contains("fn cancel_log_search("),
+            "Explorer Find must expose request-scoped cooperative cancellation"
         );
         assert!(
             !add_bookmark_src.contains("ensure_host(&state)"),

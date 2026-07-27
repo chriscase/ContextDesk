@@ -53,7 +53,10 @@ Use **Find** like contextual Find in an editor: the event table remains intact,
 the active hit is loaded into a bounded neighborhood, and Previous/Next cross
 chronological cursor pages. Only one bounded page of identities is retained.
 Literal totals are exact; a bounded regex result may explicitly report a
-partial/continuation state.
+partial/continuation state. While a Find is running, **Cancel** signals that
+specific backend request. The UI waits for terminal cancellation, preserves
+the previous visible result identities, and does not let the cancelled request
+overwrite a newer Find.
 
 Use **Filter** to reduce all evidence lanes. Keyword, level, source, service,
 host, exact trace, template ID, UTC-time, and stable sequence scopes intersect.

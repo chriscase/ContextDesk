@@ -40,7 +40,7 @@ export const HELP_FIND_VS_FILTER: HelpTipContent = {
   example: "Find job-7f3a → step hits; Filter ERROR + worker source → 2 rows",
   shortcut: "⌘/Ctrl+F focuses Find when the Explorer is active",
   safety:
-    "Only one bounded result page is retained. Next/Prev request chronological cursor pages; a regex scan-budget warning is partial and should be refined or continued. Exact UTC scope requires wall-clock evidence; use sequence range for mixed or order-only logs.",
+    "Only one bounded result page is retained. Next/Prev request chronological cursor pages; a regex scan-budget warning is partial and should be refined or continued. Cancel signals the active backend request and preserves the prior visible result identities. Exact UTC scope requires wall-clock evidence; use sequence range for mixed or order-only logs.",
   helpLocator: "help://log-explorer#find-vs-filter",
 };
 

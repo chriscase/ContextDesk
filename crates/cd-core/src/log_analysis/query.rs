@@ -409,6 +409,9 @@ pub struct EventSearchResult {
     /// Human-readable diagnostic (invalid pattern, cancelled, capped, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
+    /// True only when a cooperative cancellation request stopped this search.
+    #[serde(default)]
+    pub cancelled: bool,
     /// Events actually scanned under the work budget (regex path).
     pub scanned: u64,
 }
@@ -772,6 +775,35 @@ pub fn search_events_advanced(
     q: &EventSearchQuery,
     embed: Option<&dyn EmbedBackend>,
 ) -> CoreResult<EventSearchResult> {
+    search_events_advanced_with_cancel(corpus, q, embed, None)
+}
+
+fn search_cancelled(cancel: Option<&dyn Fn() -> bool>) -> bool {
+    cancel.is_some_and(|is_cancelled| is_cancelled())
+}
+
+fn cancelled_search_result(hits: Vec<EventSearchHit>, scanned: u64) -> EventSearchResult {
+    EventSearchResult {
+        hits,
+        next_cursor: None,
+        next_ts: None,
+        total_matched: None,
+        partial: true,
+        diagnostic: Some("cancelled".into()),
+        cancelled: true,
+        scanned,
+    }
+}
+
+/// Advanced search with cooperative cancellation checked between bounded work
+/// units and within event scans. A cancelled result is terminal and offers no
+/// continuation cursor.
+pub fn search_events_advanced_with_cancel(
+    corpus: &LogCorpus,
+    q: &EventSearchQuery,
+    embed: Option<&dyn EmbedBackend>,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> CoreResult<EventSearchResult> {
     let k = if q.k == 0 {
         50
     } else {
@@ -785,6 +817,10 @@ pub fn search_events_advanced(
     let mut next_ts = None;
     let mut total_matched = None;
     let mut last_scanned: Option<(i64, u64)> = None;
+
+    if search_cancelled(cancel) {
+        return Ok(cancelled_search_result(hits, scanned));
+    }
 
     // Semantic: templates first, then pull events for top templates under filters.
     // Disabled when match_mode is regex (semantic is template similarity, not regex).
@@ -800,6 +836,9 @@ pub fn search_events_advanced(
             k: k.min(40),
         };
         let template_hits = search_logs(corpus, &tq, embed)?;
+        if search_cancelled(cancel) {
+            return Ok(cancelled_search_result(hits, scanned));
+        }
         let mut template_ids: Vec<u64> = template_hits.iter().map(|h| h.template_id).collect();
         template_ids.truncate(20);
         if !template_ids.is_empty() {
@@ -807,11 +846,17 @@ pub fn search_events_advanced(
             fq.template_ids = template_ids.clone();
             fq.limit = k;
             let page = query_events(corpus, &fq)?;
+            if search_cancelled(cancel) {
+                return Ok(cancelled_search_result(hits, scanned));
+            }
             let score_by_tid: std::collections::HashMap<u64, f32> = template_hits
                 .iter()
                 .map(|h| (h.template_id, h.score))
                 .collect();
             for e in page.events {
+                if search_cancelled(cancel) {
+                    return Ok(cancelled_search_result(hits, scanned));
+                }
                 let score = score_by_tid.get(&e.template_id).copied().unwrap_or(0.1);
                 hits.push(EventSearchHit {
                     template_id: Some(e.template_id),
@@ -837,6 +882,7 @@ pub fn search_events_advanced(
                     diagnostic: Some(format!(
                         "pattern exceeds max length ({MAX_SEARCH_PATTERN_LEN} characters)"
                     )),
+                    cancelled: false,
                     scanned: 0,
                 });
             }
@@ -849,6 +895,9 @@ pub fn search_events_advanced(
                     let mut after_ts = q.filter.after_ts;
                     let mut pages = 0usize;
                     loop {
+                        if search_cancelled(cancel) {
+                            return Ok(cancelled_search_result(hits, scanned));
+                        }
                         if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
                             if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
                                 partial = true;
@@ -873,10 +922,16 @@ pub fn search_events_advanced(
                         fq.before_ts = None;
                         fq.sort_by_time = true;
                         let page = query_events(corpus, &fq)?;
+                        if search_cancelled(cancel) {
+                            return Ok(cancelled_search_result(hits, scanned));
+                        }
                         if page.events.is_empty() {
                             break;
                         }
                         for e in page.events {
+                            if search_cancelled(cancel) {
+                                return Ok(cancelled_search_result(hits, scanned));
+                            }
                             scanned += 1;
                             last_scanned = Some((e.ts, e.seq));
                             if let Some(m) = re.find(&e.message) {
@@ -917,6 +972,9 @@ pub fn search_events_advanced(
                         let mut after_seq = q.filter.after_seq;
                         let mut after_ts = q.filter.after_ts;
                         loop {
+                            if search_cancelled(cancel) {
+                                return Ok(cancelled_search_result(hits, scanned));
+                            }
                             if hits.len() >= k || scanned >= MAX_REGEX_SCAN_EVENTS as u64 {
                                 partial = true;
                                 break;
@@ -933,10 +991,16 @@ pub fn search_events_advanced(
                             page_q.before_ts = None;
                             page_q.sort_by_time = true;
                             let page = query_events(corpus, &page_q)?;
+                            if search_cancelled(cancel) {
+                                return Ok(cancelled_search_result(hits, scanned));
+                            }
                             if page.events.is_empty() {
                                 break;
                             }
                             for e in page.events {
+                                if search_cancelled(cancel) {
+                                    return Ok(cancelled_search_result(hits, scanned));
+                                }
                                 scanned += 1;
                                 last_scanned = Some((e.ts, e.seq));
                                 if let Some(idx) = e.message.find(pattern) {
@@ -970,6 +1034,9 @@ pub fn search_events_advanced(
                         fq.limit = k;
                         let page =
                             query_events_with_additional_keyword(corpus, &fq, Some(pattern))?;
+                        if search_cancelled(cancel) {
+                            return Ok(cancelled_search_result(hits, scanned));
+                        }
                         if !q.semantic {
                             total_matched = Some(page.total_matched);
                         }
@@ -1055,6 +1122,7 @@ pub fn search_events_advanced(
         total_matched,
         partial,
         diagnostic,
+        cancelled: false,
         scanned,
     })
 }
@@ -2362,6 +2430,40 @@ mod tests {
         );
         // May be invalid in rust regex (no backrefs/complex) or empty hits — must not panic.
         assert!(adv.is_ok() || adv.is_err());
+    }
+
+    #[test]
+    fn advanced_find_cancellation_stops_scan_and_returns_terminal_honesty() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let checks = std::cell::Cell::new(0usize);
+        let cancel = || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 8
+        };
+
+        let result = search_events_advanced_with_cancel(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(r"user \d+".into()),
+                match_mode: SearchMatchMode::Regex,
+                semantic: false,
+                k: 50,
+                ..Default::default()
+            },
+            None,
+            Some(&cancel),
+        )
+        .unwrap();
+
+        assert!(result.cancelled);
+        assert!(result.partial);
+        assert_eq!(result.diagnostic.as_deref(), Some("cancelled"));
+        assert!(result.scanned > 0 && result.scanned < 90);
+        assert_eq!(result.next_cursor, None);
+        assert_eq!(result.next_ts, None);
     }
 
     #[test]

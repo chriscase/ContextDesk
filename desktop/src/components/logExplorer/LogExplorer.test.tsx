@@ -12,6 +12,8 @@ import * as host from "../../lib/host";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
+  createLogSearchRequestId: vi.fn(() => "find-request"),
+  hostCancelLogSearch: vi.fn(async () => true),
   hostGetLogCorpus: vi.fn(async () => ({
     id: "c1",
     name: "fixture",
@@ -257,6 +259,8 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-request");
+    vi.mocked(host.hostCancelLogSearch).mockResolvedValue(true);
     vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
       hits: [],
       partial: false,
@@ -2614,6 +2618,9 @@ describe("LogExplorer shell", () => {
   });
 
   it("does not allow a late Find response to replace a newer query", async () => {
+    vi.mocked(host.createLogSearchRequestId)
+      .mockReturnValueOnce("find-old")
+      .mockReturnValueOnce("find-new");
     const oldSearch = deferred<host.EventSearchResultDto>();
     const resultEvent = (
       seq: number,
@@ -2659,6 +2666,9 @@ describe("LogExplorer shell", () => {
 
     fireEvent.change(find, { target: { value: "new" } });
     fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-old"),
+    );
     expect(
       await screen.findByText(/Match 1 of 1.*1 result identities resident/),
     ).toBeTruthy();
@@ -2686,6 +2696,150 @@ describe("LogExplorer shell", () => {
       screen.getByText(/Match 1 of 1.*1 result identities resident/),
     ).toBeTruthy();
     expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
+  });
+
+  it("cancels an in-flight Find without replacing the previous visible results", async () => {
+    vi.mocked(host.createLogSearchRequestId)
+      .mockReturnValueOnce("find-kept")
+      .mockReturnValueOnce("find-cancelled");
+    const cancelledSearch = deferred<host.EventSearchResultDto>();
+    let searchCalls = 0;
+    const keptEvent: host.ExplorerEventDto = {
+      ...defaultEventPage().events[0]!,
+      seq: 20,
+      message: "trusted visible result",
+    };
+    const partialEvent: host.ExplorerEventDto = {
+      ...keptEvent,
+      seq: 21,
+      message: "untrusted partial cancelled result",
+    };
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async () => {
+        searchCalls += 1;
+        if (searchCalls === 2) return cancelledSearch.promise;
+        return {
+          hits: [
+            {
+              event: keptEvent,
+              score: 1,
+              matchKind: "keyword",
+              templateId: keptEvent.templateId,
+            },
+          ],
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: 1,
+          partial: false,
+          scanned: 1,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const find = screen.getByTestId("log-explorer-find");
+    fireEvent.change(find, { target: { value: "cancel me" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    const cancel = await screen.findByTestId("log-explorer-find-cancel");
+    expect(cancel.textContent).toBe("Cancel");
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({ requestId: "find-cancelled" }),
+    );
+
+    fireEvent.click(cancel);
+    expect(cancel.textContent).toBe("Cancelling…");
+    expect(cancel).toHaveProperty("disabled", true);
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-cancelled"),
+    );
+
+    await act(async () => {
+      cancelledSearch.resolve({
+        hits: [
+          {
+            event: partialEvent,
+            score: 1,
+            matchKind: "regex",
+            templateId: partialEvent.templateId,
+          },
+        ],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: null,
+        partial: true,
+        diagnostic: "cancelled",
+        cancelled: true,
+        scanned: 12,
+      });
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByText(
+        "Find cancelled · previous visible results preserved",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.queryByText("untrusted partial cancelled result")).toBeNull();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+  });
+
+  it("allows cancellation to be retried when the backend request is not registered yet", async () => {
+    const pendingSearch = deferred<host.EventSearchResultDto>();
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-race");
+    vi.mocked(host.hostCancelLogSearch)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(
+      pendingSearch.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "slow regex" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+
+    fireEvent.click(await screen.findByTestId("log-explorer-find-cancel"));
+    expect(
+      await screen.findByText("Find is still running · try Cancel again"),
+    ).toBeTruthy();
+    const retry = screen.getByTestId("log-explorer-find-cancel");
+    expect(retry.textContent).toBe("Cancel");
+    expect(retry).toHaveProperty("disabled", false);
+
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenNthCalledWith(2, "find-race"),
+    );
+    expect(retry.textContent).toBe("Cancelling…");
+
+    await act(async () => {
+      pendingSearch.resolve({
+        hits: [],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: null,
+        partial: true,
+        diagnostic: "cancelled",
+        cancelled: true,
+        scanned: 0,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      await screen.findByText(
+        "Find cancelled · previous visible results preserved",
+      ),
+    ).toBeTruthy();
   });
 
   it("reruns active Find inside a keyword Filter and ignores the stale unfiltered response", async () => {
