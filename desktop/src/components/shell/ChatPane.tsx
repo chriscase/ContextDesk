@@ -12,21 +12,51 @@ import type { BrandingDto, ModelOptionDto } from "../../lib/host";
 import { IconPin } from "../icons";
 import { MessageRow } from "./MessageRow";
 
+type Starter = {
+  label: string;
+  outcome: string;
+  prompt: string;
+};
+
 /** Empty-chat starter prompts — fill composer so the user can edit before send. */
-const STARTERS: { label: string; prompt: string }[] = [
+const WORKSPACE_STARTERS: Starter[] = [
   {
     label: "How auth works",
+    outcome: "Trace an implementation with citations",
     prompt: "How does authentication work in this workspace?",
   },
   {
     label: "Summarize files",
+    outcome: "Synthesize authorized workspace sources",
     prompt:
       "Summarize the main topics in my allowlisted workspace files and cite sources.",
   },
   {
     label: "Remember this project",
+    outcome: "Propose durable notes for review",
     prompt:
       "What durable facts should I remember about this project? Suggest notes I could save to memory.",
+  },
+];
+
+const CONTEXT_SAFE_STARTERS: Starter[] = [
+  {
+    label: "Plan a technical task",
+    outcome: "Turn an outcome and constraints into next steps",
+    prompt:
+      "Help me plan a technical task. Start by asking what outcome and constraints matter.",
+  },
+  {
+    label: "Review context I add",
+    outcome: "Analyze only files or notes I explicitly attach",
+    prompt:
+      "Help me analyze the files or notes I choose to attach to this chat. Cite only context you can actually access.",
+  },
+  {
+    label: "Draft a careful note",
+    outcome: "Separate supplied facts from uncertainty",
+    prompt:
+      "Help me draft a concise project note from facts I provide. Clearly mark uncertain statements.",
   },
 ];
 
@@ -76,6 +106,8 @@ export type ChatPaneProps = {
   onOpenGuidedSetup?: () => void;
   /** Start a specific wizard by id (empty-state cards). */
   onStartWizard?: (wizardId: string) => void;
+  /** Whether current configuration authorizes at least one workspace root. */
+  hasAuthorizedWorkspaceContent?: boolean;
   /** External composer seed from wizard completion. */
   externalSeedRequest?: { id: number; text: string } | null;
 };
@@ -122,6 +154,7 @@ export function ChatPane(props: ChatPaneProps) {
     onOpenHelpCitation,
     onOpenGuidedSetup,
     onStartWizard,
+    hasAuthorizedWorkspaceContent = false,
     externalSeedRequest = null,
   } = props;
 
@@ -137,6 +170,9 @@ export function ChatPane(props: ChatPaneProps) {
 
   // Wizard / parent seed takes precedence when id changes.
   const effectiveSeed = externalSeedRequest ?? seedRequest;
+  const starters = hasAuthorizedWorkspaceContent
+    ? WORKSPACE_STARTERS
+    : CONTEXT_SAFE_STARTERS;
 
   const kbdMod =
     typeof navigator !== "undefined" &&
@@ -292,6 +328,15 @@ export function ChatPane(props: ChatPaneProps) {
                   <div
                     className="empty-state empty-state--chat"
                     data-testid="first-chat-home"
+                    data-content-scope={
+                      hasAuthorizedWorkspaceContent
+                        ? "workspace"
+                        : "chat-only"
+                    }
+                    data-preflight={
+                      preflightBlocking ? "blocked" : "ready"
+                    }
+                    data-busy={busy ? "true" : "false"}
                   >
                     <header className="empty-state__hero">
                       <div>
@@ -300,9 +345,11 @@ export function ChatPane(props: ChatPaneProps) {
                           {branding.tagline}
                         </p>
                         <p className="empty-state__body">
-                          Ask about your workspace, logs, or notes. Starters
-                          fill the composer — edit, then send. Guided setup is
-                          optional and never blocks the first question.
+                          {hasAuthorizedWorkspaceContent
+                            ? "Ask about authorized workspace sources, logs, or notes."
+                            : "Ask a general question or add chat-only files and notes when you need grounded context."}{" "}
+                          Starters fill the composer for review. Guided
+                          workflows launch explicitly and remain cancellable.
                         </p>
                       </div>
                       <div>
@@ -322,93 +369,131 @@ export function ChatPane(props: ChatPaneProps) {
                         ) : null}
                       </div>
                     </header>
-                    {onStartWizard || onOpenGuidedSetup ? (
-                      <section aria-labelledby="first-chat-setup-label">
-                        <div
-                          className="empty-state__section-label"
-                          id="first-chat-setup-label"
-                        >
-                          Guided setup
-                        </div>
-                        <div
-                          className="chat-wizard-cards"
-                          role="group"
-                          aria-label="Guided setup"
-                        >
-                          {onStartWizard ? (
-                            <>
-                              <button
-                                type="button"
-                                className="chat-action-card chat-wizard-card"
-                                data-testid="chat-guided-workflow"
-                                data-action="launch-workflow"
-                                onClick={() =>
-                                  onStartWizard("log-troubleshooting")
-                                }
-                              >
-                                <strong>Log troubleshooting</strong>
-                                <span>Ingest dumps with visual progress</span>
-                              </button>
-                              <button
-                                type="button"
-                                className="chat-action-card chat-wizard-card"
-                                data-testid="chat-guided-workflow"
-                                data-action="launch-workflow"
-                                onClick={() => onStartWizard("memory-primer")}
-                              >
-                                <strong>Memory primer</strong>
-                                <span>Review inbox vs durable store</span>
-                              </button>
-                            </>
-                          ) : null}
-                          {onOpenGuidedSetup ? (
-                            <button
-                              type="button"
-                              className="chat-action-card chat-wizard-card"
-                                data-testid="chat-guided-workflow"
-                                data-action="launch-workflow"
-                              onClick={onOpenGuidedSetup}
-                            >
-                              <strong>All guided setups…</strong>
-                              <span>Optional multi-step workflows</span>
-                            </button>
-                          ) : null}
-                        </div>
-                      </section>
-                    ) : null}
-                    <section aria-labelledby="first-chat-starters-label">
-                      <div
-                        className="empty-state__section-label"
-                        id="first-chat-starters-label"
-                      >
-                        Starter prompts
-                      </div>
-                      <div
-                        className="chat-starters"
-                        role="group"
-                        aria-label="Starter prompts"
-                      >
-                        {STARTERS.map((s) => (
-                          <button
-                            key={s.label}
-                            type="button"
-                            className="chat-action-card chat-starter"
-                            data-testid="chat-starter"
-                            data-action="fill-composer"
-                            disabled={busy || preflightBlocking}
-                            title={s.prompt}
-                            onClick={() => fillStarter(s.prompt)}
+                    {preflightBlocking ? (
+                      <p className="empty-state__blocked-note" role="status">
+                        Conversation actions are paused until the setup checks
+                        above are resolved.
+                      </p>
+                    ) : (
+                      <div className="empty-state__action-grid">
+                        <section aria-labelledby="first-chat-starters-label">
+                          <div
+                            className="empty-state__section-label"
+                            id="first-chat-starters-label"
                           >
-                            <span className="chat-starter__label">
-                              {s.label}
-                            </span>
-                            <span className="chat-starter__hint">
-                              {s.prompt}
-                            </span>
-                          </button>
-                        ))}
+                            Start a conversation
+                          </div>
+                          <div
+                            className="chat-starters"
+                            role="group"
+                            aria-label="Starter prompts"
+                          >
+                            {starters.map((s) => (
+                              <button
+                                key={s.label}
+                                type="button"
+                                className="chat-action-card chat-starter"
+                                data-testid="chat-starter"
+                                data-action="fill-composer"
+                                disabled={busy}
+                                aria-label={`${s.label}; fills the composer for review`}
+                                title={s.prompt}
+                                onClick={() => fillStarter(s.prompt)}
+                              >
+                                <span className="chat-action-card__kind">
+                                  Fills composer
+                                </span>
+                                <span className="chat-starter__label">
+                                  {s.label}
+                                </span>
+                                <span className="chat-starter__hint">
+                                  {s.outcome}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                        {onStartWizard || onOpenGuidedSetup ? (
+                          <section aria-labelledby="first-chat-setup-label">
+                            <div
+                              className="empty-state__section-label"
+                              id="first-chat-setup-label"
+                            >
+                              Guided workflows
+                            </div>
+                            <div
+                              className="chat-wizard-cards"
+                              role="group"
+                              aria-label="Guided workflows"
+                            >
+                              {onStartWizard ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="chat-action-card chat-wizard-card"
+                                    data-testid="chat-guided-workflow"
+                                    data-action="launch-workflow"
+                                    disabled={busy}
+                                    aria-label="Log troubleshooting; launches a guided workflow"
+                                    onClick={() =>
+                                      onStartWizard("log-troubleshooting")
+                                    }
+                                  >
+                                    <span className="chat-action-card__kind">
+                                      Guided workflow
+                                    </span>
+                                    <strong>Investigate logs</strong>
+                                    <span>
+                                      Import a log set, review its analysis,
+                                      then continue in linked chat
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="chat-action-card chat-wizard-card"
+                                    data-testid="chat-guided-workflow"
+                                    data-action="launch-workflow"
+                                    disabled={busy}
+                                    aria-label="Memory primer; launches a guided workflow"
+                                    onClick={() =>
+                                      onStartWizard("memory-primer")
+                                    }
+                                  >
+                                    <span className="chat-action-card__kind">
+                                      Guided workflow
+                                    </span>
+                                    <strong>Organize memory</strong>
+                                    <span>
+                                      Review candidate notes before anything
+                                      becomes durable memory
+                                    </span>
+                                  </button>
+                                </>
+                              ) : null}
+                              {onOpenGuidedSetup ? (
+                                <button
+                                  type="button"
+                                  className="chat-action-card chat-wizard-card"
+                                  data-testid="chat-guided-workflow"
+                                  data-action="launch-workflow"
+                                  disabled={busy}
+                                  aria-label="Browse all guided workflows"
+                                  onClick={onOpenGuidedSetup}
+                                >
+                                  <span className="chat-action-card__kind">
+                                    Browse
+                                  </span>
+                                  <strong>All guided workflows…</strong>
+                                  <span>
+                                    Choose another optional, cancellable setup
+                                  </span>
+                                </button>
+                              ) : null}
+                            </div>
+                          </section>
+                        ) : null}
                       </div>
-                    </section>
+                    )}
                   </div>
                 ) : (
                   <div

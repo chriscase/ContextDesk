@@ -795,6 +795,8 @@ export function App() {
                   onStartWizard: (wizardId: string) => {
                     startWizard(wizardId);
                   },
+                  hasAuthorizedWorkspaceContent:
+                    shell.setup.workspaceRoots.length > 0,
                   externalSeedRequest: wizardSeedRequest,
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
