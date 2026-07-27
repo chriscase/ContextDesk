@@ -279,6 +279,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [filterW, setFilterW] = useState(220);
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
+  const laneEditorRef = useRef<HTMLDivElement>(null);
+  const laneEditorToggleRef = useRef<HTMLButtonElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
@@ -300,6 +302,11 @@ export function LogExplorer({ corpusId }: Props) {
     filters.hosts.length +
     (filters.keyword ? 1 : 0) +
     (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
+  const laneEditorSources = Object.keys(facets?.sources ?? {}).sort();
+  const closeLaneEditor = useCallback(() => {
+    setLaneEditorOpen(false);
+    queueMicrotask(() => laneEditorToggleRef.current?.focus());
+  }, []);
   const handleRailSummary = useCallback((next: typeof chatSummary) => {
     setChatSummary((previous) =>
       previous.chatCount === next.chatCount &&
@@ -340,6 +347,41 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
   }, [previewLines]);
+
+  useEffect(() => {
+    if (!laneEditorOpen) return;
+    queueMicrotask(() => {
+      laneEditorRef.current
+        ?.querySelector<HTMLElement>('[data-testid="lane-editor-close"]')
+        ?.focus();
+    });
+  }, [laneEditorOpen]);
+
+  useEffect(() => {
+    if (!laneEditorOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (
+        target &&
+        !laneEditorRef.current?.contains(target) &&
+        !laneEditorToggleRef.current?.contains(target)
+      ) {
+        closeLaneEditor();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLaneEditor();
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeLaneEditor, laneEditorOpen]);
 
   useEffect(() => {
     if (breakpoint !== "narrow") return;
@@ -1779,10 +1821,15 @@ export function LogExplorer({ corpusId }: Props) {
             content={HELP_TIME_LINK}
           />
           <button
+            ref={laneEditorToggleRef}
             type="button"
             className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="lane-editor-toggle"
-            onClick={() => setLaneEditorOpen((o) => !o)}
+            aria-expanded={laneEditorOpen}
+            aria-controls="lane-editor"
+            onClick={() =>
+              laneEditorOpen ? closeLaneEditor() : setLaneEditorOpen(true)
+            }
             title="Compose which sources belong to each lane"
           >
             Lanes…
@@ -1945,27 +1992,56 @@ export function LogExplorer({ corpusId }: Props) {
 
       {laneEditorOpen && (
         <div
+          ref={laneEditorRef}
           className="log-explorer__lane-editor"
           data-testid="lane-editor"
-          role="region"
+          data-lane-editor-mode={breakpoint === "narrow" ? "sheet" : "popover"}
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="lane-editor-title"
           aria-label="Lane source composition"
         >
-          <div className="log-explorer__section-title">
-            Compose lanes (empty membership = all sources){" "}
-            <HelpTip
-              label="Lane composition"
-              title="Lane composition"
-              content={HELP_LANE_COMPOSE}
-            />
+          <div className="log-explorer__lane-editor-header">
+            <div>
+              <div
+                className="log-explorer__section-title"
+                id="lane-editor-title"
+              >
+                Compose lanes
+              </div>
+              <div className="log-explorer__lane-editor-summary">
+                {laneCount} visible lane{laneCount === 1 ? "" : "s"} · {laneEditorSources.length} available source{laneEditorSources.length === 1 ? "" : "s"}
+              </div>
+            </div>
+            <div className="log-explorer__lane-editor-actions">
+              <HelpTip
+                label="Lane composition"
+                title="Lane composition"
+                content={HELP_LANE_COMPOSE}
+              />
+              <button
+                type="button"
+                className="log-explorer__btn"
+                data-testid="lane-editor-close"
+                onClick={closeLaneEditor}
+              >
+                Done
+              </button>
+            </div>
           </div>
-          {lanes.slice(0, laneCount).map((lane) => (
-            <div key={lane.id} className="log-explorer__lane-editor-row">
-              <strong>{lane.label}</strong>
-              <div className="log-explorer__facet">
-                {Object.keys(facets?.sources ?? {})
-                  .sort()
-                  .slice(0, 40)
-                  .map((src) => (
+          <div className="log-explorer__lane-editor-content">
+            <p className="log-explorer__lane-editor-help">
+              Empty membership means all sources. A source can belong to more than one lane.
+            </p>
+            {lanes.slice(0, laneCount).map((lane) => (
+              <fieldset
+                key={lane.id}
+                className="log-explorer__lane-editor-row"
+                aria-label={`${lane.label} source membership`}
+              >
+                <legend>{lane.label}</legend>
+                <div className="log-explorer__facet">
+                  {laneEditorSources.slice(0, 40).map((src) => (
                     <label key={src} className="log-explorer__facet-row">
                       <input
                         type="checkbox"
@@ -1975,15 +2051,18 @@ export function LogExplorer({ corpusId }: Props) {
                       <span title={src}>{src}</span>
                     </label>
                   ))}
-              </div>
-              <div className="log-explorer__chat-preview">
-                {lane.sources.length === 0
-                  ? "All sources"
-                  : `${lane.sources.length} source(s)`}
-                {" · "}same source may appear in multiple lanes
-              </div>
-            </div>
-          ))}
+                </div>
+                <div
+                  className="log-explorer__chat-preview"
+                  data-testid={`lane-editor-summary-${lane.id}`}
+                >
+                  {lane.sources.length === 0
+                    ? "All sources"
+                    : `${lane.sources.length} source${lane.sources.length === 1 ? "" : "s"}`}
+                </div>
+              </fieldset>
+            ))}
+          </div>
         </div>
       )}
 

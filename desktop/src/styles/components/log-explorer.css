@@ -938,21 +938,85 @@
 }
 
 .log-explorer__lane-editor {
-  flex-shrink: 0;
-  max-height: 12rem;
-  overflow: auto;
-  border-bottom: 1px solid var(--border-subtle, #2a2d33);
-  padding: 0.4rem 0.6rem;
-  background: var(--bg-elevated, #121418);
+  position: absolute;
+  top: 3.15rem;
+  right: 0.75rem;
+  z-index: 30;
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  width: min(31rem, calc(100% - 1.5rem));
+  max-height: min(64vh, 34rem);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 8px;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 42%);
+  padding: 0.65rem;
+  background: var(--bg-elevated, #121418);
+}
+
+.log-explorer__lane-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--border-subtle, #2a2d33);
+}
+
+.log-explorer__lane-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.log-explorer__lane-editor-summary,
+.log-explorer__lane-editor-help {
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.72rem;
+}
+
+.log-explorer__lane-editor-help {
+  margin: 0;
+  padding: 0.5rem 0 0.1rem;
+}
+
+.log-explorer__lane-editor-content {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.2rem;
 }
 
 .log-explorer__lane-editor-row {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+  min-width: 0;
+  margin: 0.45rem 0 0;
+  padding: 0.45rem;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 6px;
+}
+
+.log-explorer__lane-editor-row legend {
+  max-width: 100%;
+  padding: 0 0.25rem;
+  color: var(--fg-primary, #e8eaed);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.log-explorer--narrow .log-explorer__lane-editor {
+  top: 4.45rem;
+  right: 0.5rem;
+  left: 0.5rem;
+  width: auto;
+  max-height: min(70vh, 34rem);
+  border-radius: 8px;
+}
+
+.log-explorer--narrow .log-explorer__lane-editor-content {
+  overscroll-behavior: contain;
 }
 
 .log-explorer__col-headers {
