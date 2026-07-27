@@ -752,7 +752,7 @@ describe("LinkedChatRail", () => {
     );
     fireEvent.click(screen.getByTestId("send-linked-chat"));
     await screen.findByText("B completed normally.");
-    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+    await screen.findByText("Linked chat response saved");
 
     // A completes later with an A-only navigation proposal. B must not show it.
     await act(async () => {
@@ -767,12 +767,12 @@ describe("LinkedChatRail", () => {
       ]);
     });
     expect(screen.queryByText("A-only nav")).toBeNull();
-    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+    await screen.findByText("Linked chat response saved");
 
     await openNamedChat("Chat A");
     expect(await screen.findByText(/A evidence/)).toBeTruthy();
     expect(screen.getByText("A-only nav")).toBeTruthy();
-    expect(screen.getByText("Linked chat response saved")).toBeTruthy();
+    await screen.findByText("Linked chat response saved");
   });
 
   it("virtualizes long transcripts and keeps pending turns mounted", async () => {
