@@ -1751,6 +1751,8 @@ export type ExplorerEventDto = {
 export type EventQueryDto = {
   timeFrom?: number | null;
   timeTo?: number | null;
+  seqFrom?: number | null;
+  seqTo?: number | null;
   levels?: string[];
   sources?: string[];
   services?: string[];

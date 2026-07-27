@@ -119,10 +119,14 @@ function filtersToQuery(
   return {
     timeFrom: f.timeFrom,
     timeTo: f.timeTo,
+    seqFrom: f.seqFrom,
+    seqTo: f.seqTo,
     levels: f.levels,
     sources: f.sources,
     services: f.services,
     hosts: f.hosts,
+    templateId: f.templateId,
+    traceId: f.traceId,
     keyword: f.keyword,
     limit: 200,
     sortByTime: true,
@@ -152,6 +156,40 @@ function effectiveLaneSources(
 function levelClass(level: string): string {
   const l = level.toLowerCase();
   return `log-explorer__level log-explorer__level--${l}`;
+}
+
+function parseWholeNumber(value: string, label: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be a non-negative whole number`);
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${label} is outside the supported range`);
+  }
+  return parsed;
+}
+
+function parseUtcSeconds(value: string, label: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(trimmed)) {
+    throw new Error(`${label} must include Z or an explicit UTC offset`);
+  }
+  const milliseconds = Date.parse(trimmed);
+  if (!Number.isFinite(milliseconds)) {
+    throw new Error(`${label} is not a valid ISO timestamp`);
+  }
+  if (milliseconds % 1000 !== 0) {
+    throw new Error(`${label} must use whole seconds`);
+  }
+  return milliseconds / 1000;
+}
+
+function utcDraft(value: number | null): string {
+  if (value == null) return "";
+  return new Date(value * 1000).toISOString();
 }
 
 export function LogExplorer({ corpusId }: Props) {
@@ -237,6 +275,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [findPartial, setFindPartial] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState("");
+  const [traceDraft, setTraceDraft] = useState("");
+  const [templateDraft, setTemplateDraft] = useState("");
+  const [timeFromDraft, setTimeFromDraft] = useState("");
+  const [timeToDraft, setTimeToDraft] = useState("");
+  const [seqFromDraft, setSeqFromDraft] = useState("");
+  const [seqToDraft, setSeqToDraft] = useState("");
   /** Find matches (ordered seqs) — does not reduce the table (#523). */
   const [findMatches, setFindMatches] = useState<number[]>([]);
   const [findMatchSources, setFindMatchSources] = useState<
@@ -347,7 +391,10 @@ export function LogExplorer({ corpusId }: Props) {
     filters.services.length +
     filters.hosts.length +
     (filters.keyword ? 1 : 0) +
-    (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
+    (filters.timeFrom != null || filters.timeTo != null ? 1 : 0) +
+    (filters.seqFrom != null || filters.seqTo != null ? 1 : 0) +
+    (filters.templateId != null ? 1 : 0) +
+    (filters.traceId ? 1 : 0);
   const laneEditorSources = useMemo(
     () =>
       [
@@ -378,6 +425,24 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     saveColWidths(colWidths);
   }, [colWidths]);
+
+  useEffect(() => {
+    setTraceDraft(filters.traceId ?? "");
+    setTemplateDraft(
+      filters.templateId == null ? "" : String(filters.templateId),
+    );
+    setTimeFromDraft(utcDraft(filters.timeFrom));
+    setTimeToDraft(utcDraft(filters.timeTo));
+    setSeqFromDraft(filters.seqFrom == null ? "" : String(filters.seqFrom));
+    setSeqToDraft(filters.seqTo == null ? "" : String(filters.seqTo));
+  }, [
+    filters.seqFrom,
+    filters.seqTo,
+    filters.templateId,
+    filters.timeFrom,
+    filters.timeTo,
+    filters.traceId,
+  ]);
 
   useEffect(
     () => () => {
@@ -777,8 +842,14 @@ export function LogExplorer({ corpusId }: Props) {
       `timeQuality=${timeQuality}`,
       filters.timeFrom != null ? `timeFrom=${filters.timeFrom}` : null,
       filters.timeTo != null ? `timeTo=${filters.timeTo}` : null,
+      filters.seqFrom != null ? `seqFrom=${filters.seqFrom}` : null,
+      filters.seqTo != null ? `seqTo=${filters.seqTo}` : null,
       filters.levels.length ? `levels=${filters.levels.join(",")}` : null,
       filters.sources.length ? `sources=${filters.sources.join(",")}` : null,
+      filters.services.length ? `services=${filters.services.join(",")}` : null,
+      filters.hosts.length ? `hosts=${filters.hosts.join(",")}` : null,
+      filters.templateId != null ? `templateId=${filters.templateId}` : null,
+      filters.traceId ? `traceId=${filters.traceId}` : null,
       filters.keyword ? `keyword=${filters.keyword}` : null,
       `linkMode=${linkMode}`,
       `lanes=${lanes
@@ -879,6 +950,24 @@ export function LogExplorer({ corpusId }: Props) {
           : [...f.sources, source],
       };
     });
+  };
+
+  const toggleService = (service: string) => {
+    setFilters((f) => ({
+      ...f,
+      services: f.services.includes(service)
+        ? f.services.filter((value) => value !== service)
+        : [...f.services, service],
+    }));
+  };
+
+  const toggleHost = (host: string) => {
+    setFilters((f) => ({
+      ...f,
+      hosts: f.hosts.includes(host)
+        ? f.hosts.filter((value) => value !== host)
+        : [...f.hosts, host],
+    }));
   };
 
   /** Apply a neighborhood page into one lane's residency + cursors. */
@@ -1226,6 +1315,52 @@ export function LogExplorer({ corpusId }: Props) {
         ? `Filter: keyword “${kw}” (intersects levels/sources/time)`
         : "Filter: keyword cleared",
     );
+  };
+
+  const applyStructuredFilters = () => {
+    try {
+      const templateId = parseWholeNumber(templateDraft, "Template ID");
+      const seqFrom = parseWholeNumber(seqFromDraft, "Sequence start");
+      const seqTo = parseWholeNumber(seqToDraft, "Sequence end");
+      const timeFrom = parseUtcSeconds(timeFromDraft, "UTC start");
+      const timeTo = parseUtcSeconds(timeToDraft, "UTC end");
+      if (seqFrom != null && seqTo != null && seqFrom > seqTo) {
+        throw new Error("Sequence start must be less than or equal to end");
+      }
+      if (timeFrom != null && timeTo != null && timeFrom >= timeTo) {
+        throw new Error("UTC start must be earlier than the exclusive end");
+      }
+      if (
+        (timeFrom != null || timeTo != null) &&
+        (facets?.timeQuality ?? timeQuality) !== "wall"
+      ) {
+        throw new Error(
+          "Exact UTC filtering requires wall-clock data; use sequence range for mixed or order-only logs",
+        );
+      }
+      const traceId = traceDraft.trim() || null;
+      setFilters((current) => ({
+        ...current,
+        templateId,
+        traceId,
+        timeFrom,
+        timeTo,
+        seqFrom,
+        seqTo,
+      }));
+      setStatus(
+        templateId == null &&
+          traceId == null &&
+          timeFrom == null &&
+          timeTo == null &&
+          seqFrom == null &&
+          seqTo == null
+          ? "Structured filters cleared"
+          : "Structured filters applied (AND with Find, Filter, and facets)",
+      );
+    } catch (applyError) {
+      setStatus(`Structured filters not applied: ${String(applyError)}`);
+    }
   };
 
   const clearAllFilters = () => {
@@ -2461,9 +2596,91 @@ export function LogExplorer({ corpusId }: Props) {
                 Template semantic
                 {!semanticAvailable ? " (unavailable)" : ""}
               </label>
+              <div className="log-explorer__structured-grid">
+                <label>
+                  Trace ID (exact)
+                  <input
+                    className="log-explorer__search"
+                    value={traceDraft}
+                    onChange={(event) => setTraceDraft(event.target.value)}
+                    aria-label="Trace ID filter"
+                    placeholder="trace-…"
+                  />
+                </label>
+                <label>
+                  Template ID
+                  <input
+                    className="log-explorer__search"
+                    value={templateDraft}
+                    inputMode="numeric"
+                    onChange={(event) => setTemplateDraft(event.target.value)}
+                    aria-label="Template ID filter"
+                    placeholder="42"
+                  />
+                </label>
+                <label>
+                  UTC start (inclusive)
+                  <input
+                    className="log-explorer__search"
+                    value={timeFromDraft}
+                    disabled={(facets?.timeQuality ?? timeQuality) !== "wall"}
+                    onChange={(event) => setTimeFromDraft(event.target.value)}
+                    aria-label="UTC start filter"
+                    placeholder="2026-07-27T12:00:00Z"
+                  />
+                </label>
+                <label>
+                  UTC end (exclusive)
+                  <input
+                    className="log-explorer__search"
+                    value={timeToDraft}
+                    disabled={(facets?.timeQuality ?? timeQuality) !== "wall"}
+                    onChange={(event) => setTimeToDraft(event.target.value)}
+                    aria-label="UTC end filter"
+                    placeholder="2026-07-27T13:00:00Z"
+                  />
+                </label>
+                <label>
+                  Sequence start
+                  <input
+                    className="log-explorer__search"
+                    value={seqFromDraft}
+                    inputMode="numeric"
+                    onChange={(event) => setSeqFromDraft(event.target.value)}
+                    aria-label="Sequence start filter"
+                    placeholder="0"
+                  />
+                </label>
+                <label>
+                  Sequence end
+                  <input
+                    className="log-explorer__search"
+                    value={seqToDraft}
+                    inputMode="numeric"
+                    onChange={(event) => setSeqToDraft(event.target.value)}
+                    aria-label="Sequence end filter"
+                    placeholder="999"
+                  />
+                </label>
+              </div>
+              {(facets?.timeQuality ?? timeQuality) !== "wall" ? (
+                <p className="log-explorer__chat-preview" role="note">
+                  Exact UTC range is unavailable for mixed or order-only data.
+                  Use the stable sequence range instead.
+                </p>
+              ) : null}
+              <button
+                type="button"
+                className="log-explorer__btn"
+                data-testid="apply-structured-filters"
+                onClick={applyStructuredFilters}
+              >
+                Apply structured filters
+              </button>
               <p className="log-explorer__chat-preview">
-                Filters (level / source / time) in this rail always intersect
-                Find. Facet chips never discard the active predicate.
+                All fields combine with AND. Multiple values within Level,
+                Source, Service, or Host combine with OR. Every active scope
+                intersects both Find and Filter.
               </p>
             </div>
           ) : null}
@@ -2500,9 +2717,7 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Apply filter
           </button>
-          {(filters.keyword ||
-            filters.levels.length > 0 ||
-            filters.sources.length > 0) && (
+          {activeFilterCount > 0 && (
             <div
               className="log-explorer__active-facets"
               data-testid="log-explorer-active-facets"
@@ -2539,6 +2754,81 @@ export function LogExplorer({ corpusId }: Props) {
                   source:{src} ×
                 </button>
               ))}
+              {filters.services.map((service) => (
+                <button
+                  key={service}
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() => toggleService(service)}
+                >
+                  service:{service} ×
+                </button>
+              ))}
+              {filters.hosts.map((host) => (
+                <button
+                  key={host}
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() => toggleHost(host)}
+                >
+                  host:{host} ×
+                </button>
+              ))}
+              {filters.templateId != null ? (
+                <button
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() =>
+                    setFilters((current) => ({
+                      ...current,
+                      templateId: null,
+                    }))
+                  }
+                >
+                  template:{filters.templateId} ×
+                </button>
+              ) : null}
+              {filters.traceId ? (
+                <button
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() =>
+                    setFilters((current) => ({ ...current, traceId: null }))
+                  }
+                >
+                  trace:{filters.traceId} ×
+                </button>
+              ) : null}
+              {filters.timeFrom != null || filters.timeTo != null ? (
+                <button
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() =>
+                    setFilters((current) => ({
+                      ...current,
+                      timeFrom: null,
+                      timeTo: null,
+                    }))
+                  }
+                >
+                  UTC range ×
+                </button>
+              ) : null}
+              {filters.seqFrom != null || filters.seqTo != null ? (
+                <button
+                  type="button"
+                  className="log-explorer__nav-chip"
+                  onClick={() =>
+                    setFilters((current) => ({
+                      ...current,
+                      seqFrom: null,
+                      seqTo: null,
+                    }))
+                  }
+                >
+                  seq:{filters.seqFrom ?? "start"}–{filters.seqTo ?? "end"} ×
+                </button>
+              ) : null}
             </div>
           )}
           {activeFilterCount > 0 ? (
@@ -2553,7 +2843,7 @@ export function LogExplorer({ corpusId }: Props) {
           ) : null}
           <p className="log-explorer__chat-preview" role="note">
             Find highlights without removing rows. Filter reduces the table and
-            intersects levels/sources/time.
+            intersects every active structured scope.
             {semanticAvailable
               ? " Template-semantic ranking is available for advanced search."
               : " Keyword-only corpus · re-analyze for semantic."}
@@ -2614,6 +2904,50 @@ export function LogExplorer({ corpusId }: Props) {
                 </label>
               ))}
           </div>
+
+          {Object.keys(facets?.services ?? {}).length > 0 ? (
+            <>
+              <div className="log-explorer__section-title">Services</div>
+              <div className="log-explorer__facet">
+                {Object.entries(facets?.services ?? {})
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 40)
+                  .map(([service, count]) => (
+                    <label key={service} className="log-explorer__facet-row">
+                      <input
+                        type="checkbox"
+                        checked={filters.services.includes(service)}
+                        onChange={() => toggleService(service)}
+                      />
+                      <span title={service}>{service}</span>
+                      <span className="count">{count}</span>
+                    </label>
+                  ))}
+              </div>
+            </>
+          ) : null}
+
+          {Object.keys(facets?.hosts ?? {}).length > 0 ? (
+            <>
+              <div className="log-explorer__section-title">Hosts</div>
+              <div className="log-explorer__facet">
+                {Object.entries(facets?.hosts ?? {})
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 40)
+                  .map(([host, count]) => (
+                    <label key={host} className="log-explorer__facet-row">
+                      <input
+                        type="checkbox"
+                        checked={filters.hosts.includes(host)}
+                        onChange={() => toggleHost(host)}
+                      />
+                      <span title={host}>{host}</span>
+                      <span className="count">{count}</span>
+                    </label>
+                  ))}
+              </div>
+            </>
+          ) : null}
 
           <div className="log-explorer__section-title">Bookmarks</div>
           <div

@@ -116,6 +116,10 @@ pub struct EventQuery {
     pub time_from: Option<i64>,
     /// Exclusive end.
     pub time_to: Option<i64>,
+    /// Inclusive stable event-sequence lower bound.
+    pub seq_from: Option<u64>,
+    /// Inclusive stable event-sequence upper bound.
+    pub seq_to: Option<u64>,
     /// Exact levels (OR). Empty = any.
     #[serde(default)]
     pub levels: Vec<String>,
@@ -162,6 +166,8 @@ impl Default for EventQuery {
         Self {
             time_from: None,
             time_to: None,
+            seq_from: None,
+            seq_to: None,
             levels: vec![],
             sources: vec![],
             services: vec![],
@@ -1371,6 +1377,16 @@ fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
             return false;
         }
     }
+    if let Some(from) = filter.seq_from {
+        if event.seq < from {
+            return false;
+        }
+    }
+    if let Some(to) = filter.seq_to {
+        if event.seq > to {
+            return false;
+        }
+    }
     if let Some(tid) = filter.template_id {
         if event.template_id != tid {
             return false;
@@ -1430,6 +1446,14 @@ fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
     if let Some(to) = q.time_to {
         clauses.push("ts < ?".into());
         binds.push(Value::BigInt(to));
+    }
+    if let Some(from) = q.seq_from {
+        clauses.push("seq >= ?".into());
+        binds.push(Value::BigInt(from as i64));
+    }
+    if let Some(to) = q.seq_to {
+        clauses.push("seq <= ?".into());
+        binds.push(Value::BigInt(to as i64));
     }
     if let Some(tid) = q.template_id {
         clauses.push("template_id = ?".into());
@@ -1565,7 +1589,7 @@ mod tests {
         for i in 0..40 {
             writeln!(
                 api,
-                r#"{{"ts":{},"level":"error","service":"api","host":"h1","message":"auth failure user {}"}}"#,
+                r#"{{"ts":{},"level":"error","service":"api","host":"h1","trace_id":"trace-api","message":"auth failure user {}"}}"#,
                 1_700_000_000 + i,
                 i
             )
@@ -1755,6 +1779,61 @@ mod tests {
         .unwrap();
         assert!(!api_only.events.is_empty());
         assert!(api_only.events.iter().all(|e| e.source.contains("api")));
+    }
+
+    #[test]
+    fn sequence_range_is_inclusive_and_composes_with_structured_filters() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let api = query_events(
+            &corpus,
+            &EventQuery {
+                sources: vec!["api.log".into()],
+                services: vec!["api".into()],
+                hosts: vec!["h1".into()],
+                limit: 10,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(api.events.len() >= 4);
+        let seq_from = api.events[1].seq;
+        let seq_to = api.events[3].seq;
+        let template_id = api.events[1].template_id;
+
+        let ranged = query_events(
+            &corpus,
+            &EventQuery {
+                seq_from: Some(seq_from),
+                seq_to: Some(seq_to),
+                sources: vec!["api.log".into()],
+                services: vec!["api".into()],
+                hosts: vec!["h1".into()],
+                template_id: Some(template_id),
+                trace_id: Some("trace-api".into()),
+                limit: 20,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            ranged
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![seq_from, api.events[2].seq, seq_to]
+        );
+        assert_eq!(ranged.total_matched, 3);
+        assert!(ranged
+            .events
+            .iter()
+            .all(|event| event.template_id == template_id
+                && event.trace_id.as_deref() == Some("trace-api")));
     }
 
     #[test]
