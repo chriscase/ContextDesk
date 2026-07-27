@@ -2274,6 +2274,11 @@ export function LogExplorer({ corpusId }: Props) {
           id="log-explorer-filter-panel"
           className="log-explorer__filters"
           data-testid="log-explorer-filters"
+          style={
+            breakpoint === "narrow"
+              ? ({ flexDirection: "column" } as React.CSSProperties)
+              : undefined
+          }
           role={breakpoint === "narrow" ? "dialog" : undefined}
           aria-label={
             breakpoint === "narrow" ? "Log filters drawer" : undefined
