@@ -157,6 +157,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
+  const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
+  const [laneSourceCatalogUnavailable, setLaneSourceCatalogUnavailable] =
+    useState(false);
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
   /** Unfiltered corpus event total for truthful count labeling (#534). */
@@ -310,6 +313,7 @@ export function LogExplorer({ corpusId }: Props) {
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
+  const laneSourceRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
   const findRequestRef = useRef(0);
   const findActiveRef = useRef(false);
@@ -339,7 +343,17 @@ export function LogExplorer({ corpusId }: Props) {
     filters.hosts.length +
     (filters.keyword ? 1 : 0) +
     (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
-  const laneEditorSources = Object.keys(facets?.sources ?? {}).sort();
+  const laneEditorSources = useMemo(
+    () =>
+      [
+        ...new Set([
+          ...laneSourceCatalog,
+          ...Object.keys(facets?.sources ?? {}),
+          ...lanes.flatMap((lane) => lane.sources),
+        ]),
+      ].sort(),
+    [facets, laneSourceCatalog, lanes],
+  );
   const closeLaneEditor = useCallback(() => {
     setLaneEditorOpen(false);
     queueMicrotask(() => laneEditorToggleRef.current?.focus());
@@ -554,6 +568,23 @@ export function LogExplorer({ corpusId }: Props) {
     }
   }, [corpusId, filters]);
 
+  const loadLaneSourceCatalog = useCallback(async () => {
+    const requestId = ++laneSourceRequestRef.current;
+    setLaneSourceCatalog([]);
+    setLaneSourceCatalogUnavailable(false);
+    try {
+      const sourceFacets = await hostLogFacets(
+        corpusId,
+        filtersToQuery(emptyFilters(), { keyword: null }),
+      );
+      if (requestId !== laneSourceRequestRef.current) return;
+      setLaneSourceCatalog(Object.keys(sourceFacets.sources ?? {}).sort());
+    } catch {
+      if (requestId !== laneSourceRequestRef.current) return;
+      setLaneSourceCatalogUnavailable(true);
+    }
+  }, [corpusId]);
+
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
     const visibleLanes = lanes.slice(0, laneCount);
@@ -717,6 +748,13 @@ export function LogExplorer({ corpusId }: Props) {
       facetRequestRef.current += 1;
     };
   }, [loadFacets]);
+
+  useEffect(() => {
+    void loadLaneSourceCatalog();
+    return () => {
+      laneSourceRequestRef.current += 1;
+    };
+  }, [loadLaneSourceCatalog]);
 
   useEffect(() => {
     void loadEvents();
@@ -2119,7 +2157,9 @@ export function LogExplorer({ corpusId }: Props) {
                 Compose lanes
               </div>
               <div className="log-explorer__lane-editor-summary">
-                {laneCount} visible lane{laneCount === 1 ? "" : "s"} · {laneEditorSources.length} available source{laneEditorSources.length === 1 ? "" : "s"}
+                {laneCount} visible lane{laneCount === 1 ? "" : "s"} ·{" "}
+                {laneEditorSources.length} available source
+                {laneEditorSources.length === 1 ? "" : "s"}
               </div>
             </div>
             <div className="log-explorer__lane-editor-actions">
@@ -2140,8 +2180,15 @@ export function LogExplorer({ corpusId }: Props) {
           </div>
           <div className="log-explorer__lane-editor-content">
             <p className="log-explorer__lane-editor-help">
-              Empty membership means all sources. A source can belong to more than one lane.
+              Empty membership means all sources. A source can belong to more
+              than one lane.
             </p>
+            {laneSourceCatalogUnavailable && (
+              <p className="log-explorer__lane-editor-help" role="status">
+                Full source catalog unavailable; showing known lane and filter
+                sources.
+              </p>
+            )}
             {lanes.slice(0, laneCount).map((lane) => (
               <fieldset
                 key={lane.id}

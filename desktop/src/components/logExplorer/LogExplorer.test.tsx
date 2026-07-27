@@ -1288,6 +1288,69 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("keeps the full lane source catalog editable under a conflicting source filter", async () => {
+    vi.mocked(host.hostLogFacets).mockImplementation(
+      async (_corpusId, query) => {
+        const sourceFilter = query?.sources ?? [];
+        return {
+          sources:
+            sourceFilter.length === 1
+              ? { [sourceFilter[0]!]: 5 }
+              : { "api.log": 5, "worker.log": 5 },
+          levels: { error: 3, info: 7 },
+          services: { api: 5 },
+          hosts: {},
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    fireEvent.click(toggle);
+    let editor = await screen.findByTestId("lane-editor");
+    fireEvent.click(
+      within(editor).getByRole("checkbox", { name: /api\.log/i }),
+    );
+    fireEvent.click(
+      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+    );
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+
+    const filtersPanel = screen.getByTestId("log-explorer-filters");
+    fireEvent.click(
+      within(filtersPanel).getByRole("checkbox", { name: /api\.log/i }),
+    );
+    await screen.findByRole("button", { name: "source:api.log ×" });
+    await waitFor(() =>
+      expect(
+        within(filtersPanel).queryByRole("checkbox", {
+          name: /worker\.log/i,
+        }),
+      ).toBeNull(),
+    );
+
+    fireEvent.click(toggle);
+    editor = await screen.findByTestId("lane-editor");
+    expect(editor.textContent).toContain("2 available sources");
+    const apiSource = within(editor).getByRole("checkbox", {
+      name: /api\.log/i,
+    }) as HTMLInputElement;
+    const workerSource = within(editor).getByRole("checkbox", {
+      name: /worker\.log/i,
+    }) as HTMLInputElement;
+    expect(apiSource.checked).toBe(true);
+    expect(workerSource.checked).toBe(true);
+
+    fireEvent.click(workerSource);
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+    expect(
+      screen.getByRole("button", { name: "source:api.log ×" }),
+    ).toBeTruthy();
+  });
+
   it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {
