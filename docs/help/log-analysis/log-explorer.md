@@ -42,7 +42,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Time-link modes | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets |
 | Timeline navigator | Closed by default and does no work until opened. A hard-capped backend summary shows the full filtered span; click a bar or release the position slider to load one bounded event neighborhood |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
-| Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot and runs **bounded log tools** (search, cluster, timeline, …) until it produces an evidence-based answer — not planning-only prose |
+| Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot, must get a successful result from a **bounded log tool**, and may consult other configured read-only sources before producing an evidence-based answer — not planning-only prose |
 | Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
 | Agent context | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context |
 | Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
@@ -141,17 +141,33 @@ selected and bookmarked counts, time quality, and link/alignment mode. Changing
 the Explorer after send does not rewrite the context of an already-running
 turn, and switching chats does not transfer its pending state.
 
-The snapshot is orientation, not a corpus dump. The agent uses bounded log
-tools to search, inspect neighborhoods, correlate sources, and retrieve
-evidence. Raw corpus contents, evaluator truth, credentials, and absolute
-source paths are not inserted wholesale. Agent navigation remains a proposal:
-ContextDesk validates it against the linked corpus and applies it only after
-the user activates the suggested action.
+The snapshot is orientation, not a corpus dump. Every linked investigation must
+first obtain a successful result from a bounded log tool. When relevant, the
+same turn can use the normal configured read-only surface: bounded
+workspace/Markdown search, durable-memory recall, bundled Help, and read-only
+database or connector tools. Linking a corpus does not configure a source,
+approve first-use access, or expose a write tool. An MCP read that still needs
+first-use approval is omitted from the linked turn until it has been separately
+authorized through the normal permission flow.
+
+This is an evidence plane followed by a synthesis plane. ContextDesk owns source
+eligibility, retrieval, caps, provenance, and permission checks; the model
+connects the returned evidence and must distinguish observation from inference.
+Skills can guide the process, but their instructions are not observed incident
+evidence and cannot raise permissions. Consulted tools and source citations
+remain with the originating chat. Failed, capped, unavailable, stale, or
+permission-blocked sources remain visible rather than becoming silent success.
+Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
+source paths are not inserted wholesale.
+
+Agent navigation remains a proposal: ContextDesk validates it against the
+linked corpus and applies it only after the user activates the suggested action.
 
 Linked investigation requires a tools-enabled provider profile. If the selected
 profile advertises `capabilities.tools=false`, ContextDesk stops before
 contacting the provider and saves visible guidance that names the profile and
-unavailable capability. Ordinary chats keep their existing chat-only behavior.
+unavailable capability. Ordinary chats keep `linked_corpus_id=null` and do not
+inherit an Explorer corpus or its active-corpus default.
 
 ## Log Lab scale profiles (synthetic)
 

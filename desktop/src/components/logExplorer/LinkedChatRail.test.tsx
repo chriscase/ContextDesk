@@ -108,9 +108,160 @@ describe("LinkedChatRail", () => {
     expect(help.textContent).toContain("small immutable snapshot");
     expect(help.textContent).toContain("bounded result pages");
     expect(help.textContent).toContain("tools-enabled provider profile");
+    expect(help.textContent).toContain("workspace/Markdown");
+    expect(help.textContent).toContain("Skills and synthesis");
+    expect(help.textContent).toContain("permission-blocked sources");
     expect(help.textContent).toContain("Raw corpus dumps");
     expect(help.textContent).toContain(
       "Switching chats cannot move a pending turn",
+    );
+  });
+
+  it("keeps governed cross-source tools and citations visible with the linked answer", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      stored?.id === id ? stored : null,
+    );
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () =>
+      stored
+        ? [
+            {
+              id: stored.id,
+              title: stored.title,
+              archived: stored.archived,
+              pinned: stored.pinned,
+              created_at: stored.created_at,
+              updated_at: stored.updated_at,
+              message_count: stored.messages.length,
+              preview: stored.messages.at(-1)?.content ?? "",
+              linked_corpus_id: stored.linked_corpus_id,
+            },
+          ]
+        : [],
+    );
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "tool",
+            payload: {
+              id: "log-tool",
+              name: "search_logs",
+              phase: "finished",
+              summary: "1 log hit",
+              ok: true,
+            },
+          },
+          {
+            kind: "citation",
+            payload: {
+              source_id: "log_template:7",
+              label: "log_template:7",
+            },
+          },
+          {
+            kind: "tool",
+            payload: {
+              id: "runbook-tool",
+              name: "search_kb",
+              phase: "finished",
+              summary: "1 workspace hit",
+              ok: true,
+            },
+          },
+          {
+            kind: "citation",
+            payload: {
+              source_id: "/workspace/checkout-runbook.md",
+              label: "checkout-runbook.md",
+            },
+          },
+          {
+            kind: "citation",
+            payload: {
+              source_id: "memory:decision-1",
+              label: "memory:decision-1",
+            },
+          },
+          {
+            kind: "citation",
+            payload: {
+              source_id: "sql:incident-db",
+              label: "sql:incident-db",
+            },
+          },
+          {
+            kind: "text_delta",
+            payload: {
+              text: "Observed log failure; supporting runbook, memory, and SQL evidence agree.",
+            },
+          },
+          {
+            kind: "search_trail",
+            payload: {
+              steps: [
+                "tool:search_logs",
+                "tool:search_kb",
+                "tool:recall_memory",
+                "tool:sql_query__incident-db",
+              ],
+            },
+          },
+          { kind: "turn_completed", payload: { reason: "stop" } },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(stored?.linked_corpus_id).toBe("c1"));
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "Cross-check the incident evidence" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    expect(
+      await screen.findByText(
+        "Linked investigation completed with governed evidence tools",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("search_logs")).toBeTruthy();
+    expect(screen.getByText("search_kb")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    expect(screen.getAllByText("checkout-runbook.md").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("memory:decision-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("sql:incident-db").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByText("Context shared with agent"));
+    const context = screen.getByTestId("linked-chat-agent-context");
+    expect(context.textContent).toContain("Eligible evidence");
+    expect(context.textContent).toContain("workspace/Markdown");
+    expect(context.textContent).toContain("Retrieval and synthesis");
+    expect(context.textContent).toContain("Process instructions only");
+
+    await waitFor(() =>
+      expect(
+        stored?.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            Array.isArray(message.citations) &&
+            message.citations.length === 4,
+        ),
+      ).toBe(true),
     );
   });
 
@@ -838,15 +989,25 @@ describe("LinkedChatRail", () => {
             text: 'A evidence {"type":"log_nav","corpusId":"c1","sources":["a.log"],"label":"A-only nav"}',
           },
         },
+        {
+          kind: "citation",
+          payload: {
+            source_id: "log_template:chat-a-only",
+            label: "chat-a-only",
+          },
+        },
         { kind: "turn_completed", payload: {} },
       ]);
     });
     expect(screen.queryByText("A-only nav")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sources" })).toBeNull();
     await screen.findByText("Linked chat response saved");
 
     await openNamedChat("Chat A");
     expect(await screen.findByText(/A evidence/)).toBeTruthy();
     expect(screen.getByText("A-only nav")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    expect(screen.getAllByText("chat-a-only").length).toBeGreaterThan(0);
     await screen.findByText("Linked chat response saved");
   });
 

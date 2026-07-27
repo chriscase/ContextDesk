@@ -115,7 +115,17 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
             const name = c.label || "Source";
             const title = (c.title || name).trim();
             const web = isHttpUrl(c.id);
+            const actionable = web || Boolean(onOpenFile);
             const hue = hueFromString(name);
+            const body = (
+              <>
+                <span className="sources__title-text">{title}</span>
+                <span className="sources__meta">
+                  {name}
+                  {web ? <IconLink className="sources__ext" /> : null}
+                </span>
+              </>
+            );
             return (
               <li key={c.id} className="sources__item">
                 <span
@@ -131,18 +141,20 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
                     <IconFile className="sources__file-svg" />
                   )}
                 </span>
-                <button
-                  type="button"
-                  className="sources__title"
-                  title={c.id}
-                  onClick={() => activate(c)}
-                >
-                  <span className="sources__title-text">{title}</span>
-                  <span className="sources__meta">
-                    {name}
-                    {web ? <IconLink className="sources__ext" /> : null}
+                {actionable ? (
+                  <button
+                    type="button"
+                    className="sources__title"
+                    title={c.id}
+                    onClick={() => activate(c)}
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <span className="sources__title" title={c.id}>
+                    {body}
                   </span>
-                </button>
+                )}
               </li>
             );
           })}
