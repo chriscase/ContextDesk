@@ -12,6 +12,8 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
+  createLogSearchRequestId,
+  hostCancelLogSearch,
   hostGetLogCorpus,
   hostLogAddBookmark,
   hostLogDeleteBookmark,
@@ -273,6 +275,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
   const [findUseSemantic, setFindUseSemantic] = useState(false);
   const [findPartial, setFindPartial] = useState(false);
+  const [findSearching, setFindSearching] = useState(false);
+  const [findCancelling, setFindCancelling] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState("");
   const [traceDraft, setTraceDraft] = useState("");
@@ -365,6 +369,7 @@ export function LogExplorer({ corpusId }: Props) {
   const laneSourceRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
   const findRequestRef = useRef(0);
+  const activeFindRequestRef = useRef<string | null>(null);
   const findActiveRef = useRef(false);
   const autoStatusLockRef = useRef<
     "bookmark-reveal" | "bookmark-restore" | null
@@ -448,6 +453,9 @@ export function LogExplorer({ corpusId }: Props) {
     () => () => {
       findRequestRef.current += 1;
       findActiveRef.current = false;
+      const requestId = activeFindRequestRef.current;
+      activeFindRequestRef.current = null;
+      if (requestId) void hostCancelLogSearch(requestId);
     },
     [],
   );
@@ -1100,7 +1108,12 @@ export function LogExplorer({ corpusId }: Props) {
    */
   const clearFindResults = (message?: string) => {
     findRequestRef.current += 1;
+    const backendRequestId = activeFindRequestRef.current;
+    activeFindRequestRef.current = null;
+    if (backendRequestId) void hostCancelLogSearch(backendRequestId);
     findActiveRef.current = false;
+    setFindSearching(false);
+    setFindCancelling(false);
     setFindActiveQuery(null);
     setFindMatches([]);
     setFindMatchSources({});
@@ -1129,13 +1142,22 @@ export function LogExplorer({ corpusId }: Props) {
       clearFindResults("Find cleared");
       return;
     }
+    const previousBackendRequestId = activeFindRequestRef.current;
+    if (previousBackendRequestId) {
+      void hostCancelLogSearch(previousBackendRequestId);
+    }
     const requestId = ++findRequestRef.current;
+    const backendRequestId = createLogSearchRequestId();
+    activeFindRequestRef.current = backendRequestId;
     findActiveRef.current = true;
     setFindActiveQuery(q);
+    setFindSearching(true);
+    setFindCancelling(false);
     setBusy(true);
     setError(null);
     try {
       const result = await hostLogSearchEventsAdvanced(corpusId, {
+        requestId: backendRequestId,
         query: q,
         semantic: findUseSemantic && findMatchMode === "literal",
         matchMode: findMatchMode,
@@ -1151,6 +1173,10 @@ export function LogExplorer({ corpusId }: Props) {
         }),
       });
       if (requestId !== findRequestRef.current) return;
+      if (result.cancelled) {
+        setStatus("Find cancelled · previous visible results preserved");
+        return;
+      }
       const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
       setFindMatchSources(
@@ -1216,7 +1242,32 @@ export function LogExplorer({ corpusId }: Props) {
       if (requestId !== findRequestRef.current) return;
       setError(String(e));
     } finally {
-      if (requestId === findRequestRef.current) setBusy(false);
+      if (requestId === findRequestRef.current) {
+        if (activeFindRequestRef.current === backendRequestId) {
+          activeFindRequestRef.current = null;
+        }
+        setFindSearching(false);
+        setFindCancelling(false);
+        setBusy(false);
+      }
+    }
+  };
+
+  const cancelFind = async () => {
+    const requestId = activeFindRequestRef.current;
+    if (!requestId || findCancelling) return;
+    setFindCancelling(true);
+    setStatus("Cancelling Find…");
+    try {
+      const signalled = await hostCancelLogSearch(requestId);
+      if (!signalled && activeFindRequestRef.current === requestId) {
+        setFindCancelling(false);
+        setStatus("Find is still running · try Cancel again");
+      }
+    } catch (cancelError) {
+      if (activeFindRequestRef.current !== requestId) return;
+      setFindCancelling(false);
+      setError(`Unable to cancel Find: ${String(cancelError)}`);
     }
   };
 
@@ -2482,6 +2533,17 @@ export function LogExplorer({ corpusId }: Props) {
             >
               Find
             </button>
+            {findSearching ? (
+              <button
+                type="button"
+                className="log-explorer__btn"
+                data-testid="log-explorer-find-cancel"
+                disabled={findCancelling}
+                onClick={() => void cancelFind()}
+              >
+                {findCancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            ) : null}
             <button
               type="button"
               className="log-explorer__btn"

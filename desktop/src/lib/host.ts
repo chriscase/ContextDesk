@@ -1826,10 +1826,21 @@ export type EventSearchResultDto = {
   totalMatched?: number | null;
   partial: boolean;
   diagnostic?: string | null;
+  /** Cooperative backend cancellation completed; no continuation remains. */
+  cancelled?: boolean;
   scanned: number;
 };
 
 export type SearchMatchMode = "literal" | "regex";
+
+let logSearchRequestCounter = 0;
+
+export function createLogSearchRequestId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  logSearchRequestCounter += 1;
+  return `find-${Date.now()}-${logSearchRequestCounter}`;
+}
 
 export type LogBookmarkDto = {
   id: string;
@@ -1944,6 +1955,7 @@ export async function hostLogFacets(
 export async function hostLogSearchEvents(
   corpusId: string,
   opts: {
+    requestId?: string;
     query?: string;
     semantic?: boolean;
     k?: number;
@@ -1960,6 +1972,7 @@ export async function hostLogSearchEvents(
 export async function hostLogSearchEventsAdvanced(
   corpusId: string,
   opts: {
+    requestId?: string;
     query?: string;
     semantic?: boolean;
     k?: number;
@@ -1974,6 +1987,7 @@ export async function hostLogSearchEventsAdvanced(
   return invoke<EventSearchResultDto>("log_search_events", {
     args: {
       corpusId,
+      requestId: opts.requestId ?? createLogSearchRequestId(),
       query: opts.query ?? null,
       semantic: opts.semantic ?? true,
       k: opts.k ?? null,
@@ -1982,6 +1996,12 @@ export async function hostLogSearchEventsAdvanced(
       caseSensitive: opts.caseSensitive ?? false,
     },
   });
+}
+
+/** Signal one request-scoped Explorer Find cancellation. */
+export async function hostCancelLogSearch(requestId: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("cancel_log_search", { requestId });
 }
 
 export async function hostLogListBookmarks(
