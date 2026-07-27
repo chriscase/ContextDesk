@@ -30,11 +30,14 @@ Real frames from the packaged macOS app on current `main` (see capture SHA in [`
 |--------------|--------------|------------------------|
 | ![Help light](docs/media/gallery/help-light.png) | ![Help slate](docs/media/gallery/help-slate.png) | ![Session-only context](docs/media/gallery/ordinary-chat-session-only.png) |
 
-Narrow / practical minimum:
+Narrow / practical 800×600 minimum (Chat → Logs → Help, no primary chrome clip):
 
-| 800×600 first-chat | 800×600 Help | 800×600 main nav |
-|--------------------|--------------|------------------|
-| ![Home narrow](docs/media/gallery/first-chat-home-narrow.png) | ![Help narrow](docs/media/gallery/help-narrow-dark.png) | ![Nav 800×600](docs/media/gallery/main-nav-800x600.png) |
+| 800×600 Chat (first-chat home) | 800×600 Logs | 800×600 Help |
+|--------------------------------|--------------|--------------|
+| ![Chat narrow](docs/media/gallery/nav-800x600-chat.png) | ![Logs narrow](docs/media/gallery/nav-800x600-logs.png) | ![Help narrow](docs/media/gallery/nav-800x600-help.png) |
+
+<p align="center"><img src="docs/media/gallery/main-nav-800x600.png" alt="800×600 contact strip: Chat, Logs, Help" width="900" /></p>
+<p align="center"><sub>Contact strip of the three 800×600 frames above. Wide first-chat is max width on the built-in Retina display (~1427 logical px), not an external ultrawide capture.</sub></p>
 
 ---
 

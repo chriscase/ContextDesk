@@ -46,22 +46,27 @@ All files are real packaged-app crops. No credentials, API keys, or absolute pri
 
 | File | Surface |
 |------|---------|
-| `first-chat-home-narrow.png` | Empty first-chat home at practical 800×600 |
+| `first-chat-home-narrow.png` | Empty first-chat home at practical 800×600 (Chat tab) |
 | `first-chat-home-normal.png` | Empty first-chat home at ~1100×760 |
-| `first-chat-home-wide.png` | Empty first-chat home at wide layout |
+| `first-chat-home-wide.png` | Empty first-chat home at **max width on built-in Retina** (~1427 logical px) — not external ultrawide |
 | `help-dark.png` | Help Center, Dark theme, normal width |
 | `help-light.png` | Help Center, Light theme |
 | `help-slate.png` | Help Center, Slate theme |
-| `help-narrow-dark.png` | Help Center, Dark, narrow |
+| `help-narrow-dark.png` | Help Center, Dark, 800×600 |
 | `ordinary-chat-session-only.png` | Ordinary chat showing **No files or skill · session-only** |
 | `logs-library.png` | Logs library with Open Explorer entry point |
-| `main-nav-800x600.png` | Main chrome navigation at 800×600 |
+| `nav-800x600-chat.png` | **Chat** pane at 800×600 (first-chat home) — visually verified |
+| `nav-800x600-logs.png` | **Logs** pane at 800×600 — visually verified |
+| `nav-800x600-help.png` | **Help** pane at 800×600 — visually verified |
+| `main-nav-800x600.png` | Contact strip of Chat + Logs + Help at 800×600 |
 
 ## Honesty notes
 
 - These frames support README product communication and tracker residual audits. They do **not** close owner GUI acceptance [#525](https://github.com/chriscase/ContextDesk/issues/525).
 - Multi-chat overflow is visible on the ordinary-chat frame (header chips); dedicated Log Explorer linked-chat **rail** packaged proof remains a residual on [#543](https://github.com/chriscase/ContextDesk/issues/543).
 - Sidebar may list local synthetic corpus/chat titles (`incident`, acceptance chats). No secret material.
+- **Not claimed:** first-chat product home at true external ultrawide (≥1800 logical px on the LC49G95T). Wide frames are built-in max only.
+- Prior mislabeled `nav-800x600-*` gallery frames that showed Source/Compose/Todos were replaced by the verified Chat/Logs/Help set above.
 
 ## Recapture
 
