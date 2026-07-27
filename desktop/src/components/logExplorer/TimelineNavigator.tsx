@@ -25,7 +25,7 @@ type Props = {
     label: string;
     sources: string[];
   }[];
-  onSeekSeq: (seq: number) => Promise<void> | void;
+  onSeekSeq: (seq: number, target?: ExplorerEventDto) => Promise<void> | void;
 };
 
 type LaneSummaryState = {
@@ -211,7 +211,7 @@ export function TimelineNavigator({
         setStatus(`No event in ${bucketLabel(summary, index)}`);
         return;
       }
-      await onSeekSeq(event.seq);
+      await onSeekSeq(event.seq, event);
       if (request !== seekRequest.current) return;
       setStatus(
         `Moved to seq ${event.seq} · ${bucketLabel(summary, index)} · bounded neighborhood loaded`,
