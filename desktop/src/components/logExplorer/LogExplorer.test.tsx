@@ -371,6 +371,17 @@ describe("LogExplorer shell", () => {
       const filtersToggle = screen.getByTestId("narrow-filters-toggle");
       fireEvent.click(filtersToggle);
       expect(filtersToggle.getAttribute("aria-expanded")).toBe("true");
+      const filtersDrawer = screen.getByTestId("log-explorer-filters");
+      const filtersDrawerStyle = getComputedStyle(filtersDrawer);
+      expect(filtersDrawerStyle.flexDirection).toBe("column");
+      expect(filtersDrawer.firstElementChild).toBe(
+        screen.getByTestId("close-filters-drawer"),
+      );
+      expect(
+        filtersDrawer.compareDocumentPosition(
+          screen.getByTestId("log-explorer-find"),
+        ) & Node.DOCUMENT_POSITION_CONTAINED_BY,
+      ).not.toBe(0);
       await waitFor(() =>
         expect(document.activeElement).toBe(
           screen.getByTestId("log-explorer-find"),

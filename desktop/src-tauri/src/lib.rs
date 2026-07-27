@@ -4768,7 +4768,7 @@ async fn open_log_explorer(
     tauri::WebviewWindowBuilder::new(&app, &label, url)
         .title(title)
         .inner_size(1400.0, 900.0)
-        .min_inner_size(720.0, 480.0)
+        .min_inner_size(800.0, 600.0)
         .resizable(true)
         .maximizable(true)
         .minimizable(true)
