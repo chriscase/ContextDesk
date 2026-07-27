@@ -77,6 +77,13 @@
   max-width: min(24rem, calc(100vw - 1rem));
 }
 
+.help-tip__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10049;
+  background: rgb(0 0 0 / 0.42);
+}
+
 .help-tip__callout {
   margin: 0.5rem 0 0;
   padding: 0.4rem 0.5rem;
@@ -206,6 +213,55 @@
 
 .help-tip__body a {
   color: var(--accent);
+}
+
+.help-tip__table-wrap {
+  max-width: 100%;
+  margin: 0 0 8px;
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.help-tip__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.help-tip__table th,
+.help-tip__table td {
+  padding: 0.35rem 0.45rem;
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.help-tip__table tr:last-child th,
+.help-tip__table tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .help-tip__popover--sheet {
+    position: fixed;
+    inset: auto 0 0;
+    width: 100%;
+    max-width: none;
+    max-height: min(78vh, 40rem);
+    padding:
+      14px
+      max(16px, env(safe-area-inset-right))
+      max(18px, env(safe-area-inset-bottom))
+      max(16px, env(safe-area-inset-left));
+    border-width: 1px 0 0;
+    border-radius: var(--radius-lg, 12px) var(--radius-lg, 12px) 0 0;
+    box-shadow: 0 -16px 48px rgb(0 0 0 / 0.45);
+  }
+
+  .help-tip__title {
+    font-size: var(--text-md, 1rem);
+  }
 }
 
 .help-title-row {

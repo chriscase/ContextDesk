@@ -20,8 +20,14 @@ import { parseHelpLocator } from "../lib/help";
 export type HelpTipContent = {
   title: string;
   definition?: string;
+  currentState?: string;
   useWhen?: string;
   options?: { name: string; when: string }[];
+  comparison?: {
+    columns: [string, string];
+    rows: { option: string; meaning: string }[];
+  };
+  consequence?: string;
   safety?: string;
   privacy?: string;
   example?: string;
@@ -85,6 +91,11 @@ function StructuredBody({ content }: { content: HelpTipContent }) {
   return (
     <>
       {content.definition ? <p>{content.definition}</p> : null}
+      {content.currentState ? (
+        <p>
+          <strong>Current state</strong> {content.currentState}
+        </p>
+      ) : null}
       {content.useWhen ? (
         <p>
           <strong>Use this when</strong> {content.useWhen}
@@ -98,6 +109,32 @@ function StructuredBody({ content }: { content: HelpTipContent }) {
             </li>
           ))}
         </ul>
+      ) : null}
+      {content.comparison && content.comparison.rows.length > 0 ? (
+        <div className="help-tip__table-wrap">
+          <table className="help-tip__table">
+            <thead>
+              <tr>
+                {content.comparison.columns.map((column) => (
+                  <th key={column} scope="col">
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {content.comparison.rows.map((row) => (
+                <tr key={row.option}>
+                  <th scope="row">{row.option}</th>
+                  <td>{row.meaning}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {content.consequence ? (
+        <p className="help-tip__callout">{content.consequence}</p>
       ) : null}
       {content.example ? (
         <p>
@@ -137,10 +174,14 @@ export function HelpTip({
   onOpenHelp,
 }: HelpTipProps) {
   const [open, setOpen] = useState(false);
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.innerWidth <= 640,
+  );
   const [pos, setPos] = useState<CSSProperties>({});
   const rootRef = useRef<HTMLSpanElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const instanceId = useId();
 
@@ -161,9 +202,20 @@ export function HelpTip({
     window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: instanceId }));
   }, [open, instanceId]);
 
+  useEffect(() => {
+    const measureViewport = () => setNarrow(window.innerWidth <= 640);
+    measureViewport();
+    window.addEventListener("resize", measureViewport);
+    return () => window.removeEventListener("resize", measureViewport);
+  }, []);
+
   useLayoutEffect(() => {
     if (!open) return;
     const measure = () => {
+      if (narrow) {
+        setPos({});
+        return;
+      }
       const trigger = btnRef.current?.getBoundingClientRect();
       const panel = panelRef.current?.getBoundingClientRect();
       if (!trigger || !panel) return;
@@ -176,15 +228,42 @@ export function HelpTip({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure, true);
     };
-  }, [open, title, children, content]);
+  }, [open, title, children, content, narrow]);
+
+  useEffect(() => {
+    if (!open || !narrow) return;
+    queueMicrotask(() => closeRef.current?.focus());
+  }, [narrow, open]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
+        e.preventDefault();
         close();
         btnRef.current?.focus();
+        return;
+      }
+      if (e.key === "Tab" && narrow) {
+        const focusable = Array.from(
+          panelRef.current?.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) ?? [],
+        );
+        if (focusable.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusable[0]!;
+        const last = focusable[focusable.length - 1]!;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
     const onPointer = (e: MouseEvent | PointerEvent) => {
@@ -193,6 +272,9 @@ export function HelpTip({
       if (rootRef.current?.contains(t)) return;
       if (panelRef.current?.contains(t)) return;
       close();
+      if (narrow) {
+        queueMicrotask(() => btnRef.current?.focus());
+      }
     };
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("pointerdown", onPointer, true);
@@ -200,7 +282,7 @@ export function HelpTip({
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("pointerdown", onPointer, true);
     };
-  }, [open, close]);
+  }, [open, close, narrow]);
 
   const heading = content?.title ?? title;
   const locator = content?.helpLocator;
@@ -209,49 +291,66 @@ export function HelpTip({
   const panel =
     open && typeof document !== "undefined"
       ? createPortal(
-          <div
-            ref={panelRef}
-            id={panelId}
-            className="help-tip__popover help-tip__popover--portal"
-            role="dialog"
-            aria-modal="false"
-            aria-label={heading}
-            data-testid="help-tip-popover"
-            style={pos}
-          >
-            <div className="help-tip__head">
-              <strong className="help-tip__title">{heading}</strong>
-              <button
-                type="button"
-                className="help-tip__close"
-                aria-label="Close help"
-                onClick={() => {
-                  close();
-                  btnRef.current?.focus();
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <div className="help-tip__body">
-              {content ? <StructuredBody content={content} /> : children}
-            </div>
-            {parsed && onOpenHelp ? (
-              <div className="help-tip__footer">
+          <>
+            {narrow ? (
+              <div
+                className="help-tip__backdrop"
+                data-testid="help-tip-backdrop"
+                aria-hidden="true"
+              />
+            ) : null}
+            <div
+              ref={panelRef}
+              id={panelId}
+              className={[
+                "help-tip__popover",
+                "help-tip__popover--portal",
+                narrow ? "help-tip__popover--sheet" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              role="dialog"
+              aria-modal={narrow ? "true" : "false"}
+              aria-label={heading}
+              data-testid="help-tip-popover"
+              data-presentation={narrow ? "sheet" : "popover"}
+              style={pos}
+            >
+              <div className="help-tip__head">
+                <strong className="help-tip__title">{heading}</strong>
                 <button
+                  ref={closeRef}
                   type="button"
-                  className="help-tip__full-link"
-                  data-testid="help-tip-full-link"
+                  className="help-tip__close"
+                  aria-label="Close help"
                   onClick={() => {
-                    onOpenHelp(parsed.pageId, parsed.anchor);
                     close();
+                    btnRef.current?.focus();
                   }}
                 >
-                  Open full Help
+                  ×
                 </button>
               </div>
-            ) : null}
-          </div>,
+              <div className="help-tip__body">
+                {content ? <StructuredBody content={content} /> : children}
+              </div>
+              {parsed && onOpenHelp ? (
+                <div className="help-tip__footer">
+                  <button
+                    type="button"
+                    className="help-tip__full-link"
+                    data-testid="help-tip-full-link"
+                    onClick={() => {
+                      onOpenHelp(parsed.pageId, parsed.anchor);
+                      close();
+                    }}
+                  >
+                    Open full Help
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </>,
           document.body,
         )
       : null;
