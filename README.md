@@ -16,7 +16,25 @@ Point it at folders you allowlist and at markdown project memory, ask how a subs
 
 ![ContextDesk desktop — empty chat with starter prompts, session sidebar, and composer](docs/media/screenshot.png)
 
-<p align="center"><sub>Desktop host (macOS): allowlisted workspace chip, local/remote egress chip, pane tabs, empty-chat starters that fill the composer, model picker. Capture notes in <a href="docs/media/README.md"><code>docs/media/README.md</code></a>.</sub></p>
+<p align="center"><sub>Desktop host (macOS): first-chat product home, pane tabs, composer, model picker, session-only context honesty. Capture notes in <a href="docs/media/README.md"><code>docs/media/README.md</code></a>.</sub></p>
+
+### Product gallery (packaged app)
+
+Real frames from the packaged macOS app on current `main` (see capture SHA in [`docs/media/README.md`](docs/media/README.md)). Not a substitute for owner Log Explorer GUI acceptance ([#525](https://github.com/chriscase/ContextDesk/issues/525)).
+
+| First-chat home | Help Center | Logs library |
+|-----------------|-------------|--------------|
+| ![First-chat home (normal)](docs/media/gallery/first-chat-home-normal.png) | ![Help Center (dark)](docs/media/gallery/help-dark.png) | ![Logs library](docs/media/gallery/logs-library.png) |
+
+| Help · Light | Help · Slate | Ordinary chat honesty |
+|--------------|--------------|------------------------|
+| ![Help light](docs/media/gallery/help-light.png) | ![Help slate](docs/media/gallery/help-slate.png) | ![Session-only context](docs/media/gallery/ordinary-chat-session-only.png) |
+
+Narrow / practical minimum:
+
+| 800×600 first-chat | 800×600 Help | 800×600 main nav |
+|--------------------|--------------|------------------|
+| ![Home narrow](docs/media/gallery/first-chat-home-narrow.png) | ![Help narrow](docs/media/gallery/help-narrow-dark.png) | ![Nav 800×600](docs/media/gallery/main-nav-800x600.png) |
 
 ---
 
