@@ -222,6 +222,10 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
   >({});
+  const [bookmarkFocusTarget, setBookmarkFocusTarget] = useState<{
+    laneId: string;
+    seq: number;
+  } | null>(null);
   const [alignedScrollTop, setAlignedScrollTop] = useState(0);
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
@@ -915,6 +919,7 @@ export function LogExplorer({ corpusId }: Props) {
       clearFilters?: boolean;
       laneId?: string;
       sources?: string[];
+      focusRow?: boolean;
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
     const base = opts?.clearFilters ? emptyFilters() : filters;
@@ -943,6 +948,9 @@ export function LogExplorer({ corpusId }: Props) {
       applyNeighborhoodToLane(nb, laneId);
       setFocusLaneId(laneId);
       setLaneScrollSeq((m) => ({ ...m, [laneId]: seq }));
+      if (opts?.focusRow) {
+        setBookmarkFocusTarget({ laneId, seq });
+      }
       if (nb.target) {
         setDetail(nb.target);
         setSelected(new Set([seq]));
@@ -1402,6 +1410,7 @@ export function LogExplorer({ corpusId }: Props) {
         if (residentTarget) {
           setFocusLaneId(matchingLane.id);
           setLaneScrollSeq((m) => ({ ...m, [matchingLane.id]: seq }));
+          setBookmarkFocusTarget({ laneId: matchingLane.id, seq });
           setDetail(residentTarget);
           setSelected(new Set([seq]));
           setBookmarkRevealState("visible");
@@ -1414,6 +1423,7 @@ export function LogExplorer({ corpusId }: Props) {
             matchingLane.sources.length > 0
               ? matchingLane.sources
               : filters.sources,
+          focusRow: true,
         });
         if (status !== "found") {
           throw new Error(
@@ -1457,6 +1467,7 @@ export function LogExplorer({ corpusId }: Props) {
         clearFilters: true,
         laneId: revealLane.id,
         sources: [resolved.target.source],
+        focusRow: true,
       });
       if (status === "found") {
         setBookmarkRevealState("revealed");
@@ -2807,6 +2818,18 @@ export function LogExplorer({ corpusId }: Props) {
                     expandedSeqs={expandedSeqs}
                     onToggleExpand={toggleExpand}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
+                    focusToSeq={
+                      bookmarkFocusTarget?.laneId === lane.id
+                        ? bookmarkFocusTarget.seq
+                        : null
+                    }
+                    onFocusToSeq={(seq) =>
+                      setBookmarkFocusTarget((pending) =>
+                        pending?.laneId === lane.id && pending.seq === seq
+                          ? null
+                          : pending,
+                      )
+                    }
                     onRowClick={onRowClick}
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}

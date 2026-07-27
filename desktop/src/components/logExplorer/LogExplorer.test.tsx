@@ -178,6 +178,42 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function bookmark(
+  id: string,
+  label: string,
+  seq: number,
+): host.LogBookmarkDto {
+  return {
+    id,
+    label,
+    note: null,
+    seqFrom: seq,
+    seqTo: seq,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+function eventNeighborhood(
+  target: host.ExplorerEventDto,
+  status: host.EventNeighborhoodDto["status"] = "found",
+  events: host.ExplorerEventDto[] = status === "found" ? [target] : [],
+): host.EventNeighborhoodDto {
+  return {
+    status,
+    target,
+    events,
+    targetIndex: status === "found" ? events.indexOf(target) : null,
+    nextCursor: null,
+    nextTs: null,
+    prevCursor: null,
+    prevTs: null,
+    totalMatched: status === "found" ? events.length : 0,
+    corpusTotal: Math.max(2, events.length),
+    timeQuality: "wall",
+  };
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -425,6 +461,296 @@ describe("LogExplorer shell", () => {
         value: originalWidth,
       });
     }
+  });
+
+  it("focuses the exact resident bookmark when timestamps and source basenames collide", async () => {
+    const sharedTs = 1_700_000_050;
+    const decoy: host.ExplorerEventDto = {
+      seq: 101,
+      ts: sharedTs,
+      timeQuality: "wall",
+      level: "error",
+      service: "api-a",
+      host: null,
+      templateId: 11,
+      traceId: null,
+      message: "decoy event with the same timestamp",
+      source: "team-a/api.log",
+    };
+    const target: host.ExplorerEventDto = {
+      ...decoy,
+      seq: 202,
+      service: "api-b",
+      templateId: 22,
+      message: "stable bookmark target",
+      source: "team-b/api.log",
+    };
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "team-a/api.log": 1, "team-b/api.log": 1 },
+      levels: { error: 2 },
+      services: { "api-a": 1, "api-b": 1 },
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue({
+      ...defaultEventPage(),
+      events: [decoy, target],
+      totalMatched: 2,
+    });
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-stable", "stable identity", target.seq),
+    ]);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(target),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(target.message);
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-stable"));
+
+    const targetRow = document.querySelector<HTMLElement>(
+      `[data-seq="${target.seq}"]`,
+    );
+    const decoyRow = document.querySelector<HTMLElement>(
+      `[data-seq="${decoy.seq}"]`,
+    );
+    await waitFor(() => {
+      expect(targetRow?.classList.contains("log-explorer__row--selected")).toBe(
+        true,
+      );
+      expect(
+        targetRow?.classList.contains("log-explorer__row--highlight"),
+      ).toBe(true);
+      expect(document.activeElement).toBe(targetRow);
+    });
+    expect(decoyRow?.classList.contains("log-explorer__row--selected")).toBe(
+      false,
+    );
+    expect(
+      decoyRow?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(false);
+    expect(screen.getByTestId("detail-metadata").textContent).toContain(
+      "team-b/api.log",
+    );
+    expect(screen.getByRole("status").textContent).toContain(
+      "Bookmark visible: stable identity",
+    );
+    expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        targetSeq: target.seq,
+        before: 0,
+        after: 0,
+      }),
+    );
+  });
+
+  it("seeks a valid nonresident bookmark through one bounded neighborhood", async () => {
+    const target: host.ExplorerEventDto = {
+      seq: 50_001,
+      ts: 1_700_050_001,
+      timeQuality: "wall",
+      level: "warn",
+      service: "worker",
+      host: null,
+      templateId: 50_001,
+      traceId: "trace-deep",
+      message: "deep nonresident bookmark target",
+      source: "worker.log",
+    };
+    const before = {
+      ...target,
+      seq: 50_000,
+      message: "bounded neighbor before",
+    };
+    const after = { ...target, seq: 50_002, message: "bounded neighbor after" };
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-deep", "deep evidence", target.seq),
+    ]);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) =>
+        query.before === 0 && query.after === 0
+          ? eventNeighborhood(target)
+          : eventNeighborhood(target, "found", [before, target, after]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-deep"));
+
+    expect((await screen.findAllByText(target.message)).length).toBe(2);
+    const targetRow = document.querySelector<HTMLElement>(
+      `[data-seq="${target.seq}"]`,
+    );
+    await waitFor(() => {
+      expect(targetRow?.classList.contains("log-explorer__row--selected")).toBe(
+        true,
+      );
+      expect(
+        targetRow?.classList.contains("log-explorer__row--highlight"),
+      ).toBe(true);
+      expect(document.activeElement).toBe(targetRow);
+    });
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Bookmark visible under current filters: deep evidence",
+    );
+    expect(host.hostLogQueryEventNeighborhood).toHaveBeenNthCalledWith(
+      2,
+      "c1",
+      expect.objectContaining({
+        targetSeq: target.seq,
+        before: 50,
+        after: 50,
+      }),
+    );
+    expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      name: "level",
+      apply: () => {
+        const errorFacet = within(
+          screen.getByTestId("log-explorer-filters"),
+        )
+          .getByText("error")
+          .closest("label");
+        fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+      },
+      expectedFilter: { levels: ["error"] },
+      restoredFacet: "level:error",
+    },
+    {
+      name: "text",
+      apply: () => {
+        fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+          target: { value: "auth" },
+        });
+        fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+      },
+      expectedFilter: { keyword: "auth" },
+      restoredFacet: "keyword:auth",
+    },
+  ])(
+    "temporarily reveals a $name-filter-hidden bookmark and restores that filter",
+    async ({ apply, expectedFilter, restoredFacet }) => {
+      const allEvents = defaultEventPage().events;
+      const target = allEvents.find((event) => event.seq === 2)!;
+      vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+        bookmark(`bm-hidden-${name}`, `${name} hidden evidence`, target.seq),
+      ]);
+      vi.mocked(host.hostLogQueryEvents).mockImplementation(
+        async (_corpusId, query) => {
+          const levels = query?.levels ?? [];
+          const keyword = query?.keyword?.toLowerCase() ?? "";
+          const sources = query?.sources ?? [];
+          const events = allEvents.filter(
+            (event) =>
+              (levels.length === 0 || levels.includes(event.level)) &&
+              (!keyword || event.message.toLowerCase().includes(keyword)) &&
+              (sources.length === 0 || sources.includes(event.source)),
+          );
+          return {
+            ...defaultEventPage(),
+            events,
+            totalMatched: events.length,
+          };
+        },
+      );
+      vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+        async (_corpusId, query) => {
+          const levels = query.filter?.levels ?? [];
+          const keyword = query.filter?.keyword?.toLowerCase() ?? "";
+          const sources = query.filter?.sources ?? [];
+          const found =
+            (levels.length === 0 || levels.includes(target.level)) &&
+            (!keyword || target.message.toLowerCase().includes(keyword)) &&
+            (sources.length === 0 || sources.includes(target.source));
+          return eventNeighborhood(
+            target,
+            found ? "found" : "hidden_by_filter",
+          );
+        },
+      );
+
+      render(<LogExplorer corpusId="c1" />);
+      await screen.findByText("job ok");
+      apply();
+      await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
+
+      fireEvent.click(
+        await screen.findByTestId(`bookmark-activate-bm-hidden-${name}`),
+      );
+      await screen.findByTestId("bookmark-restore-view");
+      expect((await screen.findAllByText("job ok")).length).toBe(2);
+      expect(screen.getByRole("status").textContent).toContain(
+        `Bookmark temporarily revealed: ${name} hidden evidence`,
+      );
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenNthCalledWith(
+        1,
+        "c1",
+        expect.objectContaining({
+          targetSeq: target.seq,
+          filter: expect.objectContaining(expectedFilter),
+        }),
+      );
+      const targetRow = document.querySelector<HTMLElement>(
+        `[data-seq="${target.seq}"]`,
+      );
+      expect(targetRow?.classList.contains("log-explorer__row--selected")).toBe(
+        true,
+      );
+      expect(
+        targetRow?.classList.contains("log-explorer__row--highlight"),
+      ).toBe(true);
+
+      fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+      expect(
+        await screen.findByText(restoredFacet, { exact: false }),
+      ).toBeTruthy();
+      await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
+      expect(screen.getByRole("status").textContent).toContain(
+        "Restored prior Explorer view",
+      );
+    },
+  );
+
+  it("reloads persisted bookmarks and activates them without stale reveal state", async () => {
+    const target = defaultEventPage().events[0]!;
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-reloaded", "persisted evidence", target.seq),
+    ]);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(target),
+    );
+
+    const first = render(<LogExplorer corpusId="c1" />);
+    expect(
+      await screen.findByTestId("bookmark-activate-bm-reloaded"),
+    ).toBeTruthy();
+    first.unmount();
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-reloaded"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Bookmark visible: persisted evidence",
+      ),
+    );
+    expect(host.hostLogListBookmarks).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+    const targetRow = document.querySelector<HTMLElement>(
+      `[data-seq="${target.seq}"]`,
+    );
+    expect(targetRow?.classList.contains("log-explorer__row--selected")).toBe(
+      true,
+    );
+    expect(
+      targetRow?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
   });
 
   it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {

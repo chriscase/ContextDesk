@@ -56,6 +56,10 @@ type Props = {
   linkedScrollTop?: number;
   onLinkedScrollTop?: (scrollTop: number) => void;
   scrollToSeq?: number | null;
+  /** One-shot keyboard focus target paired with an explicit seek. */
+  focusToSeq?: number | null;
+  /** Called after the requested row is mounted and receives focus. */
+  onFocusToSeq?: (seq: number) => void;
   expandedSeqs?: Set<number>;
   onToggleExpand?: (seq: number) => void;
   onRowClick: (e: ExplorerEventDto, multi: boolean) => void;
@@ -128,6 +132,8 @@ export function VirtualizedEventList({
   linkedScrollTop,
   onLinkedScrollTop,
   scrollToSeq,
+  focusToSeq,
+  onFocusToSeq,
   expandedSeqs,
   onToggleExpand,
   onRowClick,
@@ -322,6 +328,16 @@ export function VirtualizedEventList({
     () => displayRows.slice(start, end),
     [displayRows, start, end],
   );
+
+  useLayoutEffect(() => {
+    if (focusToSeq == null) return;
+    const row = parentRef.current?.querySelector<HTMLElement>(
+      `[data-seq="${focusToSeq}"]`,
+    );
+    if (!row) return;
+    row.focus();
+    onFocusToSeq?.(focusToSeq);
+  }, [focusToSeq, onFocusToSeq, slice]);
 
   if (displayRows.length === 0) {
     return (
