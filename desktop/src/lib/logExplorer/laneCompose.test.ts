@@ -32,7 +32,7 @@ describe("laneCompose", () => {
     expect(lanes[1]!.sources).toEqual([]);
   });
 
-  it("resizeLaneList preserves existing definitions", () => {
+  it("resizeLaneList preserves hidden definitions when visible lanes shrink", () => {
     const base = [
       { id: "lane-0", label: "api", sources: ["api/app.jsonl"] },
       { id: "lane-1", label: "worker", sources: ["worker/worker.log"] },
@@ -42,8 +42,10 @@ describe("laneCompose", () => {
     expect(grown[1]).toEqual(base[1]);
     expect(grown[2]!.sources).toEqual([]);
     const shrunk = resizeLaneList(grown, 1);
-    expect(shrunk).toHaveLength(1);
+    expect(shrunk).toHaveLength(3);
     expect(shrunk[0]!.sources).toEqual(["api/app.jsonl"]);
+    expect(shrunk[1]!.sources).toEqual(["worker/worker.log"]);
+    expect(shrunk[2]!.sources).toEqual([]);
   });
 
   it("toggleLaneSource allows multi-source and all-sources empty set", () => {
