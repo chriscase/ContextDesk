@@ -485,12 +485,22 @@ describe("LogExplorer shell", () => {
     expect(screen.getByTestId("bookmark-restore-view").textContent).toContain(
       "temp reveal",
     );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Bookmark temporarily revealed: worker evidence",
+      ),
+    );
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
         "c1",
         expect.objectContaining({ sources: ["api.log"] }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Restored prior Explorer view",
       ),
     );
     expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
