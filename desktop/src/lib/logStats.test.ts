@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   formatBytes,
-  formatReduction,
+  formatEventsPerTemplate,
   levelEntries,
   statsBlurb,
 } from "./logStats";
 
 describe("logStats", () => {
-  it("formats reduction and bytes", () => {
-    expect(formatReduction(353.2)).toBe("353.2×");
+  it("formats self-describing pattern grouping and bytes", () => {
+    expect(formatEventsPerTemplate(353.2)).toBe(
+      "353.2 avg. events/template",
+    );
+    expect(formatEventsPerTemplate(10_000)).toBe(
+      "10,000 avg. events/template",
+    );
     expect(formatBytes(1500)).toContain("KB");
     expect(formatBytes(0)).toBe("0 B");
   });
@@ -19,9 +24,11 @@ describe("logStats", () => {
       templates: 340,
       reductionRatio: 353.0,
     });
-    expect(blurb).toContain("120,000");
-    expect(blurb).toContain("340");
-    expect(blurb).toContain("353.0×");
+    expect(blurb).toContain(
+      "120,000 events grouped into 340 learned templates",
+    );
+    expect(blurb).toContain("353 avg. events/template");
+    expect(blurb).not.toContain("reduction");
   });
 
   it("sorts level counts", () => {

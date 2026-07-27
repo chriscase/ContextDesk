@@ -216,6 +216,26 @@ describe("LogPane", () => {
       expect(hostMocks.clusterProblems).toHaveBeenCalledWith(corpus.id, 12);
       expect(hostMocks.listTemplates).toHaveBeenCalledWith(corpus.id, 100);
     });
+    expect(
+      within(overview).getByText("250 avg. events/template"),
+    ).toBeTruthy();
+    fireEvent.click(
+      within(overview).getByRole("button", {
+        name: "Help: Events per template",
+      }),
+    );
+    const groupingHelp = await screen.findByRole("dialog", {
+      name: "Events per template",
+    });
+    expect(groupingHelp.textContent).toContain(
+      "Every original redacted event remains",
+    );
+    expect(groupingHelp.textContent).toContain(
+      "not a byte-compression or event-deletion claim",
+    );
+    fireEvent.click(
+      within(groupingHelp).getByRole("button", { name: "Close help" }),
+    );
     // Regression: selecting a corpus must not call hostLogTimeline.
     expect(hostMocks.timeline).not.toHaveBeenCalled();
     expect(

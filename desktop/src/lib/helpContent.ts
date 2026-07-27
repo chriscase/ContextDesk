@@ -4,6 +4,23 @@
  */
 import type { HelpTipContent } from "../components/HelpTip";
 
+export const HELP_TEMPLATE_GROUPING: HelpTipContent = {
+  title: "Events per template",
+  definition:
+    "Average events per template is the imported event count divided by the learned Drain template count. A template replaces changing tokens with placeholders, so structurally similar—not necessarily identical—events can share one pattern.",
+  currentState:
+    "Every original redacted event remains in the corpus for search, filters, provenance, and inspection.",
+  useWhen:
+    "estimating how many recurring patterns a triage engineer must review and how much optional template-level embedding work is avoided.",
+  example:
+    "100,000 events ÷ 10 learned templates = 10,000 avg. events/template",
+  consequence:
+    "A higher value means more repetition at the pattern level. It is not a byte-compression or event-deletion claim.",
+  safety:
+    "Use Source and Corpus sizes for storage. Inspect top-template counts because this ratio is only an average and may hide a long tail.",
+  helpLocator: "help://log-analysis-pipeline#events-per-template",
+};
+
 export const HELP_FIND_VS_FILTER: HelpTipContent = {
   title: "Find vs Filter",
   definition:

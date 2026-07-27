@@ -21,14 +21,15 @@ describe("buildLogTriageStarterPrompt", () => {
     const seed = buildLogTriageStarterPrompt({
       corpusId: "abc-def-12",
       sessionContext: true,
-      statsLine: "1,000 lines → 10 templates (100.0× reduction)",
+      statsLine:
+        "1,000 events grouped into 10 learned templates · 100 avg. events/template",
     });
     expect(seed).toContain("abc-def-12");
     expect(seed).toContain('corpus="abc-def-12"');
     expect(seed).toMatch(/Do not ask me for a corpus id/i);
     expect(seed).toMatch(/session context/i);
     expect(seed).toMatch(/Ingest summary/i);
-    expect(seed).toContain("100.0×");
+    expect(seed).toContain("100 avg. events/template");
   });
 
   it("falls back to generic when nothing was attached", () => {

@@ -35,15 +35,20 @@ export function formatBytes(n: number | undefined | null): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export function formatReduction(ratio: number | undefined | null): string {
+export function formatEventsPerTemplate(
+  ratio: number | undefined | null,
+): string {
   if (ratio == null || !Number.isFinite(ratio) || ratio <= 0) return "—";
-  return `${ratio.toFixed(1)}×`;
+  return `${ratio.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  })} avg. events/template`;
 }
 
 /** One-line blurb for composer seed / cards. */
 export function statsBlurb(s: StatsLike): string {
-  const red = formatReduction(s.reductionRatio);
-  const base = `${s.lines.toLocaleString()} lines → ${s.templates.toLocaleString()} templates (${red} reduction)`;
+  const grouping = formatEventsPerTemplate(s.reductionRatio);
+  const base = `${s.lines.toLocaleString()} events grouped into ${s.templates.toLocaleString()} learned templates`;
+  const groupingSummary = grouping === "—" ? "" : ` · ${grouping}`;
   const discovered = s.discoveredFiles ?? s.files;
   const fileSummary =
     discovered == null || s.files == null
@@ -57,7 +62,7 @@ export function statsBlurb(s: StatsLike): string {
     .filter(([, count]) => Number(count) > 0)
     .map(([label, count]) => `${Number(count).toLocaleString()} ${label}`)
     .join(", ");
-  return `${base}${fileSummary}${omissions ? ` · partial: ${omissions}` : ""}`;
+  return `${base}${groupingSummary}${fileSummary}${omissions ? ` · partial: ${omissions}` : ""}`;
 }
 
 export function levelEntries(

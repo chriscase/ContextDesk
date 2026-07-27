@@ -1951,7 +1951,7 @@ impl ToolHost {
         // Wizard/UI and agent ingest both default subsequent log tools to this corpus.
         self.set_active_log_corpus(Some(report.corpus_id.clone()));
         let mut raw = format!(
-            "corpus={} lines={} templates={} reduction={:.1}x embedded={}\nTop templates:\n",
+            "corpus={} events={} learned_templates={} avg_events_per_template={:.1} embedded={}\nTop templates:\n",
             report.corpus_id,
             report.stats.lines,
             report.stats.templates,

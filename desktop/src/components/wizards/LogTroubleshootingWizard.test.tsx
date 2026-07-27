@@ -153,7 +153,7 @@ function expectRichStatsHero() {
   const hero = screen.getByTestId("wizard-ingest-stats");
   expect(within(hero).getByText("1,200")).toBeTruthy();
   expect(within(hero).getByText("12")).toBeTruthy();
-  expect(within(hero).getByText("100.0×")).toBeTruthy();
+  expect(within(hero).getByText("100 avg. events/template")).toBeTruthy();
   expect(within(hero).getAllByText("3")).toHaveLength(2);
   expect(within(hero).getByText("2.0 KB")).toBeTruthy();
   expect(within(hero).getByText("1.0 KB")).toBeTruthy();
@@ -198,6 +198,23 @@ describe("LogTroubleshootingWizard product path", () => {
     expect(hostMocks.importSessionContext).not.toHaveBeenCalled();
     expect(await screen.findByText(/Import finished/)).toBeTruthy();
     expectRichStatsHero();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Help: Events per template",
+      }),
+    );
+    const groupingHelp = await screen.findByRole("dialog", {
+      name: "Events per template",
+    });
+    expect(groupingHelp.textContent).toContain(
+      "structurally similar—not necessarily identical—events",
+    );
+    expect(groupingHelp.textContent).toContain(
+      "Every original redacted event remains",
+    );
+    fireEvent.click(
+      within(groupingHelp).getByRole("button", { name: "Close help" }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Ready" });
@@ -212,7 +229,7 @@ describe("LogTroubleshootingWizard product path", () => {
       'corpus="local-corpus-raw-123"',
     );
     expect(outcome.composerSeed).toContain(
-      "1,200 lines → 12 templates (100.0× reduction)",
+      "1,200 events grouped into 12 learned templates · 100 avg. events/template",
     );
   });
 
