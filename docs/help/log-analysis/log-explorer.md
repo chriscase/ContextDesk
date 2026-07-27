@@ -40,6 +40,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Narrow layout | Logs remain primary and single-lane. Filters and Chat open intentionally as keyboard-safe drawers with state summaries and focus restoration |
 | Evidence lanes | 1–4 user-composed source groups. The same source may appear in more than one lane |
 | Time-link modes | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets |
+| Timeline navigator | Closed by default and does no work until opened. A hard-capped backend summary shows the full filtered span; click a bar or release the position slider to load one bounded event neighborhood |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
 | Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot and runs **bounded log tools** (search, cluster, timeline, …) until it produces an evidence-based answer — not planning-only prose |
 | Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
@@ -81,10 +82,22 @@ use one lane rather than stacking unusable columns.
   of exact timestamp rows and synchronized scroll. A blank striped cell means
   that lane has no event at that timestamp; it is not a fabricated log line.
 
-Align is an event-time axis, not a proportional-duration chart or the
-still-unshipped scalable time-range navigator. Mixed and order-only data cannot
-enter Align, and an empty/failed/unloaded lane cannot make the aggregate more
-trustworthy.
+Align is an event-time axis, not a proportional-duration chart. Mixed and
+order-only data cannot enter Align, and an empty/failed/unloaded lane cannot
+make the aggregate more trustworthy.
+
+## Timeline navigator
+
+Open **Navigator** to move across the entire filtered corpus without loading
+the intervening event bodies. The backend performs fixed-size SQL aggregation
+and returns at most 96 count buckets; empty spans stay empty. The shaded portion
+marks buckets represented in the current bounded resident window.
+
+Click a bar or move and release the position slider. Explorer requests one
+event in that bucket and then loads its bounded neighborhood. Slider movement
+alone performs no request. Wall-clock data uses UTC labels; order-only data is
+described as order and mixed data is labeled honestly. Closing Navigator
+returns it to zero background timeline work.
 
 ## Long lines
 

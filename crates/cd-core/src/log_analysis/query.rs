@@ -16,6 +16,12 @@ pub const MAX_EVENT_PAGE: usize = 500;
 /// Default page size when caller omits limit.
 pub const DEFAULT_EVENT_PAGE: usize = 100;
 
+/// Default number of fixed summary buckets used by the Explorer navigator.
+pub const DEFAULT_TIMELINE_BUCKETS: usize = 96;
+
+/// Hard cap on timeline summary buckets returned across IPC.
+pub const MAX_TIMELINE_BUCKETS: usize = 256;
+
 /// Minimum unix ts treated as plausible wall-clock (2000-01-01).
 pub const MIN_WALL_TS: i64 = 946_684_800;
 
@@ -172,6 +178,70 @@ impl Default for EventQuery {
             sort_by_time: true,
         }
     }
+}
+
+/// Bounded, filter-aware input for the Explorer timeline navigator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSummaryQuery {
+    /// Uses the same predicates as the visible Explorer rows. Paging cursors
+    /// and page limits are intentionally ignored.
+    #[serde(default)]
+    pub filter: EventQuery,
+    /// Desired maximum number of buckets, clamped to
+    /// [`MAX_TIMELINE_BUCKETS`].
+    #[serde(default = "default_timeline_buckets")]
+    pub max_buckets: usize,
+}
+
+fn default_timeline_buckets() -> usize {
+    DEFAULT_TIMELINE_BUCKETS
+}
+
+impl Default for TimelineSummaryQuery {
+    fn default() -> Self {
+        Self {
+            filter: EventQuery::default(),
+            max_buckets: DEFAULT_TIMELINE_BUCKETS,
+        }
+    }
+}
+
+/// One non-empty fixed-width summary bucket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSummaryBucket {
+    /// Zero-based position in the complete fixed-width span.
+    pub index: u32,
+    /// Inclusive timestamp (wall-clock seconds or explicit order value).
+    pub start: i64,
+    /// Exclusive timestamp/order bound.
+    pub end: i64,
+    /// Events in this bucket.
+    pub count: u64,
+    /// Bounded naturally by the finite level values in this bucket.
+    pub by_level: BTreeMap<String, u64>,
+}
+
+/// Fixed-size corpus overview for navigation. Empty buckets are represented by
+/// their index, not materialized as event rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineSummary {
+    /// Reliability of the filtered result's timestamps.
+    pub time_quality: TimeQuality,
+    /// Inclusive first timestamp/order value, or none when empty.
+    pub span_from: Option<i64>,
+    /// Exclusive final timestamp/order value, or none when empty.
+    pub span_to: Option<i64>,
+    /// Width of each bucket in timestamp/order units.
+    pub bucket_width: i64,
+    /// Number of slots across the complete span, including implicit empties.
+    pub bucket_count: usize,
+    /// Exact number of events matched by the supplied filters.
+    pub total_matched: u64,
+    /// Non-empty buckets only, ordered by index.
+    pub buckets: Vec<TimelineSummaryBucket>,
 }
 
 /// One explorer event row (redacted message + honest time quality).
@@ -335,6 +405,124 @@ pub struct EventSearchResult {
     pub diagnostic: Option<String>,
     /// Events actually scanned under the work budget (regex path).
     pub scanned: u64,
+}
+
+/// Query a bounded timeline summary directly in DuckDB.
+///
+/// This deliberately returns counts rather than event bodies. Its memory and
+/// IPC footprint are bounded by [`MAX_TIMELINE_BUCKETS`] regardless of corpus
+/// size, and it honors the same filter predicates as [`query_events`].
+pub fn query_timeline_summary(
+    corpus: &LogCorpus,
+    q: &TimelineSummaryQuery,
+) -> CoreResult<TimelineSummary> {
+    let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
+    let (where_sql, binds) = build_where(&q.filter);
+    let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
+
+    let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&bounds_sql).map_err(duck_err)?;
+        stmt.query_row(params_ref(&binds).as_slice(), |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(duck_err)
+    })?;
+
+    let (Some(min_ts), Some(max_ts)) = (min_ts, max_ts) else {
+        return Ok(TimelineSummary {
+            time_quality: TimeQuality::OrderOnly,
+            span_from: None,
+            span_to: None,
+            bucket_width: 1,
+            bucket_count: 0,
+            total_matched: 0,
+            buckets: Vec::new(),
+        });
+    };
+
+    let inclusive_span = max_ts.saturating_sub(min_ts).saturating_add(1).max(1);
+    let bucket_width = inclusive_span
+        .saturating_add(max_buckets as i64 - 1)
+        .checked_div(max_buckets as i64)
+        .unwrap_or(1)
+        .max(1);
+    let bucket_count = inclusive_span
+        .saturating_add(bucket_width - 1)
+        .checked_div(bucket_width)
+        .unwrap_or(1)
+        .clamp(1, max_buckets as i64) as usize;
+
+    let bucket_sql = format!(
+        "SELECT CAST(FLOOR((ts - ?) / CAST(? AS DOUBLE)) AS BIGINT) AS bucket_index, \
+         level, COUNT(*) \
+         FROM events WHERE {where_sql} \
+         GROUP BY bucket_index, level ORDER BY bucket_index, level"
+    );
+    let mut bucket_binds = vec![Value::BigInt(min_ts), Value::BigInt(bucket_width)];
+    bucket_binds.extend(binds);
+
+    let grouped = corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&bucket_sql).map_err(duck_err)?;
+        let rows = stmt
+            .query_map(params_ref(&bucket_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(duck_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(duck_err)?);
+        }
+        Ok(out)
+    })?;
+
+    let mut by_index: BTreeMap<u32, TimelineSummaryBucket> = BTreeMap::new();
+    for (raw_index, level, count) in grouped {
+        if raw_index < 0 || raw_index as usize >= bucket_count {
+            return Err(CoreError::Message(
+                "duckdb: timeline bucket fell outside computed span".into(),
+            ));
+        }
+        let index = raw_index as u32;
+        let start = min_ts.saturating_add(raw_index.saturating_mul(bucket_width));
+        let end = start
+            .saturating_add(bucket_width)
+            .min(max_ts.saturating_add(1));
+        let bucket = by_index
+            .entry(index)
+            .or_insert_with(|| TimelineSummaryBucket {
+                index,
+                start,
+                end,
+                count: 0,
+                by_level: BTreeMap::new(),
+            });
+        bucket.count = bucket.count.saturating_add(count.max(0) as u64);
+        bucket.by_level.insert(level, count.max(0) as u64);
+    }
+
+    let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
+        (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
+        (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
+        _ => TimeQuality::Mixed,
+    };
+
+    Ok(TimelineSummary {
+        time_quality,
+        span_from: Some(min_ts),
+        span_to: Some(max_ts.saturating_add(1)),
+        bucket_width,
+        bucket_count,
+        total_matched: total_matched.max(0) as u64,
+        buckets: by_index.into_values().collect(),
+    })
 }
 
 /// Query events with SQL filters + keyset pagination.
@@ -1384,6 +1572,92 @@ mod tests {
         let backend = ConceptEmbedBackend::new(64);
         let report = ingest_path(&cache, &logs, "fixture", Some(&backend), "c").unwrap();
         (dir, report.corpus_id)
+    }
+
+    #[test]
+    fn timeline_summary_is_fixed_size_sparse_and_filter_aware() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+
+        let mixed = query_timeline_summary(
+            &corpus,
+            &TimelineSummaryQuery {
+                max_buckets: 12,
+                ..Default::default()
+            },
+        )
+        .expect("mixed summary");
+        assert_eq!(mixed.total_matched, 90);
+        assert_eq!(mixed.time_quality, TimeQuality::Mixed);
+        assert!(mixed.bucket_count <= 12);
+        assert!(mixed.buckets.len() <= mixed.bucket_count);
+        assert!(
+            mixed.buckets.len() < mixed.bucket_count,
+            "the wide mixed-time span should keep empty buckets implicit"
+        );
+
+        let errors = query_timeline_summary(
+            &corpus,
+            &TimelineSummaryQuery {
+                filter: EventQuery {
+                    levels: vec!["error".into()],
+                    ..Default::default()
+                },
+                max_buckets: 7,
+            },
+        )
+        .expect("filtered summary");
+        assert_eq!(errors.total_matched, 40);
+        assert_eq!(errors.time_quality, TimeQuality::Wall);
+        assert!(errors.bucket_count <= 7);
+        assert_eq!(
+            errors
+                .buckets
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<u64>(),
+            40
+        );
+        assert!(errors
+            .buckets
+            .iter()
+            .all(|bucket| bucket.by_level.keys().all(|level| level == "error")));
+    }
+
+    #[test]
+    fn timeline_summary_caps_requested_buckets_and_handles_empty_filters() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+
+        let capped = query_timeline_summary(
+            &corpus,
+            &TimelineSummaryQuery {
+                max_buckets: usize::MAX,
+                ..Default::default()
+            },
+        )
+        .expect("capped summary");
+        assert!(capped.bucket_count <= MAX_TIMELINE_BUCKETS);
+        assert!(capped.buckets.len() <= MAX_TIMELINE_BUCKETS);
+
+        let empty = query_timeline_summary(
+            &corpus,
+            &TimelineSummaryQuery {
+                filter: EventQuery {
+                    keyword: Some("definitely absent marker".into()),
+                    ..Default::default()
+                },
+                max_buckets: 32,
+            },
+        )
+        .expect("empty summary");
+        assert_eq!(empty.total_matched, 0);
+        assert_eq!(empty.bucket_count, 0);
+        assert!(empty.buckets.is_empty());
+        assert_eq!(empty.span_from, None);
+        assert_eq!(empty.span_to, None);
     }
 
     #[test]

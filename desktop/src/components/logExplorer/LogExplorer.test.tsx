@@ -62,6 +62,18 @@ vi.mock("../../lib/host", () => ({
     totalMatched: 2,
     timeQuality: "wall",
   })),
+  hostLogTimelineSummary: vi.fn(async () => ({
+    timeQuality: "wall",
+    spanFrom: 1_700_000_000,
+    spanTo: 1_700_000_004,
+    bucketWidth: 1,
+    bucketCount: 4,
+    totalMatched: 2,
+    buckets: [
+      { index: 0, start: 1_700_000_000, end: 1_700_000_001, count: 1, byLevel: { error: 1 } },
+      { index: 1, start: 1_700_000_001, end: 1_700_000_002, count: 1, byLevel: { info: 1 } },
+    ],
+  })),
   hostLogSearchEvents: vi.fn(async () => []),
   hostLogSearchEventsAdvanced: vi.fn(async () => ({
     hits: [],

@@ -108,7 +108,8 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
   cells are visually explicit gaps, never placeholder log events. Repeated
   same-time events use stable occurrence rows rather than being dropped.
 - Align is intentionally an event-time axis, not proportional elapsed-time
-  spacing. The scalable range navigator remains separate work.
+  spacing. The separate lazy range navigator uses fixed-size SQL summaries to
+  move the resident window across the full filtered span.
 - Mixed, order-only, empty, failed, or unloaded lanes fail closed for Align;
   they cannot be upgraded by a more reliable lane.
 
@@ -126,7 +127,7 @@ Per corpus under app cache:
 |-----|---------|
 | `log_query_events` | Paged/keyset events with filter + sort |
 | `log_facets` | Sources, levels, services, hosts under filter |
-| `log_timeline` | Filtered volume buckets (+ by_level) — already partial |
+| `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the lazy range navigator; no event bodies |
 | `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor |
 | Bookmarks CRUD | Line or range anchors on corpus |
 | Chat link | List/create sessions with `linkedCorpusId` |

@@ -574,6 +574,112 @@
   align-items: center;
 }
 
+.log-explorer__navigator {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 1 1 28rem;
+}
+
+.log-explorer__navigator-body {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(8rem, 0.45fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.log-explorer__navigator-bars {
+  display: grid;
+  align-items: end;
+  gap: 1px;
+  height: 2.1rem;
+  min-width: 10rem;
+  padding: 2px;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 4px;
+  background: var(--bg-app, #0b0c0e);
+}
+
+.log-explorer__navigator-bucket {
+  position: relative;
+  align-self: stretch;
+  min-width: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: crosshair;
+}
+
+.log-explorer__navigator-bucket::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: var(--bucket-height, 4%);
+  min-height: 2px;
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 68%, transparent);
+}
+
+.log-explorer__navigator-bucket--resident {
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 16%, transparent);
+}
+
+.log-explorer__navigator-bucket--active {
+  outline: 1px solid var(--accent, #5b9fd4);
+  outline-offset: 0;
+}
+
+.log-explorer__navigator-bucket:focus-visible {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: 1px;
+  z-index: 1;
+}
+
+.log-explorer__navigator-range {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--fg-muted, #9aa0a6);
+}
+
+.log-explorer__navigator-range input {
+  width: 100%;
+  min-width: 5rem;
+}
+
+.log-explorer__navigator-label,
+.log-explorer__navigator-status {
+  font-size: 0.68rem;
+  color: var(--fg-muted, #9aa0a6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-explorer__navigator-status {
+  grid-column: 1 / -1;
+}
+
+.log-explorer--narrow .log-explorer__navigator {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+}
+
+.log-explorer--narrow .log-explorer__navigator-body {
+  grid-template-columns: 1fr;
+  flex-basis: 100%;
+}
+
+.log-explorer--narrow .log-explorer__navigator-status {
+  grid-column: auto;
+}
+
 .log-explorer__lane-grid {
   display: grid;
   flex: 1;

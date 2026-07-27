@@ -4466,6 +4466,19 @@ fn log_query_events(
     cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
 }
 
+/// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
+#[tauri::command]
+fn log_timeline_summary(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::TimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::TimelineSummary, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_timeline_summary(&c, &query).map_err(|e| e.to_string())
+}
+
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
 #[tauri::command]
 fn log_query_event_neighborhood(
@@ -5531,6 +5544,7 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
             log_search_events,

@@ -81,9 +81,11 @@ import {
   HELP_FIND_VS_FILTER,
   HELP_LANE_COMPOSE,
   HELP_LONG_LINES,
+  HELP_TIMELINE_NAVIGATOR,
   HELP_TIME_LINK,
 } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
+import { TimelineNavigator } from "./TimelineNavigator";
 import {
   eventRowHeight,
   VirtualizedEventList,
@@ -2429,6 +2431,31 @@ export function LogExplorer({ corpusId }: Props) {
 
         <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
           <div className="log-explorer__lane-strip">
+            <TimelineNavigator
+              corpusId={corpusId}
+              filter={filtersToQuery(filters, {
+                afterSeq: null,
+                afterTs: null,
+                beforeSeq: null,
+                beforeTs: null,
+              })}
+              residentEvents={Object.values(laneEvents).flat()}
+              onSeekSeq={async (seq) => {
+                const result = await seekToSeq(seq);
+                if (result !== "found") {
+                  throw new Error(
+                    result === "hidden_by_filter"
+                      ? "Timeline target is hidden by current filters"
+                      : "Timeline target is no longer present",
+                  );
+                }
+              }}
+            />
+            <HelpTip
+              label="Timeline navigator help"
+              title="Timeline navigator"
+              content={HELP_TIMELINE_NAVIGATOR}
+            />
             {linkMode === "align_time" ? (
               <span
                 className="log-explorer__badge"

@@ -64,6 +64,34 @@ export const HELP_TIME_LINK: HelpTipContent = {
   helpLocator: "help://log-explorer#time-link",
 };
 
+export const HELP_TIMELINE_NAVIGATOR: HelpTipContent = {
+  title: "Timeline navigator",
+  definition:
+    "A lazy fixed-size overview of the current filters. It summarizes counts into at most 96 backend buckets and seeks a bounded event neighborhood when you choose a position.",
+  currentState:
+    "Closed means zero timeline work. Opening performs bounded SQL aggregation; moving the slider only previews, and releasing it performs one seek.",
+  useWhen:
+    "you need to jump across a long corpus without loading or scrolling through every intervening event.",
+  comparison: {
+    columns: ["Control", "Purpose"],
+    rows: [
+      {
+        option: "Align",
+        meaning: "Compare resident lane rows at exact wall-clock times.",
+      },
+      {
+        option: "Navigator",
+        meaning: "Move the resident window across the full filtered corpus.",
+      },
+    ],
+  },
+  consequence:
+    "Empty buckets are honest empty spans. Order-only data is labeled as order, not formatted as calendar time.",
+  safety:
+    "The overview returns counts only, never full event bodies. Bucket count is hard-capped independently of corpus size.",
+  helpLocator: "help://log-explorer#timeline-navigator",
+};
+
 export const HELP_LANE_COMPOSE: HelpTipContent = {
   title: "Lane composition",
   definition:
@@ -131,6 +159,7 @@ export const HELP_COVERAGE_KEYS = [
   "find-vs-filter",
   "counts",
   "time-link",
+  "timeline-navigator",
   "lanes",
   "long-lines",
   "bookmarks",
