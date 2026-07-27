@@ -121,7 +121,7 @@ export const HELP_LANE_COMPOSE: HelpTipContent = {
 export const HELP_LONG_LINES: HelpTipContent = {
   title: "Reading long events",
   definition:
-    "1 line keeps dense scanning. Preview wraps every row to the selected line depth. Deep doubles that bounded depth. Selecting any row opens the resizable inspector with the complete redacted event.",
+    "1 line keeps dense scanning. Preview and Deep use the selected depth as a maximum while short events stay compact. Deep doubles that bounded maximum. Selecting any row opens the resizable inspector with the complete redacted event.",
   useWhen:
     "messages, stack traces, JSON, or logfmt values do not fit in a dense row.",
   options: [
@@ -131,7 +131,7 @@ export const HELP_LONG_LINES: HelpTipContent = {
     },
     {
       name: "Preview / Deep",
-      when: "Comparing several wrapped lines in place; choose 2, 4, 8, or 12 preview lines.",
+      when: "Comparing several wrapped lines in place; choose a 2, 4, 8, or 12-line maximum without padding every short event to that height.",
     },
     {
       name: "Inspector",

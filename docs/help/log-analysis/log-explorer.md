@@ -105,7 +105,9 @@ returns it to zero background timeline work.
 ## Long lines
 
 **1 line** is the dense scan mode. **Preview** and **Deep** show a configurable
-2/4/8/12-line bounded preview (Deep doubles the chosen depth up to its cap).
+2/4/8/12-line bounded maximum (Deep doubles the chosen depth up to its cap).
+Row height follows the displayed content, so a short one-line event remains
+compact instead of reserving the entire preview maximum.
 Press **X** on a focused row or use **Expand** for one event. Select a row for
 the complete redacted message and metadata in the resizable inspector; row
 preview truncation never claims to be the complete record.

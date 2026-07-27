@@ -324,7 +324,7 @@ describe("LogExplorer shell", () => {
         screen
           .getByTestId("virtualized-event-list")
           .getAttribute("data-total-height"),
-      ).toBe(String(228 * page.events.length)),
+      ).toBe("148"),
     );
 
     fireEvent.click(screen.getByText(/long-message/));
@@ -356,6 +356,14 @@ describe("LogExplorer shell", () => {
       );
       expect(root.getAttribute("data-lane-count")).toBe("1");
       expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
+      fireEvent.click(screen.getByTestId("line-mode-full"));
+      await waitFor(() =>
+        expect(
+          screen
+            .getByTestId("virtualized-event-list")
+            .getAttribute("data-total-height"),
+        ).toBe("56"),
+      );
 
       fireEvent.click(await screen.findByText("auth failure"));
       expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
@@ -709,6 +717,28 @@ describe("LogExplorer shell", () => {
       for (let index = 0; index < lanes; index += 1) {
         const lane = document.querySelector(`[data-lane-id="lane-${index}"]`);
         expect(lane?.getAttribute("data-time-quality")).toBe(qualities[index]);
+      }
+    },
+  );
+
+  it.each([1, 2, 3, 4])(
+    "keeps short Deep-mode events compact across %i visible lane(s)",
+    async (laneCount) => {
+      render(<LogExplorer corpusId="c1" />);
+      if (laneCount > 1) {
+        fireEvent.click(
+          await screen.findByTitle(`${laneCount} evidence lanes`),
+        );
+      }
+      fireEvent.click(screen.getByTestId("line-mode-full"));
+
+      await waitFor(() =>
+        expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(
+          laneCount,
+        ),
+      );
+      for (const list of screen.getAllByTestId("virtualized-event-list")) {
+        expect(list.getAttribute("data-total-height")).toBe("56");
       }
     },
   );

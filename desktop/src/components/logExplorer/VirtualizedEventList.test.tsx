@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { VirtualizedEventList } from "./VirtualizedEventList";
+import {
+  eventRowHeight,
+  VirtualizedEventList,
+} from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
 
 function makeEvents(n: number): ExplorerEventDto[] {
@@ -107,7 +110,7 @@ describe("VirtualizedEventList", () => {
     expect((list as HTMLDivElement).scrollTop).toBe(84);
   });
 
-  it("uses measured variable row offsets when preserving the anchor", () => {
+  it("uses content-aware variable row offsets when preserving the anchor", () => {
     const base = makeEvents(8).slice(2);
     const props = {
       timeQuality: "wall" as const,
@@ -130,9 +133,19 @@ describe("VirtualizedEventList", () => {
     act(() => {
       rerender(<VirtualizedEventList {...props} events={makeEvents(8)} />);
     });
-    // Deep mode at the default four-line preference uses eight visible lines:
-    // two prepended rows × 156px + the prior 96px within-row offset.
-    expect((list as HTMLDivElement).scrollTop).toBe(408);
+    // These are short one-line events, so Deep mode keeps them at 28px rather
+    // than reserving its eight-line maximum: 2 × 28px + prior 96px.
+    expect((list as HTMLDivElement).scrollTop).toBe(152);
+  });
+
+  it("bounds wrapped row height by actual content instead of always reserving the maximum", () => {
+    const [short, multiline, long] = makeEvents(3);
+    multiline!.message = "first\nsecond\nthird";
+    long!.message = "x".repeat(1_000);
+
+    expect(eventRowHeight(short!, "full", false, 28, 4)).toBe(28);
+    expect(eventRowHeight(multiline!, "full", false, 28, 4)).toBe(66);
+    expect(eventRowHeight(long!, "full", false, 28, 4)).toBe(156);
   });
 
   it("uses the user preview depth and a backend hit-centered excerpt", () => {
@@ -154,7 +167,7 @@ describe("VirtualizedEventList", () => {
       />,
     );
     const list = screen.getByTestId("virtualized-event-list");
-    expect(list.getAttribute("data-total-height")).toBe("228");
+    expect(list.getAttribute("data-total-height")).toBe("28");
     const row = list.querySelector(`[data-seq="${event.seq}"]`);
     expect(row?.getAttribute("data-match-excerpt")).toBe("true");
     expect(screen.getByText(/near NEEDLE/)).toBeTruthy();
