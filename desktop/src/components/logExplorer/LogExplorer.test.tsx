@@ -498,10 +498,14 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({ sources: ["api.log"] }),
       ),
     );
+    await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toContain(
         "Restored prior Explorer view",
       ),
+    );
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "Selection cleared",
     );
     expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
   });

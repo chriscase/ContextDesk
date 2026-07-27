@@ -316,6 +316,7 @@ export function LogExplorer({ corpusId }: Props) {
   const autoStatusLockRef = useRef<
     "bookmark-reveal" | "bookmark-restore" | null
   >(null);
+  const suppressSelectionClearStatusRef = useRef(false);
   const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
     () => {},
   );
@@ -1300,9 +1301,13 @@ export function LogExplorer({ corpusId }: Props) {
       const next = new Set([...prev].filter((s) => resident.has(s)));
       if (next.size === prev.size) return prev;
       if (next.size === 0) {
-        setStatus(
-          "Selection cleared — event no longer visible under filters/lanes",
-        );
+        if (suppressSelectionClearStatusRef.current) {
+          suppressSelectionClearStatusRef.current = false;
+        } else {
+          setStatus(
+            "Selection cleared — event no longer visible under filters/lanes",
+          );
+        }
       }
       return next;
     });
@@ -1438,6 +1443,7 @@ export function LogExplorer({ corpusId }: Props) {
   const restorePriorView = () => {
     if (revealRestore) {
       autoStatusLockRef.current = "bookmark-restore";
+      suppressSelectionClearStatusRef.current = true;
       setFilters(revealRestore.filters);
       setFilterDraft(revealRestore.filters.keyword ?? "");
       setLanes(revealRestore.lanes);
