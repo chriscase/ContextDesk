@@ -708,20 +708,15 @@ pub async fn research_turn_with_cancel_and_context(
         return Ok(ev);
     }
 
-    if log_explorer_context.is_some() && !profile.capabilities.tools {
-        let message = format!(
-            "Linked log investigation is unavailable because profile “{}” has tools disabled \
-             (capabilities.tools=false). Select or configure a tools-enabled profile in \
-             Settings → AI, then retry this linked chat.",
-            profile.label
-        );
-        return Ok(emit_provider_error(
-            "linked_tools_unavailable",
-            message,
-            session_id,
-            Some(profile.chat_model.clone()),
-            live,
-        ));
+    if log_explorer_context.is_some() {
+        if let Some(events) = linked_tools_unavailable_events(profile, session_id) {
+            if let Some(sink) = live {
+                for event in &events {
+                    sink(event.clone());
+                }
+            }
+            return Ok(events);
+        }
     }
 
     // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
@@ -830,6 +825,33 @@ fn emit_provider_error(
         }
     }
     events
+}
+
+/// Deterministic linked-chat refusal for profiles that cannot call tools.
+///
+/// Hosts may use this before constructing or waiting for a [`ToolHost`]: the
+/// result depends only on the selected profile and must remain available even
+/// while workspace indexing is still warming up.
+pub fn linked_tools_unavailable_events(
+    profile: &ProviderProfile,
+    session_id: &str,
+) -> Option<Vec<StreamEvent>> {
+    if profile.capabilities.tools {
+        return None;
+    }
+    let message = format!(
+        "Linked log investigation is unavailable because profile “{}” has tools disabled \
+         (capabilities.tools=false). Select or configure a tools-enabled profile in \
+         Settings → AI, then retry this linked chat.",
+        profile.label
+    );
+    Some(emit_provider_error(
+        "linked_tools_unavailable",
+        message,
+        session_id,
+        Some(profile.chat_model.clone()),
+        None,
+    ))
 }
 
 /// Scripted tool-using turn for golden fixtures (no network).
