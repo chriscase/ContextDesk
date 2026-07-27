@@ -4,8 +4,9 @@ mod log_lab_generator;
 use cd_core::log_analysis::{
     add_line_bookmark, export_corpus_zip, import_corpus_zip_path, ingest_path,
     ingest_path_with_observer, list_bookmarks, query_event_neighborhood, query_events,
-    query_facets, query_timeline_summary, search_events, EventNeighborhoodQuery, EventQuery,
-    EventSearchQuery, LogCorpus, TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE,
+    query_facets, query_timeline_summary, search_events, search_events_advanced,
+    EventNeighborhoodQuery, EventQuery, EventSearchQuery, LogCorpus, SearchMatchMode, TimeQuality,
+    TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -852,6 +853,33 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         .iter()
         .any(|hit| hit.event.message.contains(&deep_token)));
 
+    // Exercise the literal production regex work cap on the 100k corpus. The
+    // deliberately absent token makes the engine consume its complete bounded
+    // scan budget without returning or retaining an unbounded result set.
+    let regex_started = Instant::now();
+    let regex_result = search_events_advanced(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(r"event_id=never-present-[0-9]{6}".into()),
+            match_mode: SearchMatchMode::Regex,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let regex_ms = regex_started.elapsed().as_millis();
+    assert!(regex_result.hits.is_empty());
+    assert_eq!(regex_result.scanned, MAX_REGEX_SCAN_EVENTS as u64);
+    assert!(regex_result.partial);
+    assert!(
+        regex_result
+            .diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("scan work cap")),
+        "{regex_result:?}"
+    );
+
     let error_summary = query_timeline_summary(
         &corpus,
         &TimelineSummaryQuery {
@@ -904,7 +932,7 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
     assert!(neighborhood.events.len() <= 41);
 
     eprintln!(
-        "PASS ui-medium-100k events={} files={} source_bytes={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS ui-medium-100k events={} files={} source_bytes={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} bounded_regex_50k_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.source_bytes,
@@ -915,6 +943,7 @@ fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
         forward_ms,
         reverse_ms,
         find_ms,
+        regex_ms,
         pages[0].events.len(),
         timeline.bucket_count,
         neighborhood.events.len(),
