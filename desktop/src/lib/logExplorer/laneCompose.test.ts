@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
+  composeLaneSources,
   defaultLanes,
   resizeLaneList,
   toggleLaneSource,
@@ -58,6 +59,15 @@ describe("laneCompose", () => {
     expect(lane.sources).toEqual(["b.log"]);
     lane = toggleLaneSource(lane, "b.log");
     expect(lane.sources).toEqual([]);
+  });
+
+  it("intersects composed lane sources with global source filters", () => {
+    expect(composeLaneSources([], [])).toBeUndefined();
+    expect(composeLaneSources(["api.log"], [])).toEqual(["api.log"]);
+    expect(composeLaneSources([], ["worker.log"])).toEqual(["worker.log"]);
+    expect(composeLaneSources(["api.log", "worker.log"], ["worker.log"]))
+      .toEqual(["worker.log"]);
+    expect(composeLaneSources(["api.log"], ["worker.log"])).toEqual([]);
   });
 
   it("persists lanes per corpus", () => {

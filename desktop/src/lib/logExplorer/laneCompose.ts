@@ -67,6 +67,32 @@ export function toggleLaneSource(
   return { ...lane, sources, label };
 }
 
+/**
+ * Compose a lane's source-group filter with the global source filter.
+ *
+ * Empty lane membership means "all sources"; empty global membership means
+ * "all sources". When both are non-empty, the effective query is their
+ * intersection. An empty returned array intentionally means "matches no
+ * sources" and must be handled by the caller before sending a backend query,
+ * because the backend's empty Vec semantics are "no source filter".
+ */
+export function composeLaneSources(
+  laneSources: string[],
+  globalSources: string[],
+): string[] | undefined {
+  if (laneSources.length === 0 && globalSources.length === 0) {
+    return undefined;
+  }
+  if (laneSources.length === 0) {
+    return [...globalSources];
+  }
+  if (globalSources.length === 0) {
+    return [...laneSources];
+  }
+  const global = new Set(globalSources);
+  return laneSources.filter((source) => global.has(source));
+}
+
 export function loadLanes(corpusId: string): LaneConfig[] | null {
   try {
     const raw = localStorage.getItem(STORAGE_PREFIX + corpusId);
