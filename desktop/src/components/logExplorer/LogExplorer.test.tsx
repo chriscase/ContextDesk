@@ -1706,6 +1706,143 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("routes Find context seeks into the visible composed lane for the hit source", async () => {
+    const makeEvent = (
+      seq: number,
+      source: string,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: "info",
+      service: "fixture",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message,
+      source,
+    });
+    const page = (
+      events: host.ExplorerEventDto[],
+      totalMatched: number,
+    ): host.EventPageDto => ({
+      events,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched,
+      timeQuality: "wall",
+    });
+    const laneZeroEvents = [
+      makeEvent(1, "api.log", "api context"),
+      makeEvent(2, "worker.log", "worker context"),
+    ];
+    const laneOneInitialEvents = [makeEvent(10, "db.log", "db context")];
+    const queueHit = makeEvent(30, "queue.log", "needle queue hit");
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: {
+        "api.log": 6,
+        "worker.log": 7,
+        "queue.log": 6,
+        "db.log": 6,
+      },
+      levels: { info: 25 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        {
+          id: "lane-0",
+          label: "API + worker",
+          sources: ["api.log", "worker.log"],
+        },
+        { id: "lane-1", label: "Queue + DB", sources: ["queue.log", "db.log"] },
+      ]),
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query?.sources ?? [];
+        if (sources.includes("api.log") && sources.includes("worker.log")) {
+          return page(laneZeroEvents, 13);
+        }
+        if (sources.includes("queue.log") && sources.includes("db.log")) {
+          return page(laneOneInitialEvents, 16);
+        }
+        return page([...laneZeroEvents, ...laneOneInitialEvents, queueHit], 35);
+      },
+    );
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
+      hits: [
+        {
+          event: queueHit,
+          score: 1,
+          matchKind: "keyword",
+          templateId: queueHit.templateId,
+        },
+      ],
+      nextCursor: null,
+      nextTs: null,
+      totalMatched: 13,
+      partial: false,
+      scanned: 13,
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "found",
+      target: queueHit,
+      targetIndex: 0,
+      events: [queueHit],
+      totalMatched: 16,
+      corpusTotal: 35,
+      timeQuality: "wall",
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    await waitFor(() => {
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "13 matched",
+      );
+      expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+        "16 matched",
+      );
+    });
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: queueHit.seq,
+          filter: expect.objectContaining({
+            sources: ["queue.log", "db.log"],
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "13 matched",
+    );
+    expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+      "16 matched",
+    );
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /resident rows 3/,
+    );
+  });
+
   it("does not allow a late Find response to replace a newer query", async () => {
     const oldSearch = deferred<host.EventSearchResultDto>();
     const resultEvent = (
