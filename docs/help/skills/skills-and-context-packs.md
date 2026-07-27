@@ -35,6 +35,13 @@ limit failure is reported instead of silently importing a partial file as
 complete. Removing or purging the pack affects the session copy, not the
 original source file.
 
+The log troubleshooting wizard's **Both** mode creates the analysis corpus
+first, then tries to attach a bounded chat pack. If the optional pack exceeds
+these limits or cannot be attached, the completed corpus remains available and
+the wizard reports that the chat pack was skipped. Use the corpus for complete
+large dumps; attach only a small ZIP or selected files when chat-file access is
+also useful.
+
 ## Skills
 
 Skills are Markdown playbooks discovered from app or workspace skill

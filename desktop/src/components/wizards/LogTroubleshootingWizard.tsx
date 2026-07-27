@@ -32,6 +32,17 @@ export type LogMode = "corpus" | "session_context" | "both";
 /** Raw dump ingest vs portable analysis package (.cdlog.zip). */
 export type SourceKind = "raw" | "package";
 
+function sessionPackFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/max_files|max_bytes|session context max|chat[- ]pack.*limit/i.test(message)) {
+    return "The session chat pack exceeded its 200-file or 50 MiB safety limit. Use the analysis corpus for the complete log set.";
+  }
+  if (/director(y|ies)|is a directory|not a file/i.test(message)) {
+    return "A directory cannot be attached as one session chat-pack file. The analysis corpus supports directories; attach a small ZIP or selected files to chat instead.";
+  }
+  return "The bounded session chat pack could not be attached. The analysis corpus is still available; attach a small ZIP or selected files separately if needed.";
+}
+
 type Props = {
   sessionId: string;
   onComplete: (outcome: WizardOutcome) => void;
@@ -74,6 +85,7 @@ export function LogTroubleshootingWizard({
     null,
   );
   const [runDone, setRunDone] = useState(false);
+  const [sessionPackNote, setSessionPackNote] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -122,6 +134,7 @@ export function LogTroubleshootingWizard({
     setError(null);
     setProgress(null);
     setRunDone(false);
+    setSessionPackNote(null);
     try {
       let cid: string | null = null;
 
@@ -186,7 +199,18 @@ export function LogTroubleshootingWizard({
         }
         if (mode === "session_context" || mode === "both") {
           // Host path import extracts .zip into session context.
-          await hostSessionContextImportPath(sessionId, path);
+          try {
+            await hostSessionContextImportPath(sessionId, path);
+          } catch (error) {
+            const safeMessage = sessionPackFailureMessage(error);
+            if (mode === "both" && cid) {
+              setSessionPackNote(
+                `Analysis corpus ready. Chat pack skipped: ${safeMessage}`,
+              );
+            } else {
+              throw new Error(safeMessage, { cause: error });
+            }
+          }
         }
       }
       setRunDone(true);
@@ -410,6 +434,11 @@ export function LogTroubleshootingWizard({
                 />
                 <span>
                   <strong>Both</strong> — corpus analysis + chat attachments
+                  <span className="muted">
+                    {" "}
+                    (the optional chat pack is limited to 200 files / 50 MiB;
+                    the corpus is the large-log path)
+                  </span>
                 </span>
               </label>
             </>
@@ -468,6 +497,11 @@ export function LogTroubleshootingWizard({
                 ) : null}
                 .
               </p>
+              {sessionPackNote ? (
+                <p className="callout callout--warn" role="status">
+                  {sessionPackNote}
+                </p>
+              ) : null}
               {ingestReport ? (
                 <IngestStatsHero report={ingestReport} />
               ) : null}
@@ -492,6 +526,11 @@ export function LogTroubleshootingWizard({
           {corpusId ? (
             <p>
               Corpus id: <code>{corpusId}</code> (also available in the Logs pane).
+            </p>
+          ) : null}
+          {sessionPackNote ? (
+            <p className="callout callout--warn" role="status">
+              {sessionPackNote}
             </p>
           ) : null}
           {ingestReport ? <IngestStatsHero report={ingestReport} /> : null}

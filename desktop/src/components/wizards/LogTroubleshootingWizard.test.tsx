@@ -96,12 +96,25 @@ async function reachSourceStep() {
   await screen.findByRole("heading", { name: "Choose source" });
 }
 
-async function reachConfirmationForRaw() {
+async function reachConfirmationForRaw(
+  mode: "corpus" | "session_context" | "both" = "corpus",
+) {
   await reachSourceStep();
   fireEvent.click(screen.getByRole("button", { name: "Choose directory…" }));
   await screen.findByText("incident-logs");
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "How to use logs" });
+  if (mode === "session_context") {
+    fireEvent.click(
+      screen.getByRole("radio", { name: /Session context only/ }),
+    );
+  } else if (mode === "both") {
+    const both = screen.getByRole("radio", { name: /Both/ });
+    fireEvent.click(both);
+    expect(both.closest("label")?.textContent).toContain(
+      "limited to 200 files / 50 MiB",
+    );
+  }
   fireEvent.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Confirm SoftWrite" });
 }
@@ -182,6 +195,7 @@ describe("LogTroubleshootingWizard product path", () => {
     expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(
       "local-corpus-raw-123",
     );
+    expect(hostMocks.importSessionContext).not.toHaveBeenCalled();
     expect(await screen.findByText(/Import finished/)).toBeTruthy();
     expectRichStatsHero();
 
@@ -200,6 +214,64 @@ describe("LogTroubleshootingWizard product path", () => {
     expect(outcome.composerSeed).toContain(
       "1,200 lines → 12 templates (100.0× reduction)",
     );
+  });
+
+  it("keeps a successful corpus when Both mode skips an oversized chat pack", async () => {
+    hostMocks.ingestPath.mockResolvedValue(richReport);
+    hostMocks.importSessionContext.mockRejectedValue(
+      new Error(
+        "policy denied: session context max_files (200) at /Users/example/private-token.log",
+      ),
+    );
+    const { onComplete } = renderWizard();
+
+    await reachConfirmationForRaw("both");
+    await acceptSoftWriteAndWaitForRun(hostMocks.ingestPath);
+
+    await waitFor(() =>
+      expect(hostMocks.importSessionContext).toHaveBeenCalledWith(
+        "session-product-path",
+        "/tmp/incident-logs",
+      ),
+    );
+    expect(await screen.findByText(/Import finished/)).toBeTruthy();
+    const warning = screen.getByText(/Analysis corpus ready. Chat pack skipped/);
+    expect(warning.textContent).toContain("200-file or 50 MiB safety limit");
+    expect(warning.textContent).not.toContain("/Users/example");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Ready" });
+    expect(
+      screen.getByText(/Analysis corpus ready. Chat pack skipped/),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Finish" }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const outcome = onComplete.mock.calls[0][0];
+    expect(outcome.corpusId).toBe("local-corpus-raw-123");
+    expect(outcome.composerSeed).toContain(
+      'corpus="local-corpus-raw-123"',
+    );
+  });
+
+  it("keeps a session-context-only attachment failure fatal and safe", async () => {
+    hostMocks.importSessionContext.mockRejectedValue(
+      new Error("EISDIR: /Users/example/private-token.log is a directory"),
+    );
+    const { onComplete } = renderWizard();
+
+    await reachConfirmationForRaw("session_context");
+    await acceptSoftWriteAndWaitForRun(hostMocks.importSessionContext);
+
+    expect(hostMocks.ingestPath).not.toHaveBeenCalled();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(
+      "A directory cannot be attached as one session chat-pack file",
+    );
+    expect(alert.textContent).not.toContain("/Users/example");
+    expect(screen.queryByText(/Import finished/)).toBeNull();
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it("renders an honest partial-ingest result with bounded exclusion reasons", async () => {
