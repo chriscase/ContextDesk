@@ -52,6 +52,9 @@ struct AppState {
     /// Live tool host (rebuilt when workspace changes). Arc so the index
     /// watcher callback can reindex without holding AppState.
     host: Arc<Mutex<Option<ToolHost>>>,
+    /// UI-selected default corpus for log tools. This must be updateable without
+    /// forcing host construction; the host picks it up when ready.
+    active_log_corpus: Mutex<Option<String>>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// At most one trusted workspace backup is active.
@@ -85,6 +88,53 @@ fn seed_history_from_session(state: &AppState, session: &Session) {
     histories.insert(session.id.clone(), hist);
 }
 
+fn normalize_log_corpus_id(corpus_id: Option<String>) -> Option<String> {
+    corpus_id.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
+}
+
+fn active_log_corpus_snapshot(state: &AppState) -> Option<String> {
+    state
+        .active_log_corpus
+        .lock()
+        .expect("active_log_corpus")
+        .clone()
+}
+
+fn apply_active_log_corpus_to_host(state: &AppState, host: &mut ToolHost) {
+    host.set_active_log_corpus(active_log_corpus_snapshot(state));
+}
+
+fn set_active_log_corpus_state_nonblocking(
+    state: &AppState,
+    corpus_id: Option<String>,
+) -> Option<String> {
+    let normalized = normalize_log_corpus_id(corpus_id);
+    *state.active_log_corpus.lock().expect("active_log_corpus") = normalized.clone();
+    if let Ok(mut host_guard) = state.host.try_lock() {
+        if let Some(host) = host_guard.as_mut() {
+            host.set_active_log_corpus(normalized.clone());
+        }
+    }
+    normalized
+}
+
+fn log_embed_backend_snapshot_nonblocking(
+    state: &AppState,
+) -> Option<Arc<dyn cd_core::embed::EmbedBackend>> {
+    state
+        .host
+        .try_lock()
+        .ok()
+        .and_then(|host| host.as_ref().and_then(|h| h.log_embed_backend()))
+}
+
 fn ensure_host(state: &AppState) -> Result<(), String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or_else(|| "no workspace configured".to_string())?;
@@ -102,6 +152,7 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
             return rebuild_host(state, cfg, ws);
         }
         apply_host_connectors(host, &cfg, state);
+        apply_active_log_corpus_to_host(state, host);
         return Ok(());
     }
     drop(host_guard);
@@ -134,6 +185,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     host.set_model_context_budgets(cfg.model_context_budgets.clone());
     host.attach_connectors(&cfg.connectors);
     apply_host_connectors(&mut host, &cfg, state);
+    apply_active_log_corpus_to_host(state, &mut host);
     // Durable memory (MEMORY.md Phase 1) — product seam; without this, tools stay
     // on legacy memory_fs and ambient/recall never run.
     if let Err(e) =
@@ -4142,15 +4194,10 @@ fn import_log_corpus_package_path(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<LogPackageImportDto, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let report = cd_core::log_analysis::import_corpus_zip_path(&cache, std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
-    if let Ok(mut host) = state.host.lock() {
-        if let Some(h) = host.as_mut() {
-            h.set_active_log_corpus(Some(report.corpus_id.clone()));
-        }
-    }
+    set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
     Ok(LogPackageImportDto {
         corpus_id: report.corpus_id,
         name: report.name,
@@ -4234,11 +4281,7 @@ async fn ingest_log_path(
     let report = report?;
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
-    if let Ok(mut host) = state.host.lock() {
-        if let Some(h) = host.as_mut() {
-            h.set_active_log_corpus(Some(report.corpus_id.clone()));
-        }
-    }
+    set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
     Ok(LogIngestReportDto {
         corpus_id: report.corpus_id,
         lines: report.stats.lines,
@@ -4406,10 +4449,8 @@ fn log_search(
     query: String,
     k: Option<u32>,
 ) -> Result<Vec<LogSearchHitDto>, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let host = state.host.lock().expect("host");
-    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
+    let embed_backend = log_embed_backend_snapshot_nonblocking(&state);
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     let q = cd_core::log_analysis::SearchLogsQuery {
@@ -4418,7 +4459,7 @@ fn log_search(
         k: k.unwrap_or(8) as usize,
         ..Default::default()
     };
-    let hits = cd_core::log_analysis::search_logs(&c, &q, host.log_embed_backend().as_deref())
+    let hits = cd_core::log_analysis::search_logs(&c, &q, embed_backend.as_deref())
         .map_err(|e| e.to_string())?;
     Ok(hits
         .into_iter()
@@ -4438,15 +4479,11 @@ fn log_search(
 #[tauri::command]
 fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
-    // Clear active default if it pointed at this corpus.
-    if let Ok(mut host) = state.host.lock() {
-        if let Some(h) = host.as_mut() {
-            if h.active_log_corpus() == Some(corpus_id.as_str()) {
-                h.set_active_log_corpus(None);
-            }
-        }
+    cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
+        set_active_log_corpus_state_nonblocking(&state, None);
     }
-    cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// Set the host default log corpus so agent log tools can omit `corpus=` (wizard handoff).
@@ -4455,20 +4492,13 @@ fn set_active_log_corpus(
     state: State<'_, AppState>,
     corpus_id: Option<String>,
 ) -> Result<Option<String>, String> {
-    ensure_host(&state)?;
-    let mut host = state.host.lock().expect("host");
-    let host = host.as_mut().ok_or_else(|| "host not ready".to_string())?;
-    host.set_active_log_corpus(corpus_id);
-    Ok(host.active_log_corpus().map(|s| s.to_string()))
+    Ok(set_active_log_corpus_state_nonblocking(&state, corpus_id))
 }
 
 /// Current host default log corpus id (if any).
 #[tauri::command]
 fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    ensure_host(&state)?;
-    let host = state.host.lock().expect("host");
-    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-    Ok(host.active_log_corpus().map(|s| s.to_string()))
+    Ok(active_log_corpus_snapshot(&state))
 }
 
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
@@ -4545,25 +4575,28 @@ fn log_search_events(
     state: State<'_, AppState>,
     args: LogSearchEventsArgs,
 ) -> Result<cd_core::log_analysis::EventSearchResult, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let host = state.host.lock().expect("host");
-    let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
     let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
     let mode = match args.match_mode.as_deref() {
         Some("regex") => cd_core::log_analysis::SearchMatchMode::Regex,
         _ => cd_core::log_analysis::SearchMatchMode::Literal,
     };
+    let semantic = args.semantic.unwrap_or(true);
+    let embed_backend = if semantic && mode != cd_core::log_analysis::SearchMatchMode::Regex {
+        log_embed_backend_snapshot_nonblocking(&state)
+    } else {
+        None
+    };
     let q = cd_core::log_analysis::EventSearchQuery {
         query: args.query,
-        semantic: args.semantic.unwrap_or(true),
+        semantic,
         k: args.k.unwrap_or(50) as usize,
         filter: args.filter.unwrap_or_default(),
         match_mode: mode,
         case_sensitive: args.case_sensitive.unwrap_or(false),
     };
-    cd_core::log_analysis::search_events_advanced(&c, &q, host.log_embed_backend().as_deref())
+    cd_core::log_analysis::search_events_advanced(&c, &q, embed_backend.as_deref())
         .map_err(|e| e.to_string())
 }
 
@@ -4598,7 +4631,6 @@ fn log_add_bookmark(
     state: State<'_, AppState>,
     args: LogAddBookmarkArgs,
 ) -> Result<cd_core::log_analysis::Bookmark, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
@@ -4624,7 +4656,6 @@ fn log_delete_bookmark(
     corpus_id: String,
     bookmark_id: String,
 ) -> Result<bool, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
@@ -4710,17 +4741,12 @@ async fn open_log_explorer(
     state: State<'_, AppState>,
     corpus_id: String,
 ) -> Result<String, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     let title = format!("Log Explorer · {}", c.name());
     // Set active corpus so agent tools resolve without id.
-    if let Ok(mut host) = state.host.lock() {
-        if let Some(h) = host.as_mut() {
-            h.set_active_log_corpus(Some(corpus_id.clone()));
-        }
-    }
+    set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
     let label = format!(
         "log-explorer-{}",
@@ -5430,6 +5456,7 @@ pub fn run() {
         audit_log,
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),
+        active_log_corpus: Mutex::new(None),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
@@ -5648,6 +5675,8 @@ mod help_host_tests {
 
 #[cfg(test)]
 mod startup_host_tests {
+    use super::normalize_log_corpus_id;
+
     #[test]
     fn packaged_startup_warms_host_after_window_setup_not_before() {
         let src = include_str!("lib.rs");
@@ -5689,6 +5718,128 @@ mod startup_host_tests {
         assert!(
             spawn_blocking < fallback_call,
             "workspace memory note fallback must not read directories/files on the app main thread"
+        );
+    }
+
+    #[test]
+    fn active_log_corpus_ui_commands_do_not_force_host_construction() {
+        let src = include_str!("lib.rs");
+        let set_start = src
+            .find("fn set_active_log_corpus(")
+            .expect("set_active_log_corpus command");
+        let get_start = src
+            .find("fn get_active_log_corpus(")
+            .expect("get_active_log_corpus command");
+        let log_explorer_marker = src
+            .find("// ── Log Explorer")
+            .expect("Log Explorer section marker");
+        let explorer_start = src
+            .find("async fn open_log_explorer(")
+            .expect("open_log_explorer command");
+        let explorer_end = src[explorer_start..]
+            .find("/// Harvest row DTO")
+            .map(|offset| explorer_start + offset)
+            .expect("open_log_explorer boundary");
+
+        let set_src = &src[set_start..get_start];
+        let get_src = &src[get_start..log_explorer_marker];
+        let explorer_src = &src[explorer_start..explorer_end];
+
+        assert!(
+            set_src.contains("set_active_log_corpus_state_nonblocking(&state, corpus_id)"),
+            "selecting a log corpus should update active corpus state without building the host"
+        );
+        assert!(
+            !set_src.contains("ensure_host(&state)"),
+            "set_active_log_corpus must not synchronously construct the host from Logs-pane selection"
+        );
+        assert!(
+            get_src.contains("active_log_corpus_snapshot(&state)"),
+            "get_active_log_corpus should read the UI-selected corpus state"
+        );
+        assert!(
+            !get_src.contains("ensure_host(&state)"),
+            "get_active_log_corpus must not synchronously construct the host"
+        );
+        assert!(
+            explorer_src.contains("set_active_log_corpus_state_nonblocking"),
+            "opening Explorer should still remember the active corpus for later tools"
+        );
+        assert!(
+            !explorer_src.contains("ensure_host(&state)"),
+            "open_log_explorer must not strand the packaged window on host setup"
+        );
+        assert!(
+            src.contains("active_log_corpus: Mutex<Option<String>>"),
+            "AppState should retain the UI-selected corpus independently of ToolHost readiness"
+        );
+        assert!(
+            src.contains("apply_active_log_corpus_to_host(state, &mut host)"),
+            "rebuilt hosts must receive the pending active corpus"
+        );
+    }
+
+    #[test]
+    fn active_log_corpus_id_is_trimmed_and_blank_means_none() {
+        assert_eq!(
+            normalize_log_corpus_id(Some(" incident ".into())),
+            Some("incident".into())
+        );
+        assert_eq!(normalize_log_corpus_id(Some(" \t\n ".into())), None);
+        assert_eq!(normalize_log_corpus_id(None), None);
+    }
+
+    #[test]
+    fn log_explorer_local_search_and_bookmarks_do_not_force_host_construction() {
+        let src = include_str!("lib.rs");
+        let log_search_start = src.find("fn log_search(").expect("log_search command");
+        let discard_start = src
+            .find("fn discard_log_corpus(")
+            .expect("discard_log_corpus command");
+        let event_search_start = src
+            .find("fn log_search_events(")
+            .expect("log_search_events command");
+        let bookmarks_start = src
+            .find("fn log_list_bookmarks(")
+            .expect("log_list_bookmarks command");
+        let add_bookmark_start = src
+            .find("fn log_add_bookmark(")
+            .expect("log_add_bookmark command");
+        let delete_bookmark_start = src
+            .find("fn log_delete_bookmark(")
+            .expect("log_delete_bookmark command");
+        let linked_chats_start = src
+            .find("fn list_chat_sessions_for_corpus(")
+            .expect("linked chat command");
+
+        let log_search_src = &src[log_search_start..discard_start];
+        let event_search_src = &src[event_search_start..bookmarks_start];
+        let add_bookmark_src = &src[add_bookmark_start..delete_bookmark_start];
+        let delete_bookmark_src = &src[delete_bookmark_start..linked_chats_start];
+
+        assert!(
+            log_search_src.contains("log_embed_backend_snapshot_nonblocking(&state)"),
+            "overview log search should use an optional embed backend snapshot"
+        );
+        assert!(
+            !log_search_src.contains("ensure_host(&state)"),
+            "overview log search must not build the host to search a persisted corpus"
+        );
+        assert!(
+            event_search_src.contains("log_embed_backend_snapshot_nonblocking(&state)"),
+            "Explorer Find should use an optional embed backend snapshot"
+        );
+        assert!(
+            !event_search_src.contains("ensure_host(&state)"),
+            "Explorer Find must not strand the packaged window on host setup"
+        );
+        assert!(
+            !add_bookmark_src.contains("ensure_host(&state)"),
+            "adding a local log bookmark must not build the host"
+        );
+        assert!(
+            !delete_bookmark_src.contains("ensure_host(&state)"),
+            "deleting a local log bookmark must not build the host"
         );
     }
 }
