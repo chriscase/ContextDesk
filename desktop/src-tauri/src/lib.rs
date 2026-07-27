@@ -159,6 +159,91 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     rebuild_host(state, cfg, ws)
 }
 
+struct BackgroundIndexBuild {
+    index: cd_core::index::KeywordIndex,
+    stats: cd_core::index::ReindexStats,
+    bytes_capped: bool,
+    resident_chunks: usize,
+}
+
+struct BackgroundIndexOutcome {
+    stats: cd_core::index::ReindexStats,
+    bytes_capped: bool,
+    resident_chunks: usize,
+}
+
+fn build_background_index(
+    workspace: &Workspace,
+    cache_dir: Option<&std::path::Path>,
+    max_files: usize,
+    max_index_bytes: usize,
+) -> Result<BackgroundIndexBuild, String> {
+    let mut index = cd_core::index::KeywordIndex::open_shell_bounded(
+        workspace,
+        cache_dir,
+        Some(max_files),
+        Some(max_index_bytes),
+    )
+    .map_err(|e| e.to_string())?;
+    let stats = index.refresh().map_err(|e| e.to_string())?;
+    let bytes_capped = index.is_bytes_capped();
+    let resident_chunks = index.len();
+    Ok(BackgroundIndexBuild {
+        index,
+        stats,
+        bytes_capped,
+        resident_chunks,
+    })
+}
+
+fn install_background_index(
+    host_arc: &Arc<Mutex<Option<ToolHost>>>,
+    expected_workspace: &Workspace,
+    index: cd_core::index::KeywordIndex,
+) -> bool {
+    let mut pending = Some(index);
+    loop {
+        let mut guard = host_arc.lock().expect("host");
+        match guard.as_mut() {
+            Some(host)
+                if host.workspace.id == expected_workspace.id
+                    && host.workspace.roots == expected_workspace.roots =>
+            {
+                host.replace_index(pending.take().expect("pending index"));
+                return true;
+            }
+            Some(_) => return false,
+            // Agent turns temporarily take the host out of the mutex. Wait in
+            // this background worker, never in the chat/request path.
+            None => {}
+        }
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn build_and_install_background_index<F>(
+    host_arc: &Arc<Mutex<Option<ToolHost>>>,
+    expected_workspace: &Workspace,
+    build: F,
+) -> Result<Option<BackgroundIndexOutcome>, String>
+where
+    F: FnOnce() -> Result<BackgroundIndexBuild, String>,
+{
+    // Deliberately run the expensive walk before touching the live host lock.
+    let built = build()?;
+    let outcome = BackgroundIndexOutcome {
+        stats: built.stats,
+        bytes_capped: built.bytes_capped,
+        resident_chunks: built.resident_chunks,
+    };
+    if install_background_index(host_arc, expected_workspace, built.index) {
+        Ok(Some(outcome))
+    } else {
+        Ok(None)
+    }
+}
+
 fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
     // Stop previous watcher before replacing the host (#116).
     if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
@@ -179,7 +264,7 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     )
     .map_err(|e| e.to_string())?;
     let audit_log = state.audit_log.clone();
-    let mut host = ToolHost::new(ws, index, audit_log);
+    let mut host = ToolHost::new(ws.clone(), index, audit_log);
     host.set_help_index(state.help.lock().expect("help").clone());
     host.set_router_budget(cfg.router.clone());
     host.set_model_context_budgets(cfg.model_context_budgets.clone());
@@ -210,52 +295,51 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
 
     *state.host.lock().expect("host") = Some(host);
 
-    // Background full/incremental refresh off the UI / turn critical path (#117).
+    // Background full/incremental refresh off the UI / turn critical path
+    // (#117, #596). Build a separate index snapshot without holding the live
+    // ToolHost mutex, then swap it under a short lock.
     let host_arc = Arc::clone(&state.host);
     let status_arc = Arc::clone(&state.index_status);
+    let refresh_gate = Arc::new(Mutex::new(()));
+    let initial_refresh_gate = Arc::clone(&refresh_gate);
+    let initial_workspace = ws.clone();
+    let initial_cache = index_cache.clone();
+    let max_files = cfg.index_max_files;
+    let max_index_bytes = cfg.index_max_bytes;
     let _ = std::thread::Builder::new()
         .name("cd-index-bg".into())
         .spawn(move || {
+            let _refresh_guard = initial_refresh_gate.lock().expect("index refresh");
             {
                 let mut st = status_arc.lock().expect("index_status");
                 st.phase = cd_core::index::IndexPhase::Indexing;
                 st.message = "Indexing workspace in background…".into();
             }
-            let result = {
-                let mut g = host_arc.lock().expect("host");
-                match g.as_mut() {
-                    Some(h) => h.reindex(),
-                    None => {
-                        return;
-                    }
-                }
-            };
-            let mut st = status_arc.lock().expect("index_status");
+            let result = build_and_install_background_index(&host_arc, &initial_workspace, || {
+                build_background_index(
+                    &initial_workspace,
+                    initial_cache.as_deref(),
+                    max_files,
+                    max_index_bytes,
+                )
+            });
             match result {
-                Ok(stats) => {
-                    let capped = host_arc
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.as_ref().map(|h| h.index_bytes_capped()))
-                        .unwrap_or(false);
-                    let chunks = host_arc
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.as_ref().map(|h| h.index_resident_chunks()))
-                        .unwrap_or(0);
+                Ok(Some(build)) => {
+                    let stats = build.stats;
+                    let mut st = status_arc.lock().expect("index_status");
                     st.phase = cd_core::index::IndexPhase::Ready;
                     st.scanned = stats.scanned;
                     st.added = stats.added;
                     st.max_files = stats.max_files;
                     st.truncated = stats.truncated;
-                    st.bytes_capped = capped;
-                    st.resident_chunks = chunks as u32;
+                    st.bytes_capped = build.bytes_capped;
+                    st.resident_chunks = build.resident_chunks as u32;
                     st.message = if stats.truncated {
                         format!(
                             "Index ready (walk hit soft cap {} files; truncated).",
                             stats.max_files
                         )
-                    } else if capped {
+                    } else if build.bytes_capped {
                         "Index ready (resident set bytes-capped; search covers recent subset)."
                             .into()
                     } else {
@@ -266,7 +350,9 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
                     };
                     tracing::info!(?stats, "background index complete");
                 }
+                Ok(None) => {}
                 Err(e) => {
+                    let mut st = status_arc.lock().expect("index_status");
                     st.phase = cd_core::index::IndexPhase::Error;
                     st.message = format!("Background index failed: {e}");
                     tracing::warn!(error = %e, "background index failed");
@@ -277,26 +363,36 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     // Start debounced FS watcher → incremental reindex (host-agnostic API).
     let host_arc = Arc::clone(&state.host);
     let status_arc = Arc::clone(&state.index_status);
+    let watcher_workspace = ws.clone();
+    let watcher_cache = index_cache;
+    let watcher_refresh_gate = refresh_gate;
     let on_refresh = Arc::new(move || {
-        if let Ok(mut g) = host_arc.lock() {
-            if let Some(h) = g.as_mut() {
-                match h.reindex() {
-                    Ok(stats) => {
-                        if let Ok(mut st) = status_arc.lock() {
-                            st.phase = cd_core::index::IndexPhase::Ready;
-                            st.scanned = stats.scanned;
-                            st.added = stats.added;
-                            st.truncated = stats.truncated;
-                            st.message = format!(
-                                "Index refreshed — scanned {}, +{}.",
-                                stats.scanned, stats.added
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "index watcher refresh failed");
-                    }
+        let _refresh_guard = watcher_refresh_gate.lock().expect("index refresh");
+        match build_and_install_background_index(&host_arc, &watcher_workspace, || {
+            build_background_index(
+                &watcher_workspace,
+                watcher_cache.as_deref(),
+                max_files,
+                max_index_bytes,
+            )
+        }) {
+            Ok(Some(build)) => {
+                if let Ok(mut st) = status_arc.lock() {
+                    st.phase = cd_core::index::IndexPhase::Ready;
+                    st.scanned = build.stats.scanned;
+                    st.added = build.stats.added;
+                    st.truncated = build.stats.truncated;
+                    st.bytes_capped = build.bytes_capped;
+                    st.resident_chunks = build.resident_chunks as u32;
+                    st.message = format!(
+                        "Index refreshed — scanned {}, +{}.",
+                        build.stats.scanned, build.stats.added
+                    );
                 }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "index watcher refresh failed");
             }
         }
     });
@@ -2692,7 +2788,6 @@ async fn agent_turn(
     req: AgentTurnReq,
     on_event: tauri::ipc::Channel<EventDto>,
 ) -> Result<(), String> {
-    ensure_host(&state)?;
     let cfg = state.config.lock().expect("config").clone();
     let skill_dirs = skill_dirs_for(&state, &cfg);
     let mut user_text = req.text.clone();
@@ -2773,6 +2868,22 @@ async fn agent_turn(
         }
         None => None,
     };
+
+    // A linked turn on a chat-only profile has a deterministic, provider-free
+    // answer. Emit it before host construction so workspace background indexing
+    // cannot strand the UI in streaming state (#596).
+    if !req.force_local && log_explorer_context.is_some() {
+        if let Some(events) =
+            cd_core::research::linked_tools_unavailable_events(&profile, &req.session_id)
+        {
+            for event in events {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+    }
+
+    ensure_host(&state)?;
 
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
@@ -5726,7 +5837,14 @@ mod help_host_tests {
 
 #[cfg(test)]
 mod startup_host_tests {
-    use super::{log_search_cancel_key, normalize_log_corpus_id};
+    use super::{
+        build_and_install_background_index, log_search_cancel_key, normalize_log_corpus_id,
+        BackgroundIndexBuild,
+    };
+    use cd_core::index::{KeywordIndex, ReindexStats};
+    use cd_core::tool_host::ToolHost;
+    use cd_core::workspace::Workspace;
+    use std::sync::{Arc, Barrier, Mutex};
 
     #[test]
     fn packaged_startup_warms_host_after_window_setup_not_before() {
@@ -5750,6 +5868,65 @@ mod startup_host_tests {
             src.contains(".name(\"cd-host-warmup\".into())"),
             "background host warmup should stay named for native diagnostics"
         );
+    }
+
+    #[test]
+    fn linked_tools_disabled_guard_precedes_host_construction() {
+        let src = include_str!("lib.rs");
+        let turn_start = src.find("async fn agent_turn(").expect("agent_turn");
+        let turn_end = src[turn_start..]
+            .find("/// Signal cooperative cancel")
+            .map(|offset| turn_start + offset)
+            .expect("agent_turn boundary");
+        let turn_src = &src[turn_start..turn_end];
+        let guard = turn_src
+            .find("linked_tools_unavailable_events")
+            .expect("linked tools-disabled guard");
+        let host = turn_src
+            .find("ensure_host(&state)?")
+            .expect("host construction");
+
+        assert!(
+            guard < host,
+            "provider-free linked refusal must not wait for workspace host/index warmup"
+        );
+    }
+
+    #[test]
+    fn background_index_build_keeps_live_host_mutex_available() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let workspace = Workspace::new("workspace", vec![dir.path().to_path_buf()]);
+        let host = ToolHost::new(workspace.clone(), KeywordIndex::new(), None);
+        let host_arc = Arc::new(Mutex::new(Some(host)));
+        let worker_host = Arc::clone(&host_arc);
+        let worker_workspace = workspace.clone();
+        let build_started = Arc::new(Barrier::new(2));
+        let allow_install = Arc::new(Barrier::new(2));
+        let worker_started = Arc::clone(&build_started);
+        let worker_install = Arc::clone(&allow_install);
+
+        let worker = std::thread::spawn(move || {
+            build_and_install_background_index(&worker_host, &worker_workspace, || {
+                worker_started.wait();
+                worker_install.wait();
+                Ok(BackgroundIndexBuild {
+                    index: KeywordIndex::new(),
+                    stats: ReindexStats::default(),
+                    bytes_capped: false,
+                    resident_chunks: 0,
+                })
+            })
+        });
+
+        build_started.wait();
+        let live_host = host_arc
+            .try_lock()
+            .expect("background index build must not hold the live host mutex");
+        assert!(live_host.is_some());
+        drop(live_host);
+        allow_install.wait();
+
+        assert!(worker.join().expect("worker").expect("build").is_some());
     }
 
     #[test]
