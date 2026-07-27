@@ -1073,6 +1073,108 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("opens the compact lane composer, assigns sources independently, and restores focus on Done", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    fireEvent.click(toggle);
+
+    const editor = await screen.findByTestId("lane-editor");
+    expect(editor.getAttribute("role")).toBe("dialog");
+    expect(editor.getAttribute("data-lane-editor-mode")).toBe("popover");
+    expect(editor.textContent).toContain("2 visible lanes");
+    expect(editor.textContent).toContain("2 available sources");
+    expect(document.activeElement).toBe(screen.getByTestId("lane-editor-close"));
+
+    const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
+    fireEvent.click(
+      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+        name: /api\.log/i,
+      }),
+    );
+    fireEvent.click(
+      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+        name: /worker\.log/i,
+      }),
+    );
+    fireEvent.click(
+      within(laneRows[1] as HTMLElement).getByRole("checkbox", {
+        name: /api\.log/i,
+      }),
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "2 sources",
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-1").textContent).toBe(
+      "1 source",
+    );
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+    expect(screen.queryByTestId("lane-editor")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "2 sources",
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-1").textContent).toBe(
+      "1 source",
+    );
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+  });
+
+  it("closes the lane composer on Escape and outside click without losing composed lanes", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    fireEvent.click(toggle);
+    const editor = await screen.findByTestId("lane-editor");
+    fireEvent.click(
+      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+    );
+    fireEvent.keyDown(screen.getByTestId("lane-editor-close"), {
+      key: "Escape",
+    });
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
+
+    fireEvent.click(toggle);
+    await screen.findByTestId("lane-editor");
+    fireEvent.mouseDown(document.body);
+    await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
+    expect(document.activeElement).toBe(toggle);
+
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+  });
+
+  it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 800,
+    });
+    try {
+      render(<LogExplorer corpusId="c1" />);
+      const root = await screen.findByTestId("log-explorer");
+      await waitFor(() =>
+        expect(root.getAttribute("data-breakpoint")).toBe("narrow"),
+      );
+      const toggle = screen.getByTestId("lane-editor-toggle");
+      fireEvent.click(toggle);
+      const editor = await screen.findByTestId("lane-editor");
+      expect(editor.getAttribute("data-lane-editor-mode")).toBe("sheet");
+      expect(screen.getByTestId("lane-editor-close")).toBeTruthy();
+      fireEvent.keyDown(screen.getByTestId("lane-editor-close"), {
+        key: "Escape",
+      });
+      await waitFor(() => expect(document.activeElement).toBe(toggle));
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+    }
+  });
+
   it("does not let a stale page response overwrite a newer filter load", async () => {
     const pages: Array<{
       promise: Promise<host.EventPageDto>;
