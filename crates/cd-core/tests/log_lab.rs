@@ -612,6 +612,13 @@ fn log_lab_behavior_ui_profile_imports_pages_and_finds_deep_sentinels() {
     assert!(report.stats.files as usize >= controls.source_count);
 
     let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+    assert_eq!(
+        query_facets(&corpus, &EventQuery::default())
+            .unwrap()
+            .time_quality,
+        TimeQuality::Wall,
+        "the wall-time profile must not introduce synthetic-order rows"
+    );
     let page_started = Instant::now();
     let first = query_events(
         &corpus,
@@ -713,6 +720,65 @@ fn log_lab_behavior_ui_profile_imports_pages_and_finds_deep_sentinels() {
         report.stats.source_bytes,
         generation.tree_sha256
     );
+}
+
+#[test]
+fn log_lab_behavior_profiles_keep_their_declared_time_quality_after_import() {
+    for (quality, expected) in [
+        ("wall", TimeQuality::Wall),
+        ("mixed", TimeQuality::Mixed),
+        ("order_only", TimeQuality::OrderOnly),
+    ] {
+        let mut controls = BehaviorControls::for_profile(UI_MEDIUM_PROFILE, Some(900)).unwrap();
+        controls.profile = format!("time-quality-{quality}");
+        controls.source_count = 10;
+        controls.time_quality = quality.into();
+        controls.long_line_percent = 6;
+        controls.rotation_every = 0;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let generated = workspace.path().join("behavior");
+        generate_behavior(&generated, &controls).unwrap();
+        let manifest = load_behavior_manifest(&generated).unwrap();
+        assert_eq!(manifest["expected"]["time_quality"], quality);
+        assert!(
+            manifest["investigation"]["multiline_count"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "{quality} profile must exercise escaped multiline events"
+        );
+
+        let cache = workspace.path().join("cache");
+        let report = ingest_path(
+            &cache,
+            &generated.join("scenarios/behavior-scale/import"),
+            &format!("behavior-{quality}"),
+            None,
+            "none",
+        )
+        .unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(
+            query_facets(&corpus, &EventQuery::default())
+                .unwrap()
+                .time_quality,
+            expected,
+            "generated {quality} profile contradicted its manifest"
+        );
+        if quality == "wall" {
+            assert_eq!(
+                report
+                    .stats
+                    .format_counts
+                    .get("plain")
+                    .copied()
+                    .unwrap_or_default(),
+                0,
+                "wall profile contained rows that fell back to order-only parsing"
+            );
+        }
+    }
 }
 
 /// Explicit local acceptance path for #542. Kept out of the default suite
