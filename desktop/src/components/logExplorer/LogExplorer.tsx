@@ -1044,9 +1044,8 @@ export function LogExplorer({ corpusId }: Props) {
         caseSensitive: findCaseSensitive,
         // Only one bounded result page is retained in the webview.
         k: FIND_PAGE_SIZE,
-        // Compose with active filter facets but not a second keyword reduce.
+        // Compose Find with every active Filter predicate, including keyword.
         filter: filtersToQuery(scopedFilters, {
-          keyword: null,
           afterSeq: start?.seq ?? null,
           afterTs: start?.ts ?? null,
           beforeSeq: null,
