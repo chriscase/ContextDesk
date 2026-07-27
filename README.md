@@ -69,6 +69,20 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Skills:** pin a playbook on a chat (`examples/skills/log-triage`) or `/skill id` — never elevates SoftWrite/HardWrite — `docs/SKILLS.md`, #343
 - Chat UI **folds older turns** (full history retained); agent uses recompacted context (#33)
 
+### Log Explorer at scale
+
+The packaged desktop app below is investigating the deterministic 100,000-event
+Log Lab corpus. The first view aligns two composed source groups on exact shared
+UTC timestamps and shows missing evidence as explicit gap cells.
+
+![Log Explorer aligning two source-group lanes over a deterministic 100,000-event corpus, with explicit gap cells and a complete event inspector](docs/media/log-explorer-align-100k.jpeg)
+
+The same corpus can expand to four independently composed evidence lanes on an
+ultrawide display. These are real macOS packaged-app acceptance captures, not
+mockups; the event count is fixture data, not a universal performance claim.
+
+![Log Explorer showing four composed evidence lanes over a deterministic 100,000-event corpus on an ultrawide display](docs/media/log-explorer-four-lanes-100k.jpeg)
+
 **Roadmap / partial (do not treat as done):**
 
 - Headless **team** server: workspaces, roles, shared memory (#167) — server binary + SSE exist; roles/sharing are not built
