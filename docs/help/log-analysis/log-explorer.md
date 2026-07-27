@@ -137,6 +137,11 @@ example (never commit large output):
 cargo run -p cd-core --example generate_log_lab -- --profile ui-medium --estimate-only
 cargo run -p cd-core --example generate_log_lab -- \
   --output /tmp/contextdesk-log-lab-ui-medium --profile ui-medium --record-perf
+
+# Explicit 100k production-core proof (ignored by the routine suite):
+cargo test -p cd-core --test log_lab \
+  log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional -- \
+  --ignored --exact --nocapture
 ```
 
 | Profile | Use |

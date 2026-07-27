@@ -3,8 +3,9 @@ mod log_lab_generator;
 
 use cd_core::log_analysis::{
     add_line_bookmark, export_corpus_zip, import_corpus_zip_path, ingest_path,
-    ingest_path_with_observer, list_bookmarks, query_events, query_facets, search_events,
-    EventQuery, EventSearchQuery, LogCorpus, TimeQuality, MAX_EVENT_PAGE,
+    ingest_path_with_observer, list_bookmarks, query_event_neighborhood, query_events,
+    query_facets, query_timeline_summary, search_events, EventNeighborhoodQuery, EventQuery,
+    EventSearchQuery, LogCorpus, TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -709,6 +710,214 @@ fn log_lab_behavior_ui_profile_imports_pages_and_finds_deep_sentinels() {
         first_page_ms,
         deep_seek_ms,
         report.stats.source_bytes,
+        generation.tree_sha256
+    );
+}
+
+/// Explicit local acceptance path for #542. Kept out of the default suite
+/// because it generates and imports the literal 100k UI profile, but it uses
+/// only production core entry points and no network or external service.
+#[test]
+#[ignore = "explicit 100k Log Lab product-path proof"]
+fn log_lab_ui_medium_100k_product_path_is_bounded_and_bidirectional() {
+    let controls = BehaviorControls::for_profile(UI_MEDIUM_PROFILE, None).unwrap();
+    assert_eq!(controls.event_count, 100_000);
+
+    let workspace = tempfile::tempdir().unwrap();
+    let generated = workspace.path().join("behavior-100k");
+    let generation_started = Instant::now();
+    let generation = generate_behavior(&generated, &controls).unwrap();
+    let generation_ms = generation_started.elapsed().as_millis();
+    verify_safety(&generated).unwrap();
+    assert_eq!(generation.events, 100_000);
+
+    let manifest = load_behavior_manifest(&generated).unwrap();
+    let deep_token = manifest["investigation"]["sentinels"]["find_deep"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bookmark_token = manifest["investigation"]["sentinels"]["bookmark_evict_window"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cache = workspace.path().join("cache");
+    let import_started = Instant::now();
+    let report = ingest_path(
+        &cache,
+        &generated.join("scenarios/behavior-scale/import"),
+        "behavior-ui-100k",
+        None,
+        "none",
+    )
+    .unwrap();
+    let import_ms = import_started.elapsed().as_millis();
+    assert_eq!(report.stats.lines, 100_000);
+
+    let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+    let first_page_started = Instant::now();
+    let first = query_events(
+        &corpus,
+        &EventQuery {
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let first_page_ms = first_page_started.elapsed().as_millis();
+    assert_eq!(first.events.len(), 100);
+    assert_eq!(first.total_matched, 100_000);
+
+    let timeline_started = Instant::now();
+    let timeline = query_timeline_summary(
+        &corpus,
+        &TimelineSummaryQuery {
+            max_buckets: 96,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let timeline_ms = timeline_started.elapsed().as_millis();
+    assert_eq!(timeline.total_matched, 100_000);
+    assert!(timeline.bucket_count <= 96);
+    assert!(timeline.buckets.len() <= 96);
+
+    // Traverse enough pages to move well beyond the first resident UI window.
+    let traversal_started = Instant::now();
+    let mut pages = vec![first];
+    for _ in 1..12 {
+        let previous = pages.last().unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                after_seq: previous.next_cursor,
+                after_ts: previous.next_ts,
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 100);
+        pages.push(page);
+    }
+    let forward_ms = traversal_started.elapsed().as_millis();
+    let unique = pages
+        .iter()
+        .flat_map(|page| page.events.iter().map(|event| (event.ts, event.seq)))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), 1_200, "forward traversal duplicated an event");
+
+    let reverse_started = Instant::now();
+    let first_on_last = pages.last().unwrap().events.first().unwrap();
+    let reverse = query_events(
+        &corpus,
+        &EventQuery {
+            before_seq: Some(first_on_last.seq),
+            before_ts: Some(first_on_last.ts),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let reverse_ms = reverse_started.elapsed().as_millis();
+    let expected = pages[pages.len() - 2]
+        .events
+        .iter()
+        .map(|event| (event.ts, event.seq))
+        .collect::<Vec<_>>();
+    let actual = reverse
+        .events
+        .iter()
+        .map(|event| (event.ts, event.seq))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "reverse page must exactly retrace prior page"
+    );
+
+    let find_started = Instant::now();
+    let deep_hits = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(deep_token.clone()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let find_ms = find_started.elapsed().as_millis();
+    assert!(deep_hits
+        .iter()
+        .any(|hit| hit.event.message.contains(&deep_token)));
+
+    let error_summary = query_timeline_summary(
+        &corpus,
+        &TimelineSummaryQuery {
+            filter: EventQuery {
+                levels: vec!["error".into()],
+                ..Default::default()
+            },
+            max_buckets: 96,
+        },
+    )
+    .unwrap();
+    assert!(error_summary.total_matched > 0);
+    assert!(error_summary.total_matched < timeline.total_matched);
+
+    let bookmark_hit = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some(bookmark_token.clone()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap()
+    .into_iter()
+    .find(|hit| hit.event.message.contains(&bookmark_token))
+    .expect("bookmark sentinel");
+    let bookmark = add_line_bookmark(
+        &corpus,
+        bookmark_hit.event.seq,
+        "100k eviction sentinel",
+        None,
+        None,
+        Some(bookmark_hit.event.ts),
+    )
+    .unwrap();
+    let neighborhood = query_event_neighborhood(
+        &corpus,
+        &EventNeighborhoodQuery {
+            target_seq: bookmark.seq_from,
+            before: 20,
+            after: 20,
+            filter: EventQuery::default(),
+            sort_by_time: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(neighborhood.target.unwrap().seq, bookmark.seq_from);
+    assert!(neighborhood.events.len() <= 41);
+
+    eprintln!(
+        "PASS ui-medium-100k events={} files={} source_bytes={} generation_ms={} import_ms={} first_page_ms={} timeline_ms={} forward_12_pages_ms={} reverse_page_ms={} deep_find_ms={} first_page_rows={} timeline_slots={} neighborhood_rows={} tree_sha256={} (one-machine observation; not a universal claim)",
+        report.stats.lines,
+        report.stats.files,
+        report.stats.source_bytes,
+        generation_ms,
+        import_ms,
+        first_page_ms,
+        timeline_ms,
+        forward_ms,
+        reverse_ms,
+        find_ms,
+        pages[0].events.len(),
+        timeline.bucket_count,
+        neighborhood.events.len(),
         generation.tree_sha256
     );
 }
