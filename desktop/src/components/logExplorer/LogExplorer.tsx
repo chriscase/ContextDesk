@@ -231,6 +231,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [filterDraft, setFilterDraft] = useState("");
   /** Find matches (ordered seqs) — does not reduce the table (#523). */
   const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [findMatchSources, setFindMatchSources] = useState<
+    Record<number, string>
+  >({});
   const [findExcerpts, setFindExcerpts] = useState<Record<number, string>>({});
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
@@ -894,6 +897,51 @@ export function LogExplorer({ corpusId }: Props) {
     return nb.status;
   };
 
+  const visibleLaneForSource = (source: string | null | undefined) => {
+    const visibleLanes = lanes.slice(0, laneCount);
+    if (!source) return null;
+    return (
+      visibleLanes.find((lane) => {
+        const sourceFilter = effectiveLaneSources(lane, filters);
+        if (sourceFilter?.length === 0) return false;
+        return sourceFilter == null || sourceFilter.includes(source);
+      }) ?? null
+    );
+  };
+
+  const visibleLaneWithResidentSeq = (seq: number) =>
+    lanes
+      .slice(0, laneCount)
+      .find((lane) => (laneEvents[lane.id] ?? []).some((e) => e.seq === seq)) ??
+    null;
+
+  const focusFindMatch = async (match: {
+    seq: number;
+    source?: string | null;
+  }): Promise<
+    "focused" | "outside_visible_lanes" | "hidden_by_filter" | "missing"
+  > => {
+    const targetLane =
+      visibleLaneForSource(match.source) ??
+      visibleLaneWithResidentSeq(match.seq);
+    if (!targetLane) {
+      return "outside_visible_lanes";
+    }
+    const residentTarget = (laneEvents[targetLane.id] ?? []).find(
+      (e) => e.seq === match.seq,
+    );
+    if (residentTarget) {
+      setFocusLaneId(targetLane.id);
+      setLaneScrollSeq((m) => ({ ...m, [targetLane.id]: match.seq }));
+      return "focused";
+    }
+    const status = await seekToSeq(match.seq, {
+      laneId: targetLane.id,
+      sources: targetLane.sources,
+    });
+    return status === "found" ? "focused" : status;
+  };
+
   /**
    * Find: highlight matches in full investigation context (#523).
    * Does NOT replace the resident table with only hits.
@@ -904,6 +952,7 @@ export function LogExplorer({ corpusId }: Props) {
     findActiveRef.current = false;
     setFindActiveQuery(null);
     setFindMatches([]);
+    setFindMatchSources({});
     setFindExcerpts({});
     setFindIndex(0);
     setFindTotal(0);
@@ -954,6 +1003,11 @@ export function LogExplorer({ corpusId }: Props) {
       if (requestId !== findRequestRef.current) return;
       const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
+      setFindMatchSources(
+        Object.fromEntries(
+          hits.map((hit) => [hit.event.seq, hit.event.source]),
+        ),
+      );
       setFindExcerpts(
         Object.fromEntries(
           hits
@@ -976,14 +1030,10 @@ export function LogExplorer({ corpusId }: Props) {
           : null,
       );
       setHighlight(new Set(seqs));
+      let findContextStatus: Awaited<ReturnType<typeof focusFindMatch>> | null =
+        null;
       if (seqs.length > 0) {
-        const first = seqs[index]!;
-        const resident = laneEvents["lane-0"] ?? [];
-        if (!resident.some((e) => e.seq === first)) {
-          await seekToSeq(first);
-        } else {
-          setLaneScrollSeq((m) => ({ ...m, "lane-0": first }));
-        }
+        findContextStatus = await focusFindMatch(hits[index]!.event);
       }
       const modeLabel = findMatchMode === "regex" ? "regex" : "literal";
       const extra = [
@@ -1003,7 +1053,11 @@ export function LogExplorer({ corpusId }: Props) {
         seqs.length
           ? `Find (${modeLabel}): match ${ordinal} of ${totalLabel} for “${q}”${
               extra ? ` (${extra})` : ""
-            } (context preserved; ${seqs.length} result identities resident)`
+            } (${
+              findContextStatus === "outside_visible_lanes"
+                ? "target outside visible lanes; context not broadened"
+                : "context preserved"
+            }; ${seqs.length} result identities resident)`
           : `Find (${modeLabel}): no matches for “${q}”${
               result.diagnostic ? ` — ${result.diagnostic}` : ""
             }`,
@@ -1085,17 +1139,19 @@ export function LogExplorer({ corpusId }: Props) {
     const next = findIndex + dir;
     setFindIndex(next);
     const seq = findMatches[next]!;
-    const resident = laneEvents["lane-0"] ?? [];
-    if (!resident.some((e) => e.seq === seq)) {
-      await seekToSeq(seq);
-    } else {
-      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-    }
+    const findContextStatus = await focusFindMatch({
+      seq,
+      source: findMatchSources[seq],
+    });
     setStatus(
       `Find: match ${findBase + next + 1} of ${
         findTotalExact
           ? findTotal
           : `${Math.max(findTotal, findBase + findMatches.length)}+`
+      }${
+        findContextStatus === "outside_visible_lanes"
+          ? " · target outside visible lanes; context not broadened"
+          : ""
       }`,
     );
   };
