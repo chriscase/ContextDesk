@@ -532,13 +532,31 @@ pub fn query_timeline_summary(
 /// wall times) do not drop rows on Load more. Seq-only keyset is used when
 /// sorting by seq.
 pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage> {
+    query_events_with_additional_keyword(corpus, q, None)
+}
+
+/// Query events while requiring an additional case-insensitive message
+/// substring. Advanced Find uses this to intersect its literal query with the
+/// independently active Filter keyword without widening either predicate.
+fn query_events_with_additional_keyword(
+    corpus: &LogCorpus,
+    q: &EventQuery,
+    additional_keyword: Option<&str>,
+) -> CoreResult<EventPage> {
     let limit = if q.limit == 0 {
         DEFAULT_EVENT_PAGE
     } else {
         q.limit.clamp(1, MAX_EVENT_PAGE)
     };
 
-    let (where_sql, binds) = build_where(q);
+    let (mut where_sql, mut binds) = build_where(q);
+    if let Some(keyword) = additional_keyword {
+        let keyword = keyword.trim();
+        if !keyword.is_empty() {
+            where_sql.push_str(" AND lower(message) LIKE ?");
+            binds.push(Value::Text(format!("%{}%", keyword.to_lowercase())));
+        }
+    }
     // Reverse page: only `before_*` (no `after_*`) — fetch the adjacent older
     // window via DESC + reverse so ASC LIMIT does not return corpus head (#538).
     let reverse_page = q.before_seq.is_some() && q.after_seq.is_none();
@@ -782,7 +800,6 @@ pub fn search_events_advanced(
             let mut fq = q.filter.clone();
             fq.template_ids = template_ids.clone();
             fq.limit = k;
-            fq.keyword = None; // template path
             let page = query_events(corpus, &fq)?;
             let score_by_tid: std::collections::HashMap<u64, f32> = template_hits
                 .iter()
@@ -821,7 +838,7 @@ pub fn search_events_advanced(
             match q.match_mode {
                 SearchMatchMode::Regex => {
                     let re = compile_bounded_regex(pattern, q.case_sensitive)?;
-                    // Scan pages under filters without keyword SQL — regex runs in trusted core.
+                    // Scan pages under active filters; regex itself runs in trusted core.
                     let mut after_seq = q.filter.after_seq;
                     let mut after_ts = q.filter.after_ts;
                     let mut pages = 0usize;
@@ -843,7 +860,6 @@ pub fn search_events_advanced(
                             (MAX_REGEX_SCAN_EVENTS as u64).saturating_sub(scanned) as usize;
                         let page_limit = remaining_budget.clamp(1, MAX_EVENT_PAGE);
                         let mut fq = q.filter.clone();
-                        fq.keyword = None;
                         fq.limit = page_limit;
                         fq.after_seq = after_seq;
                         fq.after_ts = after_ts;
@@ -904,7 +920,6 @@ pub fn search_events_advanced(
                                 .min(MAX_EVENT_PAGE as u64)
                                 .max(1) as usize;
                             let mut page_q = fq.clone();
-                            page_q.keyword = None;
                             page_q.limit = page_limit;
                             page_q.after_seq = after_seq;
                             page_q.after_ts = after_ts;
@@ -946,9 +961,9 @@ pub fn search_events_advanced(
                             after_ts = page.next_ts;
                         }
                     } else {
-                        fq.keyword = Some(pattern.to_string());
                         fq.limit = k;
-                        let page = query_events(corpus, &fq)?;
+                        let page =
+                            query_events_with_additional_keyword(corpus, &fq, Some(pattern))?;
                         if !q.semantic {
                             total_matched = Some(page.total_matched);
                         }
@@ -2130,6 +2145,87 @@ mod tests {
             );
         }
         let _ = sem;
+    }
+
+    #[test]
+    fn advanced_find_intersects_independent_keyword_filter_in_all_modes() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).unwrap();
+        let keyword_filter = EventQuery {
+            keyword: Some("user 1".into()),
+            ..Default::default()
+        };
+
+        let literal = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("auth failure".into()),
+                semantic: false,
+                k: 50,
+                filter: keyword_filter.clone(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(literal.total_matched, Some(11));
+        assert_eq!(literal.hits.len(), 11);
+
+        let case_sensitive = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("auth failure".into()),
+                semantic: false,
+                k: 50,
+                filter: keyword_filter.clone(),
+                case_sensitive: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(case_sensitive.hits.len(), 11);
+
+        let regex = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(r"auth failure user \d+".into()),
+                semantic: false,
+                k: 50,
+                filter: keyword_filter.clone(),
+                match_mode: SearchMatchMode::Regex,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(regex.hits.len(), 11);
+
+        let backend = ConceptEmbedBackend::new(64);
+        let semantic = search_events_advanced(
+            &corpus,
+            &EventSearchQuery {
+                query: Some("login authentication denied".into()),
+                semantic: true,
+                k: 50,
+                filter: keyword_filter,
+                ..Default::default()
+            },
+            Some(&backend),
+        )
+        .unwrap();
+        assert!(!semantic.hits.is_empty());
+
+        for result in [&literal, &case_sensitive, &regex, &semantic] {
+            assert!(
+                result
+                    .hits
+                    .iter()
+                    .all(|hit| hit.event.message.to_lowercase().contains("user 1")),
+                "active Filter keyword must constrain every Find mode"
+            );
+        }
     }
 
     #[test]

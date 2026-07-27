@@ -2149,6 +2149,95 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
   });
 
+  it("reruns active Find inside a keyword Filter and ignores the stale unfiltered response", async () => {
+    const unfilteredSearch = deferred<host.EventSearchResultDto>();
+    const filteredEvent: host.ExplorerEventDto = {
+      ...defaultEventPage().events[0]!,
+      message: "needle event_id=behavior-0",
+    };
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.filter?.keyword === "event_id=behavior-0") {
+          return {
+            hits: [
+              {
+                event: filteredEvent,
+                score: 1,
+                matchKind: "keyword",
+                templateId: filteredEvent.templateId,
+              },
+            ],
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 1,
+            partial: false,
+            scanned: 1,
+          };
+        }
+        return unfilteredSearch.promise;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          query: "needle",
+          filter: expect.objectContaining({ keyword: null }),
+        }),
+      ),
+    );
+
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "event_id=behavior-0" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        query: "needle",
+        filter: expect.objectContaining({ keyword: "event_id=behavior-0" }),
+      }),
+    );
+
+    await act(async () => {
+      const staleEvent = {
+        ...filteredEvent,
+        seq: 99,
+        message: "needle from the stale unfiltered response",
+      };
+      unfilteredSearch.resolve({
+        hits: [
+          {
+            event: staleEvent,
+            score: 1,
+            matchKind: "keyword",
+            templateId: staleEvent.templateId,
+          },
+        ],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 4,
+        partial: false,
+        scanned: 4,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Match 1 of 4/)).toBeNull();
+  });
+
   it("creates, sends, persists, and reopens a linked chat", async () => {
     let stored: host.ChatSessionDto | null = null;
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
