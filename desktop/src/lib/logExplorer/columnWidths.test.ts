@@ -30,13 +30,15 @@ describe("columnWidths", () => {
     expect(c[0]).toBeGreaterThan(0);
     expect(c[1]).toBeGreaterThan(0);
     expect(c[2]).toBeGreaterThan(0);
-    const wide = clampColWidths([100, 100, 100, 1]);
+    expect(c[3]).toBeGreaterThan(0);
+    const wide = clampColWidths([100, 100, 100, 100]);
     expect(wide[0]).toBeLessThanOrEqual(16);
-    expect(wide[2]).toBeLessThanOrEqual(20);
+    expect(wide[2]).toBeLessThanOrEqual(30);
+    expect(wide[3]).toBeLessThanOrEqual(80);
   });
 
   it("persists and reloads preferences", () => {
-    const w: [number, number, number, number] = [9, 4, 12, 1];
+    const w: [number, number, number, number] = [9, 4, 12, 24];
     saveColWidths(w);
     expect(loadColWidths()).toEqual(w);
   });
@@ -57,7 +59,8 @@ describe("columnWidths", () => {
     const fit = autoFitColWidths([
       "region-a/very-long-service-name/app.jsonl",
       "api/app.jsonl",
-    ]);
+    ], ["short", "x".repeat(90)]);
     expect(fit[2]).toBeGreaterThan(DEFAULT_COL_WIDTHS[2]);
+    expect(fit[3]).toBeGreaterThan(DEFAULT_COL_WIDTHS[3]);
   });
 });

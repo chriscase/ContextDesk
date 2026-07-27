@@ -241,6 +241,77 @@ describe("LogExplorer shell", () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it("resizes every event column by keyboard/pointer and supports auto-fit/reset", async () => {
+    const page = defaultEventPage();
+    page.events[0] = {
+      ...page.events[0]!,
+      message: `long-message ${"detail ".repeat(60)}`,
+    };
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/long-message/);
+
+    const headers = screen.getByTestId("log-explorer-col-headers");
+    expect(headers.style.gridTemplateColumns).toContain("12rem");
+    const messageResize = screen.getByTestId("col-resize-3");
+    expect(messageResize.getAttribute("aria-label")).toBe(
+      "Resize Message column",
+    );
+    fireEvent.keyDown(messageResize, { key: "ArrowRight" });
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
+    );
+
+    const timeResize = screen.getByTestId("col-resize-0");
+    fireEvent.mouseDown(timeResize, { clientX: 100 });
+    fireEvent.mouseMove(window, { clientX: 132 });
+    fireEvent.mouseUp(window);
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
+    );
+
+    fireEvent.click(screen.getByTestId("col-autofit"));
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("40rem"),
+    );
+    fireEvent.click(screen.getByTestId("col-reset"));
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("12rem"),
+    );
+
+    const eventTime = screen.getByTestId("event-time-1");
+    expect(eventTime.tabIndex).toBe(0);
+    expect(eventTime.getAttribute("aria-label")).toMatch(
+      /wall clock.*UTC/,
+    );
+
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "12" },
+    });
+    fireEvent.click(screen.getByTestId("line-mode-wrap"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-total-height"),
+      ).toBe(String(228 * page.events.length)),
+    );
+
+    fireEvent.click(screen.getByText(/long-message/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 1")
+        .textContent,
+    ).toBe(page.events[0]!.message);
+    const metadata = within(inspector).getByTestId("detail-metadata");
+    expect(metadata.textContent).toContain("api.log");
+    expect(metadata.textContent).toContain("seq 1");
+    fireEvent.click(within(inspector).getByTestId("detail-close"));
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
+    );
+  });
+
   it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
     const bookmark: host.LogBookmarkDto = {
       id: "bm-worker",

@@ -44,7 +44,7 @@ import {
   aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
-  formatEventTime,
+  formatCanonicalUtc,
   leastReliableTimeQuality,
   timeQualityLabel,
   type Breakpoint,
@@ -78,7 +78,10 @@ import {
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
 import { HelpTip } from "../HelpTip";
-import { HELP_FIND_VS_FILTER } from "../../lib/helpContent";
+import {
+  HELP_FIND_VS_FILTER,
+  HELP_LONG_LINES,
+} from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
   VirtualizedEventList,
@@ -201,6 +204,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [filterDraft, setFilterDraft] = useState("");
   /** Find matches (ordered seqs) — does not reduce the table (#523). */
   const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [findExcerpts, setFindExcerpts] = useState<Record<number, string>>({});
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
   const [findTotalExact, setFindTotalExact] = useState(false);
@@ -229,6 +233,17 @@ export function LogExplorer({ corpusId }: Props) {
     }
     return "compact";
   });
+  const [previewLines, setPreviewLines] = useState(() => {
+    try {
+      const value = Number(
+        localStorage.getItem("contextdesk.logExplorer.previewLines.v1"),
+      );
+      if ([2, 4, 8, 12].includes(value)) return value;
+    } catch {
+      /* ignore */
+    }
+    return 4;
+  });
   const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set());
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
@@ -243,7 +258,11 @@ export function LogExplorer({ corpusId }: Props) {
     return 180;
   });
   const detailDragRef = useRef<{ startY: number; startH: number } | null>(null);
-  const colDragRef = useRef<{ index: 0 | 1 | 2; startX: number; startW: number } | null>(
+  const colDragRef = useRef<{
+    index: 0 | 1 | 2 | 3;
+    startX: number;
+    startW: number;
+  } | null>(
     null,
   );
   const [status, setStatus] = useState("Ready");
@@ -283,6 +302,17 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
   }, [lineMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.previewLines.v1",
+        String(previewLines),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [previewLines]);
 
   useEffect(() => {
     try {
@@ -743,6 +773,7 @@ export function LogExplorer({ corpusId }: Props) {
     findActiveRef.current = false;
     setFindActiveQuery(null);
     setFindMatches([]);
+    setFindExcerpts({});
     setFindIndex(0);
     setFindTotal(0);
     setFindTotalExact(false);
@@ -792,6 +823,13 @@ export function LogExplorer({ corpusId }: Props) {
       if (requestId !== findRequestRef.current) return;
       const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
+      setFindExcerpts(
+        Object.fromEntries(
+          hits
+            .filter((hit) => hit.excerpt)
+            .map((hit) => [hit.event.seq, hit.excerpt!]),
+        ),
+      );
       const index = target === "last" ? Math.max(0, seqs.length - 1) : 0;
       setFindMatches(seqs);
       setFindTotal(result.totalMatched ?? base + seqs.length);
@@ -1491,6 +1529,19 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
+  const closeDetail = () => {
+    const seq = detail?.seq;
+    setDetail(null);
+    if (seq != null) {
+      queueMicrotask(() => {
+        const row = rootRef.current?.querySelector<HTMLElement>(
+          `[data-seq="${seq}"]`,
+        );
+        row?.focus();
+      });
+    }
+  };
+
   // Per-lane truthful counts (#534).
   const laneMatchedHint = (laneId: string) => {
     const n = (laneEvents[laneId] ?? []).length;
@@ -1616,18 +1667,52 @@ export function LogExplorer({ corpusId }: Props) {
                 {n}L
               </button>
             ))}
-          {(["compact", "wrap", "full"] as LineMode[]).map((mode) => (
+          {(
+            [
+              ["compact", "1 line"],
+              ["wrap", "Preview"],
+              ["full", "Deep"],
+            ] as const
+          ).map(([mode, label]) => (
             <button
               key={mode}
               type="button"
               className={`log-explorer__btn ${lineMode === mode ? "log-explorer__btn--active" : ""}`}
               data-testid={`line-mode-${mode}`}
               onClick={() => setLineMode(mode)}
-              title={`Message lines: ${mode}`}
+              title={
+                mode === "compact"
+                  ? "Dense single-line rows; expand an individual event or use the inspector"
+                  : mode === "wrap"
+                    ? `Show up to ${previewLines} lines per row`
+                    : `Show up to ${Math.min(24, previewLines * 2)} lines per row; inspector remains complete`
+              }
             >
-              {mode}
+              {label}
             </button>
           ))}
+          <label className="log-explorer__toolbar-field">
+            Preview
+            <select
+              value={previewLines}
+              aria-label="Preview lines per event"
+              data-testid="preview-lines"
+              onChange={(event) =>
+                setPreviewLines(Number(event.target.value))
+              }
+            >
+              {[2, 4, 8, 12].map((lines) => (
+                <option key={lines} value={lines}>
+                  {lines} lines
+                </option>
+              ))}
+            </select>
+          </label>
+          <HelpTip
+            label="Long-line reading help"
+            title="Reading long events"
+            content={HELP_LONG_LINES}
+          />
           <button
             type="button"
             className="log-explorer__btn"
@@ -1635,7 +1720,11 @@ export function LogExplorer({ corpusId }: Props) {
             title="Auto-fit columns to source lengths"
             onClick={() => {
               const sources = Object.keys(facets?.sources ?? {});
-              setColWidths(autoFitColWidths(sources));
+              const messages = Object.values(laneEvents)
+                .flat()
+                .slice(0, 200)
+                .map((event) => event.message);
+              setColWidths(autoFitColWidths(sources, messages));
               setStatus("Columns auto-fitted");
             }}
           >
@@ -1668,7 +1757,7 @@ export function LogExplorer({ corpusId }: Props) {
         data-testid="log-explorer-col-headers"
         role="row"
         style={{
-          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(8rem, 1fr)`,
+          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`,
         }}
       >
         {(
@@ -1676,6 +1765,7 @@ export function LogExplorer({ corpusId }: Props) {
             { label: "Time", index: 0 as const },
             { label: "Lvl", index: 1 as const },
             { label: "Source", index: 2 as const },
+            { label: "Message", index: 3 as const },
           ] as const
         ).map((col) => (
           <div key={col.label} className="log-explorer__col-header" role="columnheader">
@@ -1708,9 +1798,6 @@ export function LogExplorer({ corpusId }: Props) {
             />
           </div>
         ))}
-        <div className="log-explorer__col-header" role="columnheader">
-          Message
-        </div>
       </div>
 
       {laneEditorOpen && (
@@ -2228,8 +2315,11 @@ export function LogExplorer({ corpusId }: Props) {
                     timeQuality={timeQuality}
                     selected={selected}
                     highlight={highlight}
+                    matchExcerpts={findExcerpts}
+                    filterKeyword={filters.keyword}
                     density={density}
                     lineMode={lineMode}
+                    previewLines={previewLines}
                     colWidths={colWidths}
                     expandedSeqs={expandedSeqs}
                     onToggleExpand={toggleExpand}
@@ -2313,6 +2403,8 @@ export function LogExplorer({ corpusId }: Props) {
               className="log-explorer__detail"
               data-testid="log-explorer-detail"
               style={{ height: detailH, maxHeight: detailH }}
+              role="region"
+              aria-label={`Complete event inspector for sequence ${detail.seq}`}
             >
               <div
                 className="log-explorer__detail-resize"
@@ -2346,9 +2438,10 @@ export function LogExplorer({ corpusId }: Props) {
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-copy"
+                  aria-label={`Copy complete redacted event ${detail.seq}`}
                   onClick={() => {
                     void navigator.clipboard?.writeText(
-                      `${detail.seq}\t${detail.ts}\t${detail.level}\t${detail.source}\t${detail.message}`,
+                      `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`,
                     );
                     setStatus("Copied event to clipboard");
                   }}
@@ -2359,22 +2452,56 @@ export function LogExplorer({ corpusId }: Props) {
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-close"
-                  onClick={() => setDetail(null)}
+                  onClick={closeDetail}
                 >
-                  Close
+                  Close inspector
                 </button>
               </div>
-              <div>
-                {detail.source} ·{" "}
-                <span className={levelClass(detail.level)}>{detail.level}</span>
-              </div>
-              <div className="log-explorer__ts">
-                {formatEventTime(detail.ts, detail.timeQuality)} ·{" "}
-                {timeQualityLabel(detail.timeQuality)}
-              </div>
+              <dl
+                className="log-explorer__detail-metadata"
+                data-testid="detail-metadata"
+              >
+                <div>
+                  <dt>Event</dt>
+                  <dd>seq {detail.seq}</dd>
+                </div>
+                <div>
+                  <dt>Time</dt>
+                  <dd>
+                    {formatCanonicalUtc(detail.ts)} ·{" "}
+                    {timeQualityLabel(detail.timeQuality)} · UTC
+                  </dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{detail.source}</dd>
+                </div>
+                <div>
+                  <dt>Level</dt>
+                  <dd className={levelClass(detail.level)}>{detail.level}</dd>
+                </div>
+                <div>
+                  <dt>Service</dt>
+                  <dd>{detail.service ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Host</dt>
+                  <dd>{detail.host ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Template</dt>
+                  <dd>{detail.templateId}</dd>
+                </div>
+                <div>
+                  <dt>Trace</dt>
+                  <dd>{detail.traceId ?? "—"}</dd>
+                </div>
+              </dl>
               <pre
-                style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0" }}
+                className="log-explorer__detail-message"
                 data-testid="detail-message"
+                tabIndex={0}
+                aria-label={`Complete redacted message for event ${detail.seq}`}
               >
                 {detail.message}
               </pre>

@@ -106,7 +106,37 @@ describe("VirtualizedEventList", () => {
         <VirtualizedEventList {...props} events={makeEvents(8)} />,
       );
     });
-    expect((list as HTMLDivElement).scrollTop).toBe(288);
+    // Deep mode at the default four-line preference uses eight visible lines:
+    // two prepended rows × 156px + the prior 96px within-row offset.
+    expect((list as HTMLDivElement).scrollTop).toBe(408);
+  });
+
+  it("uses the user preview depth and a backend hit-centered excerpt", () => {
+    const event = makeEvents(1)[0]!;
+    event.message = `prefix ${"noise ".repeat(40)}NEEDLE${" tail".repeat(40)}`;
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set([event.seq])}
+        density="comfortable"
+        lineMode="wrap"
+        previewLines={12}
+        matchExcerpts={{
+          [event.seq]: "…near NEEDLE with bounded context…",
+        }}
+        onRowClick={vi.fn()}
+      />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    expect(list.getAttribute("data-total-height")).toBe("228");
+    const row = list.querySelector(`[data-seq="${event.seq}"]`);
+    expect(row?.getAttribute("data-match-excerpt")).toBe("true");
+    expect(screen.getByText(/near NEEDLE/)).toBeTruthy();
+    expect(screen.getByText(/near NEEDLE/).getAttribute("aria-label")).toMatch(
+      /Open the event inspector for the complete message/,
+    );
   });
 
   it("requests older and newer pages when the viewport reaches either edge", () => {

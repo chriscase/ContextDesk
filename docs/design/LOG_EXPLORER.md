@@ -66,6 +66,20 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 - Filters drawer; single lane; chats as drawer/tab.
 
+### Event rows and complete reading
+
+- Visible time is deterministic UTC. Single-day windows prioritize time of day;
+  cross-day/year windows add the needed date, mixed quality is visibly marked,
+  and order-only data never fabricates calendar time.
+- Time, level, source, and message tracks have keyboard/pointer resize handles.
+  Auto-fit samples at most 200 resident redacted events; reset restores defaults.
+  Preferences are local to this desktop profile, not synchronized or exported.
+- **1 line** is the dense scan mode. **Preview** and **Deep** use a user-selected
+  bounded 2/4/8/12-line depth, and an individual row can be expanded.
+- Selecting a row opens the resizable complete-event inspector. The inspector is
+  the durable full-text path; bounded row previews do not claim to contain every
+  character.
+
 ### Lane model
 
 - A **lane** = virtualized event stream under a **source-group filter** (plus global filters).

@@ -28,7 +28,8 @@ import {
 
 const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
-const EXPANDED_ROW = 96;
+const PREVIEW_LINE_HEIGHT = 18;
+const PREVIEW_VERTICAL_CHROME = 12;
 
 export type LineMode = "compact" | "wrap" | "full";
 
@@ -37,8 +38,14 @@ type Props = {
   timeQuality: TimeQuality;
   selected: Set<number>;
   highlight: Set<number>;
+  /** Backend-produced bounded, hit-centered excerpts keyed by stable event. */
+  matchExcerpts?: Record<number, string>;
+  /** Active literal Filter term for centered presentation of resident rows. */
+  filterKeyword?: string | null;
   density: "comfortable" | "compact";
   lineMode?: LineMode;
+  /** User-selected bounded preview depth; inspector always shows the complete event. */
+  previewLines?: number;
   /** Column widths in rem: [ts, level, source, message]. */
   colWidths?: [number, number, number, number];
   scrollToSeq?: number | null;
@@ -61,12 +68,30 @@ function rowHeightFor(
   expanded: boolean,
   compactH: number,
   wrapH: number,
+  previewLines: number,
 ): number {
   const rowExpanded = expanded;
   const wrapText = lineMode === "full" || lineMode === "wrap" || rowExpanded;
   if (!wrapText) return compactH;
   if (lineMode === "wrap" && !rowExpanded) return wrapH;
-  return EXPANDED_ROW;
+  const lines =
+    lineMode === "full" && !rowExpanded
+      ? Math.min(24, previewLines * 2)
+      : previewLines;
+  return Math.max(
+    compactH,
+    lines * PREVIEW_LINE_HEIGHT + PREVIEW_VERTICAL_CHROME,
+  );
+}
+
+function centeredLiteralExcerpt(message: string, keyword: string): string {
+  const index = message.toLowerCase().indexOf(keyword.toLowerCase());
+  if (index < 0 || message.length <= 160) return message;
+  const from = Math.max(0, index - 60);
+  const to = Math.min(message.length, index + keyword.length + 80);
+  return `${from > 0 ? "…" : ""}${message.slice(from, to)}${
+    to < message.length ? "…" : ""
+  }`;
 }
 
 export function VirtualizedEventList({
@@ -74,8 +99,11 @@ export function VirtualizedEventList({
   timeQuality,
   selected,
   highlight,
+  matchExcerpts,
+  filterKeyword,
   density,
   lineMode = "compact",
+  previewLines = 4,
   colWidths = [7.5, 3.5, 8, 1],
   scrollToSeq,
   expandedSeqs,
@@ -87,7 +115,15 @@ export function VirtualizedEventList({
 }: Props) {
   const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
   const compactH = baseRowH;
-  const wrapH = lineMode === "wrap" ? Math.max(baseRowH, 44) : baseRowH;
+  const boundedPreviewLines = Math.min(12, Math.max(2, previewLines));
+  const wrapH =
+    lineMode === "wrap"
+      ? Math.max(
+          baseRowH,
+          boundedPreviewLines * PREVIEW_LINE_HEIGHT +
+            PREVIEW_VERTICAL_CHROME,
+        )
+      : baseRowH;
   const edgeRowH = wrapH;
 
   const timeRange = useMemo(() => {
@@ -100,7 +136,7 @@ export function VirtualizedEventList({
     }
     return { minTs, maxTs };
   }, [events]);
-  const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(8rem, 1fr)`;
+  const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(400);
@@ -119,12 +155,20 @@ export function VirtualizedEventList({
         expandedSeqs?.has(e.seq) ?? false,
         compactH,
         wrapH,
+        boundedPreviewLines,
       );
       heights[i] = h;
       acc += h;
     }
     return { heights, offsets, totalH: acc };
-  }, [events, expandedSeqs, lineMode, compactH, wrapH]);
+  }, [
+    events,
+    expandedSeqs,
+    lineMode,
+    compactH,
+    wrapH,
+    boundedPreviewLines,
+  ]);
 
   const onScroll = useCallback(
     (e: UIEvent<HTMLDivElement>) => {
@@ -264,9 +308,25 @@ export function VirtualizedEventList({
           const rowExpanded = expandedSeqs?.has(e.seq) ?? false;
           const wrapText =
             lineMode === "full" || lineMode === "wrap" || rowExpanded;
+          const visiblePreviewLines =
+            lineMode === "full" && !rowExpanded
+              ? Math.min(24, boundedPreviewLines * 2)
+              : boundedPreviewLines;
           const h = heights[index] ?? compactH;
           const top = offsets[index] ?? index * compactH;
           const long = e.message.length > 80 || e.message.includes("\n");
+          const matchExcerpt = matchExcerpts?.[e.seq];
+          const filterExcerpt =
+            !matchExcerpt && filterKeyword
+              ? centeredLiteralExcerpt(e.message, filterKeyword)
+              : null;
+          const visibleMessage = matchExcerpt ?? filterExcerpt ?? e.message;
+          const excerpted = visibleMessage !== e.message;
+          const previewTruncated =
+            !wrapText
+              ? long
+              : e.message.split(/\r?\n/).length > visiblePreviewLines ||
+                e.message.length > visiblePreviewLines * 100;
           return (
             <div
               key={e.seq}
@@ -275,7 +335,8 @@ export function VirtualizedEventList({
               data-seq={e.seq}
               data-index={index}
               data-expanded={wrapText ? "true" : "false"}
-              data-truncated={long && !wrapText ? "true" : "false"}
+              data-truncated={previewTruncated ? "true" : "false"}
+              data-match-excerpt={excerpted ? "true" : "false"}
               className={[
                 "log-explorer__row",
                 selected.has(e.seq) ? "log-explorer__row--selected" : "",
@@ -311,6 +372,9 @@ export function VirtualizedEventList({
               <span
                 className="log-explorer__ts"
                 title={formatEventTimeTitle(e.ts, tq)}
+                aria-label={formatEventTimeTitle(e.ts, tq)}
+                tabIndex={0}
+                data-testid={`event-time-${e.seq}`}
               >
                 {formatEventTime(e.ts, tq, timeRange)}
               </span>
@@ -326,8 +390,18 @@ export function VirtualizedEventList({
                       : "log-explorer__msg"
                   }
                   title={e.message}
+                  aria-label={
+                    excerpted
+                      ? `Match-centered excerpt: ${visibleMessage}. Open the event inspector for the complete message.`
+                      : undefined
+                  }
+                  style={
+                    wrapText
+                      ? { maxHeight: `${visiblePreviewLines * 1.35}em` }
+                      : undefined
+                  }
                 >
-                  {e.message}
+                  {visibleMessage}
                 </span>
                 {long && lineMode === "compact" ? (
                   <button

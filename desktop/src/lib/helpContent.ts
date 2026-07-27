@@ -60,6 +60,32 @@ export const HELP_LANE_COMPOSE: HelpTipContent = {
   helpLocator: "help://log-explorer#lanes",
 };
 
+export const HELP_LONG_LINES: HelpTipContent = {
+  title: "Reading long events",
+  definition:
+    "1 line keeps dense scanning. Preview wraps every row to the selected line depth. Deep doubles that bounded depth. Selecting any row opens the resizable inspector with the complete redacted event.",
+  useWhen:
+    "messages, stack traces, JSON, or logfmt values do not fit in a dense row.",
+  options: [
+    {
+      name: "1 line",
+      when: "Scanning many events; use Expand on an individual long row.",
+    },
+    {
+      name: "Preview / Deep",
+      when: "Comparing several wrapped lines in place; choose 2, 4, 8, or 12 preview lines.",
+    },
+    {
+      name: "Inspector",
+      when: "Reading or copying every character and structured event metadata.",
+    },
+  ],
+  shortcut: "X expands/collapses the focused row; Enter opens the inspector",
+  safety:
+    "Row previews are deliberately bounded for virtualization. The inspector is the complete redacted persisted event and never relies on a hover tooltip.",
+  helpLocator: "help://log-explorer#long-lines",
+};
+
 export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
   title: "Linked chat and agent context",
   definition:
