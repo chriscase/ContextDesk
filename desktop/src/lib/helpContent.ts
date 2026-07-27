@@ -157,7 +157,15 @@ export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
     },
     {
       name: "Log tools",
-      when: "Requires a tools-enabled provider profile. When available, the agent searches and correlates bounded result pages instead of receiving the entire corpus; otherwise the turn stops before contacting the provider and names the unavailable capability.",
+      when: "Required for every linked investigation. A tools-enabled provider profile searches and correlates bounded result pages instead of receiving the entire corpus; otherwise the turn stops before contacting the provider and names the unavailable capability.",
+    },
+    {
+      name: "Other read sources",
+      when: "Configured workspace/Markdown, durable memory, Help, and read-only connector tools may supply relevant supporting evidence. Linking a corpus grants no new source or write permission; an MCP read that still needs first-use approval is omitted until separately authorized.",
+    },
+    {
+      name: "Skills and synthesis",
+      when: "A selected skill guides the investigation process but is not observed incident evidence. ContextDesk retrieves and caps evidence deterministically; the model synthesizes only what those results support.",
     },
     {
       name: "Suggested navigation",
@@ -165,7 +173,7 @@ export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
     },
   ],
   safety:
-    "Switching chats cannot move a pending turn, error, progress state, or navigation proposal into another chat.",
+    "Switching chats cannot move a pending turn, error, progress state, source citation, or navigation proposal into another chat. Failed, capped, unavailable, and permission-blocked sources remain visible.",
   privacy:
     "Raw corpus dumps, evaluator truth, credentials, and absolute source paths are not placed in the chat snapshot.",
   helpLocator: "help://log-explorer#agent-context",

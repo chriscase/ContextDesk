@@ -442,7 +442,19 @@ pub async fn execute_postgres_ro(
 
 /// Format SQL result for the model (untrusted wrap).
 pub fn format_sql_for_model(source: &str, result: &SqlRoResult) -> String {
-    let mut body = format!("columns: {:?}\n", result.columns);
+    format_sql_for_model_with_cap(source, result, MAX_ROWS)
+}
+
+/// Format SQL result with the effective turn-level row cap.
+pub fn format_sql_for_model_with_cap(source: &str, result: &SqlRoResult, row_cap: usize) -> String {
+    let mut body = format!(
+        "source_kind: read_only_sql\nresult_count: {}\nresult_cap: {}\n\
+         truncated: {}\ncolumns: {:?}\n",
+        result.rows.len(),
+        row_cap.max(1),
+        result.truncated,
+        result.columns
+    );
     for (i, row) in result.rows.iter().enumerate() {
         body.push_str(&format!("row{i}: {row:?}\n"));
     }

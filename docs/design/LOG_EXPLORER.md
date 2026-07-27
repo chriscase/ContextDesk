@@ -27,7 +27,7 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 ## 2. Locked owner decisions (2026-07-25)
 
-1. **Chat column in v1** of the explorer window (inline). Chat uses **optimized log contexts** (corpus tools / templates / filters / selection — not raw multi‑MB pastes).
+1. **Chat column in v1** of the explorer window (inline). Chat uses **optimized, governed evidence contexts**: a linked turn must obtain bounded corpus-tool evidence and may cross-check normal configured read-only workspace, memory, Help, or connector sources. ContextDesk owns eligibility, caps, provenance, and permissions; the model synthesizes results rather than receiving raw multi‑MB pastes.
 2. **Agent awareness of viewport:** the model should know what the engineer is looking at (active filters, time range, visible/selected events, lane source groups) and may emit **navigation links** that open or focus interesting sources/ranges in the viewer (user chooses to follow).
 3. **Bookmarks:** engineer can bookmark interesting **lines or ranges** easily (persistent on corpus).
 4. **Lanes:** **2–4** evidence lanes; responsive layout uses full real estate when available.
@@ -224,6 +224,9 @@ UI renders as clickable chips; user opt-in applies filters / opens lane / scroll
 
 - Engineer opens multi-window explorer on a multi-file corpus, filters sources/levels, scrolls a virtualized aggregate list with honest times.
 - Ultrawide shows chat column + ≥2 lanes; link mode aligns scroll by time with visible gaps.
-- Chat answers using corpus tools without requesting full dump paste; can propose nav links user can click.
+- Chat obtains successful corpus-tool evidence without requesting a full dump,
+  may cross-check other configured read-only sources, visibly distinguishes
+  retrieved evidence from model inference, and can propose nav links the user
+  can click.
 - Bookmarks survive restart for that corpus.
 - Logs tab remains the library entry point.

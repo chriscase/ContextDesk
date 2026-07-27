@@ -169,6 +169,30 @@ pub struct ToolHost {
     http_bearers: std::collections::HashMap<String, String>,
 }
 
+/// Deterministic, order-preserving sample that retains both ends of a long
+/// result. Used when a read tool has no cursor but must honor the agent's
+/// per-source evidence budget.
+fn bounded_sample_indices(total: usize, limit: usize) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let limit = limit.max(1);
+    if total <= limit {
+        return (0..total).collect();
+    }
+    if limit == 1 {
+        return vec![total / 2];
+    }
+    (0..limit)
+        .map(|position| position * (total - 1) / (limit - 1))
+        .collect()
+}
+
+const READ_SLICE_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const READ_SLICE_MAX_LINES: usize = 400;
+const READ_SLICE_MAX_LINE_BYTES: usize = 2_000;
+const READ_SLICE_MAX_OUTPUT_BYTES: usize = 24 * 1024;
+
 impl ToolHost {
     /// Create host.
     pub fn new(workspace: Workspace, index: KeywordIndex, audit: Option<AuditLog>) -> Self {
@@ -1151,6 +1175,14 @@ impl ToolHost {
         self.specs_for_model()
     }
 
+    /// Whether a read tool can be offered to a linked investigation without
+    /// opening a new permission flow. MCP reads retain their first-use gate;
+    /// linking a corpus never grants that approval implicitly.
+    pub fn linked_read_tool_is_pre_authorized(&self, name: &str) -> bool {
+        self.side_effect_for(name) == ToolSideEffect::Read
+            && (!name.starts_with("mcp__") || self.permissions.session_tool_allowed(name))
+    }
+
     /// Incremental index refresh (skips unchanged files when a store is present).
     pub fn reindex(&mut self) -> CoreResult<crate::index::ReindexStats> {
         let cache = self.index.cache_dir();
@@ -1486,9 +1518,21 @@ impl ToolHost {
             self.index.search(query, limit)
         };
 
+        // Session context packs are deliberately overlaid even when workspace
+        // search fills its quota, but the combined result still honors the
+        // single per-source cap.
+        let session_results = if let Ok(Some(store)) = self.active_session_context() {
+            crate::session_context::search_session_context(store.root(), query, limit.min(4))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let session_results = &session_results[..session_results.len().min(limit)];
+        let workspace_limit = limit.saturating_sub(session_results.len());
+
         let mut lines = Vec::new();
         let mut first_path = None;
-        for (score, chunk) in &hits {
+        for (score, chunk) in hits.iter().take(workspace_limit) {
             let p = chunk.path.display().to_string();
             if first_path.is_none() {
                 first_path = Some(p.clone());
@@ -1499,29 +1543,21 @@ impl ToolHost {
                 p, chunk.start_line, chunk.end_line, excerpt
             ));
         }
-        // Session context pack overlay (#341) — newly dropped files without reindex.
-        let mut session_hits = 0usize;
-        if let Ok(Some(store)) = self.active_session_context() {
-            let remain = limit.saturating_sub(hits.len()).max(4);
-            if let Ok(shits) =
-                crate::session_context::search_session_context(store.root(), query, remain)
-            {
-                for h in shits {
-                    session_hits += 1;
-                    let p = h.path.display().to_string();
-                    if first_path.is_none() {
-                        first_path = Some(p.clone());
-                    }
-                    lines.push(format!(
-                        "- score=session {}#L{}\n  {}  [session context: {}]",
-                        p, h.line, h.excerpt, h.rel_path
-                    ));
-                }
+        for h in session_results {
+            let p = h.path.display().to_string();
+            if first_path.is_none() {
+                first_path = Some(p.clone());
             }
+            lines.push(format!(
+                "- score=session {}#L{}\n  {}  [session context: {}]",
+                p, h.line, h.excerpt, h.rel_path
+            ));
         }
         // Partial results are valid while a background walk continues (#117).
-        let total = hits.len() + session_hits;
-        let raw = if lines.is_empty() {
+        let workspace_hits = hits.len().min(workspace_limit);
+        let session_hits = session_results.len();
+        let total = workspace_hits + session_hits;
+        let body = if lines.is_empty() {
             if self.index.is_empty() && session_hits == 0 {
                 format!(
                     "No hits for `{query}`. The knowledge index is empty or still building in the background — search will improve as files are indexed. Session context packs (if any) also returned no matches."
@@ -1532,6 +1568,11 @@ impl ToolHost {
         } else {
             lines.join("\n")
         };
+        let raw = format!(
+            "source_kind: workspace_or_session_context\nresult_count: {total}\n\
+             result_cap: {limit}\nresident_index_capped: {}\n---\n{body}",
+            self.index.is_bytes_capped()
+        );
         let mode = if self.hybrid_retrieval {
             "hybrid"
         } else {
@@ -1544,7 +1585,7 @@ impl ToolHost {
         };
         Ok((
             true,
-            format!("{total} hit(s) for `{query}` ({mode}{sess})"),
+            format!("{total} hit(s) for `{query}` ({mode}{sess}); per-source cap={limit}"),
             raw,
             first_path,
         ))
@@ -1667,21 +1708,52 @@ impl ToolHost {
             .get("end_line")
             .and_then(|v| v.as_u64())
             .unwrap_or(start as u64 + 80) as usize;
-        let end = end.max(start).min(start + 400);
+        let requested_end = end.max(start);
+        let end = requested_end.min(start.saturating_add(READ_SLICE_MAX_LINES - 1));
+        let metadata = fs::metadata(&resolved)?;
+        if metadata.len() > READ_SLICE_MAX_FILE_BYTES {
+            return Err(CoreError::Policy(format!(
+                "read_file_slice refuses files larger than {} MiB; import large logs into \
+                 Log Explorer or attach a smaller text artifact",
+                READ_SLICE_MAX_FILE_BYTES / (1024 * 1024)
+            )));
+        }
         let text = fs::read_to_string(&resolved)?;
-        let lines: Vec<&str> = text.lines().collect();
-        let slice: Vec<String> = lines
-            .iter()
+        let mut body = String::new();
+        let mut returned_lines = 0usize;
+        let mut truncated = requested_end > end;
+        for (index, line) in text
+            .lines()
             .enumerate()
             .skip(start.saturating_sub(1))
             .take(end - start + 1)
-            .map(|(i, l)| format!("{:4}| {}", i + 1, l))
-            .collect();
-        let raw = slice.join("\n");
+        {
+            let bounded = crate::text::truncate_bytes(line, READ_SLICE_MAX_LINE_BYTES);
+            if bounded.len() < line.len() {
+                truncated = true;
+            }
+            let rendered = format!("{:4}| {bounded}\n", index + 1);
+            if body.len().saturating_add(rendered.len()) > READ_SLICE_MAX_OUTPUT_BYTES {
+                truncated = true;
+                break;
+            }
+            body.push_str(&rendered);
+            returned_lines += 1;
+        }
+        let raw = format!(
+            "source_kind: workspace_or_session_file\nrequested_lines: {start}-{requested_end}\n\
+             returned_lines: {returned_lines}\nline_cap: {READ_SLICE_MAX_LINES}\n\
+             line_byte_cap: {READ_SLICE_MAX_LINE_BYTES}\n\
+             output_byte_cap: {READ_SLICE_MAX_OUTPUT_BYTES}\ntruncated: {truncated}\n---\n{body}"
+        );
         let p = resolved.display().to_string();
         Ok((
             true,
-            format!("read {} L{start}-L{end}", resolved.display()),
+            if truncated {
+                format!("read {} L{start}-L{end} (truncated)", resolved.display())
+            } else {
+                format!("read {} L{start}-L{end}", resolved.display())
+            },
             raw,
             Some(p),
         ))
@@ -1779,6 +1851,7 @@ impl ToolHost {
         if let Some(k) = args.get("k").and_then(|v| v.as_u64()) {
             q.k = k as usize;
         }
+        q.k = q.k.clamp(1, self.max_results_per_source);
         if let Some(b) = args.get("include_superseded").and_then(|v| v.as_bool()) {
             q.include_superseded = b;
         }
@@ -1809,8 +1882,29 @@ impl ToolHost {
                 )?;
             }
         }
-        let raw = crate::memory::format_recall_hits(&hits);
-        let summary = format!("recalled {} memories", hits.len());
+        let recalled_before_cap = hits.len();
+        hits.truncate(self.max_results_per_source);
+        let truncated = recalled_before_cap > hits.len();
+        let body = crate::memory::format_recall_hits(&hits);
+        let raw = format!(
+            "source_kind: durable_memory\nresult_count: {}\nresult_cap: {}\n\
+             truncated: {truncated}\n---\n{body}",
+            hits.len(),
+            self.max_results_per_source
+        );
+        let summary = if truncated {
+            format!(
+                "recalled {} memories (truncated to per-source cap={})",
+                hits.len(),
+                self.max_results_per_source
+            )
+        } else {
+            format!(
+                "recalled {} memories (per-source cap={})",
+                hits.len(),
+                self.max_results_per_source
+            )
+        };
         Ok((
             true,
             summary,
@@ -2003,7 +2097,8 @@ impl ToolHost {
                 .get("semantic")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-            k: args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize,
+            k: (args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize)
+                .min(self.max_results_per_source),
             ..Default::default()
         };
         let hits =
@@ -2018,9 +2113,21 @@ impl ToolHost {
                 raw.push_str(&format!("    e.g. {e}\n"));
             }
         }
+        raw.insert_str(
+            0,
+            &format!(
+                "source_kind: log_templates\nresult_count: {}\nresult_cap: {}\n---\n",
+                hits.len(),
+                self.max_results_per_source
+            ),
+        );
         Ok((
             true,
-            format!("{} log hits", hits.len()),
+            format!(
+                "{} log hits (per-source cap={})",
+                hits.len(),
+                self.max_results_per_source
+            ),
             raw,
             hits.first()
                 .map(|h| format!("log_template:{}", h.template_id)),
@@ -2044,6 +2151,7 @@ impl ToolHost {
             .get("max_clusters")
             .and_then(|v| v.as_u64())
             .unwrap_or(10) as usize;
+        let max = max.min(self.max_results_per_source);
         let clusters = crate::log_analysis::cluster_problems(&corpus, max)?;
         let mut raw = String::new();
         for c in &clusters {
@@ -2052,9 +2160,21 @@ impl ToolHost {
                 c.cluster_id, c.score, c.severity, c.count, c.template_ids, c.label
             ));
         }
+        raw.insert_str(
+            0,
+            &format!(
+                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n---\n",
+                clusters.len(),
+                self.max_results_per_source
+            ),
+        );
         Ok((
             true,
-            format!("{} problem clusters", clusters.len()),
+            format!(
+                "{} problem clusters (per-source cap={})",
+                clusters.len(),
+                self.max_results_per_source
+            ),
             raw,
             clusters
                 .first()
@@ -2079,8 +2199,18 @@ impl ToolHost {
         let level = args.get("level").and_then(|v| v.as_str());
         let service = args.get("service").and_then(|v| v.as_str());
         let buckets = crate::log_analysis::timeline(&corpus, width, level, service)?;
+        let total = buckets.len();
+        let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
+        let sampled = total > sample_indices.len();
         let mut raw = String::new();
-        for b in &buckets {
+        raw.push_str(&format!(
+            "source_kind: log_timeline\nresult_count: {}\nresult_cap: {}\n\
+             total_available: {total}\nsampled: {sampled}\n---\n",
+            sample_indices.len(),
+            self.max_results_per_source
+        ));
+        for index in sample_indices {
+            let b = &buckets[index];
             raw.push_str(&format!(
                 "- t={}..{} n={} by_level={:?}\n",
                 b.start,
@@ -2091,7 +2221,17 @@ impl ToolHost {
         }
         Ok((
             true,
-            format!("{} timeline buckets", buckets.len()),
+            if sampled {
+                format!(
+                    "sampled {} of {total} timeline buckets (per-source cap={})",
+                    self.max_results_per_source, self.max_results_per_source
+                )
+            } else {
+                format!(
+                    "{total} timeline buckets (per-source cap={})",
+                    self.max_results_per_source
+                )
+            },
             raw,
             Some(format!("log_corpus:{cid}")),
         ))
@@ -2120,7 +2260,8 @@ impl ToolHost {
             .get("window_secs")
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
-        let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
+            .min(self.max_results_per_source);
         let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let hits = crate::log_analysis::correlate(&corpus, focus, around, window, k)?;
         let mut raw = String::new();
@@ -2130,9 +2271,21 @@ impl ToolHost {
                 h.template_id, h.score, h.count, h.precedes_focus, h.pattern
             ));
         }
+        raw.insert_str(
+            0,
+            &format!(
+                "source_kind: log_correlation\nresult_count: {}\nresult_cap: {}\n---\n",
+                hits.len(),
+                self.max_results_per_source
+            ),
+        );
         Ok((
             true,
-            format!("{} correlated templates", hits.len()),
+            format!(
+                "{} correlated templates (per-source cap={})",
+                hits.len(),
+                self.max_results_per_source
+            ),
             raw,
             hits.first()
                 .map(|h| format!("log_template:{}", h.template_id)),
@@ -2167,7 +2320,8 @@ impl ToolHost {
             .get("incident_to")
             .and_then(|v| v.as_i64())
             .ok_or_else(|| CoreError::Message("incident_to required".into()))?;
-        let k = args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+        let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
+            .min(self.max_results_per_source);
         let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let hits = crate::log_analysis::anomalies(&corpus, bf, bt, inf, ito, k)?;
         let mut raw = String::new();
@@ -2177,9 +2331,21 @@ impl ToolHost {
                 h.template_id, h.score, h.incident_count, h.baseline_count, h.pattern
             ));
         }
+        raw.insert_str(
+            0,
+            &format!(
+                "source_kind: log_anomalies\nresult_count: {}\nresult_cap: {}\n---\n",
+                hits.len(),
+                self.max_results_per_source
+            ),
+        );
         Ok((
             true,
-            format!("{} anomalies", hits.len()),
+            format!(
+                "{} anomalies (per-source cap={})",
+                hits.len(),
+                self.max_results_per_source
+            ),
             raw,
             hits.first()
                 .map(|h| format!("log_template:{}", h.template_id)),
@@ -2201,8 +2367,18 @@ impl ToolHost {
             .ok_or_else(|| CoreError::Message("trace_logs requires trace_id".into()))?;
         let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
         let events = crate::log_analysis::trace(&corpus, tid)?;
+        let total = events.len();
+        let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
+        let sampled = total > sample_indices.len();
         let mut raw = String::new();
-        for e in &events {
+        raw.push_str(&format!(
+            "source_kind: log_trace\nresult_count: {}\nresult_cap: {}\n\
+             total_available: {total}\nsampled: {sampled}\n---\n",
+            sample_indices.len(),
+            self.max_results_per_source
+        ));
+        for index in sample_indices {
+            let e = &events[index];
             raw.push_str(&format!(
                 "- t={} svc={:?} level={} tplt={} : {}\n",
                 e.ts, e.service, e.level, e.template_id, e.message
@@ -2210,7 +2386,17 @@ impl ToolHost {
         }
         Ok((
             true,
-            format!("{} trace events", events.len()),
+            if sampled {
+                format!(
+                    "sampled {} of {total} trace events (per-source cap={})",
+                    self.max_results_per_source, self.max_results_per_source
+                )
+            } else {
+                format!(
+                    "{total} trace events (per-source cap={})",
+                    self.max_results_per_source
+                )
+            },
             raw,
             Some(format!("log_trace:{tid}")),
         ))
@@ -3543,9 +3729,16 @@ impl ToolHost {
                 let backend = self.sql_backends.get(&source_id).ok_or_else(|| {
                     CoreError::Message(format!("SQL source `{source_id}` is not attached"))
                 })?;
-                let result = crate::sql_ro::execute_sql_backend(backend, &sql)?;
-                let wrapped =
-                    crate::sql_ro::format_sql_for_model(&format!("sql:{source_id}"), &result);
+                let mut result = crate::sql_ro::execute_sql_backend(backend, &sql)?;
+                if result.rows.len() > self.max_results_per_source {
+                    result.rows.truncate(self.max_results_per_source);
+                    result.truncated = true;
+                }
+                let wrapped = crate::sql_ro::format_sql_for_model_with_cap(
+                    &format!("sql:{source_id}"),
+                    &result,
+                    self.max_results_per_source,
+                );
                 let summary = if result.truncated {
                     format!(
                         "sql `{source_id}` ok ({} rows, truncated)",
@@ -4026,6 +4219,19 @@ mod tests {
             .join("docs")
             .join("help");
         Arc::new(crate::help::HelpIndex::load(root).expect("checked-in Help corpus"))
+    }
+
+    #[test]
+    fn bounded_sample_retains_full_span_without_exceeding_source_cap() {
+        assert_eq!(bounded_sample_indices(0, 3), Vec::<usize>::new());
+        assert_eq!(bounded_sample_indices(3, 8), vec![0, 1, 2]);
+        assert_eq!(bounded_sample_indices(10, 1), vec![5]);
+        assert_eq!(bounded_sample_indices(10, 3), vec![0, 4, 9]);
+        let sample = bounded_sample_indices(100_000, 8);
+        assert_eq!(sample.len(), 8);
+        assert_eq!(sample.first(), Some(&0));
+        assert_eq!(sample.last(), Some(&99_999));
+        assert!(sample.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[tokio::test]
@@ -5156,6 +5362,59 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[tokio::test]
+    async fn read_file_slice_discloses_line_and_output_caps() {
+        let (dir, mut host) = host_with_docs();
+        let long = dir.path().join("long.md");
+        let line = format!("LINE_START {} LINE_END\n", "x".repeat(5_000));
+        fs::write(&long, line.repeat(20)).unwrap();
+
+        let result = host
+            .execute(
+                names::READ_FILE_SLICE,
+                &json!({
+                    "path": long.to_string_lossy(),
+                    "start_line": 1,
+                    "end_line": 1_000
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "{}", result.summary);
+        assert!(result.summary.contains("truncated"), "{}", result.summary);
+        assert!(result.detail_raw.contains("line_cap: 400"));
+        assert!(result.detail_raw.contains("line_byte_cap: 2000"));
+        assert!(result.detail_raw.contains("output_byte_cap: 24576"));
+        assert!(result.detail_raw.contains("truncated: true"));
+        assert!(
+            result.detail_raw.len() <= READ_SLICE_MAX_OUTPUT_BYTES + 512,
+            "bounded result too large: {}",
+            result.detail_raw.len()
+        );
+        assert!(
+            !result.detail_raw.contains("LINE_END"),
+            "overlong line tail entered model context"
+        );
+
+        let oversized = dir.path().join("oversized.txt");
+        let file = fs::File::create(&oversized).unwrap();
+        file.set_len(READ_SLICE_MAX_FILE_BYTES + 1).unwrap();
+        let blocked = host
+            .execute(
+                names::READ_FILE_SLICE,
+                &json!({"path": oversized.to_string_lossy()}),
+                None,
+            )
+            .await;
+        assert!(
+            blocked
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("larger than 10 MiB")),
+            "{blocked:?}"
+        );
+    }
+
     /// #129: MCP-named tools require PermissionRequired before execute.
     #[tokio::test]
     async fn mcp_named_tool_requires_first_use_approval() {
@@ -5171,6 +5430,10 @@ mod tests {
                 detail: "mcp ok".into(),
             },
         });
+        assert!(
+            !host.linked_read_tool_is_pre_authorized("mcp__docs__read_file"),
+            "linked context must not bypass MCP first-use approval"
+        );
         let r = host
             .execute("mcp__docs__read_file", &json!({}), None)
             .await
@@ -5200,6 +5463,10 @@ mod tests {
             .await
             .unwrap();
         assert!(r2.ok, "{}", r2.summary);
+        assert!(
+            host.linked_read_tool_is_pre_authorized("mcp__docs__read_file"),
+            "approved MCP read should become eligible for linked turns"
+        );
         // Subsequent call in session auto-runs (session tool grant).
         let r3 = host
             .execute("mcp__docs__read_file", &json!({}), None)
@@ -5655,7 +5922,7 @@ mod tests {
         for i in 0..40 {
             writeln!(
                 f,
-                r#"{{"ts":{},"level":"error","service":"api","message":"connection refused {}"}}"#,
+                r#"{{"ts":{},"level":"error","service":"api","trace_id":"checkout-trace","message":"connection refused {}"}}"#,
                 1_700_000_000 + i,
                 i % 5
             )
@@ -5671,6 +5938,7 @@ mod tests {
         let mut host = ToolHost::new(ws, idx, None);
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        host.set_max_results_per_source(3);
 
         // No corpus arg — must use host active default.
         let r = host
@@ -5685,9 +5953,41 @@ mod tests {
         );
 
         let tl = host
-            .execute(crate::log_analysis::TIMELINE, &json!({}), None)
+            .execute(
+                crate::log_analysis::TIMELINE,
+                &json!({"width_secs": 1}),
+                None,
+            )
             .await
             .unwrap();
         assert!(tl.ok, "{}", tl.summary);
+        assert!(tl.summary.contains("sampled 3 of 40"), "{}", tl.summary);
+        assert!(tl.detail_raw.contains("result_cap: 3"), "{}", tl.detail_raw);
+        assert!(
+            tl.detail_raw.contains("t=1700000000..1700000001")
+                && tl.detail_raw.contains("t=1700000039..1700000040"),
+            "sample must retain the full time span: {}",
+            tl.detail_raw
+        );
+
+        let trace = host
+            .execute(
+                crate::log_analysis::TRACE,
+                &json!({"trace_id": "checkout-trace"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(trace.ok, "{}", trace.summary);
+        assert!(
+            trace.summary.contains("sampled 3 of 40"),
+            "{}",
+            trace.summary
+        );
+        assert!(
+            trace.detail_raw.contains("result_cap: 3"),
+            "{}",
+            trace.detail_raw
+        );
     }
 }

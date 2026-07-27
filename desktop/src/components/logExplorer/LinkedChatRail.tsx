@@ -45,6 +45,7 @@ import {
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
+import { SourceCitations } from "../SourceCitations";
 import { ToolCallList } from "../ToolCallList";
 
 export type AgentContextSummary = {
@@ -149,6 +150,7 @@ function LinkedChatBubble({
     message.content,
     message.streaming,
     message.tools,
+    message.citations,
     onHeightChange,
   ]);
 
@@ -175,6 +177,9 @@ function LinkedChatBubble({
       </div>
       {message.tools && message.tools.length > 0 ? (
         <ToolCallList tools={message.tools} collapseAfter={4} />
+      ) : null}
+      {message.citations && message.citations.length > 0 ? (
+        <SourceCitations citations={message.citations} />
       ) : null}
       <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
       {message.trail && message.trail.length > 0 && developerMode ? (
@@ -530,7 +535,7 @@ export function LinkedChatRail({
       setStatusByChat((m) => ({
         ...m,
         [sessionId!]: usedTools
-          ? "Linked investigation completed with log tools"
+          ? "Linked investigation completed with governed evidence tools"
           : "Linked chat response saved",
       }));
     } catch (e) {
@@ -898,8 +903,9 @@ export function LinkedChatRail({
           {messages.length === 0 ? (
             <div className="log-explorer__chat-preview">
               Open or create a linked chat, then ask about this corpus. The
-              agent receives a privacy-safe viewport snapshot and can run
-              bounded log tools — not a full dump paste.
+              agent receives a privacy-safe viewport snapshot, must retrieve
+              bounded log evidence, and can consult other configured read-only
+              sources when relevant — never a full dump paste.
             </div>
           ) : (
             <div
@@ -1058,9 +1064,24 @@ export function LinkedChatRail({
             <strong>Selected</strong> {agentContext.selectedCount} ·{" "}
             <strong>Bookmarks</strong> {agentContext.bookmarkCount}
           </li>
+          <li>
+            <strong>Eligible evidence</strong> Bounded log tools are required.
+            Configured workspace/Markdown, durable-memory, Help, and read-only
+            connector tools may also be consulted when relevant.
+          </li>
+          <li>
+            <strong>Retrieval and synthesis</strong> ContextDesk selects and
+            enforces source eligibility, executes retrieval, and caps results;
+            the model chooses among offered reads and connects the returned
+            evidence. Consulted tools and sources stay visible with the answer.
+          </li>
+          <li>
+            <strong>Skills</strong> Process instructions only — not observed
+            incident evidence and never a permission grant.
+          </li>
           <li className="log-explorer__chat-preview">
-            Full corpus contents are queried through bounded tools, not dumped
-            into chat context.
+            Full corpora, workspaces, memories, and databases are queried
+            through bounded tools, not dumped into chat context.
           </li>
         </ul>
       </details>
