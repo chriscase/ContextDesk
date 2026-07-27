@@ -313,12 +313,24 @@ export function LogExplorer({ corpusId }: Props) {
   const eventsRequestRef = useRef(0);
   const findRequestRef = useRef(0);
   const findActiveRef = useRef(false);
+  const autoStatusLockRef = useRef<
+    "bookmark-reveal" | "bookmark-restore" | null
+  >(null);
   const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
     () => {},
   );
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+
+  const setAutoStatus = useCallback((nextStatus: string) => {
+    if (autoStatusLockRef.current === "bookmark-restore") {
+      autoStatusLockRef.current = null;
+      return;
+    }
+    if (autoStatusLockRef.current === "bookmark-reveal") return;
+    setStatus(nextStatus);
+  }, []);
   const activeFilterCount =
     filters.levels.length +
     filters.sources.length +
@@ -592,7 +604,7 @@ export function LogExplorer({ corpusId }: Props) {
             hasNewer: page.nextCursor != null,
           },
         });
-        setStatus(
+        setAutoStatus(
           `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
         );
       } else {
@@ -682,7 +694,7 @@ export function LogExplorer({ corpusId }: Props) {
             `${failed} evidence lane${failed === 1 ? "" : "s"} failed to load; time linking remains off`,
           );
         }
-        setStatus(
+        setAutoStatus(
           `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
         );
       }
@@ -692,7 +704,7 @@ export function LogExplorer({ corpusId }: Props) {
     } finally {
       if (requestId === eventsRequestRef.current) setBusy(false);
     }
-  }, [corpusId, filters, laneCount, lanes]);
+  }, [corpusId, filters, laneCount, lanes, setAutoStatus]);
 
   useEffect(() => {
     void refreshMeta();
@@ -1383,6 +1395,7 @@ export function LogExplorer({ corpusId }: Props) {
       const openFilters = emptyFilters();
       let revealLanes = lanes;
       let revealLane = matchingLane;
+      autoStatusLockRef.current = "bookmark-reveal";
       if (!revealLane) {
         const first = lanes[0] ?? defaultLanes(1)[0]!;
         revealLane = {
@@ -1424,6 +1437,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const restorePriorView = () => {
     if (revealRestore) {
+      autoStatusLockRef.current = "bookmark-restore";
       setFilters(revealRestore.filters);
       setFilterDraft(revealRestore.filters.keyword ?? "");
       setLanes(revealRestore.lanes);
