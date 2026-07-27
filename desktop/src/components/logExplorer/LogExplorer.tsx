@@ -413,8 +413,7 @@ export function LogExplorer({ corpusId }: Props) {
   );
   const closeLaneEditor = useCallback(() => {
     setLaneEditorOpen(false);
-    // Outside dismissal starts on mousedown, but the native click sequence may
-    // focus its target afterward. Return focus after that sequence completes.
+    // Return focus after the activating or dismissal click has completed.
     window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
   }, []);
   const handleRailSummary = useCallback((next: typeof chatSummary) => {
@@ -490,7 +489,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   useEffect(() => {
     if (!laneEditorOpen) return;
-    const onMouseDown = (event: MouseEvent) => {
+    const onClick = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (
         target &&
@@ -506,10 +505,13 @@ export function LogExplorer({ corpusId }: Props) {
         closeLaneEditor();
       }
     };
-    document.addEventListener("mousedown", onMouseDown);
+    // Wait for click rather than closing on mousedown. Native controls can move
+    // focus after mousedown, so closing there races the promised trigger-focus
+    // restoration in the packaged app.
+    document.addEventListener("click", onClick);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("click", onClick);
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [closeLaneEditor, laneEditorOpen]);

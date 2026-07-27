@@ -1693,12 +1693,11 @@ describe("LogExplorer shell", () => {
 
     fireEvent.click(toggle);
     await screen.findByTestId("lane-editor");
-    fireEvent.mouseDown(document.body);
-    await act(async () => {
-      await Promise.resolve();
-    });
     const outsideTarget = screen.getByTestId("log-explorer-find");
+    fireEvent.mouseDown(outsideTarget);
     outsideTarget.focus();
+    expect(document.activeElement).toBe(outsideTarget);
+    expect(screen.getByTestId("lane-editor")).not.toBeNull();
     fireEvent.mouseUp(outsideTarget);
     fireEvent.click(outsideTarget);
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
