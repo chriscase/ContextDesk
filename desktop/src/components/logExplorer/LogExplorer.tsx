@@ -29,10 +29,7 @@ import {
   type LogFacetsDto,
   type TimeQuality,
 } from "../../lib/host";
-import {
-  applyLogNav,
-  type LogNavAction,
-} from "../../lib/logExplorer/logNav";
+import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import {
   clampLaneCount,
   computeGaps,
@@ -44,7 +41,7 @@ import {
   aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
-  formatEventTime,
+  formatCanonicalUtc,
   leastReliableTimeQuality,
   timeQualityLabel,
   type Breakpoint,
@@ -77,10 +74,20 @@ import {
   toggleLaneSource,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
+import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
-import { HELP_FIND_VS_FILTER } from "../../lib/helpContent";
-import { LinkedChatRail } from "./LinkedChatRail";
 import {
+  HELP_COUNTS,
+  HELP_FIND_VS_FILTER,
+  HELP_LANE_COMPOSE,
+  HELP_LONG_LINES,
+  HELP_TIMELINE_NAVIGATOR,
+  HELP_TIME_LINK,
+} from "../../lib/helpContent";
+import { LinkedChatRail } from "./LinkedChatRail";
+import { TimelineNavigator } from "./TimelineNavigator";
+import {
+  eventRowHeight,
   VirtualizedEventList,
   type LineMode,
 } from "./VirtualizedEventList";
@@ -88,6 +95,18 @@ import "../../styles/components/log-explorer.css";
 
 type Props = {
   corpusId: string;
+};
+
+const FIND_PAGE_SIZE = 50;
+
+type FindCursor = {
+  seq: number;
+  ts: number;
+};
+
+type FindPageHistory = {
+  start: FindCursor | null;
+  base: number;
 };
 
 function filtersToQuery(
@@ -136,11 +155,17 @@ export function LogExplorer({ corpusId }: Props) {
       }
     >
   >({});
-  /** Per-lane scroll anchor adjust (rows prepended) for stable visual position. */
-  const [laneScrollAdjust, setLaneScrollAdjust] = useState<
-    Record<string, number>
-  >({});
   const pagingInflight = useRef<Record<string, "older" | "newer" | null>>({});
+  const [lanePaging, setLanePaging] = useState<
+    Record<
+      string,
+      {
+        loading: "older" | "newer" | null;
+        error: string | null;
+        failedDirection: "older" | "newer" | null;
+      }
+    >
+  >({});
   const [focusLaneId, setFocusLaneId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
@@ -161,6 +186,10 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
+  /** Exact matched count for each lane query; null means unavailable/failed. */
+  const [laneMatched, setLaneMatched] = useState<Record<string, number | null>>(
+    {},
+  );
   const [laneTimeStates, setLaneTimeStates] = useState<
     Record<string, LaneTimeState>
   >({});
@@ -168,10 +197,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
   >({});
+  const [alignedScrollTop, setAlignedScrollTop] = useState(0);
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [findDraft, setFindDraft] = useState("");
-  const [findMatchMode, setFindMatchMode] = useState<SearchMatchMode>("literal");
+  const [findMatchMode, setFindMatchMode] =
+    useState<SearchMatchMode>("literal");
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
   const [findUseSemantic, setFindUseSemantic] = useState(false);
   const [findPartial, setFindPartial] = useState(false);
@@ -179,12 +210,21 @@ export function LogExplorer({ corpusId }: Props) {
   const [filterDraft, setFilterDraft] = useState("");
   /** Find matches (ordered seqs) — does not reduce the table (#523). */
   const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [findExcerpts, setFindExcerpts] = useState<Record<number, string>>({});
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
-  /** Prior filters/view saved while a bookmark temporary reveal is active (#531). */
-  const [revealRestore, setRevealRestore] = useState<ExplorerFilters | null>(
-    null,
-  );
+  const [findTotalExact, setFindTotalExact] = useState(false);
+  const [findBase, setFindBase] = useState(0);
+  const [findNextCursor, setFindNextCursor] = useState<FindCursor | null>(null);
+  const [findPageStart, setFindPageStart] = useState<FindCursor | null>(null);
+  const [findHistory, setFindHistory] = useState<FindPageHistory[]>([]);
+  const [findActiveQuery, setFindActiveQuery] = useState<string | null>(null);
+  /** Prior filters/lanes saved while a bookmark temporary reveal is active (#531). */
+  const [revealRestore, setRevealRestore] = useState<{
+    filters: ExplorerFilters;
+    lanes: LaneConfig[];
+    laneCount: number;
+  } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
   >("idle");
@@ -197,13 +237,31 @@ export function LogExplorer({ corpusId }: Props) {
     }
     return "compact";
   });
+  const [previewLines, setPreviewLines] = useState(() => {
+    try {
+      const value = Number(
+        localStorage.getItem("contextdesk.logExplorer.previewLines.v1"),
+      );
+      if ([2, 4, 8, 12].includes(value)) return value;
+    } catch {
+      /* ignore */
+    }
+    return 4;
+  });
   const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set());
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [chatSummary, setChatSummary] = useState({
+    chatCount: 0,
+    hasActiveChat: false,
+    busy: false,
+  });
   const [detailH, setDetailH] = useState(() => {
     try {
-      const n = Number(localStorage.getItem("contextdesk.logExplorer.detailH.v1"));
+      const n = Number(
+        localStorage.getItem("contextdesk.logExplorer.detailH.v1"),
+      );
       if (Number.isFinite(n) && n >= 120 && n <= 640) return n;
     } catch {
       /* ignore */
@@ -211,24 +269,58 @@ export function LogExplorer({ corpusId }: Props) {
     return 180;
   });
   const detailDragRef = useRef<{ startY: number; startH: number } | null>(null);
-  const colDragRef = useRef<{ index: 0 | 1 | 2; startX: number; startW: number } | null>(
-    null,
-  );
+  const colDragRef = useRef<{
+    index: 0 | 1 | 2 | 3;
+    startX: number;
+    startW: number;
+  } | null>(null);
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
+  const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
+  const findRequestRef = useRef(0);
+  const findActiveRef = useRef(false);
+  const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
+    () => {},
+  );
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+  const activeFilterCount =
+    filters.levels.length +
+    filters.sources.length +
+    filters.services.length +
+    filters.hosts.length +
+    (filters.keyword ? 1 : 0) +
+    (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
+  const handleRailSummary = useCallback((next: typeof chatSummary) => {
+    setChatSummary((previous) =>
+      previous.chatCount === next.chatCount &&
+      previous.hasActiveChat === next.hasActiveChat &&
+      previous.busy === next.busy
+        ? previous
+        : next,
+    );
+  }, []);
 
   useEffect(() => {
     saveColWidths(colWidths);
   }, [colWidths]);
+
+  useEffect(
+    () => () => {
+      findRequestRef.current += 1;
+      findActiveRef.current = false;
+    },
+    [],
+  );
 
   useEffect(() => {
     try {
@@ -240,7 +332,34 @@ export function LogExplorer({ corpusId }: Props) {
 
   useEffect(() => {
     try {
-      localStorage.setItem("contextdesk.logExplorer.detailH.v1", String(detailH));
+      localStorage.setItem(
+        "contextdesk.logExplorer.previewLines.v1",
+        String(previewLines),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [previewLines]);
+
+  useEffect(() => {
+    if (breakpoint !== "narrow") return;
+    if (narrowFiltersOpen) {
+      queueMicrotask(() => findInputRef.current?.focus());
+    } else if (narrowChatOpen) {
+      queueMicrotask(() => {
+        rootRef.current
+          ?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]')
+          ?.focus();
+      });
+    }
+  }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.detailH.v1",
+        String(detailH),
+      );
     } catch {
       /* ignore */
     }
@@ -367,7 +486,11 @@ export function LogExplorer({ corpusId }: Props) {
     );
     setBusy(true);
     setError(null);
+    setLanePaging({});
     setLaneTimeStates(unloaded);
+    setLaneMatched(
+      Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
+    );
     setTimeQuality("order_only");
     setGaps([]);
     try {
@@ -383,6 +506,7 @@ export function LogExplorer({ corpusId }: Props) {
             : { status: "empty", quality: null };
         const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
+        setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
         setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
@@ -398,7 +522,6 @@ export function LogExplorer({ corpusId }: Props) {
             hasNewer: page.nextCursor != null,
           },
         });
-        setLaneScrollAdjust({ "lane-0": 0 });
         setStatus(
           `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
         );
@@ -416,7 +539,8 @@ export function LogExplorer({ corpusId }: Props) {
           }
         > = {};
         const states: Record<string, LaneTimeState> = {};
-        let total = 0;
+        const matchedByLane: Record<string, number | null> = {};
+        let maxLaneMatched = 0;
         let shown = 0;
         const requests = visibleLanes.map(async (lane) => {
           const q = filtersToQuery(filters, {
@@ -449,6 +573,7 @@ export function LogExplorer({ corpusId }: Props) {
               hasNewer: false,
             };
             states[lane.id] = { status: "error", quality: null };
+            matchedByLane[lane.id] = null;
             continue;
           }
           const { page } = result.value;
@@ -462,7 +587,8 @@ export function LogExplorer({ corpusId }: Props) {
             hasOlder: page.prevCursor != null,
             hasNewer: page.nextCursor != null,
           };
-          total = Math.max(total, page.totalMatched);
+          matchedByLane[lane.id] = page.totalMatched;
+          maxLaneMatched = Math.max(maxLaneMatched, page.totalMatched);
           shown += page.events.length;
           states[lane.id] =
             page.events.length > 0
@@ -470,9 +596,11 @@ export function LogExplorer({ corpusId }: Props) {
               : { status: "empty", quality: null };
         }
         setLaneEvents(byLane);
+        setLaneMatched(matchedByLane);
         setLaneCursors(cursors);
         setLaneTimeStates(states);
-        setTotalMatched(total);
+        // No global unique matched total is derivable from overlapping lanes.
+        setTotalMatched(0);
         setTimeQuality(
           aggregateLaneTimeQuality(
             visibleLanes.map((lane) => lane.id),
@@ -486,7 +614,7 @@ export function LogExplorer({ corpusId }: Props) {
           );
         }
         setStatus(
-          `${laneCount} lanes · ${shown} loaded (page) · up to ${total} matched per lane`,
+          `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
         );
       }
     } catch (e) {
@@ -552,9 +680,9 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarks,
   ]);
 
-  // Link/gap when multi-lane + link on
+  // Gap summaries are claims about shared time and belong only to true Align.
   useEffect(() => {
-    if (linkMode === "independent" || laneCount < 2) {
+    if (linkMode !== "align_time" || laneCount < 2) {
       setGaps([]);
       return;
     }
@@ -579,15 +707,28 @@ export function LogExplorer({ corpusId }: Props) {
   }, [linkMode, laneCount, lanes, laneEvents, timeQuality]);
 
   useEffect(() => {
-    if (timeQuality === "order_only" && linkMode !== "independent") {
+    const visibleLaneIds = lanes.slice(0, laneCount).map((lane) => lane.id);
+    const settled = visibleLaneIds.every((laneId) => {
+      const state = laneTimeStates[laneId];
+      return (
+        state?.status === "loaded" ||
+        state?.status === "empty" ||
+        state?.status === "error"
+      );
+    });
+    if (!settled) return;
+    const invalid =
+      (linkMode === "align_time" && timeQuality !== "wall") ||
+      (linkMode === "follow_cursor" && timeQuality === "order_only");
+    if (invalid) {
       setLinkMode("independent");
       saveLinkMode(corpusId, "independent");
       setGaps([]);
       setStatus(
-        "Time link disabled: order-only time cannot claim wall-clock alignment",
+        "Time link disabled: current lane time quality cannot support that mode",
       );
     }
-  }, [linkMode, timeQuality, corpusId]);
+  }, [corpusId, laneCount, laneTimeStates, lanes, linkMode, timeQuality]);
 
   const toggleLevel = (level: string) => {
     setFilters((f) => {
@@ -613,9 +754,10 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
-  /** Apply a neighborhood page into lane-0 residency + cursors. */
+  /** Apply a neighborhood page into one lane's residency + cursors. */
   const applyNeighborhoodToLane = (
     nb: Awaited<ReturnType<typeof hostLogQueryEventNeighborhood>>,
+    laneId = "lane-0",
   ) => {
     if (nb.events.length === 0) return;
     const seeded = seedFromPage({
@@ -626,35 +768,37 @@ export function LogExplorer({ corpusId }: Props) {
       prevTs: nb.prevTs ?? null,
       totalMatched: nb.totalMatched,
     });
-    setLaneEvents((prev) => ({ ...prev, "lane-0": seeded.events }));
+    setLaneEvents((prev) => ({ ...prev, [laneId]: seeded.events }));
     setLaneCursors((prev) => ({
       ...prev,
-      "lane-0": {
+      [laneId]: {
         afterSeq: seeded.afterSeq,
         afterTs: seeded.afterTs,
         beforeSeq: seeded.beforeSeq,
         beforeTs: seeded.beforeTs,
-        hasOlder: seeded.beforeSeq != null,
-        hasNewer: seeded.afterSeq != null,
+        hasOlder: nb.prevCursor != null,
+        hasNewer: nb.nextCursor != null,
       },
     }));
     if (nb.corpusTotal > 0) setCorpusTotal(nb.corpusTotal);
-    if (nb.totalMatched > 0) setTotalMatched(nb.totalMatched);
+    setLaneMatched((m) => ({ ...m, [laneId]: nb.totalMatched }));
+    if (laneCount === 1) setTotalMatched(nb.totalMatched);
   };
 
   /** Seek a stable event into the resident window via neighborhood API. */
   const seekToSeq = async (
     seq: number,
-    opts?: { clearFilters?: boolean },
+    opts?: {
+      clearFilters?: boolean;
+      laneId?: string;
+      sources?: string[];
+    },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
-    const filter = opts?.clearFilters
-      ? filtersToQuery({
-          ...filters,
-          levels: [],
-          sources: [],
-          keyword: null,
-        })
-      : filtersToQuery(filters, { keyword: filters.keyword });
+    const base = opts?.clearFilters ? emptyFilters() : filters;
+    const filter = filtersToQuery(base, {
+      keyword: base.keyword,
+      sources: opts?.sources ?? base.sources,
+    });
     const nb = await hostLogQueryEventNeighborhood(corpusId, {
       targetSeq: seq,
       before: 50,
@@ -663,8 +807,10 @@ export function LogExplorer({ corpusId }: Props) {
       sortByTime: true,
     });
     if (nb.status === "found") {
-      applyNeighborhoodToLane(nb);
-      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
+      const laneId = opts?.laneId ?? "lane-0";
+      applyNeighborhoodToLane(nb, laneId);
+      setFocusLaneId(laneId);
+      setLaneScrollSeq((m) => ({ ...m, [laneId]: seq }));
       if (nb.target) {
         setDetail(nb.target);
         setSelected(new Set([seq]));
@@ -678,16 +824,39 @@ export function LogExplorer({ corpusId }: Props) {
    * Does NOT replace the resident table with only hits.
    * Uses direct neighborhood seek for non-resident matches (no 40-page scan).
    */
-  const runFind = async () => {
+  const clearFindResults = (message?: string) => {
+    findRequestRef.current += 1;
+    findActiveRef.current = false;
+    setFindActiveQuery(null);
+    setFindMatches([]);
+    setFindExcerpts({});
+    setFindIndex(0);
+    setFindTotal(0);
+    setFindTotalExact(false);
+    setFindBase(0);
+    setFindNextCursor(null);
+    setFindPageStart(null);
+    setFindHistory([]);
+    setFindPartial(false);
+    setHighlight(new Set());
+    if (message) setStatus(message);
+  };
+
+  const requestFindPage = async (
+    start: FindCursor | null,
+    base: number,
+    history: FindPageHistory[],
+    target: "first" | "last",
+    scopedFilters: ExplorerFilters,
+  ) => {
     const q = findDraft.trim();
     if (!q) {
-      setFindMatches([]);
-      setFindIndex(0);
-      setFindTotal(0);
-      setHighlight(new Set());
-      setStatus("Find cleared");
+      clearFindResults("Find cleared");
       return;
     }
+    const requestId = ++findRequestRef.current;
+    findActiveRef.current = true;
+    setFindActiveQuery(q);
     setBusy(true);
     setError(null);
     try {
@@ -696,20 +865,44 @@ export function LogExplorer({ corpusId }: Props) {
         semantic: findUseSemantic && findMatchMode === "literal",
         matchMode: findMatchMode,
         caseSensitive: findCaseSensitive,
-        // Cap is a partial/capped result signal; navigation still seeks by seq.
-        k: 500,
+        // Only one bounded result page is retained in the webview.
+        k: FIND_PAGE_SIZE,
         // Compose with active filter facets but not a second keyword reduce.
-        filter: filtersToQuery(filters, { keyword: null }),
+        filter: filtersToQuery(scopedFilters, {
+          keyword: null,
+          afterSeq: start?.seq ?? null,
+          afterTs: start?.ts ?? null,
+          beforeSeq: null,
+          beforeTs: null,
+        }),
       });
+      if (requestId !== findRequestRef.current) return;
       const hits = result.hits;
       const seqs = hits.map((h) => h.event.seq);
+      setFindExcerpts(
+        Object.fromEntries(
+          hits
+            .filter((hit) => hit.excerpt)
+            .map((hit) => [hit.event.seq, hit.excerpt!]),
+        ),
+      );
+      const index = target === "last" ? Math.max(0, seqs.length - 1) : 0;
       setFindMatches(seqs);
-      setFindTotal(seqs.length);
-      setFindIndex(seqs.length > 0 ? 0 : 0);
+      setFindTotal(result.totalMatched ?? base + seqs.length);
+      setFindTotalExact(result.totalMatched != null);
+      setFindBase(base);
+      setFindIndex(index);
       setFindPartial(result.partial);
+      setFindPageStart(start);
+      setFindHistory(history);
+      setFindNextCursor(
+        result.nextCursor != null && result.nextTs != null
+          ? { seq: result.nextCursor, ts: result.nextTs }
+          : null,
+      );
       setHighlight(new Set(seqs));
       if (seqs.length > 0) {
-        const first = seqs[0]!;
+        const first = seqs[index]!;
         const resident = laneEvents["lane-0"] ?? [];
         if (!resident.some((e) => e.seq === first)) {
           await seekToSeq(first);
@@ -719,42 +912,117 @@ export function LogExplorer({ corpusId }: Props) {
       }
       const modeLabel = findMatchMode === "regex" ? "regex" : "literal";
       const extra = [
-        result.partial ? "partial/capped" : null,
+        result.partial && result.nextCursor == null ? "partial/capped" : null,
         result.diagnostic,
       ]
         .filter(Boolean)
         .join(" · ");
+      const ordinal = base + index + 1;
+      const totalLabel =
+        result.totalMatched != null
+          ? String(result.totalMatched)
+          : result.nextCursor != null
+            ? `${base + seqs.length}+`
+            : String(base + seqs.length);
       setStatus(
         seqs.length
-          ? `Find (${modeLabel}): match 1 of ${seqs.length}${
-              result.partial ? "+" : ""
-            } for “${q}”${extra ? ` (${extra})` : ""} (context preserved)`
+          ? `Find (${modeLabel}): match ${ordinal} of ${totalLabel} for “${q}”${
+              extra ? ` (${extra})` : ""
+            } (context preserved; ${seqs.length} result identities resident)`
           : `Find (${modeLabel}): no matches for “${q}”${
               result.diagnostic ? ` — ${result.diagnostic}` : ""
             }`,
       );
     } catch (e) {
+      if (requestId !== findRequestRef.current) return;
       setError(String(e));
     } finally {
-      setBusy(false);
+      if (requestId === findRequestRef.current) setBusy(false);
     }
   };
 
-  const findStep = (dir: 1 | -1) => {
-    if (findMatches.length === 0) return;
-    const next =
-      (findIndex + dir + findMatches.length) % findMatches.length;
+  const runFind = async () => {
+    await requestFindPage(null, 0, [], "first", filters);
+  };
+
+  findRefreshRef.current = (nextFilters) => {
+    if (!findActiveRef.current) return;
+    void requestFindPage(null, 0, [], "first", nextFilters);
+  };
+
+  useEffect(() => {
+    findRefreshRef.current(filters);
+  }, [filters]);
+
+  const findStep = async (dir: 1 | -1) => {
+    if (findMatches.length === 0) {
+      if (dir === 1 && findNextCursor) {
+        await requestFindPage(
+          findNextCursor,
+          findBase,
+          [...findHistory, { start: findPageStart, base: findBase }],
+          "first",
+          filters,
+        );
+      } else if (dir === -1) {
+        const previous = findHistory.at(-1);
+        if (previous) {
+          await requestFindPage(
+            previous.start,
+            previous.base,
+            findHistory.slice(0, -1),
+            "last",
+            filters,
+          );
+        }
+      }
+      return;
+    }
+    if (dir === 1 && findIndex === findMatches.length - 1) {
+      if (!findNextCursor) {
+        setStatus("Find: end of results");
+        return;
+      }
+      await requestFindPage(
+        findNextCursor,
+        findBase + findMatches.length,
+        [...findHistory, { start: findPageStart, base: findBase }],
+        "first",
+        filters,
+      );
+      return;
+    }
+    if (dir === -1 && findIndex === 0) {
+      const previous = findHistory.at(-1);
+      if (!previous) {
+        setStatus("Find: beginning of results");
+        return;
+      }
+      await requestFindPage(
+        previous.start,
+        previous.base,
+        findHistory.slice(0, -1),
+        "last",
+        filters,
+      );
+      return;
+    }
+    const next = findIndex + dir;
     setFindIndex(next);
     const seq = findMatches[next]!;
     const resident = laneEvents["lane-0"] ?? [];
     if (!resident.some((e) => e.seq === seq)) {
-      void seekToSeq(seq).then(() => {
-        setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
-      });
+      await seekToSeq(seq);
     } else {
       setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-      setStatus(`Find: match ${next + 1} of ${findMatches.length}`);
     }
+    setStatus(
+      `Find: match ${findBase + next + 1} of ${
+        findTotalExact
+          ? findTotal
+          : `${Math.max(findTotal, findBase + findMatches.length)}+`
+      }`,
+    );
   };
 
   /** Filter: reduce visible events by keyword ∩ facets (#523). */
@@ -766,6 +1034,12 @@ export function LogExplorer({ corpusId }: Props) {
         ? `Filter: keyword “${kw}” (intersects levels/sources/time)`
         : "Filter: keyword cleared",
     );
+  };
+
+  const clearAllFilters = () => {
+    setFilterDraft("");
+    setFilters(emptyFilters());
+    setStatus("All event filters cleared");
   };
 
   const onRowClick = (e: ExplorerEventDto, multi: boolean) => {
@@ -792,12 +1066,16 @@ export function LogExplorer({ corpusId }: Props) {
           scrollMap[p.laneId] = p.seq;
           if (p.seq != null) hl.add(p.seq);
         }
-        setLaneScrollSeq(scrollMap);
+        if (linkMode === "follow_cursor") {
+          setLaneScrollSeq(scrollMap);
+        }
         setHighlight(hl);
         setStatus(
-          `Linked cursor ts=${e.ts} · ${scrub.peerPositions
-            .map((p) => `${p.laneId}→${p.seq ?? "—"}`)
-            .join(" · ")}`,
+          linkMode === "align_time"
+            ? `Aligned wall-clock row ts=${e.ts} · empty cells are explicit missing evidence`
+            : `Follow cursor ts=${e.ts} · ${scrub.peerPositions
+                .map((p) => `${p.laneId}→${p.seq ?? "—"}`)
+                .join(" · ")}`,
         );
       } else if (scrub.refuseReason) {
         setStatus(scrub.refuseReason);
@@ -830,6 +1108,31 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const onKeyDown = (ev: ReactKeyboardEvent) => {
+    if (
+      ev.key === "Escape" &&
+      !ev.defaultPrevented &&
+      breakpoint === "narrow"
+    ) {
+      if (narrowFiltersOpen) {
+        ev.preventDefault();
+        setNarrowFiltersOpen(false);
+        queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
+        return;
+      }
+      if (narrowChatOpen) {
+        ev.preventDefault();
+        setNarrowChatOpen(false);
+        queueMicrotask(() => narrowChatToggleRef.current?.focus());
+        return;
+      }
+    }
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "f") {
+      ev.preventDefault();
+      setNarrowFiltersOpen(true);
+      setNarrowChatOpen(false);
+      findInputRef.current?.focus();
+      return;
+    }
     if (ev.key === "b" || ev.key === "B") {
       if (
         (ev.target as HTMLElement)?.tagName === "INPUT" ||
@@ -875,27 +1178,20 @@ export function LogExplorer({ corpusId }: Props) {
       ),
     );
 
-    const resident = Object.values(laneEvents)
-      .flat()
-      .some((e) => e.seq >= b.seqFrom && e.seq <= b.seqTo);
-    if (resident) {
-      setLaneScrollSeq((m) => ({ ...m, "lane-0": seq }));
-      setBookmarkRevealState("visible");
-      setStatus(`Bookmark visible: ${b.label}`);
-      return;
-    }
-
     setBusy(true);
     setError(null);
     try {
-      // Try under current filters first.
-      let status = await seekToSeq(seq);
-      if (status === "found") {
-        setBookmarkRevealState("visible");
-        setStatus(`Bookmark visible under current filters: ${b.label}`);
-        return;
-      }
-      if (status === "missing") {
+      // Resolve the stable target under current global filters. Hidden results
+      // still return the target identity so the correct source lane can be
+      // selected or temporarily composed.
+      const resolved = await hostLogQueryEventNeighborhood(corpusId, {
+        targetSeq: seq,
+        before: 0,
+        after: 0,
+        filter: filtersToQuery(filters),
+        sortByTime: true,
+      });
+      if (resolved.status === "missing" || !resolved.target) {
         setBookmarkRevealState("missing");
         setStatus(
           `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
@@ -903,19 +1199,76 @@ export function LogExplorer({ corpusId }: Props) {
         return;
       }
 
-      // Hidden by filters — temporarily clear and seek again.
-      if (!revealRestore) {
-        setRevealRestore({ ...filters });
+      const visibleLanes = lanes.slice(0, laneCount);
+      const matchingLane =
+        visibleLanes.find(
+          (lane) =>
+            lane.sources.length > 0 &&
+            lane.sources.includes(resolved.target!.source),
+        ) ?? visibleLanes.find((lane) => lane.sources.length === 0);
+
+      if (resolved.status === "found" && matchingLane) {
+        const residentTarget = (laneEvents[matchingLane.id] ?? []).find(
+          (event) => event.seq === seq,
+        );
+        if (residentTarget) {
+          setFocusLaneId(matchingLane.id);
+          setLaneScrollSeq((m) => ({ ...m, [matchingLane.id]: seq }));
+          setDetail(residentTarget);
+          setSelected(new Set([seq]));
+          setBookmarkRevealState("visible");
+          setStatus(`Bookmark visible: ${b.label}`);
+          return;
+        }
+        const status = await seekToSeq(seq, {
+          laneId: matchingLane.id,
+          sources:
+            matchingLane.sources.length > 0
+              ? matchingLane.sources
+              : filters.sources,
+        });
+        if (status !== "found") {
+          throw new Error(
+            "Bookmark target changed while it was being revealed",
+          );
+        }
+        setBookmarkRevealState("visible");
+        setStatus(`Bookmark visible under current filters: ${b.label}`);
+        return;
       }
-      const openFilters: ExplorerFilters = {
-        ...filters,
-        levels: [],
-        sources: [],
-        keyword: null,
-      };
+
+      // Hidden by filters or absent from current lane composition: preserve
+      // the complete prior view and explicitly create a temporary reveal.
+      if (!revealRestore) {
+        setRevealRestore({
+          filters: { ...filters },
+          lanes: lanes.map((lane) => ({
+            ...lane,
+            sources: [...lane.sources],
+          })),
+          laneCount,
+        });
+      }
+      const openFilters = emptyFilters();
+      let revealLanes = lanes;
+      let revealLane = matchingLane;
+      if (!revealLane) {
+        const first = lanes[0] ?? defaultLanes(1)[0]!;
+        revealLane = {
+          ...first,
+          label: `Bookmark · ${resolved.target.source}`,
+          sources: [resolved.target.source],
+        };
+        revealLanes = [revealLane, ...lanes.slice(1)];
+        setLanes(revealLanes);
+      }
       setFilters(openFilters);
       setFilterDraft("");
-      status = await seekToSeq(seq, { clearFilters: true });
+      const status = await seekToSeq(seq, {
+        clearFilters: true,
+        laneId: revealLane.id,
+        sources: [resolved.target.source],
+      });
       if (status === "found") {
         setBookmarkRevealState("revealed");
         setStatus(
@@ -940,8 +1293,10 @@ export function LogExplorer({ corpusId }: Props) {
 
   const restorePriorView = () => {
     if (revealRestore) {
-      setFilters(revealRestore);
-      setFilterDraft(revealRestore.keyword ?? "");
+      setFilters(revealRestore.filters);
+      setFilterDraft(revealRestore.filters.keyword ?? "");
+      setLanes(revealRestore.lanes);
+      setLaneCount(revealRestore.laneCount);
       setRevealRestore(null);
       setBookmarkRevealState("idle");
       setStatus("Restored prior Explorer view");
@@ -1022,7 +1377,14 @@ export function LogExplorer({ corpusId }: Props) {
     if (pagingInflight.current[laneId]) return;
     pagingInflight.current[laneId] = "newer";
     const requestId = eventsRequestRef.current;
-    setBusy(true);
+    setLanePaging((previous) => ({
+      ...previous,
+      [laneId]: {
+        loading: "newer",
+        error: null,
+        failedDirection: null,
+      },
+    }));
     try {
       const page = await hostLogQueryEvents(
         corpusId,
@@ -1043,8 +1405,13 @@ export function LogExplorer({ corpusId }: Props) {
         beforeTs: cur.beforeTs,
         totalMatched: totalMatched,
       };
-      const { window } = appendNewer(resident, page, DEFAULT_MAX_RESIDENT);
+      const { window, droppedFromHead } = appendNewer(
+        resident,
+        page,
+        DEFAULT_MAX_RESIDENT,
+      );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
+      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -1052,7 +1419,7 @@ export function LogExplorer({ corpusId }: Props) {
           afterTs: window.afterTs,
           beforeSeq: window.beforeSeq,
           beforeTs: window.beforeTs,
-          hasOlder: window.beforeSeq != null,
+          hasOlder: cur.hasOlder || droppedFromHead > 0,
           hasNewer: page.nextCursor != null,
         },
       }));
@@ -1080,15 +1447,29 @@ export function LogExplorer({ corpusId }: Props) {
           return next;
         });
       }
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: null,
+          failedDirection: null,
+        },
+      }));
       setStatus(
         `Lane ${laneId}: +${page.events.length} newer · ${window.events.length} resident`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
-      setError(String(e));
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: String(e),
+          failedDirection: "newer",
+        },
+      }));
     } finally {
       pagingInflight.current[laneId] = null;
-      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -1098,7 +1479,14 @@ export function LogExplorer({ corpusId }: Props) {
     if (pagingInflight.current[laneId]) return;
     pagingInflight.current[laneId] = "older";
     const requestId = eventsRequestRef.current;
-    setBusy(true);
+    setLanePaging((previous) => ({
+      ...previous,
+      [laneId]: {
+        loading: "older",
+        error: null,
+        failedDirection: null,
+      },
+    }));
     try {
       const page = await hostLogQueryEvents(
         corpusId,
@@ -1119,12 +1507,13 @@ export function LogExplorer({ corpusId }: Props) {
         beforeTs: cur.beforeTs,
         totalMatched: totalMatched,
       };
-      const { window, prepended } = prependOlder(
+      const { window, droppedFromTail } = prependOlder(
         resident,
         page,
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
+      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -1133,24 +1522,32 @@ export function LogExplorer({ corpusId }: Props) {
           beforeSeq: window.beforeSeq,
           beforeTs: window.beforeTs,
           hasOlder: page.prevCursor != null,
-          hasNewer: cur.hasNewer || page.events.length > 0,
+          hasNewer: cur.hasNewer || droppedFromTail > 0,
         },
       }));
-      if (prepended > 0) {
-        setLaneScrollAdjust((prev) => ({
-          ...prev,
-          [laneId]: (prev[laneId] ?? 0) + prepended,
-        }));
-      }
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: null,
+          failedDirection: null,
+        },
+      }));
       setStatus(
         `Lane ${laneId}: +${page.events.length} older · ${window.events.length} resident`,
       );
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
-      setError(String(e));
+      setLanePaging((previous) => ({
+        ...previous,
+        [laneId]: {
+          loading: null,
+          error: String(e),
+          failedDirection: "older",
+        },
+      }));
     } finally {
       pagingInflight.current[laneId] = null;
-      if (requestId === eventsRequestRef.current) setBusy(false);
     }
   };
 
@@ -1189,9 +1586,52 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const setTimeLinkMode = (mode: TimeLinkMode) => {
+    if (mode === "align_time") setAlignedScrollTop(0);
     setLinkMode(mode);
     saveLinkMode(corpusId, mode);
   };
+
+  const alignedRowsByLane = useMemo(() => {
+    if (linkMode !== "align_time" || timeQuality !== "wall" || laneCount < 2) {
+      return {};
+    }
+    const baseRowH = density === "compact" ? 22 : 28;
+    const boundedPreview = Math.min(12, Math.max(2, previewLines));
+    const wrapH =
+      lineMode === "wrap"
+        ? Math.max(baseRowH, boundedPreview * 18 + 12)
+        : baseRowH;
+    return buildAlignedLaneRows(
+      lanes.slice(0, laneCount).map((lane) => ({
+        id: lane.id,
+        events: laneEvents[lane.id] ?? [],
+      })),
+      (event) =>
+        eventRowHeight(
+          event,
+          lineMode,
+          expandedSeqs.has(event.seq),
+          baseRowH,
+          wrapH,
+          boundedPreview,
+        ),
+      baseRowH,
+    );
+  }, [
+    density,
+    expandedSeqs,
+    laneCount,
+    laneEvents,
+    lanes,
+    lineMode,
+    linkMode,
+    previewLines,
+    timeQuality,
+  ]);
+  const alignedSlotCount =
+    linkMode === "align_time"
+      ? (alignedRowsByLane[lanes[0]?.id ?? ""]?.length ?? 0)
+      : 0;
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
   const bpClass = `log-explorer--${breakpoint}`;
@@ -1217,13 +1657,26 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
+  const closeDetail = () => {
+    const seq = detail?.seq;
+    setDetail(null);
+    if (seq != null) {
+      queueMicrotask(() => {
+        const row = rootRef.current?.querySelector<HTMLElement>(
+          `[data-seq="${seq}"]`,
+        );
+        row?.focus();
+      });
+    }
+  };
+
   // Per-lane truthful counts (#534).
   const laneMatchedHint = (laneId: string) => {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
-    const more =
-      cur?.hasNewer || cur?.hasOlder ? "+" : "";
-    return `${n}${more} resident`;
+    const matched = laneMatched[laneId];
+    const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
+    return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
 
   return (
@@ -1238,6 +1691,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-line-mode={lineMode}
       data-lane-count={laneCount}
       data-link-mode={linkMode}
+      data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
       data-resizable="true"
       onKeyDown={onKeyDown}
@@ -1246,7 +1700,10 @@ export function LogExplorer({ corpusId }: Props) {
         <div className="log-explorer__title">
           Log Explorer · {summary?.name ?? corpusId.slice(0, 8)}
         </div>
-        <div className="log-explorer__meta">
+        <div
+          className="log-explorer__meta"
+          data-testid="log-explorer-global-counts"
+        >
           <span
             className={
               timeQuality === "order_only"
@@ -1257,7 +1714,19 @@ export function LogExplorer({ corpusId }: Props) {
           >
             {timeQualityLabel(timeQuality)}
           </span>
-          <span className="log-explorer__badge">{totalMatched} events</span>
+          <span className="log-explorer__badge">
+            {corpusTotal.toLocaleString()} corpus events
+          </span>
+          {laneCount === 1 && (
+            <span className="log-explorer__badge">
+              {totalMatched.toLocaleString()} matched
+            </span>
+          )}
+          {laneCount > 1 && (
+            <span className="log-explorer__badge">
+              {laneCount} lane queries
+            </span>
+          )}
           <span className="log-explorer__badge">{breakpoint}</span>
         </div>
         <div className="log-explorer__toolbar">
@@ -1281,15 +1750,21 @@ export function LogExplorer({ corpusId }: Props) {
                     : "Align lanes on a shared vertical time axis with explicit gap bands"
               }
               onClick={() => {
-                if (mode !== "independent" && timeQuality === "order_only") {
+                if (mode === "align_time" && timeQuality !== "wall") {
+                  setStatus(
+                    `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
+                  );
+                  return;
+                }
+                if (mode === "follow_cursor" && timeQuality === "order_only") {
                   setStatus(
                     "Time link unavailable: order-only time cannot claim wall-clock alignment",
                   );
                   return;
                 }
-                if (mode !== "independent" && timeQuality === "mixed") {
+                if (mode === "follow_cursor" && timeQuality === "mixed") {
                   setStatus(
-                    "Time link uses mixed time quality; inspect each lane badge before interpreting gaps",
+                    "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
                   );
                 }
                 setTimeLinkMode(mode);
@@ -1298,6 +1773,11 @@ export function LogExplorer({ corpusId }: Props) {
               {label}
             </button>
           ))}
+          <HelpTip
+            label="Time-link modes"
+            title="Time-link modes"
+            content={HELP_TIME_LINK}
+          />
           <button
             type="button"
             className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
@@ -1328,18 +1808,50 @@ export function LogExplorer({ corpusId }: Props) {
                 {n}L
               </button>
             ))}
-          {(["compact", "wrap", "full"] as LineMode[]).map((mode) => (
+          {(
+            [
+              ["compact", "1 line"],
+              ["wrap", "Preview"],
+              ["full", "Deep"],
+            ] as const
+          ).map(([mode, label]) => (
             <button
               key={mode}
               type="button"
               className={`log-explorer__btn ${lineMode === mode ? "log-explorer__btn--active" : ""}`}
               data-testid={`line-mode-${mode}`}
               onClick={() => setLineMode(mode)}
-              title={`Message lines: ${mode}`}
+              title={
+                mode === "compact"
+                  ? "Dense single-line rows; expand an individual event or use the inspector"
+                  : mode === "wrap"
+                    ? `Show up to ${previewLines} lines per row`
+                    : `Show up to ${Math.min(24, previewLines * 2)} lines per row; inspector remains complete`
+              }
             >
-              {mode}
+              {label}
             </button>
           ))}
+          <label className="log-explorer__toolbar-field">
+            Preview
+            <select
+              value={previewLines}
+              aria-label="Preview lines per event"
+              data-testid="preview-lines"
+              onChange={(event) => setPreviewLines(Number(event.target.value))}
+            >
+              {[2, 4, 8, 12].map((lines) => (
+                <option key={lines} value={lines}>
+                  {lines} lines
+                </option>
+              ))}
+            </select>
+          </label>
+          <HelpTip
+            label="Long-line reading help"
+            title="Reading long events"
+            content={HELP_LONG_LINES}
+          />
           <button
             type="button"
             className="log-explorer__btn"
@@ -1347,7 +1859,11 @@ export function LogExplorer({ corpusId }: Props) {
             title="Auto-fit columns to source lengths"
             onClick={() => {
               const sources = Object.keys(facets?.sources ?? {});
-              setColWidths(autoFitColWidths(sources));
+              const messages = Object.values(laneEvents)
+                .flat()
+                .slice(0, 200)
+                .map((event) => event.message);
+              setColWidths(autoFitColWidths(sources, messages));
               setStatus("Columns auto-fitted");
             }}
           >
@@ -1380,7 +1896,7 @@ export function LogExplorer({ corpusId }: Props) {
         data-testid="log-explorer-col-headers"
         role="row"
         style={{
-          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(8rem, 1fr)`,
+          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`,
         }}
       >
         {(
@@ -1388,9 +1904,14 @@ export function LogExplorer({ corpusId }: Props) {
             { label: "Time", index: 0 as const },
             { label: "Lvl", index: 1 as const },
             { label: "Source", index: 2 as const },
+            { label: "Message", index: 3 as const },
           ] as const
         ).map((col) => (
-          <div key={col.label} className="log-explorer__col-header" role="columnheader">
+          <div
+            key={col.label}
+            className="log-explorer__col-header"
+            role="columnheader"
+          >
             <span>{col.label}</span>
             <button
               type="button"
@@ -1420,9 +1941,6 @@ export function LogExplorer({ corpusId }: Props) {
             />
           </div>
         ))}
-        <div className="log-explorer__col-header" role="columnheader">
-          Message
-        </div>
       </div>
 
       {laneEditorOpen && (
@@ -1433,7 +1951,12 @@ export function LogExplorer({ corpusId }: Props) {
           aria-label="Lane source composition"
         >
           <div className="log-explorer__section-title">
-            Compose lanes (empty membership = all sources)
+            Compose lanes (empty membership = all sources){" "}
+            <HelpTip
+              label="Lane composition"
+              title="Lane composition"
+              content={HELP_LANE_COMPOSE}
+            />
           </div>
           {lanes.slice(0, laneCount).map((lane) => (
             <div key={lane.id} className="log-explorer__lane-editor-row">
@@ -1470,31 +1993,36 @@ export function LogExplorer({ corpusId }: Props) {
           data-testid="log-explorer-narrow-tabs"
         >
           <button
+            ref={narrowFiltersToggleRef}
             type="button"
             className={`log-explorer__btn ${narrowFiltersOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="narrow-filters-toggle"
             aria-expanded={narrowFiltersOpen}
+            aria-controls="log-explorer-filter-panel"
             onClick={() => {
               setNarrowFiltersOpen((o) => !o);
               setNarrowChatOpen(false);
             }}
           >
             Filters
-            {filters.levels.length + filters.sources.length > 0
-              ? ` (${filters.levels.length + filters.sources.length})`
-              : ""}
+            {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
           <button
+            ref={narrowChatToggleRef}
             type="button"
             className={`log-explorer__btn ${narrowChatOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="narrow-chat-toggle"
             aria-expanded={narrowChatOpen}
+            aria-controls="log-explorer-chat-panel"
             onClick={() => {
               setNarrowChatOpen((o) => !o);
               setNarrowFiltersOpen(false);
             }}
           >
             Chat
+            {chatSummary.chatCount > 0 ? ` (${chatSummary.chatCount})` : ""}
+            {chatSummary.hasActiveChat ? " · active" : ""}
+            {chatSummary.busy ? " · working" : ""}
           </button>
         </div>
       )}
@@ -1505,14 +2033,37 @@ export function LogExplorer({ corpusId }: Props) {
         data-testid="log-explorer-body"
       >
         <aside
+          id="log-explorer-filter-panel"
           className="log-explorer__filters"
           data-testid="log-explorer-filters"
+          role={breakpoint === "narrow" ? "dialog" : undefined}
+          aria-label={
+            breakpoint === "narrow" ? "Log filters drawer" : undefined
+          }
         >
+          {breakpoint === "narrow" ? (
+            <button
+              type="button"
+              className="log-explorer__btn log-explorer__drawer-close"
+              data-testid="close-filters-drawer"
+              onClick={() => {
+                setNarrowFiltersOpen(false);
+                queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
+              }}
+            >
+              Close filters
+            </button>
+          ) : null}
           <div className="log-explorer__section-title">
             Find{" "}
-            <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />
+            <HelpTip
+              label="Find vs Filter"
+              title="Find vs Filter"
+              content={HELP_FIND_VS_FILTER}
+            />
           </div>
           <input
+            ref={findInputRef}
             className="log-explorer__search"
             placeholder={
               findMatchMode === "regex"
@@ -1520,7 +2071,13 @@ export function LogExplorer({ corpusId }: Props) {
                 : "Find in corpus (keeps surrounding rows)…"
             }
             value={findDraft}
-            onChange={(e) => setFindDraft(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setFindDraft(next);
+              if (findActiveQuery != null && next.trim() !== findActiveQuery) {
+                clearFindResults("Find term changed — press Find to apply");
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") void runFind();
             }}
@@ -1540,8 +2097,11 @@ export function LogExplorer({ corpusId }: Props) {
               type="button"
               className="log-explorer__btn"
               data-testid="log-explorer-find-prev"
-              disabled={findMatches.length === 0}
-              onClick={() => findStep(-1)}
+              disabled={
+                findHistory.length === 0 &&
+                (findMatches.length === 0 || findIndex === 0)
+              }
+              onClick={() => void findStep(-1)}
             >
               Prev
             </button>
@@ -1549,8 +2109,12 @@ export function LogExplorer({ corpusId }: Props) {
               type="button"
               className="log-explorer__btn"
               data-testid="log-explorer-find-next"
-              disabled={findMatches.length === 0}
-              onClick={() => findStep(1)}
+              disabled={
+                !findNextCursor &&
+                (findMatches.length === 0 ||
+                  findIndex === findMatches.length - 1)
+              }
+              onClick={() => void findStep(1)}
             >
               Next
             </button>
@@ -1580,7 +2144,14 @@ export function LogExplorer({ corpusId }: Props) {
                   type="radio"
                   name="find-mode"
                   checked={findMatchMode === "literal"}
-                  onChange={() => setFindMatchMode("literal")}
+                  onChange={() => {
+                    setFindMatchMode("literal");
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Find mode changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-mode-literal"
                 />
                 Literal text
@@ -1590,7 +2161,14 @@ export function LogExplorer({ corpusId }: Props) {
                   type="radio"
                   name="find-mode"
                   checked={findMatchMode === "regex"}
-                  onChange={() => setFindMatchMode("regex")}
+                  onChange={() => {
+                    setFindMatchMode("regex");
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Find mode changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-mode-regex"
                 />
                 Regex (bounded)
@@ -1599,7 +2177,14 @@ export function LogExplorer({ corpusId }: Props) {
                 <input
                   type="checkbox"
                   checked={findCaseSensitive}
-                  onChange={(e) => setFindCaseSensitive(e.target.checked)}
+                  onChange={(e) => {
+                    setFindCaseSensitive(e.target.checked);
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Case option changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-case-sensitive"
                 />
                 Case sensitive
@@ -1608,10 +2193,15 @@ export function LogExplorer({ corpusId }: Props) {
                 <input
                   type="checkbox"
                   checked={findUseSemantic}
-                  disabled={
-                    !semanticAvailable || findMatchMode === "regex"
-                  }
-                  onChange={(e) => setFindUseSemantic(e.target.checked)}
+                  disabled={!semanticAvailable || findMatchMode === "regex"}
+                  onChange={(e) => {
+                    setFindUseSemantic(e.target.checked);
+                    if (findActiveRef.current) {
+                      clearFindResults(
+                        "Semantic option changed — press Find to apply",
+                      );
+                    }
+                  }}
                   data-testid="find-semantic"
                 />
                 Template semantic
@@ -1628,9 +2218,11 @@ export function LogExplorer({ corpusId }: Props) {
               className="log-explorer__chat-preview"
               data-testid="log-explorer-find-count"
             >
-              Match {findIndex + 1} of {findTotal}
-              {findPartial ? "+" : ""}
-              {findPartial ? " (partial)" : ""}
+              Match {findBase + findIndex + 1} of{" "}
+              {findTotalExact ? findTotal : `${findTotal}+`}
+              {findPartial && !findNextCursor ? " (partial)" : ""}
+              {" · "}
+              {findMatches.length} result identities resident
             </div>
           ) : null}
 
@@ -1695,6 +2287,16 @@ export function LogExplorer({ corpusId }: Props) {
               ))}
             </div>
           )}
+          {activeFilterCount > 0 ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="clear-all-filters"
+              onClick={clearAllFilters}
+            >
+              Clear all filters
+            </button>
+          ) : null}
           <p className="log-explorer__chat-preview" role="note">
             Find highlights without removing rows. Filter reduces the table and
             intersects levels/sources/time.
@@ -1707,8 +2309,17 @@ export function LogExplorer({ corpusId }: Props) {
             data-testid="log-explorer-count-truth"
           >
             {/* #534: label totals separately — never use max-per-lane as global. */}
-            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·
-            matched {totalMatched.toLocaleString()} · resident{" "}
+            <HelpTip
+              label="Corpus, matched, and resident counts"
+              title="Corpus, matched, and resident counts"
+              content={HELP_COUNTS}
+            />{" "}
+            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()}{" "}
+            ·{" "}
+            {laneCount === 1
+              ? `matched ${totalMatched.toLocaleString()} · `
+              : "matched per lane below · "}
+            resident rows{" "}
             {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
             {laneCount > 1
               ? ` · ${laneCount} lanes (per-lane counts in headers)`
@@ -1820,10 +2431,48 @@ export function LogExplorer({ corpusId }: Props) {
 
         <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
           <div className="log-explorer__lane-strip">
-            {linkMode !== "independent" && gaps.length > 0 && (
+            <TimelineNavigator
+              corpusId={corpusId}
+              filter={filtersToQuery(filters, {
+                afterSeq: null,
+                afterTs: null,
+                beforeSeq: null,
+                beforeTs: null,
+              })}
+              residentEvents={Object.values(laneEvents).flat()}
+              lanes={lanes.slice(0, laneCount).map((lane) => ({
+                id: lane.id,
+                label: lane.label,
+                sources: lane.sources,
+              }))}
+              onSeekSeq={async (seq) => {
+                const result = await seekToSeq(seq);
+                if (result !== "found") {
+                  throw new Error(
+                    result === "hidden_by_filter"
+                      ? "Timeline target is hidden by current filters"
+                      : "Timeline target is no longer present",
+                  );
+                }
+              }}
+            />
+            <HelpTip
+              label="Timeline navigator help"
+              title="Timeline navigator"
+              content={HELP_TIMELINE_NAVIGATOR}
+            />
+            {linkMode === "align_time" ? (
+              <span
+                className="log-explorer__badge"
+                data-testid="aligned-time-axis"
+              >
+                Shared exact-time rows · {alignedSlotCount} resident slots ·
+                blank cells mean no event at that timestamp
+              </span>
+            ) : null}
+            {linkMode === "align_time" && gaps.length > 0 && (
               <span className="log-explorer__badge log-explorer__badge--warn">
-                {gaps.length} {timeQuality === "mixed" ? "potential " : ""}gap
-                region{gaps.length === 1 ? "" : "s"}
+                {gaps.length} coarse gap region{gaps.length === 1 ? "" : "s"}
               </span>
             )}
           </div>
@@ -1874,47 +2523,89 @@ export function LogExplorer({ corpusId }: Props) {
                       data-testid={`lane-count-${lane.id}`}
                     >
                       {laneMatchedHint(lane.id)}
-                      {totalMatched > 0 && laneCount === 1
-                        ? ` · ${totalMatched} matched`
-                        : ""}
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>
-                  {linkMode !== "independent" &&
-                    gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
-                      <div
-                        className="log-explorer__gap-band"
-                        title="Gap: this lane empty while peers have events"
-                        data-testid="log-explorer-gap"
-                      />
-                    )}
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
+                    alignedRows={
+                      linkMode === "align_time"
+                        ? alignedRowsByLane[lane.id]
+                        : undefined
+                    }
+                    linkedScrollTop={
+                      linkMode === "align_time" ? alignedScrollTop : undefined
+                    }
+                    onLinkedScrollTop={
+                      linkMode === "align_time"
+                        ? setAlignedScrollTop
+                        : undefined
+                    }
                     timeQuality={timeQuality}
                     selected={selected}
                     highlight={highlight}
+                    matchExcerpts={findExcerpts}
+                    filterKeyword={filters.keyword}
                     density={density}
                     lineMode={lineMode}
+                    previewLines={previewLines}
                     colWidths={colWidths}
                     expandedSeqs={expandedSeqs}
                     onToggleExpand={toggleExpand}
                     scrollToSeq={laneScrollSeq[lane.id] ?? null}
-                    scrollAnchorAdjust={laneScrollAdjust[lane.id] ?? 0}
                     onRowClick={onRowClick}
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}
                   />
-                  <div className="log-explorer__lane-paging">
+                  {lanePaging[lane.id]?.error ? (
+                    <div
+                      className="log-explorer__lane-page-error"
+                      role="alert"
+                      data-testid={`lane-page-error-${lane.id}`}
+                    >
+                      <span>
+                        Could not load{" "}
+                        {lanePaging[lane.id]?.failedDirection ?? "adjacent"}{" "}
+                        events: {lanePaging[lane.id]?.error}
+                      </span>
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        onClick={() =>
+                          lanePaging[lane.id]?.failedDirection === "older"
+                            ? void loadOlderLane(lane.id)
+                            : void loadMoreLane(lane.id)
+                        }
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : null}
+                  <div
+                    className="log-explorer__lane-paging"
+                    aria-live="polite"
+                    aria-label={`${lane.label} paging status`}
+                  >
+                    {!laneCursors[lane.id]?.hasOlder ? (
+                      <span className="log-explorer__paging-boundary">
+                        Beginning
+                      </span>
+                    ) : null}
                     {laneCursors[lane.id]?.hasOlder ? (
                       <button
                         type="button"
                         className="log-explorer__btn"
                         data-testid={`load-older-${lane.id}`}
-                        disabled={busy}
+                        disabled={lanePaging[lane.id]?.loading != null}
                         onClick={() => void loadOlderLane(lane.id)}
                       >
                         Load older
                       </button>
+                    ) : null}
+                    {lanePaging[lane.id]?.loading ? (
+                      <span className="log-explorer__paging-loading">
+                        Loading {lanePaging[lane.id]?.loading}…
+                      </span>
                     ) : null}
                     {laneCursors[lane.id]?.hasNewer ? (
                       <button
@@ -1922,11 +2613,14 @@ export function LogExplorer({ corpusId }: Props) {
                         className="log-explorer__btn"
                         data-testid={`load-more-${lane.id}`}
                         data-lane-load-more={lane.id}
-                        disabled={busy}
+                        disabled={lanePaging[lane.id]?.loading != null}
                         onClick={() => void loadMoreLane(lane.id)}
                       >
                         Load newer
                       </button>
+                    ) : null}
+                    {!laneCursors[lane.id]?.hasNewer ? (
+                      <span className="log-explorer__paging-boundary">End</span>
                     ) : null}
                   </div>
                 </section>
@@ -1938,6 +2632,8 @@ export function LogExplorer({ corpusId }: Props) {
               className="log-explorer__detail"
               data-testid="log-explorer-detail"
               style={{ height: detailH, maxHeight: detailH }}
+              role="region"
+              aria-label={`Complete event inspector for sequence ${detail.seq}`}
             >
               <div
                 className="log-explorer__detail-resize"
@@ -1971,9 +2667,10 @@ export function LogExplorer({ corpusId }: Props) {
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-copy"
+                  aria-label={`Copy complete redacted event ${detail.seq}`}
                   onClick={() => {
                     void navigator.clipboard?.writeText(
-                      `${detail.seq}\t${detail.ts}\t${detail.level}\t${detail.source}\t${detail.message}`,
+                      `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`,
                     );
                     setStatus("Copied event to clipboard");
                   }}
@@ -1984,22 +2681,56 @@ export function LogExplorer({ corpusId }: Props) {
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-close"
-                  onClick={() => setDetail(null)}
+                  onClick={closeDetail}
                 >
-                  Close
+                  Close inspector
                 </button>
               </div>
-              <div>
-                {detail.source} ·{" "}
-                <span className={levelClass(detail.level)}>{detail.level}</span>
-              </div>
-              <div className="log-explorer__ts">
-                {formatEventTime(detail.ts, detail.timeQuality)} ·{" "}
-                {timeQualityLabel(detail.timeQuality)}
-              </div>
+              <dl
+                className="log-explorer__detail-metadata"
+                data-testid="detail-metadata"
+              >
+                <div>
+                  <dt>Event</dt>
+                  <dd>seq {detail.seq}</dd>
+                </div>
+                <div>
+                  <dt>Time</dt>
+                  <dd>
+                    {formatCanonicalUtc(detail.ts)} ·{" "}
+                    {timeQualityLabel(detail.timeQuality)} · UTC
+                  </dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{detail.source}</dd>
+                </div>
+                <div>
+                  <dt>Level</dt>
+                  <dd className={levelClass(detail.level)}>{detail.level}</dd>
+                </div>
+                <div>
+                  <dt>Service</dt>
+                  <dd>{detail.service ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Host</dt>
+                  <dd>{detail.host ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>Template</dt>
+                  <dd>{detail.templateId}</dd>
+                </div>
+                <div>
+                  <dt>Trace</dt>
+                  <dd>{detail.traceId ?? "—"}</dd>
+                </div>
+              </dl>
               <pre
-                style={{ whiteSpace: "pre-wrap", margin: "0.4rem 0 0" }}
+                className="log-explorer__detail-message"
                 data-testid="detail-message"
+                tabIndex={0}
+                aria-label={`Complete redacted message for event ${detail.seq}`}
               >
                 {detail.message}
               </pre>
@@ -2036,6 +2767,11 @@ export function LogExplorer({ corpusId }: Props) {
           onApplyNav={applyNav}
           compactLayout={breakpoint === "narrow"}
           developerMode={import.meta.env.MODE === "development"}
+          onRailSummary={handleRailSummary}
+          onRequestClose={() => {
+            setNarrowChatOpen(false);
+            queueMicrotask(() => narrowChatToggleRef.current?.focus());
+          }}
         />
       </div>
 

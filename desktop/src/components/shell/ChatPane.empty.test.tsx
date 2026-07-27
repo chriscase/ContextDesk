@@ -3,7 +3,13 @@
  * Real ChatPane rendering — not CSS-only or testid-existence checks.
  */
 import { createRef } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatPane } from "./ChatPane";
 import type { Msg } from "../../lib/session";
@@ -76,7 +82,7 @@ function baseProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ChatPane first-chat home", () => {
-  it("renders product home and starters fill composer without sending", () => {
+  it("renders a context-safe home and starters fill composer without sending", async () => {
     const onSubmit = vi.fn(async () => true);
     render(
       <ChatPane
@@ -88,13 +94,39 @@ describe("ChatPane first-chat home", () => {
       />,
     );
     expect(screen.getByTestId("first-chat-home")).toBeTruthy();
+    expect(screen.queryByText("Summarize files")).toBeNull();
     const starter = screen.getAllByTestId("chat-starter")[0]!;
     expect(starter.getAttribute("data-action")).toBe("fill-composer");
     fireEvent.click(starter);
+    await waitFor(() =>
+      expect(
+        (screen.getByPlaceholderText(
+          "Message ContextDesk…",
+        ) as HTMLTextAreaElement).value,
+      ).toContain("plan a technical task"),
+    );
     expect(onSubmit).not.toHaveBeenCalled();
+    const context = screen.getByTestId("session-context-bar");
+    expect(context.hasAttribute("open")).toBe(false);
+    expect(within(context).getByText(/No files or skill/)).toBeTruthy();
   });
 
-  it("guided workflows share the action-card primitive but launch on click", () => {
+  it("shows workspace-aware starters only when workspace content is authorized", async () => {
+    render(
+      <ChatPane
+        {...baseProps({
+          hasAuthorizedWorkspaceContent: true,
+        })}
+      />,
+    );
+    expect(screen.getByText("Summarize files")).toBeTruthy();
+    expect(screen.queryByText("Review context I add")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
+    );
+  });
+
+  it("guided workflows share the action-card primitive but launch on click", async () => {
     const onStartWizard = vi.fn();
     render(
       <ChatPane
@@ -112,9 +144,12 @@ describe("ChatPane first-chat home", () => {
     );
     fireEvent.click(guided);
     expect(onStartWizard).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
+    );
   });
 
-  it("preflight-blocked state shows recovery and disables starters", () => {
+  it("preflight-blocked state shows one recovery path without action galleries", async () => {
     const openSettings = vi.fn();
     render(
       <ChatPane
@@ -127,8 +162,13 @@ describe("ChatPane first-chat home", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Fix setup issues/i }));
     expect(openSettings).toHaveBeenCalledWith("health");
-    for (const s of screen.getAllByTestId("chat-starter")) {
-      expect((s as HTMLButtonElement).disabled).toBe(true);
-    }
+    expect(screen.queryByTestId("chat-starter")).toBeNull();
+    expect(screen.queryByTestId("chat-guided-workflow")).toBeNull();
+    expect(
+      screen.getByText(/Conversation actions are paused/i),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
+    );
   });
 });

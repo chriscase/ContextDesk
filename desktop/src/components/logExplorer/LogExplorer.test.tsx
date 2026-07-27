@@ -62,8 +62,31 @@ vi.mock("../../lib/host", () => ({
     totalMatched: 2,
     timeQuality: "wall",
   })),
+  hostLogTimelineSummary: vi.fn(async () => ({
+    timeQuality: "wall",
+    spanFrom: 1_700_000_000,
+    spanTo: 1_700_000_004,
+    bucketWidth: 1,
+    bucketCount: 4,
+    totalMatched: 2,
+    buckets: [
+      { index: 0, start: 1_700_000_000, end: 1_700_000_001, count: 1, byLevel: { error: 1 } },
+      { index: 1, start: 1_700_000_001, end: 1_700_000_002, count: 1, byLevel: { info: 1 } },
+    ],
+  })),
   hostLogSearchEvents: vi.fn(async () => []),
-  hostLogSearchEventsAdvanced: vi.fn(async () => ({ hits: [], partial: false, scanned: 0 })),
+  hostLogSearchEventsAdvanced: vi.fn(async () => ({
+    hits: [],
+    partial: false,
+    scanned: 0,
+  })),
+  hostLogQueryEventNeighborhood: vi.fn(async () => ({
+    status: "missing",
+    events: [],
+    totalMatched: 0,
+    corpusTotal: 0,
+    timeQuality: "order_only",
+  })),
   hostLogAddBookmark: vi.fn(),
   hostLogDeleteBookmark: vi.fn(),
   hostSaveChatSession: vi.fn(),
@@ -76,6 +99,7 @@ function eventPage(
   timeQuality: host.TimeQuality,
   eventCount = 1,
   ts = 1_700_000_000,
+  totalMatched = eventCount,
 ): host.EventPageDto {
   return {
     events: Array.from({ length: eventCount }, (_, index) => ({
@@ -95,7 +119,7 @@ function eventPage(
     })),
     nextCursor: null,
     nextTs: null,
-    totalMatched: eventCount,
+    totalMatched,
     timeQuality,
   };
 }
@@ -183,8 +207,20 @@ describe("LogExplorer shell", () => {
       timeQuality: "wall",
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
-    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({ hits: [], partial: false, scanned: 0 });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
+      hits: [],
+      partial: false,
+      scanned: 0,
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "missing",
+      events: [],
+      totalMatched: 0,
+      corpusTotal: 10,
+      timeQuality: "wall",
+    });
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
@@ -214,6 +250,376 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
+  });
+
+  it("focuses Find with the platform find shortcut", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    const input = screen.getByTestId("log-explorer-find");
+    expect(document.activeElement).not.toBe(input);
+    fireEvent.keyDown(root, { key: "f", metaKey: true });
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("resizes every event column by keyboard/pointer and supports auto-fit/reset", async () => {
+    const page = defaultEventPage();
+    page.events[0] = {
+      ...page.events[0]!,
+      message: `long-message ${"detail ".repeat(60)}`,
+    };
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(page);
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/long-message/);
+
+    const headers = screen.getByTestId("log-explorer-col-headers");
+    expect(headers.style.gridTemplateColumns).toContain("12rem");
+    const messageResize = screen.getByTestId("col-resize-3");
+    expect(messageResize.getAttribute("aria-label")).toBe(
+      "Resize Message column",
+    );
+    fireEvent.keyDown(messageResize, { key: "ArrowRight" });
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
+    );
+
+    const timeResize = screen.getByTestId("col-resize-0");
+    fireEvent.mouseDown(timeResize, { clientX: 100 });
+    fireEvent.mouseMove(window, { clientX: 132 });
+    fireEvent.mouseUp(window);
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
+    );
+
+    fireEvent.click(screen.getByTestId("col-autofit"));
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("40rem"),
+    );
+    fireEvent.click(screen.getByTestId("col-reset"));
+    await waitFor(() =>
+      expect(headers.style.gridTemplateColumns).toContain("12rem"),
+    );
+
+    const eventTime = screen.getByTestId("event-time-1");
+    expect(eventTime.tabIndex).toBe(0);
+    expect(eventTime.getAttribute("aria-label")).toMatch(/wall clock.*UTC/);
+
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "12" },
+    });
+    fireEvent.click(screen.getByTestId("line-mode-wrap"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-total-height"),
+      ).toBe(String(228 * page.events.length)),
+    );
+
+    fireEvent.click(screen.getByText(/long-message/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 1")
+        .textContent,
+    ).toBe(page.events[0]!.message);
+    const metadata = within(inspector).getByTestId("detail-metadata");
+    expect(metadata.textContent).toContain("api.log");
+    expect(metadata.textContent).toContain("seq 1");
+    fireEvent.click(within(inspector).getByTestId("detail-close"));
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
+    );
+  });
+
+  it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 800,
+    });
+    try {
+      render(<LogExplorer corpusId="c1" />);
+      const root = await screen.findByTestId("log-explorer");
+      await waitFor(() =>
+        expect(root.getAttribute("data-breakpoint")).toBe("narrow"),
+      );
+      expect(root.getAttribute("data-lane-count")).toBe("1");
+      expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
+
+      fireEvent.click(await screen.findByText("auth failure"));
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+
+      const filtersToggle = screen.getByTestId("narrow-filters-toggle");
+      fireEvent.click(filtersToggle);
+      expect(filtersToggle.getAttribute("aria-expanded")).toBe("true");
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByTestId("log-explorer-find"),
+        ),
+      );
+
+      const errorFacet = within(screen.getByTestId("log-explorer-filters"))
+        .getByText("error")
+        .closest("label");
+      fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+      expect(await screen.findByTestId("clear-all-filters")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("clear-all-filters"));
+      await waitFor(() =>
+        expect(screen.queryByTestId("clear-all-filters")).toBeNull(),
+      );
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+
+      fireEvent.keyDown(screen.getByTestId("log-explorer-find"), {
+        key: "Escape",
+      });
+      await waitFor(() => expect(document.activeElement).toBe(filtersToggle));
+      expect(filtersToggle.getAttribute("aria-expanded")).toBe("false");
+
+      const chatToggle = screen.getByTestId("narrow-chat-toggle");
+      fireEvent.click(chatToggle);
+      expect(chatToggle.getAttribute("aria-expanded")).toBe("true");
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByTestId("new-linked-chat"),
+        ),
+      );
+      expect(screen.getByLabelText("Chat message")).toBeTruthy();
+      expect(screen.getByTestId("send-linked-chat")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("close-chat-drawer"));
+      await waitFor(() => expect(document.activeElement).toBe(chatToggle));
+      expect(chatToggle.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+    }
+  });
+
+  it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
+    const bookmark: host.LogBookmarkDto = {
+      id: "bm-worker",
+      label: "worker evidence",
+      note: null,
+      seqFrom: 2,
+      seqTo: 2,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const allEvents = defaultEventPage().events;
+    const target = allEvents.find((event) => event.seq === 2)!;
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([bookmark]);
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sourceFilter = query?.sources ?? [];
+        const events =
+          sourceFilter.length === 0
+            ? allEvents
+            : allEvents.filter((event) => sourceFilter.includes(event.source));
+        return {
+          events,
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+          totalMatched: events.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query.filter?.sources ?? [];
+        const found = sources.length === 0 || sources.includes(target.source);
+        return {
+          status: found ? "found" : "hidden_by_filter",
+          target,
+          events: found ? [target] : [],
+          targetIndex: found ? 0 : null,
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+          totalMatched: found ? 1 : 0,
+          corpusTotal: 2,
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.click(screen.getByRole("checkbox", { name: /api\.log/i }));
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ sources: ["api.log"] }),
+      ),
+    );
+    await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
+
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-worker"));
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: 2,
+          filter: expect.objectContaining({ sources: ["worker.log"] }),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("job ok").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("bookmark-restore-view").textContent).toContain(
+      "temp reveal",
+    );
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ sources: ["api.log"] }),
+      ),
+    );
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+  });
+
+  it("reports a missing bookmark target without claiming navigation success", async () => {
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      {
+        id: "bm-missing",
+        label: "removed event",
+        note: null,
+        seqFrom: 404,
+        seqTo: 404,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "missing",
+      target: null,
+      events: [],
+      targetIndex: null,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched: 0,
+      corpusTotal: 2,
+      timeQuality: "wall",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-missing"));
+    expect(await screen.findByTestId("bookmark-missing")).toBeTruthy();
+    expect(screen.getByText(/not found in corpus/)).toBeTruthy();
+    expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
+  });
+
+  it("temporarily composes the correct lane for a bookmark outside all visible lanes", async () => {
+    const target: host.ExplorerEventDto = {
+      seq: 77,
+      ts: 1_700_000_077,
+      timeQuality: "wall",
+      level: "error",
+      service: "queue",
+      host: null,
+      templateId: 77,
+      traceId: "trace-77",
+      message: "queue poison evidence",
+      source: "queue.log",
+    };
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      {
+        id: "bm-queue",
+        label: "queue clue",
+        note: null,
+        seqFrom: 77,
+        seqTo: 77,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const sources = query?.sources ?? [];
+        const page = sources.includes("queue.log")
+          ? {
+              ...eventPage("queue.log", "wall"),
+              events: [target],
+              totalMatched: 1,
+            }
+          : sources.length > 0
+            ? eventPage(sources[0]!, "wall")
+            : defaultEventPage();
+        return page;
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "found",
+      target,
+      events: [target],
+      targetIndex: 0,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched: 1,
+      corpusTotal: 11,
+      timeQuality: "wall",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    const editor = screen.getByTestId("lane-editor");
+    const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
+    expect(laneRows.length).toBe(2);
+    fireEvent.click(
+      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+        name: /api\.log/i,
+      }),
+    );
+    fireEvent.click(
+      within(laneRows[1] as HTMLElement).getByRole("checkbox", {
+        name: /worker\.log/i,
+      }),
+    );
+    await waitFor(() => {
+      const sourceCalls = vi
+        .mocked(host.hostLogQueryEvents)
+        .mock.calls.map(([, query]) => query?.sources ?? []);
+      expect(sourceCalls).toContainEqual(["api.log"]);
+      expect(sourceCalls).toContainEqual(["worker.log"]);
+    });
+
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-queue"));
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: 77,
+          filter: expect.objectContaining({ sources: ["queue.log"] }),
+        }),
+      ),
+    );
+    expect(screen.getAllByText("queue poison evidence").length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getAllByText(/Bookmark · queue\.log/).length).toBeGreaterThan(
+      0,
+    );
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() => {
+      const sourceCalls = vi
+        .mocked(host.hostLogQueryEvents)
+        .mock.calls.map(([, query]) => query?.sources ?? []);
+      expect(sourceCalls.at(-2)).toEqual(["api.log"]);
+      expect(sourceCalls.at(-1)).toEqual(["worker.log"]);
+    });
   });
 
   it.each([
@@ -281,6 +687,169 @@ describe("LogExplorer shell", () => {
     },
   );
 
+  it("labels corpus, per-lane matched, and resident counts without inventing a global lane total", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "fixture",
+      eventCount: 35,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 6, "audit.log": 4 },
+      levels: { info: 10 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        if (source === "api.log") {
+          return eventPage("api.log", "wall", 6, 1_700_000_000, 6);
+        }
+        if (source === "audit.log") {
+          return eventPage("audit.log", "wall", 4, 1_700_000_100, 4);
+        }
+        return eventPage("all.log", "wall", 2, 1_700_000_000, 35);
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Audit", sources: ["audit.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("audit.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "6 matched · 6 resident",
+      );
+      expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+        "4 matched · 4 resident",
+      );
+    });
+    const global = screen.getByTestId("log-explorer-global-counts");
+    expect(global.textContent).toContain("35 corpus events");
+    expect(global.textContent).toContain("2 lane queries");
+    expect(global.textContent).not.toMatch(/\b6 events\b/);
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /matched per lane below · resident rows 10/,
+    );
+  });
+
+  it("keeps overlapping, empty, and paged lane counts honest across reverse response order", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
+      id: "c1",
+      name: "fixture",
+      eventCount: 35,
+      templateCount: 2,
+      engine: "duckdb",
+      createdAt: 0,
+      sourceLabel: null,
+      stats: null,
+      topTemplates: [],
+      embedding: {
+        state: "keyword_only",
+        modelId: null,
+        embeddedTemplates: 0,
+        totalTemplates: 2,
+        reason: "local_model_unavailable",
+        updatedAt: 1,
+      },
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: {
+        "shared.log": 6,
+        "empty.log": 0,
+        "paged.log": 100,
+      },
+      levels: { info: 106 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    const pending = Array.from({ length: 4 }, () =>
+      deferred<host.EventPageDto>(),
+    );
+    let laneRequest = 0;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if ((query?.sources?.length ?? 0) === 0) {
+          return eventPage("all.log", "wall", 2, 1_700_000_000, 35);
+        }
+        return pending[laneRequest++]!.promise;
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "Shared A", sources: ["shared.log"] },
+        { id: "lane-1", label: "Shared B", sources: ["shared.log"] },
+        { id: "lane-2", label: "Empty", sources: ["empty.log"] },
+        { id: "lane-3", label: "Paged", sources: ["paged.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("paged.log");
+    fireEvent.click(screen.getByTitle("4 evidence lanes"));
+    await waitFor(() => expect(laneRequest).toBe(4));
+
+    const shared = eventPage("shared.log", "wall", 2, 1_700_000_000, 6);
+    shared.nextCursor = shared.events.at(-1)!.seq;
+    shared.nextTs = shared.events.at(-1)!.ts;
+    const paged = eventPage("paged.log", "wall", 1, 1_700_000_100, 100);
+    paged.nextCursor = paged.events[0]!.seq;
+    paged.nextTs = paged.events[0]!.ts;
+    await act(async () => {
+      pending[3]!.resolve(paged);
+      pending[1]!.resolve({ ...shared, events: [...shared.events] });
+      pending[0]!.resolve(shared);
+      pending[2]!.resolve(eventPage("empty.log", "wall", 0, 1_700_000_050, 0));
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-3").textContent).toContain(
+        "100 matched · 1+ resident",
+      ),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "6 matched · 2+ resident",
+    );
+    expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+      "6 matched · 2+ resident",
+    );
+    expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
+      "0 matched · 0 resident",
+    );
+    const global = screen.getByTestId("log-explorer-global-counts");
+    expect(global.textContent).toContain("35 corpus events");
+    expect(global.textContent).toContain("4 lane queries");
+    expect(global.textContent).not.toMatch(/112 matched|112 events/);
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /resident rows 5/,
+    );
+  });
+
   it("keeps linking off when a visible lane is empty or failed", async () => {
     vi.mocked(host.hostLogFacets).mockResolvedValue({
       sources: { "api.log": 1, "worker.log": 0, "db.log": 1 },
@@ -325,11 +894,141 @@ describe("LogExplorer shell", () => {
       ).toBe("error");
     });
     expect(screen.getByText(/evidence lane failed to load/)).toBeTruthy();
+    expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
+      "matched unavailable",
+    );
 
     fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
     // Order-only aggregate refuses wall-clock link.
     expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
+  });
+
+  it("aligns wall-clock lanes on shared virtual rows with explicit empty cells and synchronized scroll", async () => {
+    const makeEvent = (
+      seq: number,
+      ts: number,
+      source: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts,
+      timeQuality: "wall",
+      level: "info",
+      service: source,
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message: `${source} seq ${seq}`,
+      source,
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 2, "worker.log": 2 },
+      levels: { info: 4 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        const events =
+          source === "api.log"
+            ? [
+                makeEvent(11, 1_700_000_000, "api.log"),
+                makeEvent(13, 1_700_000_002, "api.log"),
+              ]
+            : source === "worker.log"
+              ? [
+                  makeEvent(21, 1_700_000_000, "worker.log"),
+                  makeEvent(22, 1_700_000_001, "worker.log"),
+                ]
+              : [makeEvent(1, 1_700_000_000, "all.log")];
+        return {
+          events,
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: events.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("worker.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-link-mode")).toBe("align_time"),
+    );
+
+    expect(root.getAttribute("data-aligned-slots")).toBe("3");
+    expect(screen.getByTestId("aligned-time-axis").textContent).toMatch(
+      /3 resident slots/,
+    );
+    const lists = screen.getAllByTestId("virtualized-event-list");
+    expect(lists).toHaveLength(2);
+    expect(lists[0]!.getAttribute("data-aligned-slots")).toBe("3");
+    expect(lists[1]!.getAttribute("data-aligned-slots")).toBe("3");
+    expect(screen.getAllByTestId("aligned-gap")).toHaveLength(2);
+    expect(
+      (document.querySelector('[data-seq="11"]') as HTMLElement).style.top,
+    ).toBe(
+      (document.querySelector('[data-seq="21"]') as HTMLElement).style.top,
+    );
+
+    lists[0]!.scrollTop = 42;
+    fireEvent.scroll(lists[0]!);
+    await waitFor(() => expect(lists[1]!.scrollTop).toBe(42));
+  });
+
+  it("refuses exact Align for mixed time while retaining approximate Follow", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 1, "worker.log": 1 },
+      levels: { info: 2 },
+      services: {},
+      hosts: {},
+      timeQuality: "mixed",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) =>
+        eventPage(
+          query?.sources?.[0] ?? "all.log",
+          query?.sources?.[0] === "worker.log" ? "mixed" : "wall",
+        ),
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("worker.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("mixed"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("independent");
+    expect(screen.getByText(/Align unavailable: mixed time/)).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    expect(root.getAttribute("data-link-mode")).toBe("follow_cursor");
+    expect(screen.queryByTestId("aligned-time-axis")).toBeNull();
   });
 
   it("user-composed lanes assign sources without auto first-N assignment", async () => {
@@ -410,6 +1109,222 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-time-quality")).toBe("order_only");
   });
 
+  it("pages backward and forward through the real lane while preserving resident rows", async () => {
+    const pageEvent = (
+      seq: number,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: "info",
+      service: "api",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message,
+      source: "api.log",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.beforeSeq === 101) {
+          return {
+            events: [pageEvent(99, "older 99"), pageEvent(100, "older 100")],
+            prevCursor: null,
+            prevTs: null,
+            nextCursor: 100,
+            nextTs: 1_700_000_100,
+            totalMatched: 6,
+            timeQuality: "wall",
+          };
+        }
+        if (query?.afterSeq === 102) {
+          return {
+            events: [pageEvent(103, "newer 103"), pageEvent(104, "newer 104")],
+            prevCursor: 103,
+            prevTs: 1_700_000_103,
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 6,
+            timeQuality: "wall",
+          };
+        }
+        return {
+          events: [pageEvent(101, "middle 101"), pageEvent(102, "middle 102")],
+          prevCursor: 101,
+          prevTs: 1_700_000_101,
+          nextCursor: 102,
+          nextTs: 1_700_000_102,
+          totalMatched: 6,
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-older-lane-0"));
+    expect(await screen.findByText("older 99")).toBeTruthy();
+    expect(screen.getByText("middle 101")).toBeTruthy();
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        beforeSeq: 101,
+        beforeTs: 1_700_000_101,
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("load-more-lane-0"));
+    expect(await screen.findByText("newer 104")).toBeTruthy();
+    expect(screen.getByText("older 100")).toBeTruthy();
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        afterSeq: 102,
+        afterTs: 1_700_000_102,
+      }),
+    );
+    expect(screen.queryByTestId("load-older-lane-0")).toBeNull();
+    expect(screen.queryByTestId("load-more-lane-0")).toBeNull();
+  });
+
+  it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
+    let newerAttempts = 0;
+    const middle = defaultEventPage();
+    middle.nextCursor = 2;
+    middle.nextTs = middle.events[1]!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.afterSeq === 2) {
+          newerAttempts += 1;
+          if (newerAttempts === 1) throw new Error("fixture page unavailable");
+          return {
+            events: [
+              {
+                ...middle.events[1]!,
+                seq: 3,
+                ts: middle.events[1]!.ts + 1,
+                message: "retry recovered",
+              },
+            ],
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 3,
+            timeQuality: "wall",
+          };
+        }
+        return middle;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    const alert = await screen.findByTestId("lane-page-error-lane-0");
+    expect(within(alert).getByText(/fixture page unavailable/)).toBeTruthy();
+    expect(screen.getByText("auth failure")).toBeTruthy();
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("retry recovered")).toBeTruthy();
+    expect(screen.queryByTestId("lane-page-error-lane-0")).toBeNull();
+    expect(newerAttempts).toBe(2);
+  });
+
+  it("paginates lanes independently while a peer lane is still loading", async () => {
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+    const slowApi = deferred<host.EventPageDto>();
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        if (query?.afterSeq != null && source === "api.log") {
+          return slowApi.promise;
+        }
+        if (query?.afterSeq != null && source === "worker.log") {
+          return {
+            ...eventPage("worker.log", "wall", 1, 1_700_000_101, 2),
+            nextCursor: null,
+            nextTs: null,
+          };
+        }
+        if (source === "api.log") {
+          const page = eventPage("api.log", "wall", 1, 1_700_000_000, 2);
+          page.nextCursor = page.events[0]!.seq;
+          page.nextTs = page.events[0]!.ts;
+          return page;
+        }
+        if (source === "worker.log") {
+          const page = eventPage("worker.log", "wall", 1, 1_700_000_100, 2);
+          page.nextCursor = page.events[0]!.seq;
+          page.nextTs = page.events[0]!.ts;
+          return page;
+        }
+        return defaultEventPage();
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    const apiMore = await screen.findByTestId("load-more-lane-0");
+    const workerMore = await screen.findByTestId("load-more-lane-1");
+    fireEvent.click(apiMore);
+    await waitFor(() =>
+      expect((apiMore as HTMLButtonElement).disabled).toBe(true),
+    );
+
+    fireEvent.click(workerMore);
+    await waitFor(() =>
+      expect(screen.queryByTestId("load-more-lane-1")).toBeNull(),
+    );
+    expect((apiMore as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      slowApi.resolve({
+        ...eventPage("api.log", "wall", 1, 1_700_000_001, 2),
+        nextCursor: null,
+        nextTs: null,
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("load-more-lane-0")).toBeNull(),
+    );
+  });
+
+  it("invalidates a late paging response when filters start a new generation", async () => {
+    const paging = deferred<host.EventPageDto>();
+    const initial = defaultEventPage();
+    initial.nextCursor = 2;
+    initial.nextTs = initial.events[1]!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.afterSeq === 2) return paging.promise;
+        if (query?.keyword === "fresh") {
+          return eventPage("fresh.log", "wall");
+        }
+        return initial;
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "fresh" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    expect(await screen.findByText(/fresh\.log event 0/)).toBeTruthy();
+
+    await act(async () => {
+      paging.resolve(eventPage("stale-page.log", "wall"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/stale-page\.log event 0/)).toBeNull();
+    expect(screen.getByText(/fresh\.log event 0/)).toBeTruthy();
+  });
+
   it("documents semantic availability without treating Find as semantic search", async () => {
     vi.mocked(host.hostGetLogCorpus).mockResolvedValue({
       id: "c1",
@@ -444,6 +1359,203 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({ semantic: false }),
       ),
     );
+  });
+
+  it("navigates cursor-paged Find results without materializing every hit", async () => {
+    const findEvent = (seq: number): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: seq % 2 === 0 ? "error" : "info",
+      service: "api",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message: `needle result ${seq}`,
+      source: "api.log",
+    });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, query) => {
+        const after = query?.filter?.afterSeq;
+        const events =
+          after === 11
+            ? [findEvent(12), findEvent(13)]
+            : [findEvent(10), findEvent(11)];
+        return {
+          hits: events.map((event) => ({
+            event,
+            score: 1,
+            matchKind: "keyword",
+            templateId: event.templateId,
+          })),
+          nextCursor: after === 11 ? null : 11,
+          nextTs: after === 11 ? null : findEvent(11).ts,
+          totalMatched: 4,
+          partial: after !== 11,
+          scanned: events.length,
+        };
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const target = findEvent(query.targetSeq);
+        return {
+          status: "found",
+          target,
+          targetIndex: 0,
+          events: [target],
+          totalMatched: 10,
+          corpusTotal: 10,
+          timeQuality: "wall",
+          nextCursor: null,
+          nextTs: null,
+          prevCursor: null,
+          prevTs: null,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        k: 50,
+        filter: expect.objectContaining({
+          afterSeq: null,
+          afterTs: null,
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    expect(
+      await screen.findByText(/Match 2 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    expect(
+      await screen.findByText(/Match 3 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        filter: expect.objectContaining({
+          afterSeq: 11,
+          afterTs: findEvent(11).ts,
+        }),
+      }),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-prev"));
+    expect(
+      await screen.findByText(/Match 2 of 4.*2 result identities resident/),
+    ).toBeTruthy();
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+      "c1",
+      expect.objectContaining({
+        filter: expect.objectContaining({
+          afterSeq: null,
+          afterTs: null,
+        }),
+      }),
+    );
+
+    const errorFacet = screen.getByText("error").closest("label");
+    expect(errorFacet).toBeTruthy();
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({
+          filter: expect.objectContaining({
+            levels: ["error"],
+            afterSeq: null,
+            afterTs: null,
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("does not allow a late Find response to replace a newer query", async () => {
+    const oldSearch = deferred<host.EventSearchResultDto>();
+    const resultEvent = (
+      seq: number,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      ...defaultEventPage().events[0]!,
+      seq,
+      ts: 1_700_000_000 + seq,
+      message,
+    });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.query === "old") return oldSearch.promise;
+        const event = resultEvent(20, "new result");
+        return {
+          hits: [
+            {
+              event,
+              score: 1,
+              matchKind: "keyword",
+              templateId: event.templateId,
+            },
+          ],
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: 1,
+          partial: false,
+          scanned: 1,
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const find = screen.getByTestId("log-explorer-find");
+    fireEvent.change(find, { target: { value: "old" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ query: "old" }),
+      ),
+    );
+
+    fireEvent.change(find, { target: { value: "new" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+
+    await act(async () => {
+      const staleEvent = resultEvent(10, "old stale result");
+      oldSearch.resolve({
+        hits: [
+          {
+            event: staleEvent,
+            score: 1,
+            matchKind: "keyword",
+            templateId: staleEvent.templateId,
+          },
+        ],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 99,
+        partial: false,
+        scanned: 99,
+      });
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
   });
 
   it("creates, sends, persists, and reopens a linked chat", async () => {

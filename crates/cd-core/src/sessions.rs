@@ -6,10 +6,110 @@
 use crate::chat::{ChatMessage, Role};
 use crate::error::{CoreError, CoreResult};
 use chrono::{DateTime, Utc};
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use uuid::Uuid;
+
+const SESSION_META_CACHE_VERSION: u8 = 1;
+const SESSION_META_CACHE_DIR: &str = ".meta";
+const MAX_SESSION_META_CACHE_BYTES: u64 = 64 * 1024;
+/// Maximum linked-chat rows returned to the Explorer selector.
+///
+/// The selector is intentionally bounded independently of transcript length
+/// and total linked-chat count. A future paged management surface can expose
+/// older rows without weakening this production bound.
+pub const MAX_LINKED_SESSION_META: usize = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionSourceFingerprint {
+    bytes: u64,
+    modified_ns: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedSessionMeta {
+    version: u8,
+    source: SessionSourceFingerprint,
+    meta: SessionMeta,
+}
+
+#[derive(Debug, Default)]
+struct MessageCount(usize);
+
+impl<'de> Deserialize<'de> for MessageCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct MessageCountVisitor;
+
+        impl<'de> Visitor<'de> for MessageCountVisitor {
+            type Value = MessageCount;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a chat message array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut count = 0usize;
+                while seq.next_element::<IgnoredAny>()?.is_some() {
+                    count = count.saturating_add(1);
+                }
+                Ok(MessageCount(count))
+            }
+        }
+
+        deserializer.deserialize_seq(MessageCountVisitor)
+    }
+}
+
+/// Streaming projection used to migrate legacy sessions without materializing
+/// their message histories merely to populate a selector row.
+#[derive(Debug, Deserialize)]
+struct SessionMetaProjection {
+    id: String,
+    title: String,
+    messages: MessageCount,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    trashed: bool,
+    #[serde(default)]
+    trashed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    linked_corpus_id: Option<String>,
+}
+
+impl SessionMetaProjection {
+    fn into_meta(self) -> SessionMeta {
+        SessionMeta {
+            id: self.id,
+            title: self.title,
+            archived: self.archived,
+            trashed: self.trashed,
+            pinned: self.pinned,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            trashed_at: self.trashed_at,
+            message_count: self.messages.0,
+            // Legacy migration intentionally avoids reading message bodies.
+            // A normal subsequent save refreshes this bounded preview.
+            preview: String::new(),
+            linked_corpus_id: self.linked_corpus_id,
+        }
+    }
+}
 
 /// Lightweight row for sidebar / archive lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -832,6 +932,14 @@ impl SessionStore {
         self.dir.join(format!("{id}.json"))
     }
 
+    fn meta_dir(&self) -> PathBuf {
+        self.dir.join(SESSION_META_CACHE_DIR)
+    }
+
+    fn meta_path(&self, id: &str) -> PathBuf {
+        self.meta_dir().join(format!("{id}.json"))
+    }
+
     fn validate_id(id: &str) -> CoreResult<()> {
         if id.is_empty()
             || !id
@@ -843,12 +951,100 @@ impl SessionStore {
         Ok(())
     }
 
+    fn source_fingerprint(path: &Path) -> CoreResult<SessionSourceFingerprint> {
+        let metadata = fs::metadata(path)?;
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+        Ok(SessionSourceFingerprint {
+            bytes: metadata.len(),
+            modified_ns,
+        })
+    }
+
+    fn write_meta_cache(
+        &self,
+        session_id: &str,
+        meta: SessionMeta,
+        source_path: &Path,
+    ) -> CoreResult<()> {
+        let meta_dir = self.meta_dir();
+        fs::create_dir_all(&meta_dir)?;
+        let cached = CachedSessionMeta {
+            version: SESSION_META_CACHE_VERSION,
+            source: Self::source_fingerprint(source_path)?,
+            meta,
+        };
+        let target = self.meta_path(session_id);
+        let temp = meta_dir.join(format!(".{session_id}.{}.tmp", Uuid::new_v4()));
+        fs::write(&temp, serde_json::to_vec(&cached)?)?;
+        // Windows cannot atomically replace an existing destination. A missing
+        // cache is safe: readers fall back to the authoritative session once.
+        if target.exists() {
+            fs::remove_file(&target)?;
+        }
+        if let Err(error) = fs::rename(&temp, &target) {
+            let _ = fs::remove_file(&temp);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn read_meta_cache(&self, id: &str, source_path: &Path) -> CoreResult<Option<SessionMeta>> {
+        let cache_path = self.meta_path(id);
+        let metadata = match fs::metadata(&cache_path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => return Ok(None),
+        };
+        if metadata.len() > MAX_SESSION_META_CACHE_BYTES {
+            return Ok(None);
+        }
+        let raw = match fs::read(&cache_path) {
+            Ok(raw) => raw,
+            Err(_) => return Ok(None),
+        };
+        let cached: CachedSessionMeta = match serde_json::from_slice(&raw) {
+            Ok(cached) => cached,
+            Err(_) => return Ok(None),
+        };
+        if cached.version != SESSION_META_CACHE_VERSION
+            || cached.meta.id != id
+            || cached.source != Self::source_fingerprint(source_path)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(cached.meta))
+    }
+
+    fn meta_for_path(&self, id: &str, source_path: &Path) -> CoreResult<SessionMeta> {
+        if let Some(meta) = self.read_meta_cache(id, source_path)? {
+            return Ok(meta);
+        }
+        let file = fs::File::open(source_path)?;
+        let projection: SessionMetaProjection = serde_json::from_reader(BufReader::new(file))?;
+        if projection.id != id {
+            return Err(CoreError::Policy(
+                "session metadata id does not match filename".into(),
+            ));
+        }
+        let meta = projection.into_meta();
+        // The session is authoritative. If cache refresh fails, this listing
+        // remains correct and a later read can retry migration.
+        let _ = self.write_meta_cache(id, meta.clone(), source_path);
+        Ok(meta)
+    }
+
     /// Save session.
     pub fn save(&self, session: &Session) -> CoreResult<()> {
         Self::validate_id(&session.id)?;
         self.ensure()?;
         let p = self.path(&session.id);
-        fs::write(p, serde_json::to_string_pretty(session)?)?;
+        fs::write(&p, serde_json::to_string_pretty(session)?)?;
+        // Metadata is a validated cache, never the authoritative session.
+        // Legacy/corrupt/missing cache rows migrate on the next list operation.
+        let _ = self.write_meta_cache(&session.id, session.meta(), &p);
         Ok(())
     }
 
@@ -865,6 +1061,10 @@ impl SessionStore {
         let p = self.path(id);
         if p.exists() {
             fs::remove_file(p)?;
+        }
+        let meta = self.meta_path(id);
+        if meta.exists() {
+            fs::remove_file(meta)?;
         }
         Ok(())
     }
@@ -896,34 +1096,85 @@ impl SessionStore {
 
     /// List session metadata, newest `updated_at` first (pinned first among ties).
     pub fn list_meta(&self) -> CoreResult<Vec<SessionMeta>> {
-        let mut sessions = self.load_all()?;
-        sessions.sort_by(|a, b| {
+        self.ensure()?;
+        let mut metas = Vec::new();
+        if let Ok(rd) = fs::read_dir(&self.dir) {
+            for ent in rd.flatten() {
+                let path = ent.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
+                    continue;
+                };
+                if let Ok(meta) = self.meta_for_path(stem, &path) {
+                    metas.push(meta);
+                }
+            }
+        }
+        metas.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
         });
-        Ok(sessions.iter().map(Session::meta).collect())
+        Ok(metas)
     }
 
     /// Sessions linked to a log corpus (any chat may link — Log Explorer #480).
     ///
     /// Excludes trashed by default.
     pub fn list_meta_for_corpus(&self, corpus_id: &str) -> CoreResult<Vec<SessionMeta>> {
+        self.list_meta_for_corpus_bounded(corpus_id, MAX_LINKED_SESSION_META)
+    }
+
+    /// Bounded linked-session listing, newest `updated_at` first.
+    ///
+    /// Reads validated metadata sidecars instead of chat transcripts. Missing
+    /// legacy sidecars are migrated one session at a time.
+    pub fn list_meta_for_corpus_bounded(
+        &self,
+        corpus_id: &str,
+        limit: usize,
+    ) -> CoreResult<Vec<SessionMeta>> {
         let id = corpus_id.trim();
-        if id.is_empty() {
+        if id.is_empty() || limit == 0 {
             return Ok(vec![]);
         }
-        let mut sessions: Vec<Session> = self
-            .load_all()?
-            .into_iter()
-            .filter(|s| !s.trashed && s.linked_corpus_id.as_deref() == Some(id))
-            .collect();
-        sessions.sort_by(|a, b| {
+        self.ensure()?;
+        let limit = limit.min(MAX_LINKED_SESSION_META);
+        let mut metas = Vec::with_capacity(limit.min(32));
+        if let Ok(rd) = fs::read_dir(&self.dir) {
+            for ent in rd.flatten() {
+                let path = ent.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|x| x.to_str()) else {
+                    continue;
+                };
+                let Ok(meta) = self.meta_for_path(stem, &path) else {
+                    continue;
+                };
+                if meta.trashed || meta.linked_corpus_id.as_deref() != Some(id) {
+                    continue;
+                }
+                metas.push(meta);
+                if metas.len() > limit {
+                    metas.sort_by(|a, b| {
+                        b.pinned
+                            .cmp(&a.pinned)
+                            .then_with(|| b.updated_at.cmp(&a.updated_at))
+                    });
+                    metas.truncate(limit);
+                }
+            }
+        }
+        metas.sort_by(|a, b| {
             b.pinned
                 .cmp(&a.pinned)
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
         });
-        Ok(sessions.iter().map(Session::meta).collect())
+        Ok(metas)
     }
 
     /// Load every session from disk.
@@ -1940,6 +2191,88 @@ mod tests {
     }
 
     #[test]
+    fn linked_corpus_listing_uses_validated_metadata_without_loading_messages() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut linked = Session::new("Long investigation");
+        linked.id = "linked-cache".into();
+        linked.set_linked_corpus_id(Some("corpus-cache".into()));
+        linked.messages.push(StoredMessage {
+            id: "1".into(),
+            role: "user".into(),
+            content: "bounded preview".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        store.save(&linked).unwrap();
+
+        // Make the authoritative transcript deliberately unparsable, then
+        // update only the cache fingerprint. A metadata listing must still
+        // succeed without reading/deserializing message bodies.
+        let session_path = store.path("linked-cache");
+        let mut raw = fs::read(&session_path).unwrap();
+        let message_offset = raw
+            .windows(b"bounded preview".len())
+            .position(|window| window == b"bounded preview")
+            .unwrap();
+        raw[message_offset] = 0xff;
+        fs::write(&session_path, raw).unwrap();
+
+        let cache_path = store.meta_path("linked-cache");
+        let mut cached: CachedSessionMeta =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        cached.source = SessionStore::source_fingerprint(&session_path).unwrap();
+        fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+        assert!(store.load("linked-cache").is_err());
+        let metas = store.list_meta_for_corpus("corpus-cache").unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].title, "Long investigation");
+        assert_eq!(metas[0].message_count, 1);
+        assert_eq!(metas[0].preview, "bounded preview");
+    }
+
+    #[test]
+    fn linked_corpus_listing_migrates_legacy_metadata_and_honors_bound() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        for index in 0..5 {
+            let mut session = Session::new(format!("Investigation {index}"));
+            session.id = format!("linked-{index}");
+            session.set_linked_corpus_id(Some("corpus-bounded".into()));
+            store.save(&session).unwrap();
+        }
+
+        let legacy_meta = store.meta_path("linked-0");
+        fs::remove_file(&legacy_meta).unwrap();
+        let legacy_session = store.path("linked-0");
+        let mut legacy_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&legacy_session).unwrap()).unwrap();
+        legacy_json["messages"] = serde_json::json!([{"legacy_shape": true}]);
+        fs::write(
+            &legacy_session,
+            serde_json::to_vec_pretty(&legacy_json).unwrap(),
+        )
+        .unwrap();
+        assert!(!legacy_meta.exists());
+        assert!(
+            store.load("linked-0").is_err(),
+            "full Session parsing should reject the legacy message shape"
+        );
+
+        let metas = store
+            .list_meta_for_corpus_bounded("corpus-bounded", 3)
+            .unwrap();
+        assert_eq!(metas.len(), 3);
+        assert!(legacy_meta.exists(), "legacy sidecar should be recreated");
+        assert!(metas
+            .iter()
+            .all(|meta| { meta.linked_corpus_id.as_deref() == Some("corpus-bounded") }));
+    }
+
+    #[test]
     fn list_meta_sorted_and_delete() {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path());
@@ -1974,6 +2307,7 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "bbb");
         store.delete("bbb").unwrap();
+        assert!(!store.meta_path("bbb").exists());
         assert_eq!(store.list_meta().unwrap().len(), 1);
     }
 

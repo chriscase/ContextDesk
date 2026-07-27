@@ -544,6 +544,35 @@ Important honesty examples:
 
 ## 14. Verification strategy
 
+### Contextual Help decision rule
+
+Use contextual Help only after the control itself has a clear name, visible
+state, sensible default, and direct feedback:
+
+| Need | Product treatment |
+| --- | --- |
+| The basic action is repeatedly misunderstood | Redesign the control; a question mark is not a usability repair |
+| A term or consequence needs one short sentence | Persistent inline hint or ordinary tooltip |
+| Modes, tradeoffs, limits, privacy, or a short example matter at the decision point | Typed click-open `HelpTip` with a canonical `help://` locator |
+| The complete workflow, decision table, or diagram is needed | **Open full Help** at the exact page and heading |
+
+Required operating information is never hover-only. Rich Help is rendered in a
+portal and collision-shifted on normal windows. At narrow widths it becomes a
+modal bottom sheet with contained keyboard focus, Escape/backdrop/close
+dismissal, and invoker focus restoration. Only one surface is open at a time.
+Typed content may contain a definition, current state, use guidance, mode list
+or compact comparison table, consequence, safety/privacy callouts, example,
+shortcut, and canonical full-Help link. It does not fetch remote or
+model-generated content at render time.
+
+### Help impact on feature changes
+
+Every user-visible feature PR records either the affected Help
+page/anchor/contextual definition or `Help impact: none — <specific reason>`.
+Review compares the Help claim to the current production path and
+`docs/CLAIMS.md`; passing implementation tests is not sufficient when shipped
+Help still teaches old controls.
+
 ### Core and corpus
 
 - valid fixture and bundled corpus load;

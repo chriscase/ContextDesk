@@ -64,16 +64,54 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 ### Narrow
 
-- Filters drawer; single lane; chats as drawer/tab.
+- Logs remain the primary surface with one evidence lane. The 2–4 lane controls
+  are omitted because stacking wide lanes would make a misleading, unusable
+  narrow view.
+- Filters and linked chat are mutually exclusive drawers opened from explicit
+  **Filters** and **Chat** controls. Their closed controls report active-filter,
+  linked-chat, and working state without consuming the event viewport.
+- Escape or the drawer's close control returns keyboard focus to the invoking
+  control. Opening or closing a drawer preserves event selection, filters, lane
+  paging, and linked-chat state.
+- Filters include one **Clear all filters** action. The chat drawer keeps New
+  linked chat, the active thread, composer, Send, and newest-message following
+  reachable; technical context remains collapsed and developer-only detail is
+  hidden by default.
+- The event surface retains a practical minimum height of 240 CSS pixels before
+  the outer window itself must scroll. The complete-event inspector remains
+  independently closable and restores focus to the selected event.
+
+### Event rows and complete reading
+
+- Visible time is deterministic UTC. Single-day windows prioritize time of day;
+  cross-day/year windows add the needed date, mixed quality is visibly marked,
+  and order-only data never fabricates calendar time.
+- Time, level, source, and message tracks have keyboard/pointer resize handles.
+  Auto-fit samples at most 200 resident redacted events; reset restores defaults.
+  Preferences are local to this desktop profile, not synchronized or exported.
+- **1 line** is the dense scan mode. **Preview** and **Deep** use a user-selected
+  bounded 2/4/8/12-line depth, and an individual row can be expanded.
+- Selecting a row opens the resizable complete-event inspector. The inspector is
+  the durable full-text path; bounded row previews do not claim to contain every
+  character.
 
 ### Lane model
 
 - A **lane** = virtualized event stream under a **source-group filter** (plus global filters).
 - Global: level, time range, keyword/semantic, service/host when present.
 - Per-lane: which `source` values (files) are included.
-- **Link mode ON:** shared time cursor; scrolling one lane scrubs others; **gap visualization** where one lane has no events while another does.
-- **Link mode OFF:** independent scroll.
-- Link requires **wall-clock time quality** when possible; order-only sources badge and warn/refuse fake calendar sync.
+- **Independent:** every lane scrolls and pages independently.
+- **Follow cursor:** selecting an event seeks each peer lane to its nearest
+  resident timestamp. This is approximate and does not claim row alignment.
+- **Align time:** reliable wall-clock lanes share an exact-timestamp slot model,
+  identical row heights, and one synchronized virtual scroll coordinate. Empty
+  cells are visually explicit gaps, never placeholder log events. Repeated
+  same-time events use stable occurrence rows rather than being dropped.
+- Align is intentionally an event-time axis, not proportional elapsed-time
+  spacing. The separate lazy range navigator uses fixed-size SQL summaries to
+  move the resident window across the full filtered span.
+- Mixed, order-only, empty, failed, or unloaded lanes fail closed for Align;
+  they cannot be upgraded by a more reliable lane.
 
 ## 5. Data plane (already mostly shipped)
 
@@ -89,8 +127,8 @@ Per corpus under app cache:
 |-----|---------|
 | `log_query_events` | Paged/keyset events with filter + sort |
 | `log_facets` | Sources, levels, services, hosts under filter |
-| `log_timeline` | Filtered volume buckets (+ by_level) — already partial |
-| `log_search_events` | Keyword/regex + template-semantic → event hits |
+| `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the lazy range navigator; no event bodies |
+| `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor |
 | Bookmarks CRUD | Line or range anchors on corpus |
 | Chat link | List/create sessions with `linkedCorpusId` |
 | View context snapshot | Serialize filters/lanes/selection for agent |

@@ -22,8 +22,11 @@ import {
 } from "react";
 import {
   agentTurn,
+  hostArchiveChatSession,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
+  hostPinChatSession,
+  hostRenameChatSession,
   hostSaveChatSession,
   type SessionMetaDto,
 } from "../../lib/host";
@@ -40,6 +43,8 @@ import {
   type LogNavAction,
 } from "../../lib/logExplorer/logNav";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
+import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
 import { ToolCallList } from "../ToolCallList";
 
 export type AgentContextSummary = {
@@ -65,6 +70,13 @@ type Props = {
   compactLayout?: boolean;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
+  /** Compact parent indicator without duplicating chat/session state. */
+  onRailSummary?: (summary: {
+    chatCount: number;
+    hasActiveChat: boolean;
+    busy: boolean;
+  }) => void;
+  onRequestClose?: () => void;
 };
 
 const NEAR_BOTTOM_PX = 64;
@@ -181,17 +193,34 @@ export function LinkedChatRail({
   onApplyNav,
   compactLayout = false,
   developerMode = false,
+  onRailSummary,
+  onRequestClose,
 }: Props) {
   const [chats, setChats] = useState<SessionMetaDto[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [navChips, setNavChips] = useState<LogNavAction[]>([]);
+  /**
+   * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
+   * chat A must not leak into chat B when the user switches mid-turn (#543).
+   */
+  const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
+  const [errorByChat, setErrorByChat] = useState<
+    Record<string, string | null>
+  >({});
+  const [statusByChat, setStatusByChat] = useState<
+    Record<string, string | null>
+  >({});
+  const [navChipsByChat, setNavChipsByChat] = useState<
+    Record<string, LogNavAction[]>
+  >({});
+  /** Errors before a chat identity exists (list/create) remain rail-scoped. */
+  const [railError, setRailError] = useState<string | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState("");
+  const [manageOpen, setManageOpen] = useState(false);
+  const [manageBusy, setManageBusy] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
   const [contextOpen, setContextOpen] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
   const [devJson, setDevJson] = useState("");
@@ -209,6 +238,7 @@ export function LinkedChatRail({
   /** Monotonic generation for openChat loads (#543 race safety). */
   const openGenRef = useRef(0);
   const switcherToggleRef = useRef<HTMLButtonElement>(null);
+  const manageToggleRef = useRef<HTMLButtonElement>(null);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -220,6 +250,16 @@ export function LinkedChatRail({
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
     : true;
+  const busy = activeChatId ? (busyByChat[activeChatId] ?? false) : false;
+  const error = activeChatId
+    ? (errorByChat[activeChatId] ?? railError)
+    : railError;
+  const status = activeChatId
+    ? (statusByChat[activeChatId] ?? null)
+    : null;
+  const navChips = activeChatId
+    ? (navChipsByChat[activeChatId] ?? [])
+    : [];
   const showJump =
     Boolean(activeChatId) &&
     (detachedByChat[activeChatId!] || !followActive);
@@ -229,7 +269,7 @@ export function LinkedChatRail({
       const list = await hostListChatSessionsForCorpus(corpusId);
       setChats(list ?? []);
     } catch (e) {
-      setError(String(e));
+      setRailError(String(e));
     }
   }, [corpusId]);
 
@@ -279,8 +319,9 @@ export function LinkedChatRail({
     const gen = ++openGenRef.current;
     setActiveChatId(id);
     setSwitcherOpen(false);
-    setError(null);
-    setStatus(null);
+    setManageOpen(false);
+    setRailError(null);
+    setErrorByChat((m) => ({ ...m, [id]: null }));
     setDraft(draftsRef.current[id] ?? "");
     // Clear immediately so B never shows A's messages while loading.
     setMessages([]);
@@ -344,13 +385,13 @@ export function LinkedChatRail({
       ) {
         return;
       }
-      setError(String(e));
+      setErrorByChat((m) => ({ ...m, [id]: String(e) }));
       setMessages([]);
     }
   };
 
   const createLinkedChat = async (): Promise<string | null> => {
-    setError(null);
+    setRailError(null);
     try {
       const s = newSession(`Logs · ${corpusName || corpusId.slice(0, 8)}`);
       s.linkedCorpusId = corpusId;
@@ -358,13 +399,16 @@ export function LinkedChatRail({
       if (saved) {
         await refreshChats();
         await openChat(saved.id);
-        setStatus(`Linked chat created: ${saved.title}`);
+        setStatusByChat((m) => ({
+          ...m,
+          [saved.id]: `Linked chat created: ${saved.title}`,
+        }));
         setFollowByChat((m) => ({ ...m, [saved.id]: true }));
         setDetachedByChat((m) => ({ ...m, [saved.id]: false }));
         return saved.id;
       }
     } catch (e) {
-      setError(String(e));
+      setRailError(String(e));
     }
     return null;
   };
@@ -377,8 +421,10 @@ export function LinkedChatRail({
       sessionId = await createLinkedChat();
       if (!sessionId) return;
     }
-    setBusy(true);
-    setError(null);
+    if (busyByChat[sessionId]) return;
+    setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
+    setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
+    setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
     setDraft("");
     draftsRef.current[sessionId] = "";
     // Sending always re-engages follow for this chat (#529).
@@ -463,8 +509,8 @@ export function LinkedChatRail({
 
       const found = extractLogNavFromText(assistant.content);
       if (found.length) {
-        setNavChips((prev) => {
-          const next = [...prev];
+        setNavChipsByChat((byChat) => {
+          const next = [...(byChat[sessionId!] ?? [])];
           for (const a of found) {
             if (
               !next.some(
@@ -476,18 +522,19 @@ export function LinkedChatRail({
               next.push(a);
             }
           }
-          return next;
+          return { ...byChat, [sessionId!]: next };
         });
       }
       await refreshChats();
       const usedTools = (assistant.tools?.length ?? 0) > 0;
-      setStatus(
-        usedTools
+      setStatusByChat((m) => ({
+        ...m,
+        [sessionId!]: usedTools
           ? "Linked investigation completed with log tools"
           : "Linked chat response saved",
-      );
+      }));
     } catch (e) {
-      setError(String(e));
+      setErrorByChat((m) => ({ ...m, [sessionId!]: String(e) }));
       if (activeChatIdRef.current === sessionId) {
         setMessages((msgs) =>
           msgs.map((x) =>
@@ -502,7 +549,7 @@ export function LinkedChatRail({
         );
       }
     } finally {
-      setBusy(false);
+      setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
     }
   };
 
@@ -520,6 +567,40 @@ export function LinkedChatRail({
   const activeTitle =
     activeMeta?.title ??
     (activeChatId ? "Linked chat" : "No chat selected");
+
+  useEffect(() => {
+    onRailSummary?.({
+      chatCount: chats.length,
+      hasActiveChat: activeChatId != null,
+      busy,
+    });
+  }, [activeChatId, busy, chats.length, onRailSummary]);
+
+  const openManage = () => {
+    if (!activeMeta) return;
+    setRenameDraft(activeMeta.title);
+    setManageOpen((open) => !open);
+  };
+
+  const finishManageMutation = async (
+    action: () => Promise<unknown>,
+    success: string,
+  ) => {
+    if (!activeChatId || manageBusy) return;
+    const id = activeChatId;
+    setManageBusy(true);
+    setErrorByChat((m) => ({ ...m, [id]: null }));
+    try {
+      const result = await action();
+      if (!result) throw new Error("Chat update was not persisted");
+      await refreshChats();
+      setStatusByChat((m) => ({ ...m, [id]: success }));
+    } catch (e) {
+      setErrorByChat((m) => ({ ...m, [id]: String(e) }));
+    } finally {
+      setManageBusy(false);
+    }
+  };
 
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -564,20 +645,40 @@ export function LinkedChatRail({
   const applyDevJson = () => {
     const found = extractLogNavFromText(devJson);
     if (found.length) {
-      setNavChips((prev) => [...prev, ...found]);
+      if (!activeChatId) {
+        setRailError("Open a linked chat before adding navigation proposals");
+        return;
+      }
+      setNavChipsByChat((m) => ({
+        ...m,
+        [activeChatId]: [...(m[activeChatId] ?? []), ...found],
+      }));
       setDevJson("");
-      setStatus(`Parsed ${found.length} navigation proposal(s)`);
+      setStatusByChat((m) => ({
+        ...m,
+        [activeChatId]: `Parsed ${found.length} navigation proposal(s)`,
+      }));
     } else {
-      setError("No valid log_nav JSON found");
+      if (activeChatId) {
+        setErrorByChat((m) => ({
+          ...m,
+          [activeChatId]: "No valid log_nav JSON found",
+        }));
+      } else {
+        setRailError("No valid log_nav JSON found");
+      }
     }
   };
 
   return (
     <aside
+      id="log-explorer-chat-panel"
       className={`log-explorer__chat log-explorer__chat--rail${
         compactLayout ? " log-explorer__chat--compact-layout" : ""
       }`}
       data-testid="log-explorer-chat"
+      role={compactLayout ? "dialog" : undefined}
+      aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
       <header className="log-explorer__chat-header" data-testid="linked-chat-header">
         <div className="log-explorer__chat-header-main">
@@ -586,9 +687,25 @@ export function LinkedChatRail({
           </div>
           <div className="log-explorer__chat-header-meta">
             Linked · {chats.length} chat{chats.length === 1 ? "" : "s"}
+            <HelpTip
+              label="How linked chat context works"
+              title="Linked chat and agent context"
+              content={HELP_LINKED_CHAT_CONTEXT}
+            />
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          {compactLayout && onRequestClose ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              aria-label="Close chat drawer"
+              data-testid="close-chat-drawer"
+              onClick={onRequestClose}
+            >
+              Close
+            </button>
+          ) : null}
           <button
             type="button"
             className="log-explorer__btn"
@@ -600,6 +717,19 @@ export function LinkedChatRail({
             onClick={() => setSwitcherOpen((o) => !o)}
           >
             Chats
+          </button>
+          <button
+            type="button"
+            className="log-explorer__btn"
+            ref={manageToggleRef}
+            data-testid="linked-chat-manage-toggle"
+            disabled={!activeMeta}
+            aria-expanded={manageOpen}
+            aria-controls="linked-chat-manage"
+            aria-haspopup="dialog"
+            onClick={openManage}
+          >
+            Manage
           </button>
           <button
             type="button"
@@ -659,12 +789,97 @@ export function LinkedChatRail({
                     onClick={() => void openChat(c.id)}
                   >
                     <div className="log-explorer__chat-item-title">{c.title}</div>
-                    <div className="log-explorer__chat-preview">{c.preview}</div>
+                    <div className="log-explorer__chat-preview">
+                      {busyByChat[c.id] ? "Investigating… · " : ""}
+                      {c.preview}
+                    </div>
                   </button>
                 </li>
               ))}
             </ul>
           )}
+        </div>
+      )}
+
+      {manageOpen && activeMeta && (
+        <div
+          className="log-explorer__chat-manage"
+          id="linked-chat-manage"
+          role="dialog"
+          aria-label={`Manage ${activeMeta.title}`}
+          data-testid="linked-chat-manage"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setManageOpen(false);
+            manageToggleRef.current?.focus();
+          }}
+        >
+          <label className="log-explorer__chat-manage-rename">
+            <span>Chat title</span>
+            <input
+              className="log-explorer__search"
+              value={renameDraft}
+              disabled={manageBusy}
+              maxLength={120}
+              onChange={(event) => setRenameDraft(event.target.value)}
+            />
+          </label>
+          <div className="log-explorer__chat-manage-actions">
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={
+                manageBusy ||
+                !renameDraft.trim() ||
+                renameDraft.trim() === activeMeta.title
+              }
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostRenameChatSession(activeMeta.id, renameDraft.trim()),
+                  "Linked chat renamed",
+                )
+              }
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={manageBusy}
+              aria-pressed={activeMeta.pinned}
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostPinChatSession(activeMeta.id, !activeMeta.pinned),
+                  activeMeta.pinned ? "Linked chat unpinned" : "Linked chat pinned",
+                )
+              }
+            >
+              {activeMeta.pinned ? "Unpin" : "Pin"}
+            </button>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={manageBusy}
+              aria-pressed={activeMeta.archived}
+              onClick={() =>
+                void finishManageMutation(
+                  () =>
+                    hostArchiveChatSession(
+                      activeMeta.id,
+                      !activeMeta.archived,
+                    ),
+                  activeMeta.archived
+                    ? "Linked chat reopened"
+                    : "Linked chat archived",
+                )
+              }
+            >
+              {activeMeta.archived ? "Reopen" : "Archive"}
+            </button>
+          </div>
         </div>
       )}
 

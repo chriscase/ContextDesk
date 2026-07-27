@@ -19,7 +19,7 @@
   <text x="367" y="158" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Detect duplicate</text>
   <text x="367" y="184" text-anchor="middle" fill="#fef3c7" font-family="system-ui, sans-serif" font-size="13">Edit candidate</text>
   <rect x="298" y="210" width="138" height="38" rx="9" fill="#78350f" stroke="#fbbf24"/>
-  <text x="367" y="234" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Approve or discard</text>
+  <text x="367" y="234" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="13">Approve / discard</text>
   <path d="M471 167H520" stroke="#34d399" stroke-width="4" marker-end="url(#arrow)"/>
   <rect x="530" y="62" width="210" height="210" rx="18" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
   <text x="635" y="98" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">Durable store</text>

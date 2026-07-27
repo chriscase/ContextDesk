@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { VirtualizedEventList } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
@@ -41,5 +41,170 @@ describe("VirtualizedEventList", () => {
     expect(rendered).toBeGreaterThan(0);
     expect(rendered).toBeLessThan(120);
     expect(rendered).toBeLessThan(events.length);
+  });
+
+  it("keeps a large shared alignment axis virtualized and renders gaps as non-events", () => {
+    const events = makeEvents(100);
+    const byIndex = new Map(events.map((event, index) => [index * 100, event]));
+    const alignedRows = Array.from({ length: 10_000 }, (_, index) => ({
+      key: `slot-${index}`,
+      ts: 1_700_000_000 + index,
+      event: byIndex.get(index) ?? null,
+      height: 28,
+    }));
+    render(
+      <VirtualizedEventList
+        events={events}
+        alignedRows={alignedRows}
+        linkedScrollTop={0}
+        onLinkedScrollTop={vi.fn()}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    expect(list.getAttribute("data-total")).toBe("100");
+    expect(list.getAttribute("data-aligned-slots")).toBe("10000");
+    expect(Number(list.getAttribute("data-rendered"))).toBeLessThan(120);
+    expect(screen.getAllByTestId("aligned-gap").length).toBeLessThan(120);
+    expect(screen.queryByText("No events match filters")).toBeNull();
+  });
+
+  it("preserves a stable event pixel anchor across prepend and head eviction", () => {
+    const events = makeEvents(12).slice(2);
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={events} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 56,
+    });
+
+    act(() => {
+      rerender(<VirtualizedEventList {...props} events={makeEvents(12)} />);
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(112);
+
+    // Append one newer row while evicting one row from the head.
+    act(() => {
+      rerender(
+        <VirtualizedEventList {...props} events={makeEvents(13).slice(1)} />,
+      );
+    });
+    expect((list as HTMLDivElement).scrollTop).toBe(84);
+  });
+
+  it("uses measured variable row offsets when preserving the anchor", () => {
+    const base = makeEvents(8).slice(2);
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={base} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 96,
+    });
+
+    act(() => {
+      rerender(<VirtualizedEventList {...props} events={makeEvents(8)} />);
+    });
+    // Deep mode at the default four-line preference uses eight visible lines:
+    // two prepended rows × 156px + the prior 96px within-row offset.
+    expect((list as HTMLDivElement).scrollTop).toBe(408);
+  });
+
+  it("uses the user preview depth and a backend hit-centered excerpt", () => {
+    const event = makeEvents(1)[0]!;
+    event.message = `prefix ${"noise ".repeat(40)}NEEDLE${" tail".repeat(40)}`;
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set([event.seq])}
+        density="comfortable"
+        lineMode="wrap"
+        previewLines={12}
+        matchExcerpts={{
+          [event.seq]: "…near NEEDLE with bounded context…",
+        }}
+        onRowClick={vi.fn()}
+      />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    expect(list.getAttribute("data-total-height")).toBe("228");
+    const row = list.querySelector(`[data-seq="${event.seq}"]`);
+    expect(row?.getAttribute("data-match-excerpt")).toBe("true");
+    expect(screen.getByText(/near NEEDLE/)).toBeTruthy();
+    expect(screen.getByText(/near NEEDLE/).getAttribute("aria-label")).toMatch(
+      /Open the event inspector for the complete message/,
+    );
+  });
+
+  it("requests older and newer pages when the viewport reaches either edge", () => {
+    const onNearTop = vi.fn();
+    const onNearBottom = vi.fn();
+    const { unmount } = render(
+      <VirtualizedEventList
+        events={makeEvents(100)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearTop={onNearTop}
+      />,
+    );
+    const topList = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(topList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2_800 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    fireEvent.scroll(topList);
+    expect(onNearTop).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(
+      <VirtualizedEventList
+        events={makeEvents(100)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearBottom={onNearBottom}
+      />,
+    );
+    const bottomList = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(bottomList, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2_800 },
+      scrollTop: { configurable: true, writable: true, value: 2_400 },
+    });
+    fireEvent.scroll(bottomList);
+    expect(onNearBottom).toHaveBeenCalledTimes(1);
   });
 });

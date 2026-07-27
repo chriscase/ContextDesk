@@ -11,7 +11,7 @@
     <path d="M200 157H247" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="258" y="105" width="170" height="104" rx="12" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
     <text x="343" y="138" fill="#e5e7eb" font-size="16" font-weight="700">Path policy</text>
-    <text x="343" y="166" fill="#9ca3af" font-size="13">canonicalize + symlinks</text>
+    <text x="343" y="166" fill="#9ca3af" font-size="13">paths + symlinks</text>
     <text x="343" y="188" fill="#9ca3af" font-size="13">secrets + type + size</text>
     <path d="M434 157H481" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="492" y="116" width="146" height="82" rx="12" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
@@ -20,9 +20,10 @@
     <path d="M644 157H691" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="702" y="105" width="150" height="104" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
     <text x="777" y="138" fill="#e5e7eb" font-size="16" font-weight="700">Local index</text>
-    <text x="777" y="166" fill="#9ca3af" font-size="13">SQLite keyword store</text>
-    <text x="777" y="188" fill="#9ca3af" font-size="13">optional hybrid rank</text>
+    <text x="777" y="166" fill="#9ca3af" font-size="13">Local keyword index</text>
+    <text x="777" y="188" fill="#9ca3af" font-size="13">optional hybrid</text>
   </g>
-  <rect x="258" y="244" width="380" height="42" rx="10" fill="#451a03" stroke="#fbbf24"/>
-  <text x="448" y="270" text-anchor="middle" fill="#fde68a" font-family="system-ui, sans-serif" font-size="14">Skipped files and file/byte caps are reported, never claimed as indexed.</text>
+  <rect x="258" y="230" width="380" height="62" rx="10" fill="#451a03" stroke="#fbbf24"/>
+  <text x="448" y="253" text-anchor="middle" fill="#fde68a" font-family="system-ui, sans-serif" font-size="14">Skipped files and caps are reported.</text>
+  <text x="448" y="277" text-anchor="middle" fill="#fde68a" font-family="system-ui, sans-serif" font-size="14">Never silently claimed as indexed.</text>
 </svg>

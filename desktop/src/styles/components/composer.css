@@ -358,10 +358,45 @@
   border-radius: 10px;
   background: color-mix(in srgb, var(--overlay-faint) 70%, transparent);
 }
+
+.session-context-bar:not([open]) {
+  padding-block: 0;
+}
+
 .session-context-bar.is-dragover {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
 }
+
+.session-context-bar__summary {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 2rem;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.session-context-bar__summary-state {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-context-bar__body {
+  padding: 0 0 var(--space-1);
+}
+
+.session-context-bar__privacy {
+  margin: 0 0 var(--space-2);
+}
+
 .session-context-bar__label {
   font-size: var(--text-xs);
   font-weight: 600;
@@ -375,4 +410,18 @@
 }
 .session-context-bar__add {
   cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .session-context-bar__summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+    padding-block: 0.35rem;
+  }
+
+  .session-context-bar__summary-state {
+    margin-left: 1rem;
+    max-width: calc(100% - 1rem);
+  }
 }

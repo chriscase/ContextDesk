@@ -50,6 +50,10 @@ content, and process pages without both a diagram and table.
 
 Before review:
 
+- Record `Help impact: <page/anchor and contextual definition>` for every
+  user-visible behavior change, or `Help impact: none — <specific reason>`.
+  Update affected Help in the feature PR rather than leaving a follow-up drift
+  task.
 - Check capability wording against `docs/CLAIMS.md` and the current code anchor.
 - Check the README's “What it does (honest)” section.
 - Use the current production path, not only a helper or design document.

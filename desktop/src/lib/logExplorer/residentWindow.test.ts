@@ -61,7 +61,7 @@ describe("residentWindow", () => {
       prevTs: ev(10).ts,
       totalMatched: 50,
     });
-    const { window, prepended } = prependOlder(
+    const { window, prepended, droppedFromTail } = prependOlder(
       seed,
       {
         events: [ev(8), ev(9)],
@@ -72,7 +72,68 @@ describe("residentWindow", () => {
       100,
     );
     expect(prepended).toBe(2);
+    expect(droppedFromTail).toBe(0);
     expect(window.events.map((e) => e.seq)).toEqual([8, 9, 10, 11]);
     expect(window.beforeSeq).toBe(8);
+  });
+
+  it("stays bounded and gap-free while alternating both paging directions", () => {
+    let window = seedFromPage({
+      events: Array.from({ length: 100 }, (_, index) => ev(901 + index)),
+      nextCursor: 1000,
+      nextTs: ev(1000).ts,
+      prevCursor: 901,
+      prevTs: ev(901).ts,
+      totalMatched: 2_000,
+    });
+
+    for (let start = 1001; start <= 1800; start += 100) {
+      ({ window } = appendNewer(
+        window,
+        {
+          events: Array.from({ length: 100 }, (_, index) =>
+            ev(start + index),
+          ),
+          nextCursor: start + 99,
+          nextTs: ev(start + 99).ts,
+          totalMatched: 2_000,
+        },
+        800,
+      ));
+      expect(window.events.length).toBeLessThanOrEqual(800);
+    }
+    expect(window.events[0]?.seq).toBe(1001);
+    expect(window.events.at(-1)?.seq).toBe(1800);
+
+    for (let end = 1000; end >= 300; end -= 100) {
+      const result = prependOlder(
+        window,
+        {
+          events: Array.from({ length: 100 }, (_, index) =>
+            ev(end - 99 + index),
+          ),
+          prevCursor: end - 99,
+          prevTs: ev(end - 99).ts,
+          totalMatched: 2_000,
+        },
+        800,
+      );
+      window = result.window;
+      expect(window.events.length).toBeLessThanOrEqual(800);
+    }
+    expect(window.events[0]?.seq).toBe(201);
+    expect(window.events.at(-1)?.seq).toBe(1000);
+    expect(window.events.map((event) => event.seq)).toEqual(
+      Array.from({ length: 800 }, (_, index) => 201 + index),
+    );
+  });
+
+  it("orders equal timestamps by stable sequence without duplicates", () => {
+    const timestamp = 1_700_000_000;
+    const merged = mergeAscending(
+      [ev(4, timestamp), ev(2, timestamp)],
+      [ev(3, timestamp), ev(4, timestamp), ev(1, timestamp)],
+    );
+    expect(merged.map((event) => event.seq)).toEqual([1, 2, 3, 4]);
   });
 });

@@ -111,9 +111,10 @@ export function timeQualityLabel(q: TimeQuality): string {
 /** Canonical UTC timestamp string (full precision, no locale). */
 export function formatCanonicalUtc(ts: number): string {
   try {
+    if (!Number.isFinite(ts)) return "invalid timestamp";
     return new Date(ts * 1000).toISOString().replace("T", " ");
   } catch {
-    return String(ts);
+    return "invalid timestamp";
   }
 }
 
@@ -127,6 +128,7 @@ export function formatEventTime(
   quality: TimeQuality,
   opts?: { minTs?: number; maxTs?: number },
 ): string {
+  if (!Number.isFinite(ts)) return "invalid time";
   if (quality === "order_only" || ts < 946_684_800) {
     return `ord ${ts}`;
   }
@@ -136,8 +138,11 @@ export function formatEventTime(
   try {
     const d = new Date(ts * 1000);
     const iso = d.toISOString(); // always UTC
-    const hhmmss = iso.slice(11, 19);
+    const hhmmss = Number.isInteger(ts)
+      ? iso.slice(11, 19)
+      : iso.slice(11, 23);
     const ymd = iso.slice(0, 10);
+    const qualityPrefix = quality === "mixed" ? "~" : "";
     const min = opts?.minTs;
     const max = opts?.maxTs;
     if (min != null && max != null && min >= 946_684_800 && max >= 946_684_800) {
@@ -147,20 +152,21 @@ export function formatEventTime(
       const sameYear = a.slice(0, 4) === b.slice(0, 4);
       if (sameDay) {
         // Prefer discriminating time-of-day for single-day investigations.
-        return `${hhmmss}Z`;
+        return `${qualityPrefix}${hhmmss}Z`;
       }
       if (sameYear) {
-        return `${ymd.slice(5)} ${hhmmss}Z`; // MM-DD HH:mm:ssZ
+        return `${qualityPrefix}${ymd.slice(5)} ${hhmmss}Z`; // MM-DD HH:mm:ssZ
       }
     }
-    return `${ymd} ${hhmmss}Z`;
+    return `${qualityPrefix}${ymd} ${hhmmss}Z`;
   } catch {
-    return String(ts);
+    return "invalid time";
   }
 }
 
 /** Accessible full timestamp title including quality. */
 export function formatEventTimeTitle(ts: number, quality: TimeQuality): string {
+  if (!Number.isFinite(ts)) return "invalid timestamp (not calendar time)";
   if (quality === "order_only" || ts < 946_684_800) {
     return `order-only seq-time ${ts} (not calendar time)`;
   }

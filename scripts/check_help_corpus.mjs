@@ -191,6 +191,164 @@ function normalizedInside(root, candidate, source) {
   return resolved;
 }
 
+function svgAttributes(raw) {
+  const attributes = {};
+  for (const match of raw.matchAll(
+    /([a-zA-Z_:][a-zA-Z0-9_.:-]*)\s*=\s*["']([^"']*)["']/g,
+  )) {
+    attributes[match[1]] = match[2];
+  }
+  return attributes;
+}
+
+function finiteNumber(value, fallback = Number.NaN) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function boxesOverlap(a, b, tolerance = 1) {
+  return (
+    Math.min(a.right, b.right) - Math.max(a.left, b.left) > tolerance &&
+    Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > tolerance
+  );
+}
+
+/**
+ * Conservative deterministic geometry check for the deliberately simple Help
+ * SVG authoring subset. It catches clipping, text/text collisions, and labels
+ * touching their containing rectangle. Font-metric/arrow quality still
+ * requires the documented rendered contact-sheet review.
+ */
+export function validateSvgGeometry(svg, source = "<svg>") {
+  const root = svg.match(/<svg\b([^>]*)>/i);
+  const viewBox = root && svgAttributes(root[1]).viewBox;
+  const dimensions = viewBox
+    ?.trim()
+    .split(/\s+/)
+    .map((value) => finiteNumber(value));
+  if (
+    !dimensions ||
+    dimensions.length !== 4 ||
+    dimensions.some((value) => !Number.isFinite(value)) ||
+    dimensions[2] <= 0 ||
+    dimensions[3] <= 0
+  ) {
+    throw new Error(`${source}: SVG requires a numeric positive viewBox`);
+  }
+  const [viewX, viewY, viewWidth, viewHeight] = dimensions;
+  const viewport = {
+    left: viewX,
+    top: viewY,
+    right: viewX + viewWidth,
+    bottom: viewY + viewHeight,
+  };
+
+  const rectangles = [...svg.matchAll(/<rect\b([^>]*)\/?>/gi)]
+    .map((match) => svgAttributes(match[1]))
+    .map((attributes) => {
+      const x = finiteNumber(attributes.x, 0);
+      const y = finiteNumber(attributes.y, 0);
+      const width = finiteNumber(attributes.width);
+      const height = finiteNumber(attributes.height);
+      return {
+        left: x,
+        top: y,
+        right: x + width,
+        bottom: y + height,
+        area: width * height,
+      };
+    })
+    .filter(
+      (box) =>
+        Number.isFinite(box.area) &&
+        box.right > box.left &&
+        box.bottom > box.top,
+    );
+
+  const hasMiddleTextGroup =
+    /<g\b[^>]*\btext-anchor\s*=\s*["']middle["'][^>]*>/i.test(svg);
+  const texts = [...svg.matchAll(/<text\b([^>]*)>([^<]*)<\/text>/gi)]
+    .map((match, index) => {
+      const attributes = svgAttributes(match[1]);
+      const label = match[2].replace(/\s+/g, " ").trim();
+      const x = finiteNumber(attributes.x);
+      const y = finiteNumber(attributes.y);
+      const fontSize = finiteNumber(attributes["font-size"]);
+      if (
+        !label ||
+        !Number.isFinite(x) ||
+        !Number.isFinite(y) ||
+        !Number.isFinite(fontSize) ||
+        fontSize <= 0
+      ) {
+        throw new Error(
+          `${source}: text ${index + 1} requires plain content and numeric x/y/font-size`,
+        );
+      }
+      // A conservative system-ui estimate. The small margin avoids pretending
+      // this replaces a real font-metric render review.
+      const width = [...label].length * fontSize * 0.57;
+      const anchor =
+        attributes["text-anchor"] ?? (hasMiddleTextGroup ? "middle" : "start");
+      const left =
+        anchor === "middle" ? x - width / 2 : anchor === "end" ? x - width : x;
+      return {
+        label,
+        left,
+        right: left + width,
+        top: y - fontSize * 0.82,
+        bottom: y + fontSize * 0.22,
+        centerX: x,
+        centerY: y - fontSize * 0.3,
+      };
+    });
+
+  for (const text of texts) {
+    const pad = 1;
+    if (
+      text.left < viewport.left + pad ||
+      text.right > viewport.right - pad ||
+      text.top < viewport.top + pad ||
+      text.bottom > viewport.bottom - pad
+    ) {
+      throw new Error(`${source}: clipped text '${text.label}'`);
+    }
+
+    const containing = rectangles
+      .filter(
+        (rect) =>
+          text.centerX >= rect.left &&
+          text.centerX <= rect.right &&
+          text.centerY >= rect.top &&
+          text.centerY <= rect.bottom,
+      )
+      .sort((a, b) => a.area - b.area)[0];
+    if (
+      containing &&
+      (text.left < containing.left + 3 ||
+        text.right > containing.right - 3 ||
+        text.top < containing.top + 3 ||
+        text.bottom > containing.bottom - 3)
+    ) {
+      throw new Error(
+        `${source}: text '${text.label}' touches or crosses its box border ` +
+          `(text=${text.left.toFixed(1)},${text.top.toFixed(1)}..${text.right.toFixed(1)},${text.bottom.toFixed(1)}; ` +
+          `box=${containing.left},${containing.top}..${containing.right},${containing.bottom})`,
+      );
+    }
+  }
+
+  for (let left = 0; left < texts.length; left += 1) {
+    for (let right = left + 1; right < texts.length; right += 1) {
+      if (boxesOverlap(texts[left], texts[right])) {
+        throw new Error(
+          `${source}: text collision '${texts[left].label}' / '${texts[right].label}'`,
+        );
+      }
+    }
+  }
+}
+
 function validateSvg(assetPath, source) {
   const stat = fs.lstatSync(assetPath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -216,6 +374,7 @@ function validateSvg(assetPath, source) {
   ) {
     throw new Error(`${source}: SVG contains executable or remote content`);
   }
+  validateSvgGeometry(svg, source);
 }
 
 function validateBody(body, meta, pagePath, root, assetsSeen) {

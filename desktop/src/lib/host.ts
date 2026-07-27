@@ -1780,6 +1780,25 @@ export type EventPageDto = {
   timeQuality: TimeQuality;
 };
 
+export type TimelineSummaryBucketDto = {
+  index: number;
+  start: number;
+  end: number;
+  count: number;
+  byLevel: Record<string, number>;
+};
+
+export type TimelineSummaryDto = {
+  timeQuality: TimeQuality;
+  spanFrom: number | null;
+  spanTo: number | null;
+  bucketWidth: number;
+  bucketCount: number;
+  totalMatched: number;
+  /** Non-empty buckets only; empty slots are represented by absent indexes. */
+  buckets: TimelineSummaryBucketDto[];
+};
+
 export type LogFacetsDto = {
   sources: Record<string, number>;
   levels: Record<string, number>;
@@ -1798,6 +1817,11 @@ export type EventSearchHitDto = {
 
 export type EventSearchResultDto = {
   hits: EventSearchHitDto[];
+  /** Composite cursor for the next chronological search-result page. */
+  nextCursor?: number | null;
+  nextTs?: number | null;
+  /** Exact for SQL literal search; unavailable for bounded regex/semantic scans. */
+  totalMatched?: number | null;
   partial: boolean;
   diagnostic?: string | null;
   scanned: number;
@@ -1826,6 +1850,29 @@ export async function hostLogQueryEvents(
     return { events: [], nextCursor: null, totalMatched: 0, timeQuality: "order_only" };
   }
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
+}
+
+/** Fixed-size, filter-aware overview used only when the Explorer navigator opens. */
+export async function hostLogTimelineSummary(
+  corpusId: string,
+  filter: EventQueryDto = {},
+  maxBuckets = 96,
+): Promise<TimelineSummaryDto> {
+  if (!isTauri()) {
+    return {
+      timeQuality: "order_only",
+      spanFrom: null,
+      spanTo: null,
+      bucketWidth: 1,
+      bucketCount: 0,
+      totalMatched: 0,
+      buckets: [],
+    };
+  }
+  return invoke<TimelineSummaryDto>("log_timeline_summary", {
+    corpusId,
+    query: { filter, maxBuckets },
+  });
 }
 
 /** How a stable target resolved under filters. */

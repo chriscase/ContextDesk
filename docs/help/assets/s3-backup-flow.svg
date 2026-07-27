@@ -12,12 +12,14 @@
     <rect x="258" y="100" width="166" height="120" rx="12" fill="#451a03" stroke="#fbbf24" stroke-width="2"/>
     <text x="341" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Native confirm</text>
     <text x="341" y="163" fill="#fde68a" font-size="13">roots + destination</text>
-    <text x="341" y="184" fill="#fde68a" font-size="13">files + bytes + exclusions</text>
+    <text x="341" y="184" fill="#fde68a" font-size="13">file + byte totals</text>
+    <text x="341" y="205" fill="#fde68a" font-size="13">exclusions</text>
     <path d="M430 160H481" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="492" y="100" width="166" height="120" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
     <text x="575" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Upload bodies</text>
-    <text x="575" y="163" fill="#9ca3af" font-size="13">streaming + cancellable</text>
-    <text x="575" y="184" fill="#9ca3af" font-size="13">reuse matching hashes</text>
+    <text x="575" y="160" fill="#9ca3af" font-size="13">bounded stream</text>
+    <text x="575" y="181" fill="#9ca3af" font-size="13">cancellable</text>
+    <text x="575" y="202" fill="#9ca3af" font-size="13">reuse known hashes</text>
     <path d="M664 160H715" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="726" y="100" width="132" height="120" rx="12" fill="#064e3b" stroke="#34d399" stroke-width="2"/>
     <text x="792" y="135" fill="#e5e7eb" font-size="16" font-weight="700">Publish</text>

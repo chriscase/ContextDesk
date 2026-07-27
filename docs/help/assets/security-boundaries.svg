@@ -9,7 +9,8 @@
     <text x="154" y="132" fill="#9ca3af" font-size="13">redacted DTOs + decisions</text>
     <rect x="54" y="206" width="200" height="74" rx="12" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
     <text x="154" y="236" fill="#e5e7eb" font-size="16" font-weight="700">Local sources</text>
-    <text x="154" y="260" fill="#9ca3af" font-size="13">allowlisted, untrusted content</text>
+    <text x="154" y="256" fill="#9ca3af" font-size="13">allowlisted content</text>
+    <text x="154" y="273" fill="#9ca3af" font-size="13">still untrusted</text>
     <path d="M260 114H326" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <path d="M260 243H296Q318 243 326 216" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="338" y="60" width="230" height="230" rx="14" fill="#082f49" stroke="#38bdf8" stroke-width="3"/>
@@ -23,9 +24,11 @@
     <path d="M574 224H608Q630 224 638 246" fill="none" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="650" y="72" width="196" height="90" rx="12" fill="#1e293b" stroke="#f472b6" stroke-width="2"/>
     <text x="748" y="107" fill="#e5e7eb" font-size="16" font-weight="700">Remote services</text>
-    <text x="748" y="135" fill="#9ca3af" font-size="13">explicit egress, untrusted</text>
+    <text x="748" y="132" fill="#9ca3af" font-size="13">explicit egress</text>
+    <text x="748" y="151" fill="#9ca3af" font-size="13">still untrusted</text>
     <rect x="650" y="208" width="196" height="78" rx="12" fill="#1e293b" stroke="#fbbf24" stroke-width="2"/>
     <text x="748" y="239" fill="#e5e7eb" font-size="16" font-weight="700">MCP subprocesses</text>
-    <text x="748" y="263" fill="#9ca3af" font-size="13">cleared env, still untrusted</text>
+    <text x="748" y="258" fill="#9ca3af" font-size="13">cleared environment</text>
+    <text x="748" y="277" fill="#9ca3af" font-size="13">still untrusted</text>
   </g>
 </svg>

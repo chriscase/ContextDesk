@@ -46,6 +46,7 @@ import { foldPreview, nowIso } from "./lib/session";
 import {
   helpOpenRequest,
   parseHelpLocator,
+  subscribeHelpAcrossWindows,
   type HelpLocation,
 } from "./lib/help";
 import { nextSkinId } from "./lib/skins";
@@ -148,6 +149,10 @@ export function App() {
       const location = parseHelpLocator(locator);
       if (location) openHelp(location);
     },
+    [openHelp],
+  );
+  useEffect(
+    () => subscribeHelpAcrossWindows((location) => openHelp(location)),
     [openHelp],
   );
 
@@ -795,6 +800,8 @@ export function App() {
                   onStartWizard: (wizardId: string) => {
                     startWizard(wizardId);
                   },
+                  hasAuthorizedWorkspaceContent:
+                    shell.setup.workspaceRoots.length > 0,
                   externalSeedRequest: wizardSeedRequest,
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
