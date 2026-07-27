@@ -89,6 +89,7 @@ import {
 import { LinkedChatRail } from "./LinkedChatRail";
 import { TimelineNavigator } from "./TimelineNavigator";
 import {
+  centeredLiteralExcerpt,
   eventRowHeight,
   VirtualizedEventList,
   type LineMode,
@@ -1787,10 +1788,6 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const baseRowH = density === "compact" ? 22 : 28;
     const boundedPreview = Math.min(12, Math.max(2, previewLines));
-    const wrapH =
-      lineMode === "wrap"
-        ? Math.max(baseRowH, boundedPreview * 18 + 12)
-        : baseRowH;
     return buildAlignedLaneRows(
       lanes.slice(0, laneCount).map((lane) => ({
         id: lane.id,
@@ -1802,14 +1799,19 @@ export function LogExplorer({ corpusId }: Props) {
           lineMode,
           expandedSeqs.has(event.seq),
           baseRowH,
-          wrapH,
           boundedPreview,
+          findExcerpts[event.seq] ??
+            (filters.keyword
+              ? centeredLiteralExcerpt(event.message, filters.keyword)
+              : event.message),
         ),
       baseRowH,
     );
   }, [
     density,
     expandedSeqs,
+    filters.keyword,
+    findExcerpts,
     laneCount,
     laneEvents,
     lanes,

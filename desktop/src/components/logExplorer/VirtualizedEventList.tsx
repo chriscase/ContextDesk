@@ -31,6 +31,7 @@ const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
 const PREVIEW_LINE_HEIGHT = 18;
 const PREVIEW_VERTICAL_CHROME = 12;
+const APPROX_PREVIEW_CHARS_PER_LINE = 80;
 
 export type LineMode = "compact" | "wrap" | "full";
 
@@ -69,28 +70,40 @@ function levelClass(level: string): string {
 }
 
 export function eventRowHeight(
-  _e: ExplorerEventDto,
+  e: ExplorerEventDto,
   lineMode: LineMode,
   expanded: boolean,
   compactH: number,
-  wrapH: number,
   previewLines: number,
+  displayedMessage = e.message,
 ): number {
   const rowExpanded = expanded;
   const wrapText = lineMode === "full" || lineMode === "wrap" || rowExpanded;
   if (!wrapText) return compactH;
-  if (lineMode === "wrap" && !rowExpanded) return wrapH;
-  const lines =
+  const maxLines =
     lineMode === "full" && !rowExpanded
       ? Math.min(24, previewLines * 2)
       : previewLines;
+  const lines = Math.min(
+    maxLines,
+    displayedMessage.split(/\r?\n/).reduce(
+      (total, line) =>
+        total +
+        Math.max(1, Math.ceil(line.length / APPROX_PREVIEW_CHARS_PER_LINE)),
+      0,
+    ),
+  );
+  if (lines <= 1) return compactH;
   return Math.max(
     compactH,
     lines * PREVIEW_LINE_HEIGHT + PREVIEW_VERTICAL_CHROME,
   );
 }
 
-function centeredLiteralExcerpt(message: string, keyword: string): string {
+export function centeredLiteralExcerpt(
+  message: string,
+  keyword: string,
+): string {
   const index = message.toLowerCase().indexOf(keyword.toLowerCase());
   if (index < 0 || message.length <= 160) return message;
   const from = Math.max(0, index - 60);
@@ -125,38 +138,49 @@ export function VirtualizedEventList({
   const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
   const compactH = baseRowH;
   const boundedPreviewLines = Math.min(12, Math.max(2, previewLines));
-  const wrapH =
-    lineMode === "wrap"
-      ? Math.max(
+  const maxPreviewLines =
+    lineMode === "full"
+      ? Math.min(24, boundedPreviewLines * 2)
+      : boundedPreviewLines;
+  const edgeRowH =
+    lineMode === "compact"
+      ? baseRowH
+      : Math.max(
           baseRowH,
-          boundedPreviewLines * PREVIEW_LINE_HEIGHT + PREVIEW_VERTICAL_CHROME,
-        )
-      : baseRowH;
-  const edgeRowH = wrapH;
+          maxPreviewLines * PREVIEW_LINE_HEIGHT + PREVIEW_VERTICAL_CHROME,
+        );
   const displayRows = useMemo<AlignedLaneRow<ExplorerEventDto>[]>(
     () =>
       alignedRows ??
-      events.map((event) => ({
-        key: String(event.seq),
-        ts: event.ts,
-        event,
-        height: eventRowHeight(
+      events.map((event) => {
+        const matchExcerpt = matchExcerpts?.[event.seq];
+        const filterExcerpt =
+          !matchExcerpt && filterKeyword
+            ? centeredLiteralExcerpt(event.message, filterKeyword)
+            : null;
+        return {
+          key: String(event.seq),
+          ts: event.ts,
           event,
-          lineMode,
-          expandedSeqs?.has(event.seq) ?? false,
-          compactH,
-          wrapH,
-          boundedPreviewLines,
-        ),
-      })),
+          height: eventRowHeight(
+            event,
+            lineMode,
+            expandedSeqs?.has(event.seq) ?? false,
+            compactH,
+            boundedPreviewLines,
+            matchExcerpt ?? filterExcerpt ?? event.message,
+          ),
+        };
+      }),
     [
       alignedRows,
       boundedPreviewLines,
       compactH,
       events,
       expandedSeqs,
+      filterKeyword,
       lineMode,
-      wrapH,
+      matchExcerpts,
     ],
   );
 
@@ -182,33 +206,11 @@ export function VirtualizedEventList({
     for (let i = 0; i < displayRows.length; i++) {
       offsets[i] = acc;
       const row = displayRows[i]!;
-      const e = row.event;
-      const h =
-        alignedRows != null
-          ? row.height
-          : e
-            ? eventRowHeight(
-                e,
-                lineMode,
-                expandedSeqs?.has(e.seq) ?? false,
-                compactH,
-                wrapH,
-                boundedPreviewLines,
-              )
-            : compactH;
-      heights[i] = h;
-      acc += h;
+      heights[i] = row.height;
+      acc += row.height;
     }
     return { heights, offsets, totalH: acc };
-  }, [
-    alignedRows,
-    displayRows,
-    expandedSeqs,
-    lineMode,
-    compactH,
-    wrapH,
-    boundedPreviewLines,
-  ]);
+  }, [displayRows]);
 
   const onScroll = useCallback(
     (e: UIEvent<HTMLDivElement>) => {
