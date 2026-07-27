@@ -64,7 +64,22 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 ### Narrow
 
-- Filters drawer; single lane; chats as drawer/tab.
+- Logs remain the primary surface with one evidence lane. The 2–4 lane controls
+  are omitted because stacking wide lanes would make a misleading, unusable
+  narrow view.
+- Filters and linked chat are mutually exclusive drawers opened from explicit
+  **Filters** and **Chat** controls. Their closed controls report active-filter,
+  linked-chat, and working state without consuming the event viewport.
+- Escape or the drawer's close control returns keyboard focus to the invoking
+  control. Opening or closing a drawer preserves event selection, filters, lane
+  paging, and linked-chat state.
+- Filters include one **Clear all filters** action. The chat drawer keeps New
+  linked chat, the active thread, composer, Send, and newest-message following
+  reachable; technical context remains collapsed and developer-only detail is
+  hidden by default.
+- The event surface retains a practical minimum height of 240 CSS pixels before
+  the outer window itself must scroll. The complete-event inspector remains
+  independently closable and restores focus to the selected event.
 
 ### Event rows and complete reading
 

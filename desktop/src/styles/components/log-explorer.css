@@ -9,6 +9,7 @@
   color: var(--fg-primary, #e8eaed);
   font-family: var(--font-ui, system-ui, sans-serif);
   overflow: hidden;
+  position: relative;
 }
 
 .log-explorer__titlebar {
@@ -473,7 +474,7 @@
 }
 
 .log-explorer--narrow .log-explorer__lanes {
-  min-height: 0;
+  min-height: 240px;
 }
 
 .log-explorer--narrow .log-explorer__splitter {
@@ -491,6 +492,13 @@
   padding: 0.35rem 0.5rem;
   border-bottom: 1px solid var(--border-subtle, #2a2d33);
   background: var(--bg-elevated, #121418);
+}
+
+.log-explorer__drawer-close {
+  align-self: flex-end;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .log-explorer__filters {

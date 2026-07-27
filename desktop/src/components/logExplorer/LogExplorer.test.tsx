@@ -312,6 +312,74 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 800,
+    });
+    try {
+      render(<LogExplorer corpusId="c1" />);
+      const root = await screen.findByTestId("log-explorer");
+      await waitFor(() =>
+        expect(root.getAttribute("data-breakpoint")).toBe("narrow"),
+      );
+      expect(root.getAttribute("data-lane-count")).toBe("1");
+      expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
+
+      fireEvent.click(await screen.findByText("auth failure"));
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+
+      const filtersToggle = screen.getByTestId("narrow-filters-toggle");
+      fireEvent.click(filtersToggle);
+      expect(filtersToggle.getAttribute("aria-expanded")).toBe("true");
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByTestId("log-explorer-find"),
+        ),
+      );
+
+      const errorFacet = within(
+        screen.getByTestId("log-explorer-filters"),
+      )
+        .getByText("error")
+        .closest("label");
+      fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+      expect(await screen.findByTestId("clear-all-filters")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("clear-all-filters"));
+      await waitFor(() =>
+        expect(screen.queryByTestId("clear-all-filters")).toBeNull(),
+      );
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+
+      fireEvent.keyDown(screen.getByTestId("log-explorer-find"), {
+        key: "Escape",
+      });
+      await waitFor(() => expect(document.activeElement).toBe(filtersToggle));
+      expect(filtersToggle.getAttribute("aria-expanded")).toBe("false");
+
+      const chatToggle = screen.getByTestId("narrow-chat-toggle");
+      fireEvent.click(chatToggle);
+      expect(chatToggle.getAttribute("aria-expanded")).toBe("true");
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByTestId("new-linked-chat"),
+        ),
+      );
+      expect(screen.getByLabelText("Chat message")).toBeTruthy();
+      expect(screen.getByTestId("send-linked-chat")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("close-chat-drawer"));
+      await waitFor(() => expect(document.activeElement).toBe(chatToggle));
+      expect(chatToggle.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.getByTestId("log-explorer-detail")).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+    }
+  });
+
   it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
     const bookmark: host.LogBookmarkDto = {
       id: "bm-worker",

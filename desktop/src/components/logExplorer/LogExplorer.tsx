@@ -248,6 +248,11 @@ export function LogExplorer({ corpusId }: Props) {
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [chatSummary, setChatSummary] = useState({
+    chatCount: 0,
+    hasActiveChat: false,
+    busy: false,
+  });
   const [detailH, setDetailH] = useState(() => {
     try {
       const n = Number(localStorage.getItem("contextdesk.logExplorer.detailH.v1"));
@@ -271,6 +276,8 @@ export function LogExplorer({ corpusId }: Props) {
   const [chatW, setChatW] = useState(300);
   const rootRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
+  const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
+  const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
@@ -282,6 +289,25 @@ export function LogExplorer({ corpusId }: Props) {
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+  const activeFilterCount =
+    filters.levels.length +
+    filters.sources.length +
+    filters.services.length +
+    filters.hosts.length +
+    (filters.keyword ? 1 : 0) +
+    (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
+  const handleRailSummary = useCallback(
+    (next: typeof chatSummary) => {
+      setChatSummary((previous) =>
+        previous.chatCount === next.chatCount &&
+        previous.hasActiveChat === next.hasActiveChat &&
+        previous.busy === next.busy
+          ? previous
+          : next,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     saveColWidths(colWidths);
@@ -313,6 +339,19 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
   }, [previewLines]);
+
+  useEffect(() => {
+    if (breakpoint !== "narrow") return;
+    if (narrowFiltersOpen) {
+      queueMicrotask(() => findInputRef.current?.focus());
+    } else if (narrowChatOpen) {
+      queueMicrotask(() => {
+        rootRef.current
+          ?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]')
+          ?.focus();
+      });
+    }
+  }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
 
   useEffect(() => {
     try {
@@ -978,6 +1017,12 @@ export function LogExplorer({ corpusId }: Props) {
     );
   };
 
+  const clearAllFilters = () => {
+    setFilterDraft("");
+    setFilters(emptyFilters());
+    setStatus("All event filters cleared");
+  };
+
   const onRowClick = (e: ExplorerEventDto, multi: boolean) => {
     setDetail(e);
     setSelected((prev) => {
@@ -1040,6 +1085,24 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const onKeyDown = (ev: ReactKeyboardEvent) => {
+    if (
+      ev.key === "Escape" &&
+      !ev.defaultPrevented &&
+      breakpoint === "narrow"
+    ) {
+      if (narrowFiltersOpen) {
+        ev.preventDefault();
+        setNarrowFiltersOpen(false);
+        queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
+        return;
+      }
+      if (narrowChatOpen) {
+        ev.preventDefault();
+        setNarrowChatOpen(false);
+        queueMicrotask(() => narrowChatToggleRef.current?.focus());
+        return;
+      }
+    }
     if (
       (ev.metaKey || ev.ctrlKey) &&
       ev.key.toLowerCase() === "f"
@@ -1845,31 +1908,38 @@ export function LogExplorer({ corpusId }: Props) {
           data-testid="log-explorer-narrow-tabs"
         >
           <button
+            ref={narrowFiltersToggleRef}
             type="button"
             className={`log-explorer__btn ${narrowFiltersOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="narrow-filters-toggle"
             aria-expanded={narrowFiltersOpen}
+            aria-controls="log-explorer-filter-panel"
             onClick={() => {
               setNarrowFiltersOpen((o) => !o);
               setNarrowChatOpen(false);
             }}
           >
             Filters
-            {filters.levels.length + filters.sources.length > 0
-              ? ` (${filters.levels.length + filters.sources.length})`
+            {activeFilterCount > 0
+              ? ` (${activeFilterCount})`
               : ""}
           </button>
           <button
+            ref={narrowChatToggleRef}
             type="button"
             className={`log-explorer__btn ${narrowChatOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="narrow-chat-toggle"
             aria-expanded={narrowChatOpen}
+            aria-controls="log-explorer-chat-panel"
             onClick={() => {
               setNarrowChatOpen((o) => !o);
               setNarrowFiltersOpen(false);
             }}
           >
             Chat
+            {chatSummary.chatCount > 0 ? ` (${chatSummary.chatCount})` : ""}
+            {chatSummary.hasActiveChat ? " · active" : ""}
+            {chatSummary.busy ? " · working" : ""}
           </button>
         </div>
       )}
@@ -1880,9 +1950,29 @@ export function LogExplorer({ corpusId }: Props) {
         data-testid="log-explorer-body"
       >
         <aside
+          id="log-explorer-filter-panel"
           className="log-explorer__filters"
           data-testid="log-explorer-filters"
+          role={breakpoint === "narrow" ? "dialog" : undefined}
+          aria-label={
+            breakpoint === "narrow" ? "Log filters drawer" : undefined
+          }
         >
+          {breakpoint === "narrow" ? (
+            <button
+              type="button"
+              className="log-explorer__btn log-explorer__drawer-close"
+              data-testid="close-filters-drawer"
+              onClick={() => {
+                setNarrowFiltersOpen(false);
+                queueMicrotask(() =>
+                  narrowFiltersToggleRef.current?.focus(),
+                );
+              }}
+            >
+              Close filters
+            </button>
+          ) : null}
           <div className="log-explorer__section-title">
             Find{" "}
             <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />
@@ -2117,6 +2207,16 @@ export function LogExplorer({ corpusId }: Props) {
               ))}
             </div>
           )}
+          {activeFilterCount > 0 ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="clear-all-filters"
+              onClick={clearAllFilters}
+            >
+              Clear all filters
+            </button>
+          ) : null}
           <p className="log-explorer__chat-preview" role="note">
             Find highlights without removing rows. Filter reduces the table and
             intersects levels/sources/time.
@@ -2538,6 +2638,11 @@ export function LogExplorer({ corpusId }: Props) {
           onApplyNav={applyNav}
           compactLayout={breakpoint === "narrow"}
           developerMode={import.meta.env.MODE === "development"}
+          onRailSummary={handleRailSummary}
+          onRequestClose={() => {
+            setNarrowChatOpen(false);
+            queueMicrotask(() => narrowChatToggleRef.current?.focus());
+          }}
         />
       </div>
 

@@ -70,6 +70,13 @@ type Props = {
   compactLayout?: boolean;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
+  /** Compact parent indicator without duplicating chat/session state. */
+  onRailSummary?: (summary: {
+    chatCount: number;
+    hasActiveChat: boolean;
+    busy: boolean;
+  }) => void;
+  onRequestClose?: () => void;
 };
 
 const NEAR_BOTTOM_PX = 64;
@@ -186,6 +193,8 @@ export function LinkedChatRail({
   onApplyNav,
   compactLayout = false,
   developerMode = false,
+  onRailSummary,
+  onRequestClose,
 }: Props) {
   const [chats, setChats] = useState<SessionMetaDto[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -559,6 +568,14 @@ export function LinkedChatRail({
     activeMeta?.title ??
     (activeChatId ? "Linked chat" : "No chat selected");
 
+  useEffect(() => {
+    onRailSummary?.({
+      chatCount: chats.length,
+      hasActiveChat: activeChatId != null,
+      busy,
+    });
+  }, [activeChatId, busy, chats.length, onRailSummary]);
+
   const openManage = () => {
     if (!activeMeta) return;
     setRenameDraft(activeMeta.title);
@@ -655,10 +672,13 @@ export function LinkedChatRail({
 
   return (
     <aside
+      id="log-explorer-chat-panel"
       className={`log-explorer__chat log-explorer__chat--rail${
         compactLayout ? " log-explorer__chat--compact-layout" : ""
       }`}
       data-testid="log-explorer-chat"
+      role={compactLayout ? "dialog" : undefined}
+      aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
       <header className="log-explorer__chat-header" data-testid="linked-chat-header">
         <div className="log-explorer__chat-header-main">
@@ -675,6 +695,17 @@ export function LinkedChatRail({
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          {compactLayout && onRequestClose ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              aria-label="Close chat drawer"
+              data-testid="close-chat-drawer"
+              onClick={onRequestClose}
+            >
+              Close
+            </button>
+          ) : null}
           <button
             type="button"
             className="log-explorer__btn"
