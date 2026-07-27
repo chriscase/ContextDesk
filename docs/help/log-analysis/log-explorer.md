@@ -30,21 +30,75 @@ import/export, and open investigation. It is not a million-row browser.
 
 | Feature | Notes |
 | --- | --- |
-| Find vs Filter | **Find** highlights matches and steps next/prev without removing surrounding rows. Non-resident matches load via a **direct event-neighborhood** seek (not a multi-page scan). **Filter** reduces the table and intersects levels/sources/time (e.g. `job-7f3a` ∩ ERROR). Active facets show as removable chips. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic when vectors exist. Contextual Help (`?`) opens a collision-aware popover with a deep link into this page |
+| Find vs Filter | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist |
 | Counts | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total |
 | Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
 | Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; manual **Load older/newer** remains as fallback |
-| Timestamps | Adaptive UTC display (time-of-day on single-day corpora); full timestamp in the row tooltip; order-only never fabricates calendar time |
-| Columns | Drag or keyboard-resize Time / Level / Source columns; **Auto-fit cols** / **Reset cols**; widths persist in local preferences |
-| Long lines | **compact** / **wrap** / **full** line modes (preference persisted); Expand on truncated rows; virtualization accounts for expanded height; event inspector is drag-resizable (keyboard ↑/↓) with Copy |
-| Narrow layout | Filters and Chat open as drawers/tabs; single lane; event viewport keeps most of the height |
-| Evidence lanes | 1–4 source groups; optional timestamp link + gap bands |
+| Timestamps | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time |
+| Columns | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally |
+| Long lines | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event |
+| Narrow layout | Logs remain primary and single-lane. Filters and Chat open intentionally as keyboard-safe drawers with state summaries and focus restoration |
+| Evidence lanes | 1–4 user-composed source groups. The same source may appear in more than one lane |
+| Time-link modes | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets |
 | Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
-| Bookmarks | Line or range on the corpus (`bookmarks.json` sidecar) |
 | Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot and runs **bounded log tools** (search, cluster, timeline, …) until it produces an evidence-based answer — not planning-only prose |
 | Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
 | Agent context | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context |
 | Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
+
+## Find vs Filter
+
+Use **Find** like contextual Find in an editor: the event table remains intact,
+the active hit is loaded into a bounded neighborhood, and Previous/Next cross
+chronological cursor pages. Only one bounded page of identities is retained.
+Literal totals are exact; a bounded regex result may explicitly report a
+partial/continuation state.
+
+Use **Filter** to reduce all evidence lanes. Keyword, level, source, service,
+host, and time facets intersect. Changing a facet while Find is active reruns
+Find against that view rather than silently dropping the Find term.
+
+## Counts
+
+**Corpus events** is the persisted corpus size. **Matched** belongs to the
+current query; when lanes overlap, each lane reports its own matched value
+because summing them would double-count events. **Resident** is the bounded
+in-memory/browser window, not the result total.
+
+## Lanes
+
+Choose 1–4 visible lanes when the window is wide enough, then use **Lanes…** to
+assign zero or more sources to each. Empty membership means all globally
+filtered sources. Lane composition persists locally per corpus. Narrow windows
+use one lane rather than stacking unusable columns.
+
+## Time link
+
+- **Independent:** every lane scrolls and pages on its own.
+- **Follow:** choosing an event seeks each peer lane near that timestamp. It is
+  approximate and does not claim that rows line up.
+- **Align:** reliable wall-clock lanes share one bounded, virtualized sequence
+  of exact timestamp rows and synchronized scroll. A blank striped cell means
+  that lane has no event at that timestamp; it is not a fabricated log line.
+
+Align is an event-time axis, not a proportional-duration chart or the
+still-unshipped scalable time-range navigator. Mixed and order-only data cannot
+enter Align, and an empty/failed/unloaded lane cannot make the aggregate more
+trustworthy.
+
+## Long lines
+
+**1 line** is the dense scan mode. **Preview** and **Deep** show a configurable
+2/4/8/12-line bounded preview (Deep doubles the chosen depth up to its cap).
+Press **X** on a focused row or use **Expand** for one event. Select a row for
+the complete redacted message and metadata in the resizable inspector; row
+preview truncation never claims to be the complete record.
+
+## Bookmarks
+
+A bookmark points to a stable event or range. Activating it resolves the target
+directly. If current filters or lane membership hide it, Explorer clearly
+offers a temporary reveal and a way to restore the prior view.
 
 ## Agent context
 

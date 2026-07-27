@@ -100,9 +100,17 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 - A **lane** = virtualized event stream under a **source-group filter** (plus global filters).
 - Global: level, time range, keyword/semantic, service/host when present.
 - Per-lane: which `source` values (files) are included.
-- **Link mode ON:** shared time cursor; scrolling one lane scrubs others; **gap visualization** where one lane has no events while another does.
-- **Link mode OFF:** independent scroll.
-- Link requires **wall-clock time quality** when possible; order-only sources badge and warn/refuse fake calendar sync.
+- **Independent:** every lane scrolls and pages independently.
+- **Follow cursor:** selecting an event seeks each peer lane to its nearest
+  resident timestamp. This is approximate and does not claim row alignment.
+- **Align time:** reliable wall-clock lanes share an exact-timestamp slot model,
+  identical row heights, and one synchronized virtual scroll coordinate. Empty
+  cells are visually explicit gaps, never placeholder log events. Repeated
+  same-time events use stable occurrence rows rather than being dropped.
+- Align is intentionally an event-time axis, not proportional elapsed-time
+  spacing. The scalable range navigator remains separate work.
+- Mixed, order-only, empty, failed, or unloaded lanes fail closed for Align;
+  they cannot be upgraded by a more reliable lane.
 
 ## 5. Data plane (already mostly shipped)
 

@@ -63,7 +63,11 @@ vi.mock("../../lib/host", () => ({
     timeQuality: "wall",
   })),
   hostLogSearchEvents: vi.fn(async () => []),
-  hostLogSearchEventsAdvanced: vi.fn(async () => ({ hits: [], partial: false, scanned: 0 })),
+  hostLogSearchEventsAdvanced: vi.fn(async () => ({
+    hits: [],
+    partial: false,
+    scanned: 0,
+  })),
   hostLogQueryEventNeighborhood: vi.fn(async () => ({
     status: "missing",
     events: [],
@@ -193,7 +197,11 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
-    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({ hits: [], partial: false, scanned: 0 });
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
+      hits: [],
+      partial: false,
+      scanned: 0,
+    });
     vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
       status: "missing",
       events: [],
@@ -281,9 +289,7 @@ describe("LogExplorer shell", () => {
 
     const eventTime = screen.getByTestId("event-time-1");
     expect(eventTime.tabIndex).toBe(0);
-    expect(eventTime.getAttribute("aria-label")).toMatch(
-      /wall clock.*UTC/,
-    );
+    expect(eventTime.getAttribute("aria-label")).toMatch(/wall clock.*UTC/);
 
     fireEvent.change(screen.getByTestId("preview-lines"), {
       target: { value: "12" },
@@ -339,9 +345,7 @@ describe("LogExplorer shell", () => {
         ),
       );
 
-      const errorFacet = within(
-        screen.getByTestId("log-explorer-filters"),
-      )
+      const errorFacet = within(screen.getByTestId("log-explorer-filters"))
         .getByText("error")
         .closest("label");
       fireEvent.click(within(errorFacet!).getByRole("checkbox"));
@@ -399,9 +403,7 @@ describe("LogExplorer shell", () => {
         const events =
           sourceFilter.length === 0
             ? allEvents
-            : allEvents.filter((event) =>
-                sourceFilter.includes(event.source),
-              );
+            : allEvents.filter((event) => sourceFilter.includes(event.source));
         return {
           events,
           nextCursor: null,
@@ -435,22 +437,16 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: /api\.log/i }),
-    );
+    fireEvent.click(screen.getByRole("checkbox", { name: /api\.log/i }));
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
         "c1",
         expect.objectContaining({ sources: ["api.log"] }),
       ),
     );
-    await waitFor(() =>
-      expect(screen.queryByText("job ok")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
 
-    fireEvent.click(
-      await screen.findByTestId("bookmark-activate-bm-worker"),
-    );
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-worker"));
     await screen.findByTestId("bookmark-restore-view");
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
@@ -462,9 +458,9 @@ describe("LogExplorer shell", () => {
       ),
     );
     expect(screen.getAllByText("job ok").length).toBeGreaterThan(0);
-    expect(
-      screen.getByTestId("bookmark-restore-view").textContent,
-    ).toContain("temp reveal");
+    expect(screen.getByTestId("bookmark-restore-view").textContent).toContain(
+      "temp reveal",
+    );
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() =>
@@ -503,9 +499,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByTestId("bookmark-activate-bm-missing"),
-    );
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-missing"));
     expect(await screen.findByTestId("bookmark-missing")).toBeTruthy();
     expect(screen.getByText(/not found in corpus/)).toBeTruthy();
     expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
@@ -538,16 +532,15 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostLogQueryEvents).mockImplementation(
       async (_corpusId, query) => {
         const sources = query?.sources ?? [];
-        const page =
-          sources.includes("queue.log")
-            ? {
-                ...eventPage("queue.log", "wall"),
-                events: [target],
-                totalMatched: 1,
-              }
-            : sources.length > 0
-              ? eventPage(sources[0]!, "wall")
-              : defaultEventPage();
+        const page = sources.includes("queue.log")
+          ? {
+              ...eventPage("queue.log", "wall"),
+              events: [target],
+              totalMatched: 1,
+            }
+          : sources.length > 0
+            ? eventPage(sources[0]!, "wall")
+            : defaultEventPage();
         return page;
       },
     );
@@ -566,9 +559,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "2L" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = screen.getByTestId("lane-editor");
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -591,9 +582,7 @@ describe("LogExplorer shell", () => {
       expect(sourceCalls).toContainEqual(["worker.log"]);
     });
 
-    fireEvent.click(
-      await screen.findByTestId("bookmark-activate-bm-queue"),
-    );
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-queue"));
     await screen.findByTestId("bookmark-restore-view");
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
@@ -607,9 +596,9 @@ describe("LogExplorer shell", () => {
     expect(screen.getAllByText("queue poison evidence").length).toBeGreaterThan(
       0,
     );
-    expect(
-      screen.getAllByText(/Bookmark · queue\.log/).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Bookmark · queue\.log/).length).toBeGreaterThan(
+      0,
+    );
 
     fireEvent.click(screen.getByTestId("bookmark-restore-view"));
     await waitFor(() => {
@@ -822,9 +811,7 @@ describe("LogExplorer shell", () => {
       pending[3]!.resolve(paged);
       pending[1]!.resolve({ ...shared, events: [...shared.events] });
       pending[0]!.resolve(shared);
-      pending[2]!.resolve(
-        eventPage("empty.log", "wall", 0, 1_700_000_050, 0),
-      );
+      pending[2]!.resolve(eventPage("empty.log", "wall", 0, 1_700_000_050, 0));
       await Promise.resolve();
     });
 
@@ -903,6 +890,133 @@ describe("LogExplorer shell", () => {
     // Order-only aggregate refuses wall-clock link.
     expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
+  });
+
+  it("aligns wall-clock lanes on shared virtual rows with explicit empty cells and synchronized scroll", async () => {
+    const makeEvent = (
+      seq: number,
+      ts: number,
+      source: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts,
+      timeQuality: "wall",
+      level: "info",
+      service: source,
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message: `${source} seq ${seq}`,
+      source,
+    });
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 2, "worker.log": 2 },
+      levels: { info: 4 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const source = query?.sources?.[0];
+        const events =
+          source === "api.log"
+            ? [
+                makeEvent(11, 1_700_000_000, "api.log"),
+                makeEvent(13, 1_700_000_002, "api.log"),
+              ]
+            : source === "worker.log"
+              ? [
+                  makeEvent(21, 1_700_000_000, "worker.log"),
+                  makeEvent(22, 1_700_000_001, "worker.log"),
+                ]
+              : [makeEvent(1, 1_700_000_000, "all.log")];
+        return {
+          events,
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: events.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("worker.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-link-mode")).toBe("align_time"),
+    );
+
+    expect(root.getAttribute("data-aligned-slots")).toBe("3");
+    expect(screen.getByTestId("aligned-time-axis").textContent).toMatch(
+      /3 resident slots/,
+    );
+    const lists = screen.getAllByTestId("virtualized-event-list");
+    expect(lists).toHaveLength(2);
+    expect(lists[0]!.getAttribute("data-aligned-slots")).toBe("3");
+    expect(lists[1]!.getAttribute("data-aligned-slots")).toBe("3");
+    expect(screen.getAllByTestId("aligned-gap")).toHaveLength(2);
+    expect(
+      (document.querySelector('[data-seq="11"]') as HTMLElement).style.top,
+    ).toBe(
+      (document.querySelector('[data-seq="21"]') as HTMLElement).style.top,
+    );
+
+    lists[0]!.scrollTop = 42;
+    fireEvent.scroll(lists[0]!);
+    await waitFor(() => expect(lists[1]!.scrollTop).toBe(42));
+  });
+
+  it("refuses exact Align for mixed time while retaining approximate Follow", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 1, "worker.log": 1 },
+      levels: { info: 2 },
+      services: {},
+      hosts: {},
+      timeQuality: "mixed",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) =>
+        eventPage(
+          query?.sources?.[0] ?? "all.log",
+          query?.sources?.[0] === "worker.log" ? "mixed" : "wall",
+        ),
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByTitle("worker.log");
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("mixed"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("independent");
+    expect(screen.getByText(/Align unavailable: mixed time/)).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    expect(root.getAttribute("data-link-mode")).toBe("follow_cursor");
+    expect(screen.queryByTestId("aligned-time-axis")).toBeNull();
   });
 
   it("user-composed lanes assign sources without auto first-N assignment", async () => {
@@ -1359,7 +1473,10 @@ describe("LogExplorer shell", () => {
 
   it("does not allow a late Find response to replace a newer query", async () => {
     const oldSearch = deferred<host.EventSearchResultDto>();
-    const resultEvent = (seq: number, message: string): host.ExplorerEventDto => ({
+    const resultEvent = (
+      seq: number,
+      message: string,
+    ): host.ExplorerEventDto => ({
       ...defaultEventPage().events[0]!,
       seq,
       ts: 1_700_000_000 + seq,

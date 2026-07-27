@@ -29,10 +29,7 @@ import {
   type LogFacetsDto,
   type TimeQuality,
 } from "../../lib/host";
-import {
-  applyLogNav,
-  type LogNavAction,
-} from "../../lib/logExplorer/logNav";
+import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import {
   clampLaneCount,
   computeGaps,
@@ -77,13 +74,18 @@ import {
   toggleLaneSource,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
+import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
 import {
+  HELP_COUNTS,
   HELP_FIND_VS_FILTER,
+  HELP_LANE_COMPOSE,
   HELP_LONG_LINES,
+  HELP_TIME_LINK,
 } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
 import {
+  eventRowHeight,
   VirtualizedEventList,
   type LineMode,
 } from "./VirtualizedEventList";
@@ -183,9 +185,9 @@ export function LogExplorer({ corpusId }: Props) {
     Record<string, ExplorerEventDto[]>
   >({});
   /** Exact matched count for each lane query; null means unavailable/failed. */
-  const [laneMatched, setLaneMatched] = useState<
-    Record<string, number | null>
-  >({});
+  const [laneMatched, setLaneMatched] = useState<Record<string, number | null>>(
+    {},
+  );
   const [laneTimeStates, setLaneTimeStates] = useState<
     Record<string, LaneTimeState>
   >({});
@@ -193,10 +195,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
   >({});
+  const [alignedScrollTop, setAlignedScrollTop] = useState(0);
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [findDraft, setFindDraft] = useState("");
-  const [findMatchMode, setFindMatchMode] = useState<SearchMatchMode>("literal");
+  const [findMatchMode, setFindMatchMode] =
+    useState<SearchMatchMode>("literal");
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
   const [findUseSemantic, setFindUseSemantic] = useState(false);
   const [findPartial, setFindPartial] = useState(false);
@@ -209,9 +213,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [findTotal, setFindTotal] = useState(0);
   const [findTotalExact, setFindTotalExact] = useState(false);
   const [findBase, setFindBase] = useState(0);
-  const [findNextCursor, setFindNextCursor] = useState<FindCursor | null>(
-    null,
-  );
+  const [findNextCursor, setFindNextCursor] = useState<FindCursor | null>(null);
   const [findPageStart, setFindPageStart] = useState<FindCursor | null>(null);
   const [findHistory, setFindHistory] = useState<FindPageHistory[]>([]);
   const [findActiveQuery, setFindActiveQuery] = useState<string | null>(null);
@@ -255,7 +257,9 @@ export function LogExplorer({ corpusId }: Props) {
   });
   const [detailH, setDetailH] = useState(() => {
     try {
-      const n = Number(localStorage.getItem("contextdesk.logExplorer.detailH.v1"));
+      const n = Number(
+        localStorage.getItem("contextdesk.logExplorer.detailH.v1"),
+      );
       if (Number.isFinite(n) && n >= 120 && n <= 640) return n;
     } catch {
       /* ignore */
@@ -267,9 +271,7 @@ export function LogExplorer({ corpusId }: Props) {
     index: 0 | 1 | 2 | 3;
     startX: number;
     startW: number;
-  } | null>(
-    null,
-  );
+  } | null>(null);
   const [status, setStatus] = useState("Ready");
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
@@ -296,18 +298,15 @@ export function LogExplorer({ corpusId }: Props) {
     filters.hosts.length +
     (filters.keyword ? 1 : 0) +
     (filters.timeFrom != null || filters.timeTo != null ? 1 : 0);
-  const handleRailSummary = useCallback(
-    (next: typeof chatSummary) => {
-      setChatSummary((previous) =>
-        previous.chatCount === next.chatCount &&
-        previous.hasActiveChat === next.hasActiveChat &&
-        previous.busy === next.busy
-          ? previous
-          : next,
-      );
-    },
-    [],
-  );
+  const handleRailSummary = useCallback((next: typeof chatSummary) => {
+    setChatSummary((previous) =>
+      previous.chatCount === next.chatCount &&
+      previous.hasActiveChat === next.hasActiveChat &&
+      previous.busy === next.busy
+        ? previous
+        : next,
+    );
+  }, []);
 
   useEffect(() => {
     saveColWidths(colWidths);
@@ -355,7 +354,10 @@ export function LogExplorer({ corpusId }: Props) {
 
   useEffect(() => {
     try {
-      localStorage.setItem("contextdesk.logExplorer.detailH.v1", String(detailH));
+      localStorage.setItem(
+        "contextdesk.logExplorer.detailH.v1",
+        String(detailH),
+      );
     } catch {
       /* ignore */
     }
@@ -676,9 +678,9 @@ export function LogExplorer({ corpusId }: Props) {
     bookmarks,
   ]);
 
-  // Link/gap when multi-lane + link on
+  // Gap summaries are claims about shared time and belong only to true Align.
   useEffect(() => {
-    if (linkMode === "independent" || laneCount < 2) {
+    if (linkMode !== "align_time" || laneCount < 2) {
       setGaps([]);
       return;
     }
@@ -703,15 +705,28 @@ export function LogExplorer({ corpusId }: Props) {
   }, [linkMode, laneCount, lanes, laneEvents, timeQuality]);
 
   useEffect(() => {
-    if (timeQuality === "order_only" && linkMode !== "independent") {
+    const visibleLaneIds = lanes.slice(0, laneCount).map((lane) => lane.id);
+    const settled = visibleLaneIds.every((laneId) => {
+      const state = laneTimeStates[laneId];
+      return (
+        state?.status === "loaded" ||
+        state?.status === "empty" ||
+        state?.status === "error"
+      );
+    });
+    if (!settled) return;
+    const invalid =
+      (linkMode === "align_time" && timeQuality !== "wall") ||
+      (linkMode === "follow_cursor" && timeQuality === "order_only");
+    if (invalid) {
       setLinkMode("independent");
       saveLinkMode(corpusId, "independent");
       setGaps([]);
       setStatus(
-        "Time link disabled: order-only time cannot claim wall-clock alignment",
+        "Time link disabled: current lane time quality cannot support that mode",
       );
     }
-  }, [linkMode, timeQuality, corpusId]);
+  }, [corpusId, laneCount, laneTimeStates, lanes, linkMode, timeQuality]);
 
   const toggleLevel = (level: string) => {
     setFilters((f) => {
@@ -1001,7 +1016,9 @@ export function LogExplorer({ corpusId }: Props) {
     }
     setStatus(
       `Find: match ${findBase + next + 1} of ${
-        findTotalExact ? findTotal : `${Math.max(findTotal, findBase + findMatches.length)}+`
+        findTotalExact
+          ? findTotal
+          : `${Math.max(findTotal, findBase + findMatches.length)}+`
       }`,
     );
   };
@@ -1047,12 +1064,16 @@ export function LogExplorer({ corpusId }: Props) {
           scrollMap[p.laneId] = p.seq;
           if (p.seq != null) hl.add(p.seq);
         }
-        setLaneScrollSeq(scrollMap);
+        if (linkMode === "follow_cursor") {
+          setLaneScrollSeq(scrollMap);
+        }
         setHighlight(hl);
         setStatus(
-          `Linked cursor ts=${e.ts} · ${scrub.peerPositions
-            .map((p) => `${p.laneId}→${p.seq ?? "—"}`)
-            .join(" · ")}`,
+          linkMode === "align_time"
+            ? `Aligned wall-clock row ts=${e.ts} · empty cells are explicit missing evidence`
+            : `Follow cursor ts=${e.ts} · ${scrub.peerPositions
+                .map((p) => `${p.laneId}→${p.seq ?? "—"}`)
+                .join(" · ")}`,
         );
       } else if (scrub.refuseReason) {
         setStatus(scrub.refuseReason);
@@ -1103,10 +1124,7 @@ export function LogExplorer({ corpusId }: Props) {
         return;
       }
     }
-    if (
-      (ev.metaKey || ev.ctrlKey) &&
-      ev.key.toLowerCase() === "f"
-    ) {
+    if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "f") {
       ev.preventDefault();
       setNarrowFiltersOpen(true);
       setNarrowChatOpen(false);
@@ -1208,7 +1226,9 @@ export function LogExplorer({ corpusId }: Props) {
               : filters.sources,
         });
         if (status !== "found") {
-          throw new Error("Bookmark target changed while it was being revealed");
+          throw new Error(
+            "Bookmark target changed while it was being revealed",
+          );
         }
         setBookmarkRevealState("visible");
         setStatus(`Bookmark visible under current filters: ${b.label}`);
@@ -1564,9 +1584,52 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const setTimeLinkMode = (mode: TimeLinkMode) => {
+    if (mode === "align_time") setAlignedScrollTop(0);
     setLinkMode(mode);
     saveLinkMode(corpusId, mode);
   };
+
+  const alignedRowsByLane = useMemo(() => {
+    if (linkMode !== "align_time" || timeQuality !== "wall" || laneCount < 2) {
+      return {};
+    }
+    const baseRowH = density === "compact" ? 22 : 28;
+    const boundedPreview = Math.min(12, Math.max(2, previewLines));
+    const wrapH =
+      lineMode === "wrap"
+        ? Math.max(baseRowH, boundedPreview * 18 + 12)
+        : baseRowH;
+    return buildAlignedLaneRows(
+      lanes.slice(0, laneCount).map((lane) => ({
+        id: lane.id,
+        events: laneEvents[lane.id] ?? [],
+      })),
+      (event) =>
+        eventRowHeight(
+          event,
+          lineMode,
+          expandedSeqs.has(event.seq),
+          baseRowH,
+          wrapH,
+          boundedPreview,
+        ),
+      baseRowH,
+    );
+  }, [
+    density,
+    expandedSeqs,
+    laneCount,
+    laneEvents,
+    lanes,
+    lineMode,
+    linkMode,
+    previewLines,
+    timeQuality,
+  ]);
+  const alignedSlotCount =
+    linkMode === "align_time"
+      ? (alignedRowsByLane[lanes[0]?.id ?? ""]?.length ?? 0)
+      : 0;
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
   const bpClass = `log-explorer--${breakpoint}`;
@@ -1610,8 +1673,7 @@ export function LogExplorer({ corpusId }: Props) {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
     const matched = laneMatched[laneId];
-    const more =
-      cur?.hasNewer || cur?.hasOlder ? "+" : "";
+    const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
     return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
 
@@ -1627,6 +1689,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-line-mode={lineMode}
       data-lane-count={laneCount}
       data-link-mode={linkMode}
+      data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
       data-resizable="true"
       onKeyDown={onKeyDown}
@@ -1658,7 +1721,9 @@ export function LogExplorer({ corpusId }: Props) {
             </span>
           )}
           {laneCount > 1 && (
-            <span className="log-explorer__badge">{laneCount} lane queries</span>
+            <span className="log-explorer__badge">
+              {laneCount} lane queries
+            </span>
           )}
           <span className="log-explorer__badge">{breakpoint}</span>
         </div>
@@ -1683,15 +1748,21 @@ export function LogExplorer({ corpusId }: Props) {
                     : "Align lanes on a shared vertical time axis with explicit gap bands"
               }
               onClick={() => {
-                if (mode !== "independent" && timeQuality === "order_only") {
+                if (mode === "align_time" && timeQuality !== "wall") {
+                  setStatus(
+                    `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
+                  );
+                  return;
+                }
+                if (mode === "follow_cursor" && timeQuality === "order_only") {
                   setStatus(
                     "Time link unavailable: order-only time cannot claim wall-clock alignment",
                   );
                   return;
                 }
-                if (mode !== "independent" && timeQuality === "mixed") {
+                if (mode === "follow_cursor" && timeQuality === "mixed") {
                   setStatus(
-                    "Time link uses mixed time quality; inspect each lane badge before interpreting gaps",
+                    "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
                   );
                 }
                 setTimeLinkMode(mode);
@@ -1700,6 +1771,11 @@ export function LogExplorer({ corpusId }: Props) {
               {label}
             </button>
           ))}
+          <HelpTip
+            label="Time-link modes"
+            title="Time-link modes"
+            content={HELP_TIME_LINK}
+          />
           <button
             type="button"
             className={`log-explorer__btn ${laneEditorOpen ? "log-explorer__btn--active" : ""}`}
@@ -1760,9 +1836,7 @@ export function LogExplorer({ corpusId }: Props) {
               value={previewLines}
               aria-label="Preview lines per event"
               data-testid="preview-lines"
-              onChange={(event) =>
-                setPreviewLines(Number(event.target.value))
-              }
+              onChange={(event) => setPreviewLines(Number(event.target.value))}
             >
               {[2, 4, 8, 12].map((lines) => (
                 <option key={lines} value={lines}>
@@ -1831,7 +1905,11 @@ export function LogExplorer({ corpusId }: Props) {
             { label: "Message", index: 3 as const },
           ] as const
         ).map((col) => (
-          <div key={col.label} className="log-explorer__col-header" role="columnheader">
+          <div
+            key={col.label}
+            className="log-explorer__col-header"
+            role="columnheader"
+          >
             <span>{col.label}</span>
             <button
               type="button"
@@ -1871,7 +1949,12 @@ export function LogExplorer({ corpusId }: Props) {
           aria-label="Lane source composition"
         >
           <div className="log-explorer__section-title">
-            Compose lanes (empty membership = all sources)
+            Compose lanes (empty membership = all sources){" "}
+            <HelpTip
+              label="Lane composition"
+              title="Lane composition"
+              content={HELP_LANE_COMPOSE}
+            />
           </div>
           {lanes.slice(0, laneCount).map((lane) => (
             <div key={lane.id} className="log-explorer__lane-editor-row">
@@ -1920,9 +2003,7 @@ export function LogExplorer({ corpusId }: Props) {
             }}
           >
             Filters
-            {activeFilterCount > 0
-              ? ` (${activeFilterCount})`
-              : ""}
+            {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
           </button>
           <button
             ref={narrowChatToggleRef}
@@ -1965,9 +2046,7 @@ export function LogExplorer({ corpusId }: Props) {
               data-testid="close-filters-drawer"
               onClick={() => {
                 setNarrowFiltersOpen(false);
-                queueMicrotask(() =>
-                  narrowFiltersToggleRef.current?.focus(),
-                );
+                queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
               }}
             >
               Close filters
@@ -1975,7 +2054,11 @@ export function LogExplorer({ corpusId }: Props) {
           ) : null}
           <div className="log-explorer__section-title">
             Find{" "}
-            <HelpTip label="Find vs Filter" title="Find vs Filter" content={HELP_FIND_VS_FILTER} />
+            <HelpTip
+              label="Find vs Filter"
+              title="Find vs Filter"
+              content={HELP_FIND_VS_FILTER}
+            />
           </div>
           <input
             ref={findInputRef}
@@ -1989,10 +2072,7 @@ export function LogExplorer({ corpusId }: Props) {
             onChange={(e) => {
               const next = e.target.value;
               setFindDraft(next);
-              if (
-                findActiveQuery != null &&
-                next.trim() !== findActiveQuery
-              ) {
+              if (findActiveQuery != null && next.trim() !== findActiveQuery) {
                 clearFindResults("Find term changed — press Find to apply");
               }
             }}
@@ -2111,9 +2191,7 @@ export function LogExplorer({ corpusId }: Props) {
                 <input
                   type="checkbox"
                   checked={findUseSemantic}
-                  disabled={
-                    !semanticAvailable || findMatchMode === "regex"
-                  }
+                  disabled={!semanticAvailable || findMatchMode === "regex"}
                   onChange={(e) => {
                     setFindUseSemantic(e.target.checked);
                     if (findActiveRef.current) {
@@ -2229,7 +2307,13 @@ export function LogExplorer({ corpusId }: Props) {
             data-testid="log-explorer-count-truth"
           >
             {/* #534: label totals separately — never use max-per-lane as global. */}
-            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·{" "}
+            <HelpTip
+              label="Corpus, matched, and resident counts"
+              title="Corpus, matched, and resident counts"
+              content={HELP_COUNTS}
+            />{" "}
+            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()}{" "}
+            ·{" "}
             {laneCount === 1
               ? `matched ${totalMatched.toLocaleString()} · `
               : "matched per lane below · "}
@@ -2345,10 +2429,18 @@ export function LogExplorer({ corpusId }: Props) {
 
         <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
           <div className="log-explorer__lane-strip">
-            {linkMode !== "independent" && gaps.length > 0 && (
+            {linkMode === "align_time" ? (
+              <span
+                className="log-explorer__badge"
+                data-testid="aligned-time-axis"
+              >
+                Shared exact-time rows · {alignedSlotCount} resident slots ·
+                blank cells mean no event at that timestamp
+              </span>
+            ) : null}
+            {linkMode === "align_time" && gaps.length > 0 && (
               <span className="log-explorer__badge log-explorer__badge--warn">
-                {gaps.length} {timeQuality === "mixed" ? "potential " : ""}gap
-                region{gaps.length === 1 ? "" : "s"}
+                {gaps.length} coarse gap region{gaps.length === 1 ? "" : "s"}
               </span>
             )}
           </div>
@@ -2402,16 +2494,21 @@ export function LogExplorer({ corpusId }: Props) {
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>
-                  {linkMode !== "independent" &&
-                    gaps.some((g) => g.emptyLaneIds.includes(lane.id)) && (
-                      <div
-                        className="log-explorer__gap-band"
-                        title="Gap: this lane empty while peers have events"
-                        data-testid="log-explorer-gap"
-                      />
-                    )}
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
+                    alignedRows={
+                      linkMode === "align_time"
+                        ? alignedRowsByLane[lane.id]
+                        : undefined
+                    }
+                    linkedScrollTop={
+                      linkMode === "align_time" ? alignedScrollTop : undefined
+                    }
+                    onLinkedScrollTop={
+                      linkMode === "align_time"
+                        ? setAlignedScrollTop
+                        : undefined
+                    }
                     timeQuality={timeQuality}
                     selected={selected}
                     highlight={highlight}

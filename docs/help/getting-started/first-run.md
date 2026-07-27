@@ -68,10 +68,24 @@ the Ready state.
 
 ## 4. Ask a grounded question
 
-Try a question that names a subsystem in the selected folder. When retrieval
-finds relevant material, the answer can include a search trail and citations.
-An answer without a citation does not prove it came from your workspace; see
-help://chat-citations-context.
+The empty chat home distinguishes two action types:
+
+- **Fills composer** starters place editable text in the composer and never
+  surprise-send. Workspace-dependent starters appear only when at least one
+  workspace root is authorized; otherwise the starters remain chat-context
+  safe.
+- **Guided workflow** cards explicitly launch an optional, cancellable
+  multi-step flow.
+
+The context disclosure stays compact when no file or skill is attached, but
+always states its session-only boundary. Material attached-file and pinned-skill
+state expands and remains visible before send. If preflight is blocking, the
+home shows one setup recovery action rather than a misleading action gallery.
+
+With a workspace selected, try a question that names a subsystem in that
+folder. When retrieval finds relevant material, the answer can include a search
+trail and citations. An answer without a citation does not prove it came from
+your workspace; see help://chat-citations-context.
 
 > Tip:
 > Use a small, known folder for the first question. It makes the allowlist and

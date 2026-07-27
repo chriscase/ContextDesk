@@ -43,6 +43,37 @@ describe("VirtualizedEventList", () => {
     expect(rendered).toBeLessThan(events.length);
   });
 
+  it("keeps a large shared alignment axis virtualized and renders gaps as non-events", () => {
+    const events = makeEvents(100);
+    const byIndex = new Map(events.map((event, index) => [index * 100, event]));
+    const alignedRows = Array.from({ length: 10_000 }, (_, index) => ({
+      key: `slot-${index}`,
+      ts: 1_700_000_000 + index,
+      event: byIndex.get(index) ?? null,
+      height: 28,
+    }));
+    render(
+      <VirtualizedEventList
+        events={events}
+        alignedRows={alignedRows}
+        linkedScrollTop={0}
+        onLinkedScrollTop={vi.fn()}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    expect(list.getAttribute("data-total")).toBe("100");
+    expect(list.getAttribute("data-aligned-slots")).toBe("10000");
+    expect(Number(list.getAttribute("data-rendered"))).toBeLessThan(120);
+    expect(screen.getAllByTestId("aligned-gap").length).toBeLessThan(120);
+    expect(screen.queryByText("No events match filters")).toBeNull();
+  });
+
   it("preserves a stable event pixel anchor across prepend and head eviction", () => {
     const events = makeEvents(12).slice(2);
     const props = {
@@ -63,19 +94,14 @@ describe("VirtualizedEventList", () => {
     });
 
     act(() => {
-      rerender(
-        <VirtualizedEventList {...props} events={makeEvents(12)} />,
-      );
+      rerender(<VirtualizedEventList {...props} events={makeEvents(12)} />);
     });
     expect((list as HTMLDivElement).scrollTop).toBe(112);
 
     // Append one newer row while evicting one row from the head.
     act(() => {
       rerender(
-        <VirtualizedEventList
-          {...props}
-          events={makeEvents(13).slice(1)}
-        />,
+        <VirtualizedEventList {...props} events={makeEvents(13).slice(1)} />,
       );
     });
     expect((list as HTMLDivElement).scrollTop).toBe(84);
@@ -102,9 +128,7 @@ describe("VirtualizedEventList", () => {
     });
 
     act(() => {
-      rerender(
-        <VirtualizedEventList {...props} events={makeEvents(8)} />,
-      );
+      rerender(<VirtualizedEventList {...props} events={makeEvents(8)} />);
     });
     // Deep mode at the default four-line preference uses eight visible lines:
     // two prepended rows × 156px + the prior 96px within-row offset.

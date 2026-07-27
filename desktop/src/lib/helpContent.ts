@@ -31,7 +31,8 @@ export const HELP_COUNTS: HelpTipContent = {
   title: "Corpus, matched, and resident counts",
   definition:
     "Corpus is the full event store size. Matched is how many events satisfy the active global query/facets. Resident is how many events are currently loaded in the evidence window.",
-  useWhen: "you need to know whether you are looking at a page or the whole match set.",
+  useWhen:
+    "you need to know whether you are looking at a page or the whole match set.",
   safety:
     "Never treat a per-lane maximum as the global total — multi-lane headers report each lane separately.",
   helpLocator: "help://log-explorer#counts",
@@ -40,15 +41,26 @@ export const HELP_COUNTS: HelpTipContent = {
 export const HELP_TIME_LINK: HelpTipContent = {
   title: "Time-link modes",
   definition:
-    "Independent: each lane scrolls alone. Follow cursor: selecting an event seeks peers to the nearest time (not row alignment). Align time: lanes share a vertical time axis with explicit gap bands.",
+    "Independent lets each lane scroll alone. Follow seeks peers near a selected timestamp. Align gives every wall-clock lane the same virtualized exact-time rows, with blank cells where a lane has no event.",
+  currentState:
+    "Align is an exact event-time axis, not a duration-proportional chart. Coarse gap-region counts summarize silence; blank aligned cells are the row-level evidence.",
   useWhen: "comparing multi-source timelines during an incident.",
   options: [
-    { name: "Independent", when: "Sources have unrelated rates or order-only data." },
-    { name: "Follow", when: "You want peer seek without claiming row alignment." },
-    { name: "Align", when: "Wall-clock data supports shared vertical time." },
+    {
+      name: "Independent",
+      when: "Sources have unrelated rates or order-only data.",
+    },
+    {
+      name: "Follow",
+      when: "You want approximate peer seek without claiming row alignment.",
+    },
+    {
+      name: "Align",
+      when: "Every visible lane has reliable wall-clock time and exact timestamp rows are useful.",
+    },
   ],
   safety:
-    "Order-only or mixed time quality cannot claim calendar alignment. Empty/failed lanes do not strengthen quality.",
+    "Order-only or mixed time quality cannot enter Align. Empty, failed, or unloaded lanes do not strengthen the aggregate. Align never fabricates placeholder log events.",
   helpLocator: "help://log-explorer#time-link",
 };
 
@@ -56,7 +68,8 @@ export const HELP_LANE_COMPOSE: HelpTipContent = {
   title: "Lane composition",
   definition:
     "A lane is a named ordered evidence stream of zero or more sources. Empty membership means all sources. The same source may appear in multiple lanes.",
-  useWhen: "you need custom multi-source groups instead of automatic first-N assignment.",
+  useWhen:
+    "you need custom multi-source groups instead of automatic first-N assignment.",
   helpLocator: "help://log-explorer#lanes",
 };
 

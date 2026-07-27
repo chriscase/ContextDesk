@@ -637,6 +637,23 @@
   flex-shrink: 0;
 }
 
+.log-explorer__aligned-gap {
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--border-subtle, #2a2d33) 40%, transparent);
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 8px,
+    color-mix(in srgb, var(--warning, #d29922) 6%, transparent) 8px 9px
+  );
+  pointer-events: none;
+}
+
+.log-explorer[data-link-mode="align_time"] .log-explorer__rows--virtual {
+  scrollbar-color:
+    color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent)
+    transparent;
+}
+
 .log-explorer__rows {
   flex: 1;
   overflow: auto;
