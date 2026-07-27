@@ -46,6 +46,7 @@ import { foldPreview, nowIso } from "./lib/session";
 import {
   helpOpenRequest,
   parseHelpLocator,
+  subscribeHelpAcrossWindows,
   type HelpLocation,
 } from "./lib/help";
 import { nextSkinId } from "./lib/skins";
@@ -148,6 +149,10 @@ export function App() {
       const location = parseHelpLocator(locator);
       if (location) openHelp(location);
     },
+    [openHelp],
+  );
+  useEffect(
+    () => subscribeHelpAcrossWindows((location) => openHelp(location)),
     [openHelp],
   );
 

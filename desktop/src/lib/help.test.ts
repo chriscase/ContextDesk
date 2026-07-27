@@ -3,6 +3,8 @@ import {
   helpOpenRequest,
   helpPageForSettingsSection,
   parseHelpLocator,
+  requestHelpAcrossWindows,
+  subscribeHelpAcrossWindows,
 } from "./help";
 
 describe("canonical Help deep links (#439)", () => {
@@ -50,5 +52,28 @@ describe("canonical Help deep links (#439)", () => {
     );
     expect(helpPageForSettingsSection("skills")).toBe("skills-context-packs");
     expect(helpPageForSettingsSection("appearance")).toBe("product-overview");
+  });
+
+  it("hands canonical Help requests across windows and rejects malformed storage data", () => {
+    const received: unknown[] = [];
+    const unsubscribe = subscribeHelpAcrossWindows((location) =>
+      received.push(location),
+    );
+    requestHelpAcrossWindows({
+      pageId: "log-explorer",
+      anchor: "timeline-navigator",
+    });
+    expect(received).toEqual([
+      { pageId: "log-explorer", anchor: "timeline-navigator" },
+    ]);
+
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: "contextdesk.help.open.v1",
+        newValue: JSON.stringify({ pageId: "../private" }),
+      }),
+    );
+    expect(received).toHaveLength(1);
+    unsubscribe();
   });
 });

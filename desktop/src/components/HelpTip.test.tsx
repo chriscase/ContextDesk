@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HelpTip } from "./HelpTip";
 import { HELP_FIND_VS_FILTER } from "../lib/helpContent";
+import { subscribeHelpAcrossWindows } from "../lib/help";
 
 describe("HelpTip", () => {
   afterEach(() => {
@@ -58,6 +59,25 @@ describe("HelpTip", () => {
     fireEvent.click(screen.getByRole("button", { name: "Help: Find" }));
     fireEvent.click(await screen.findByTestId("help-tip-full-link"));
     expect(onOpenHelp).toHaveBeenCalledWith("log-explorer", "find-vs-filter");
+  });
+
+  it("hands full Help to the main window when opened from a standalone surface", async () => {
+    const received = vi.fn();
+    const unsubscribe = subscribeHelpAcrossWindows(received);
+    render(
+      <HelpTip
+        label="Find"
+        title="Find"
+        content={HELP_FIND_VS_FILTER}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Help: Find" }));
+    fireEvent.click(await screen.findByTestId("help-tip-full-link"));
+    expect(received).toHaveBeenCalledWith({
+      pageId: "log-explorer",
+      anchor: "find-vs-filter",
+    });
+    unsubscribe();
   });
 
   it("uses a modal narrow sheet with trapped focus and restores the trigger", async () => {

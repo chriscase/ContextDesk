@@ -15,7 +15,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { IconHelp } from "./icons";
-import { parseHelpLocator } from "../lib/help";
+import { parseHelpLocator, requestHelpAcrossWindows } from "../lib/help";
 
 export type HelpTipContent = {
   title: string;
@@ -334,14 +334,18 @@ export function HelpTip({
               <div className="help-tip__body">
                 {content ? <StructuredBody content={content} /> : children}
               </div>
-              {parsed && onOpenHelp ? (
+              {parsed ? (
                 <div className="help-tip__footer">
                   <button
                     type="button"
                     className="help-tip__full-link"
                     data-testid="help-tip-full-link"
                     onClick={() => {
-                      onOpenHelp(parsed.pageId, parsed.anchor);
+                      if (onOpenHelp) {
+                        onOpenHelp(parsed.pageId, parsed.anchor);
+                      } else {
+                        requestHelpAcrossWindows(parsed);
+                      }
                       close();
                     }}
                   >
