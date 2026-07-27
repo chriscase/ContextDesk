@@ -110,6 +110,43 @@ describe("VirtualizedEventList", () => {
     expect((list as HTMLDivElement).scrollTop).toBe(84);
   });
 
+  it("focuses an explicit mounted seek target once without stealing focus later", () => {
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+    };
+    const onFocusToSeq = vi.fn();
+    const { rerender } = render(
+      <VirtualizedEventList
+        {...props}
+        events={makeEvents(3)}
+        scrollToSeq={2}
+        focusToSeq={2}
+        onFocusToSeq={onFocusToSeq}
+      />,
+    );
+    const target = document.querySelector<HTMLElement>('[data-seq="2"]');
+    expect(document.activeElement).toBe(target);
+    expect(onFocusToSeq).toHaveBeenCalledWith(2);
+
+    const other = document.querySelector<HTMLElement>('[data-seq="1"]');
+    other?.focus();
+    rerender(
+      <VirtualizedEventList
+        {...props}
+        events={makeEvents(4)}
+        scrollToSeq={2}
+        focusToSeq={null}
+        onFocusToSeq={onFocusToSeq}
+      />,
+    );
+    expect(document.activeElement).toBe(other);
+    expect(onFocusToSeq).toHaveBeenCalledTimes(1);
+  });
+
   it("uses content-aware variable row offsets when preserving the anchor", () => {
     const base = makeEvents(8).slice(2);
     const props = {
