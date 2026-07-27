@@ -790,10 +790,15 @@ describe("LogExplorer shell", () => {
       deferred<host.EventPageDto>(),
     );
     let laneRequest = 0;
+    let servedInitialOneLane = false;
     vi.mocked(host.hostLogQueryEvents).mockImplementation(
       async (_corpusId, query) => {
         if ((query?.sources?.length ?? 0) === 0) {
           return eventPage("all.log", "wall", 2, 1_700_000_000, 35);
+        }
+        if (!servedInitialOneLane && query?.sources?.[0] === "shared.log") {
+          servedInitialOneLane = true;
+          return eventPage("shared.log", "wall", 1, 1_700_000_000, 6);
         }
         return pending[laneRequest++]!.promise;
       },
@@ -1071,6 +1076,71 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("follow_cursor"),
     );
+  });
+
+  it("applies composed source membership in 1L and intersects global source filters", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 6, "worker.log": 7, "db.log": 6 },
+      levels: { info: 19 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        {
+          id: "lane-0",
+          label: "2 sources",
+          sources: ["api.log", "worker.log"],
+        },
+      ]),
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        const querySources = query?.sources ?? ["all.log"];
+        return {
+          events: querySources.map((source, index) => ({
+            seq: index + 1,
+            ts: 1_700_000_000 + index,
+            timeQuality: "wall" as const,
+            level: "info",
+            service: "fixture",
+            host: null,
+            templateId: 1,
+            traceId: null,
+            message: `${source} scoped row`,
+            source,
+          })),
+          nextCursor: null,
+          nextTs: null,
+          totalMatched: querySources.length,
+          timeQuality: "wall",
+        };
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          sources: ["api.log", "worker.log"],
+        }),
+      ),
+    );
+    expect(screen.getByTestId("log-explorer-count-truth").textContent)
+      .toMatch(/matched 2/);
+
+    const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls.length;
+    fireEvent.click(screen.getByRole("checkbox", { name: /db\.log/ }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("log-explorer-count-truth").textContent)
+        .toMatch(/matched 0/),
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(eventQueryCalls);
   });
 
   it("opens the compact lane composer, assigns sources independently, and restores focus on Done", async () => {
@@ -1372,6 +1442,13 @@ describe("LogExplorer shell", () => {
   });
 
   it("paginates lanes independently while a peer lane is still loading", async () => {
+    const offsetSeqs = (page: host.EventPageDto, offset: number) => ({
+      ...page,
+      events: page.events.map((event) => ({
+        ...event,
+        seq: event.seq + offset,
+      })),
+    });
     localStorage.setItem(
       "contextdesk.logExplorer.lanes.v1:c1",
       JSON.stringify([
@@ -1388,7 +1465,10 @@ describe("LogExplorer shell", () => {
         }
         if (query?.afterSeq != null && source === "worker.log") {
           return {
-            ...eventPage("worker.log", "wall", 1, 1_700_000_101, 2),
+            ...offsetSeqs(
+              eventPage("worker.log", "wall", 1, 1_700_000_101, 2),
+              100_000,
+            ),
             nextCursor: null,
             nextTs: null,
           };
@@ -1426,7 +1506,7 @@ describe("LogExplorer shell", () => {
 
     await act(async () => {
       slowApi.resolve({
-        ...eventPage("api.log", "wall", 1, 1_700_000_001, 2),
+        ...offsetSeqs(eventPage("api.log", "wall", 1, 1_700_000_001, 2), 100_000),
         nextCursor: null,
         nextTs: null,
       });

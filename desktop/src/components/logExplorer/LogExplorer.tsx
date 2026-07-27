@@ -21,6 +21,7 @@ import {
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
   hostSetActiveLogCorpus,
+  type EventPageDto,
   type SearchMatchMode,
   type EventQueryDto,
   type ExplorerEventDto,
@@ -65,6 +66,7 @@ import {
   type ColWidths,
 } from "../../lib/logExplorer/columnWidths";
 import {
+  composeLaneSources,
   defaultLanes,
   loadLanes,
   loadLinkMode,
@@ -125,6 +127,25 @@ function filtersToQuery(
     sortByTime: true,
     ...extra,
   };
+}
+
+function emptyEventPage(timeQuality: TimeQuality = "order_only"): EventPageDto {
+  return {
+    events: [],
+    nextCursor: null,
+    nextTs: null,
+    prevCursor: null,
+    prevTs: null,
+    totalMatched: 0,
+    timeQuality,
+  };
+}
+
+function effectiveLaneSources(
+  lane: LaneConfig | undefined,
+  filters: ExplorerFilters,
+): string[] | undefined {
+  return composeLaneSources(lane?.sources ?? [], filters.sources);
 }
 
 function levelClass(level: string): string {
@@ -537,10 +558,14 @@ export function LogExplorer({ corpusId }: Props) {
     setGaps([]);
     try {
       if (laneCount <= 1) {
-        const page = await hostLogQueryEvents(
-          corpusId,
-          filtersToQuery(filters),
-        );
+        const sourceFilter = effectiveLaneSources(visibleLanes[0], filters);
+        const page =
+          sourceFilter?.length === 0
+            ? emptyEventPage()
+            : await hostLogQueryEvents(
+                corpusId,
+                filtersToQuery(filters, { sources: sourceFilter }),
+              );
         if (requestId !== eventsRequestRef.current) return;
         const laneState: LaneTimeState =
           page.events.length > 0
@@ -585,13 +610,12 @@ export function LogExplorer({ corpusId }: Props) {
         let maxLaneMatched = 0;
         let shown = 0;
         const requests = visibleLanes.map(async (lane) => {
+          const sourceFilter = effectiveLaneSources(lane, filters);
+          if (sourceFilter?.length === 0) {
+            return { lane, page: emptyEventPage() };
+          }
           const q = filtersToQuery(filters, {
-            sources:
-              lane.sources.length > 0
-                ? lane.sources
-                : filters.sources.length > 0
-                  ? filters.sources
-                  : undefined,
+            sources: sourceFilter,
             limit: 100,
             sortByTime: true,
           });
@@ -837,9 +861,18 @@ export function LogExplorer({ corpusId }: Props) {
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
     const base = opts?.clearFilters ? emptyFilters() : filters;
+    const sourceFilter =
+      opts?.sources != null
+        ? composeLaneSources(opts.sources, base.sources)
+        : base.sources.length > 0
+          ? base.sources
+          : undefined;
+    if (sourceFilter?.length === 0) {
+      return "hidden_by_filter";
+    }
     const filter = filtersToQuery(base, {
       keyword: base.keyword,
-      sources: opts?.sources ?? base.sources,
+      sources: sourceFilter,
     });
     const nb = await hostLogQueryEventNeighborhood(corpusId, {
       targetSeq: seq,
@@ -1406,17 +1439,15 @@ export function LogExplorer({ corpusId }: Props) {
 
   const laneSourceFilter = (laneId: string) => {
     const lane = lanes.find((l) => l.id === laneId);
-    return lane && lane.sources.length > 0
-      ? lane.sources
-      : filters.sources.length > 0
-        ? filters.sources
-        : undefined;
+    return effectiveLaneSources(lane, filters);
   };
 
   const loadMoreLane = async (laneId: string) => {
     const cur = laneCursors[laneId];
     if (!cur?.hasNewer || cur.afterSeq == null || cur.afterTs == null) return;
     if (pagingInflight.current[laneId]) return;
+    const sourceFilter = laneSourceFilter(laneId);
+    if (sourceFilter?.length === 0) return;
     pagingInflight.current[laneId] = "newer";
     const requestId = eventsRequestRef.current;
     setLanePaging((previous) => ({
@@ -1431,7 +1462,7 @@ export function LogExplorer({ corpusId }: Props) {
       const page = await hostLogQueryEvents(
         corpusId,
         filtersToQuery(filters, {
-          sources: laneSourceFilter(laneId),
+          sources: sourceFilter,
           afterSeq: cur.afterSeq,
           afterTs: cur.afterTs,
           sortByTime: true,
@@ -1519,6 +1550,8 @@ export function LogExplorer({ corpusId }: Props) {
     const cur = laneCursors[laneId];
     if (!cur?.hasOlder || cur.beforeSeq == null || cur.beforeTs == null) return;
     if (pagingInflight.current[laneId]) return;
+    const sourceFilter = laneSourceFilter(laneId);
+    if (sourceFilter?.length === 0) return;
     pagingInflight.current[laneId] = "older";
     const requestId = eventsRequestRef.current;
     setLanePaging((previous) => ({
@@ -1533,7 +1566,7 @@ export function LogExplorer({ corpusId }: Props) {
       const page = await hostLogQueryEvents(
         corpusId,
         filtersToQuery(filters, {
-          sources: laneSourceFilter(laneId),
+          sources: sourceFilter,
           beforeSeq: cur.beforeSeq,
           beforeTs: cur.beforeTs,
           sortByTime: true,
