@@ -5,7 +5,7 @@ blanket claim that every future product change is automatically documented.
 
 - Audited main baseline: `ae1ca8dc53aa5e0bf47c4e656480bb89cf26b7bf`
 - Explorer completion branch: `integrate/codex-log-explorer-finish`
-- Final promoted SHA: pending promotion; replace this line during post-merge proof
+- Feature promotion merge: `813b6f7e064ccb480798773c5b07636d7d383a07`
 - Render review: all 12 bundled SVGs at 380 / 760 / 1520 pixels
 - Automated review: clipping, box-border, and text/text collision fixtures
 - Remaining external proof: real packaged HelpPane/themes under owner tracker #525
@@ -55,7 +55,7 @@ blanket claim that every future product change is automatically documented.
 
 ## Required close-proof rerun
 
-1. Replace the pending final SHA above with current `main`.
+1. Confirm the feature promotion merge above is an ancestor of current `main`.
 2. Run `node scripts/check_help_corpus.mjs` and its Node tests.
 3. Render the contact sheet with
    `scripts/render_help_svg_contact_sheet.sh OUTPUT_DIRECTORY`.
