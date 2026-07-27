@@ -148,6 +148,11 @@ source paths are not inserted wholesale. Agent navigation remains a proposal:
 ContextDesk validates it against the linked corpus and applies it only after
 the user activates the suggested action.
 
+Linked investigation requires a tools-enabled provider profile. If the selected
+profile advertises `capabilities.tools=false`, ContextDesk stops before
+contacting the provider and saves visible guidance that names the profile and
+unavailable capability. Ordinary chats keep their existing chat-only behavior.
+
 ## Log Lab scale profiles (synthetic)
 
 For offline/local scale testing, generate synthetic corpora with the Log Lab
