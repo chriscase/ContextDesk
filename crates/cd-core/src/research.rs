@@ -708,6 +708,22 @@ pub async fn research_turn_with_cancel_and_context(
         return Ok(ev);
     }
 
+    if log_explorer_context.is_some() && !profile.capabilities.tools {
+        let message = format!(
+            "Linked log investigation is unavailable because profile “{}” has tools disabled \
+             (capabilities.tools=false). Select or configure a tools-enabled profile in \
+             Settings → AI, then retry this linked chat.",
+            profile.label
+        );
+        return Ok(emit_provider_error(
+            "linked_tools_unavailable",
+            message,
+            session_id,
+            Some(profile.chat_model.clone()),
+            live,
+        ));
+    }
+
     // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
     // #123: never silently fall back to keyword-only when a chat model is selected.
     if profile.kind == ProviderKind::Ollama {
@@ -1366,6 +1382,78 @@ mod tests {
                 .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
             "must not emit keyword TextDelta"
         );
+    }
+
+    #[tokio::test]
+    async fn tools_disabled_profile_blocks_linked_turn_before_provider_but_not_ordinary_chat() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("linked-tools", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let mut profile = ProviderProfile::ollama_local();
+        profile.label = "Grok Build session".into();
+        profile.base_url = "http://127.0.0.1:9".into();
+        profile.capabilities.tools = false;
+        let context = crate::agent::LogExplorerTurnContext::new(
+            "log-explorer",
+            "corpus-1",
+            "corpusId=corpus-1; sources=api.log",
+        )
+        .unwrap();
+        let mut linked_history = vec![];
+        let linked = research_turn_with_cancel_and_context(
+            &mut host,
+            &profile,
+            None,
+            "Investigate this corpus",
+            &mut linked_history,
+            "linked-session",
+            false,
+            None,
+            Some(context),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let linked_error = linked.iter().find_map(|event| match event {
+            StreamEvent::Error { code, message } => Some((code, message)),
+            _ => None,
+        });
+        let (code, message) = linked_error.expect("visible linked-tools error");
+        assert_eq!(code, "linked_tools_unavailable");
+        assert!(message.contains("Grok Build session"), "{message}");
+        assert!(message.contains("capabilities.tools=false"), "{message}");
+        assert!(message.contains("tools-enabled profile"), "{message}");
+        assert!(
+            !linked
+                .iter()
+                .any(|event| matches!(event, StreamEvent::TextDelta { .. })),
+            "provider planning prose must not be presented: {linked:?}"
+        );
+        assert!(linked_history.is_empty());
+
+        let mut ordinary_history = vec![];
+        let ordinary = research_turn_with_cancel(
+            &mut host,
+            &profile,
+            None,
+            "Ordinary chat remains chat-only",
+            &mut ordinary_history,
+            "ordinary-session",
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(ordinary.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { code, .. } if code == "ollama_unreachable"
+        )));
+        assert!(!ordinary.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { code, .. } if code == "linked_tools_unavailable"
+        )));
     }
 
     #[tokio::test]

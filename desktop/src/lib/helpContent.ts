@@ -157,7 +157,7 @@ export const HELP_LINKED_CHAT_CONTEXT: HelpTipContent = {
     },
     {
       name: "Log tools",
-      when: "The agent searches and correlates bounded result pages instead of receiving the entire corpus.",
+      when: "Requires a tools-enabled provider profile. When available, the agent searches and correlates bounded result pages instead of receiving the entire corpus; otherwise the turn stops before contacting the provider and names the unavailable capability.",
     },
     {
       name: "Suggested navigation",

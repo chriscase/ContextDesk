@@ -107,6 +107,7 @@ describe("LinkedChatRail", () => {
     });
     expect(help.textContent).toContain("small immutable snapshot");
     expect(help.textContent).toContain("bounded result pages");
+    expect(help.textContent).toContain("tools-enabled provider profile");
     expect(help.textContent).toContain("Raw corpus dumps");
     expect(help.textContent).toContain(
       "Switching chats cannot move a pending turn",
@@ -378,6 +379,80 @@ describe("LinkedChatRail", () => {
     expect(
       await within(thread).findByText("Continue investigation"),
     ).toBeTruthy();
+  });
+
+  it("persists and visibly surfaces a tools-disabled linked result", async () => {
+    let stored = sessionDto("s-tools-off", "Logs · fixture");
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: stored.messages.at(-1)?.content ?? "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    const unavailable =
+      "Linked log investigation is unavailable because profile “Grok Build session” has tools disabled (capabilities.tools=false). Select or configure a tools-enabled profile in Settings → AI, then retry this linked chat.";
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "error",
+            payload: {
+              code: "linked_tools_unavailable",
+              message: unavailable,
+            },
+          },
+          {
+            kind: "turn_completed",
+            payload: { reason: "linked_tools_unavailable" },
+          },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(stored.linked_corpus_id).toBe("c1"));
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "Investigate with the linked log tools" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    const assistant = await screen.findByTestId("linked-chat-msg-assistant");
+    expect(assistant.textContent).toContain(unavailable);
+    expect(screen.queryByText(/I'll use .*log tool/i)).toBeNull();
+    await screen.findByText("Linked chat response saved");
+    await waitFor(() =>
+      expect(
+        stored.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.content.includes("capabilities.tools=false"),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("jump-to-latest restores follow mode after deliberate upward scroll", async () => {
