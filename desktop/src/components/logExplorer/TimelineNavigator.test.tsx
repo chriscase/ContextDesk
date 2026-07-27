@@ -122,11 +122,11 @@ describe("TimelineNavigator", () => {
         }),
       ),
     );
-    expect(onSeekSeq).toHaveBeenCalledWith(77);
+    expect(onSeekSeq).toHaveBeenCalledWith(77, target);
     expect(screen.getByText(/Moved to seq 77/)).toBeTruthy();
-    expect(
-      screen.getByTestId("timeline-bucket-3").className,
-    ).toContain("resident");
+    expect(screen.getByTestId("timeline-bucket-3").className).toContain(
+      "resident",
+    );
   });
 
   it("previews range dragging without querying until the position is committed", async () => {
@@ -143,7 +143,9 @@ describe("TimelineNavigator", () => {
     fireEvent.change(range, { target: { value: "3" } });
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
     fireEvent.pointerUp(range, { target: { value: "3" } });
-    await waitFor(() => expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
   });
 
   it("labels order-only summaries as order rather than calendar time", async () => {
@@ -258,7 +260,9 @@ describe("TimelineNavigator", () => {
     await screen.findByTestId("timeline-bucket-0");
     fireEvent.click(screen.getByTestId("timeline-bucket-0"));
     fireEvent.click(screen.getByTestId("timeline-bucket-3"));
-    await waitFor(() => expect(onSeekSeq).toHaveBeenCalledWith(88));
+    await waitFor(() =>
+      expect(onSeekSeq).toHaveBeenCalledWith(88, newerTarget),
+    );
     old.resolve({
       events: [target],
       nextCursor: null,
@@ -266,7 +270,7 @@ describe("TimelineNavigator", () => {
       timeQuality: "wall",
     });
     await Promise.resolve();
-    expect(onSeekSeq).not.toHaveBeenCalledWith(77);
+    expect(onSeekSeq).not.toHaveBeenCalledWith(77, target);
 
     fireEvent.click(screen.getByTestId("timeline-bucket-2"));
     expect(await screen.findByText(/No event in/)).toBeTruthy();

@@ -70,8 +70,20 @@ vi.mock("../../lib/host", () => ({
     bucketCount: 4,
     totalMatched: 2,
     buckets: [
-      { index: 0, start: 1_700_000_000, end: 1_700_000_001, count: 1, byLevel: { error: 1 } },
-      { index: 1, start: 1_700_000_001, end: 1_700_000_002, count: 1, byLevel: { info: 1 } },
+      {
+        index: 0,
+        start: 1_700_000_000,
+        end: 1_700_000_001,
+        count: 1,
+        byLevel: { error: 1 },
+      },
+      {
+        index: 1,
+        start: 1_700_000_001,
+        end: 1_700_000_002,
+        count: 1,
+        byLevel: { info: 1 },
+      },
     ],
   })),
   hostLogSearchEvents: vi.fn(async () => []),
@@ -1130,15 +1142,18 @@ describe("LogExplorer shell", () => {
         }),
       ),
     );
-    expect(screen.getByTestId("log-explorer-count-truth").textContent)
-      .toMatch(/matched 2/);
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /matched 2/,
+    );
 
-    const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls.length;
+    const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
     fireEvent.click(screen.getByRole("checkbox", { name: /db\.log/ }));
 
     await waitFor(() =>
-      expect(screen.getByTestId("log-explorer-count-truth").textContent)
-        .toMatch(/matched 0/),
+      expect(
+        screen.getByTestId("log-explorer-count-truth").textContent,
+      ).toMatch(/matched 0/),
     );
     expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(eventQueryCalls);
   });
@@ -1154,7 +1169,9 @@ describe("LogExplorer shell", () => {
     expect(editor.getAttribute("data-lane-editor-mode")).toBe("popover");
     expect(editor.textContent).toContain("2 visible lanes");
     expect(editor.textContent).toContain("2 available sources");
-    expect(document.activeElement).toBe(screen.getByTestId("lane-editor-close"));
+    expect(document.activeElement).toBe(
+      screen.getByTestId("lane-editor-close"),
+    );
 
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(
@@ -1506,7 +1523,10 @@ describe("LogExplorer shell", () => {
 
     await act(async () => {
       slowApi.resolve({
-        ...offsetSeqs(eventPage("api.log", "wall", 1, 1_700_000_001, 2), 100_000),
+        ...offsetSeqs(
+          eventPage("api.log", "wall", 1, 1_700_000_001, 2),
+          100_000,
+        ),
         nextCursor: null,
         nextTs: null,
       });
@@ -1826,6 +1846,133 @@ describe("LogExplorer shell", () => {
         "c1",
         expect.objectContaining({
           targetSeq: queueHit.seq,
+          filter: expect.objectContaining({
+            sources: ["queue.log", "db.log"],
+          }),
+        }),
+      ),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "13 matched",
+    );
+    expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+      "16 matched",
+    );
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /resident rows 3/,
+    );
+  });
+
+  it("routes Navigator seeks through visible composed lane membership", async () => {
+    const makeEvent = (
+      seq: number,
+      source: string,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      seq,
+      ts: 1_700_000_000 + seq,
+      timeQuality: "wall",
+      level: "info",
+      service: "fixture",
+      host: null,
+      templateId: 1,
+      traceId: null,
+      message,
+      source,
+    });
+    const page = (
+      events: host.ExplorerEventDto[],
+      totalMatched: number,
+    ): host.EventPageDto => ({
+      events,
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+      totalMatched,
+      timeQuality: "wall",
+    });
+    const laneZeroEvents = [
+      makeEvent(1, "api.log", "api context"),
+      makeEvent(2, "worker.log", "worker context"),
+    ];
+    const laneOneInitialEvents = [makeEvent(10, "db.log", "db context")];
+    const queueTarget = makeEvent(30, "queue.log", "timeline target");
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: {
+        "api.log": 6,
+        "worker.log": 7,
+        "queue.log": 6,
+        "db.log": 6,
+        "edge.log": 6,
+      },
+      levels: { info: 31 },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        {
+          id: "lane-0",
+          label: "API + worker",
+          sources: ["api.log", "worker.log"],
+        },
+        { id: "lane-1", label: "Queue + DB", sources: ["queue.log", "db.log"] },
+      ]),
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.timeFrom != null && query.limit === 1) {
+          return page([queueTarget], 35);
+        }
+        const sources = query?.sources ?? [];
+        if (sources.includes("api.log") && sources.includes("worker.log")) {
+          return page(laneZeroEvents, 13);
+        }
+        if (sources.includes("queue.log") && sources.includes("db.log")) {
+          return page(laneOneInitialEvents, 16);
+        }
+        return page(
+          [...laneZeroEvents, ...laneOneInitialEvents, queueTarget],
+          35,
+        );
+      },
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue({
+      status: "found",
+      target: queueTarget,
+      targetIndex: 0,
+      events: [queueTarget],
+      totalMatched: 16,
+      corpusTotal: 35,
+      timeQuality: "wall",
+      nextCursor: null,
+      nextTs: null,
+      prevCursor: null,
+      prevTs: null,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    await waitFor(() => {
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "13 matched",
+      );
+      expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+        "16 matched",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
+    fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          targetSeq: queueTarget.seq,
           filter: expect.objectContaining({
             sources: ["queue.log", "db.log"],
           }),

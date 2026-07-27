@@ -2613,8 +2613,19 @@ export function LogExplorer({ corpusId }: Props) {
                 label: lane.label,
                 sources: lane.sources,
               }))}
-              onSeekSeq={async (seq) => {
-                const result = await seekToSeq(seq);
+              onSeekSeq={async (seq, target) => {
+                const targetLane =
+                  visibleLaneForSource(target?.source) ??
+                  visibleLaneWithResidentSeq(seq);
+                if (!targetLane) {
+                  throw new Error(
+                    "Timeline target is outside visible lanes; context not broadened",
+                  );
+                }
+                const result = await seekToSeq(seq, {
+                  laneId: targetLane.id,
+                  sources: targetLane.sources,
+                });
                 if (result !== "found") {
                   throw new Error(
                     result === "hidden_by_filter"
