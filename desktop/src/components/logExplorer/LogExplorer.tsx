@@ -356,7 +356,9 @@ export function LogExplorer({ corpusId }: Props) {
   );
   const closeLaneEditor = useCallback(() => {
     setLaneEditorOpen(false);
-    queueMicrotask(() => laneEditorToggleRef.current?.focus());
+    // Outside dismissal starts on mousedown, but the native click sequence may
+    // focus its target afterward. Return focus after that sequence completes.
+    window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
   }, []);
   const handleRailSummary = useCallback((next: typeof chatSummary) => {
     setChatSummary((previous) =>

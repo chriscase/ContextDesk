@@ -1279,8 +1279,15 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     await screen.findByTestId("lane-editor");
     fireEvent.mouseDown(document.body);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const outsideTarget = screen.getByTestId("log-explorer-find");
+    outsideTarget.focus();
+    fireEvent.mouseUp(outsideTarget);
+    fireEvent.click(outsideTarget);
     await waitFor(() => expect(screen.queryByTestId("lane-editor")).toBeNull());
-    expect(document.activeElement).toBe(toggle);
+    await waitFor(() => expect(document.activeElement).toBe(toggle));
 
     fireEvent.click(toggle);
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
