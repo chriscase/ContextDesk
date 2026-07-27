@@ -1121,6 +1121,47 @@ describe("LogExplorer shell", () => {
     fireEvent.click(screen.getByTestId("lane-editor-close"));
   });
 
+  it("preserves hidden lane memberships across visible lane-count changes", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    fireEvent.click(toggle);
+    let editor = await screen.findByTestId("lane-editor");
+    let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
+    fireEvent.click(
+      within(laneRows[0] as HTMLElement).getAllByRole("checkbox")[0]!,
+    );
+    fireEvent.click(
+      within(laneRows[1] as HTMLElement).getAllByRole("checkbox")[1]!,
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-1").textContent).toBe(
+      "1 source",
+    );
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+
+    fireEvent.click(screen.getByTitle("1 evidence lane"));
+    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    fireEvent.click(toggle);
+    editor = await screen.findByTestId("lane-editor");
+    laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
+
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-1").textContent).toBe(
+      "1 source",
+    );
+    expect(
+      within(laneRows[1] as HTMLElement)
+        .getAllByRole("checkbox")
+        .filter((check) => (check as HTMLInputElement).checked),
+    ).toHaveLength(1);
+  });
+
   it("closes the lane composer on Escape and outside click without losing composed lanes", async () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");

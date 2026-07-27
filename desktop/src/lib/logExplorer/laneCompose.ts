@@ -28,18 +28,21 @@ export function defaultLanes(count: number): LaneConfig[] {
   );
 }
 
-/** Resize lane list without inventing automatic first-N source assignment. */
+/** Resize visible capacity without inventing automatic first-N source assignment. */
 export function resizeLaneList(
   existing: LaneConfig[],
   count: number,
 ): LaneConfig[] {
   const n = Math.max(1, Math.min(4, count));
-  if (existing.length === n) return existing;
-  if (existing.length > n) return existing.slice(0, n);
-  const next = [...existing];
+  const next = existing.slice(0, 4);
+  if (next.length >= n) return next;
   while (next.length < n) {
     const i = next.length;
-    next.push({ id: `lane-${i}`, label: `Lane ${i + 1}`, sources: [] });
+    next.push(
+      i === 0
+        ? { ...DEFAULT_LANE }
+        : { id: `lane-${i}`, label: `Lane ${i + 1}`, sources: [] },
+    );
   }
   return next;
 }
