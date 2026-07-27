@@ -39,3 +39,21 @@ Syntactic SVG safety is **not** sufficient. Before shipping a diagram:
    decorative junk text).
 5. Run `node scripts/check_help_corpus.mjs` (or the desktop test suite that
    includes help corpus validation).
+
+The validator includes a conservative geometry gate for clipped text,
+text/text collisions, and text touching its containing rectangle. Deliberately
+broken fixtures prove those checks fail. It does not pretend to know the exact
+font metrics or whether an arrow is aesthetically well placed.
+
+For the required rendered review, install `librsvg` and ImageMagick, then run:
+
+```sh
+scripts/render_help_svg_contact_sheet.sh /tmp/contextdesk-help-review
+```
+
+This renders every asset at 380, 760, and 1520 pixels (the last is the
+200%-zoom review) and produces a labeled contact sheet plus an order/width
+manifest. Review the contact sheet explicitly in addition to the automated
+gate. Before close proof, also inspect representative diagrams inside the real
+Help pane at narrow, normal, and wide layouts in each theme; the contact sheet
+does not substitute for pane/CSS verification.

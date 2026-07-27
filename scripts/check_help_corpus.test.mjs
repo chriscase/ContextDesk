@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   parseHelpFrontmatter,
   validateHelpCorpus,
+  validateSvgGeometry,
 } from "./check_help_corpus.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -115,4 +116,59 @@ test("validator rejects traversal-shaped asset paths", () => {
     );
     assert.throws(() => validateHelpCorpus(root), /path escapes help root/);
   });
+});
+
+test("SVG geometry validator accepts separated padded labels", () => {
+  assert.doesNotThrow(() =>
+    validateSvgGeometry(
+      `<svg viewBox="0 0 200 100">
+        <title>Valid</title>
+        <rect x="10" y="10" width="80" height="40"/>
+        <text x="50" y="35" text-anchor="middle" font-size="12">Safe label</text>
+        <text x="150" y="80" text-anchor="middle" font-size="12">Footer</text>
+      </svg>`,
+      "valid.svg",
+    ),
+  );
+});
+
+test("SVG geometry validator rejects text collisions", () => {
+  assert.throws(
+    () =>
+      validateSvgGeometry(
+        `<svg viewBox="0 0 200 100">
+          <title>Collision</title>
+          <text x="100" y="50" text-anchor="middle" font-size="16">First label</text>
+          <text x="100" y="50" text-anchor="middle" font-size="16">Second label</text>
+        </svg>`,
+        "collision.svg",
+      ),
+    /text collision/,
+  );
+});
+
+test("SVG geometry validator rejects clipping and box-border overlap", () => {
+  assert.throws(
+    () =>
+      validateSvgGeometry(
+        `<svg viewBox="0 0 100 100">
+          <title>Clipped</title>
+          <text x="99" y="50" font-size="16">outside</text>
+        </svg>`,
+        "clipped.svg",
+      ),
+    /clipped text/,
+  );
+  assert.throws(
+    () =>
+      validateSvgGeometry(
+        `<svg viewBox="0 0 100 100">
+          <title>Border</title>
+          <rect x="10" y="10" width="80" height="40"/>
+          <text x="11" y="35" font-size="14">touch</text>
+        </svg>`,
+        "border.svg",
+      ),
+    /box border/,
+  );
 });

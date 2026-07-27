@@ -6,7 +6,7 @@
   <g font-family="system-ui, sans-serif" text-anchor="middle">
     <rect x="50" y="112" width="180" height="104" rx="14" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
     <text x="140" y="148" fill="#e5e7eb" font-size="17" font-weight="700">Session model</text>
-    <text x="140" y="176" fill="#9ca3af" font-size="13">history + selected evidence</text>
+    <text x="140" y="176" fill="#9ca3af" font-size="13">selected evidence</text>
     <text x="140" y="197" fill="#9ca3af" font-size="13">hard context fit</text>
     <path d="M236 164H309" stroke="#38bdf8" stroke-width="4" marker-end="url(#a)"/>
     <rect x="320" y="82" width="230" height="164" rx="14" fill="#082f49" stroke="#38bdf8" stroke-width="3"/>
@@ -21,6 +21,6 @@
     <text x="735" y="158" fill="#e5e7eb" font-size="14">Grok Build session</text>
     <text x="735" y="188" fill="#e5e7eb" font-size="14">OpenAI-compatible</text>
     <text x="735" y="218" fill="#e5e7eb" font-size="14">Anthropic Messages</text>
-    <text x="735" y="246" fill="#9ca3af" font-size="12">Remote paths receive selected context</text>
+    <text x="735" y="246" fill="#9ca3af" font-size="12">Remote paths get context</text>
   </g>
 </svg>

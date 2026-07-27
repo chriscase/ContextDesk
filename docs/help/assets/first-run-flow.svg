@@ -16,9 +16,10 @@
   <rect x="275" y="54" width="200" height="138" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
   <circle cx="313" cy="86" r="18" fill="#082f49" stroke="#38bdf8"/>
   <text x="313" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="16" font-weight="700">2</text>
-  <text x="375" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">AI provider</text>
-  <text x="375" y="126" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Select provider and model</text>
-  <text x="375" y="150" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Probe without exposing keys</text>
+  <text x="390" y="92" text-anchor="middle" fill="#e5e7eb" font-family="system-ui, sans-serif" font-size="19" font-weight="700">AI provider</text>
+  <text x="375" y="124" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Choose provider + model</text>
+  <text x="375" y="147" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">Probe connection</text>
+  <text x="375" y="169" text-anchor="middle" fill="#9ca3af" font-family="system-ui, sans-serif" font-size="14">keys stay host-side</text>
   <path d="M479 123H520" stroke="#38bdf8" stroke-width="4" marker-end="url(#arrow)"/>
   <rect x="530" y="54" width="200" height="138" rx="18" fill="#111827" stroke="#fbbf24" stroke-width="2"/>
   <circle cx="568" cy="86" r="18" fill="#451a03" stroke="#fbbf24"/>

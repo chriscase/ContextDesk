@@ -1495,6 +1495,42 @@ related: []
         );
     }
 
+    #[test]
+    fn checked_in_help_search_and_read_cover_current_log_explorer_workflows() {
+        let index = HelpIndex::load(checked_in_root()).unwrap();
+        for query in [
+            "find filter log events",
+            "bidirectional paging older newer",
+            "long log lines preview deep",
+            "timeline navigator",
+            "linked chat log tools",
+            "evidence lanes align",
+        ] {
+            let hits = index.search_keyword(query, 5);
+            assert!(
+                hits.iter().any(|hit| hit.page_id == "log-explorer"),
+                "query={query} hits={hits:?}"
+            );
+        }
+
+        let page = index.page("log-explorer").unwrap();
+        for literal in [
+            "## Find vs Filter",
+            "## Lanes",
+            "## Time link",
+            "## Timeline navigator",
+            "## Long lines",
+            "## Bookmarks",
+            "## Agent context",
+            "Bidirectional paging",
+        ] {
+            assert!(
+                page.body.contains(literal),
+                "log-explorer Help is missing {literal:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn help_search_without_embed_is_keyword_only() {
         let index = HelpIndex::load(checked_in_root()).unwrap();
