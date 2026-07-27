@@ -56,8 +56,20 @@ Literal totals are exact; a bounded regex result may explicitly report a
 partial/continuation state.
 
 Use **Filter** to reduce all evidence lanes. Keyword, level, source, service,
-host, and time facets intersect. Changing a facet while Find is active reruns
-Find against that view rather than silently dropping the Find term.
+host, exact trace, template ID, UTC-time, and stable sequence scopes intersect.
+Multiple choices inside one level/source/service/host facet combine with OR;
+the facet groups and exact fields combine with AND. Changing any scope while
+Find is active reruns Find against that view rather than silently dropping the
+Find term.
+
+Advanced scope uses explicit fields rather than a hidden query language:
+
+- UTC start is inclusive and UTC end is exclusive. Enter ISO timestamps with
+  `Z` or an explicit offset. Exact UTC filtering is disabled when the current
+  evidence is mixed-time or order-only.
+- Sequence start and end are inclusive stable event identities and remain
+  available when calendar time is unavailable.
+- Trace ID and template ID are exact matches.
 
 ## Counts
 

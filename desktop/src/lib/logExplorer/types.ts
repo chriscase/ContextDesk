@@ -46,6 +46,10 @@ export type ExplorerFilters = {
   hosts: string[];
   timeFrom: number | null;
   timeTo: number | null;
+  seqFrom: number | null;
+  seqTo: number | null;
+  templateId: number | null;
+  traceId: string | null;
   keyword: string | null;
 };
 
@@ -87,6 +91,10 @@ export function emptyFilters(): ExplorerFilters {
     hosts: [],
     timeFrom: null,
     timeTo: null,
+    seqFrom: null,
+    seqTo: null,
+    templateId: null,
+    traceId: null,
     keyword: null,
   };
 }

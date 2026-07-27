@@ -423,6 +423,10 @@ describe("LogExplorer shell", () => {
           screen.getByTestId("log-explorer-find"),
         ),
       );
+      fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+      expect(
+        filtersDrawer.contains(screen.getByLabelText("Sequence start filter")),
+      ).toBe(true);
 
       const errorFacet = within(screen.getByTestId("log-explorer-filters"))
         .getByText("error")
@@ -632,6 +636,30 @@ describe("LogExplorer shell", () => {
       expectedFilter: { keyword: "auth" },
       restoredFacet: "keyword:auth",
     },
+    {
+      name: "time",
+      apply: () => {
+        fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+        fireEvent.change(screen.getByLabelText("UTC end filter"), {
+          target: { value: "2023-11-14T22:13:21Z" },
+        });
+        fireEvent.click(screen.getByTestId("apply-structured-filters"));
+      },
+      expectedFilter: { timeTo: 1_700_000_001 },
+      restoredFacet: "UTC range",
+    },
+    {
+      name: "sequence",
+      apply: () => {
+        fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+        fireEvent.change(screen.getByLabelText("Sequence end filter"), {
+          target: { value: "1" },
+        });
+        fireEvent.click(screen.getByTestId("apply-structured-filters"));
+      },
+      expectedFilter: { seqTo: 1 },
+      restoredFacet: "seq:start–1",
+    },
   ])(
     "temporarily reveals a $name-filter-hidden bookmark and restores that filter",
     async ({ apply, expectedFilter, restoredFacet }) => {
@@ -645,11 +673,19 @@ describe("LogExplorer shell", () => {
           const levels = query?.levels ?? [];
           const keyword = query?.keyword?.toLowerCase() ?? "";
           const sources = query?.sources ?? [];
+          const timeFrom = query?.timeFrom;
+          const timeTo = query?.timeTo;
+          const seqFrom = query?.seqFrom;
+          const seqTo = query?.seqTo;
           const events = allEvents.filter(
             (event) =>
               (levels.length === 0 || levels.includes(event.level)) &&
               (!keyword || event.message.toLowerCase().includes(keyword)) &&
-              (sources.length === 0 || sources.includes(event.source)),
+              (sources.length === 0 || sources.includes(event.source)) &&
+              (timeFrom == null || event.ts >= timeFrom) &&
+              (timeTo == null || event.ts < timeTo) &&
+              (seqFrom == null || event.seq >= seqFrom) &&
+              (seqTo == null || event.seq <= seqTo),
           );
           return {
             ...defaultEventPage(),
@@ -663,10 +699,18 @@ describe("LogExplorer shell", () => {
           const levels = query.filter?.levels ?? [];
           const keyword = query.filter?.keyword?.toLowerCase() ?? "";
           const sources = query.filter?.sources ?? [];
+          const timeFrom = query.filter?.timeFrom;
+          const timeTo = query.filter?.timeTo;
+          const seqFrom = query.filter?.seqFrom;
+          const seqTo = query.filter?.seqTo;
           const found =
             (levels.length === 0 || levels.includes(target.level)) &&
             (!keyword || target.message.toLowerCase().includes(keyword)) &&
-            (sources.length === 0 || sources.includes(target.source));
+            (sources.length === 0 || sources.includes(target.source)) &&
+            (timeFrom == null || target.ts >= timeFrom) &&
+            (timeTo == null || target.ts < timeTo) &&
+            (seqFrom == null || target.seq >= seqFrom) &&
+            (seqTo == null || target.seq <= seqTo);
           return eventNeighborhood(
             target,
             found ? "found" : "hidden_by_filter",
@@ -2053,6 +2097,134 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({ semantic: false }),
       ),
     );
+  });
+
+  it("composes explicit service, host, trace, template, UTC, and sequence scopes with Find", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 5, "worker.log": 5 },
+      levels: { error: 3, info: 7 },
+      services: { api: 5, worker: 5 },
+      hosts: { h1: 3, h2: 7 },
+      timeQuality: "wall",
+    });
+    render(<LogExplorer corpusId="c1" />);
+    const filtersPanel = await screen.findByTestId("log-explorer-filters");
+    const services = (await within(filtersPanel).findByText("Services"))
+      .nextElementSibling as HTMLElement;
+    const hosts = (await within(filtersPanel).findByText("Hosts"))
+      .nextElementSibling as HTMLElement;
+    fireEvent.click(within(services).getByRole("checkbox", { name: /^api\b/ }));
+    fireEvent.click(within(hosts).getByRole("checkbox", { name: /^h1\b/ }));
+    fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+    fireEvent.change(screen.getByLabelText("Trace ID filter"), {
+      target: { value: "trace-7f3a" },
+    });
+    fireEvent.change(screen.getByLabelText("Template ID filter"), {
+      target: { value: "1" },
+    });
+    fireEvent.change(screen.getByLabelText("UTC start filter"), {
+      target: { value: "2023-11-14T22:13:20Z" },
+    });
+    fireEvent.change(screen.getByLabelText("UTC end filter"), {
+      target: { value: "2023-11-14T22:13:22Z" },
+    });
+    fireEvent.change(screen.getByLabelText("Sequence start filter"), {
+      target: { value: "1" },
+    });
+    fireEvent.change(screen.getByLabelText("Sequence end filter"), {
+      target: { value: "9" },
+    });
+    fireEvent.click(screen.getByTestId("apply-structured-filters"));
+
+    const expectedScope = expect.objectContaining({
+      services: ["api"],
+      hosts: ["h1"],
+      traceId: "trace-7f3a",
+      templateId: 1,
+      timeFrom: 1_700_000_000,
+      timeTo: 1_700_000_002,
+      seqFrom: 1,
+      seqTo: 9,
+    });
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expectedScope,
+      ),
+    );
+    expect(screen.getByRole("button", { name: "service:api ×" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "host:h1 ×" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "trace:trace-7f3a ×" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "template:1 ×" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "seq:1–9 ×" })).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "auth" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ query: "auth", filter: expectedScope }),
+      ),
+    );
+  });
+
+  it("disables exact UTC scope honestly for order-only data while retaining sequence scope", async () => {
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "plain.log": 10 },
+      levels: { info: 10 },
+      services: {},
+      hosts: {},
+      timeQuality: "order_only",
+    });
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("log-explorer-advanced-toggle"));
+    const utcStart = screen.getByLabelText(
+      "UTC start filter",
+    ) as HTMLInputElement;
+    const utcEnd = screen.getByLabelText("UTC end filter") as HTMLInputElement;
+    expect(utcStart.disabled).toBe(true);
+    expect(utcEnd.disabled).toBe(true);
+    expect(
+      screen.getByText(/Use the stable sequence range instead/),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Sequence start filter"), {
+      target: { value: "3" },
+    });
+    fireEvent.change(screen.getByLabelText("Sequence end filter"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByTestId("apply-structured-filters"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
+        "c1",
+        expect.objectContaining({ seqFrom: 3, seqTo: 5 }),
+      ),
+    );
+  });
+
+  it("rejects an inverted structured range without mutating the active query", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("log-explorer-advanced-toggle"));
+    await waitFor(() => expect(host.hostLogQueryEvents).toHaveBeenCalled());
+    const callsBefore = vi.mocked(host.hostLogQueryEvents).mock.calls.length;
+    fireEvent.change(screen.getByLabelText("Sequence start filter"), {
+      target: { value: "20" },
+    });
+    fireEvent.change(screen.getByLabelText("Sequence end filter"), {
+      target: { value: "10" },
+    });
+    fireEvent.click(screen.getByTestId("apply-structured-filters"));
+    expect(screen.getByRole("status").textContent).toContain(
+      "Sequence start must be less than or equal to end",
+    );
+    await Promise.resolve();
+    expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(callsBefore);
+    expect(screen.queryByRole("button", { name: /seq:/ })).toBeNull();
   });
 
   it("navigates cursor-paged Find results without materializing every hit", async () => {

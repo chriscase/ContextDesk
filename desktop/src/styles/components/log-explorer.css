@@ -544,6 +544,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+.log-explorer__structured-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.35rem;
+  margin: 0.45rem 0;
+}
+
+.log-explorer__structured-grid label {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--fg-muted, #9aa0a6);
+}
+
+.log-explorer__structured-grid .log-explorer__search {
+  margin-bottom: 0;
+  color: var(--fg-default, inherit);
+}
+
 .log-explorer__search {
   width: 100%;
   box-sizing: border-box;

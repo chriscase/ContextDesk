@@ -17,10 +17,22 @@ describe("lanePaging (#505)", () => {
   it("builds composite keyset query per lane", () => {
     const f = emptyFilters();
     f.levels = ["error"];
+    f.services = ["api"];
+    f.hosts = ["h1"];
+    f.templateId = 4;
+    f.traceId = "trace-4";
+    f.seqFrom = 3;
+    f.seqTo = 30;
     const cur: LaneCursor = { afterSeq: 10, afterTs: 1_700_000_000 };
     const q = filtersToLaneQuery(f, lane, cur, 50);
     expect(q.sources).toEqual(["api.log"]);
     expect(q.levels).toEqual(["error"]);
+    expect(q.services).toEqual(["api"]);
+    expect(q.hosts).toEqual(["h1"]);
+    expect(q.templateId).toBe(4);
+    expect(q.traceId).toBe("trace-4");
+    expect(q.seqFrom).toBe(3);
+    expect(q.seqTo).toBe(30);
     expect(q.afterSeq).toBe(10);
     expect(q.afterTs).toBe(1_700_000_000);
     expect(q.sortByTime).toBe(true);
