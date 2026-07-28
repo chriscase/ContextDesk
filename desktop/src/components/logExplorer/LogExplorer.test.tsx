@@ -943,6 +943,108 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
   });
 
+  it("does not let an active Find refresh overwrite a temporary bookmark reveal", async () => {
+    const allEvents = defaultEventPage().events;
+    const findTarget = allEvents.find((event) => event.seq === 1)!;
+    const bookmarkTarget = allEvents.find((event) => event.seq === 2)!;
+    const staleFind =
+      deferred<Awaited<ReturnType<typeof host.hostLogSearchEventsAdvanced>>>();
+    const findResult: Awaited<
+      ReturnType<typeof host.hostLogSearchEventsAdvanced>
+    > = {
+      hits: [
+        {
+          event: findTarget,
+          score: 1,
+          excerpt: "auth failure",
+          matchKind: "keyword",
+          templateId: findTarget.templateId,
+        },
+      ],
+      partial: false,
+      scanned: 2,
+      totalMatched: 1,
+    };
+    let findRequestCount = 0;
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-find-race", "worker evidence", bookmarkTarget.seq),
+    ]);
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      findRequestCount += 1;
+      return findRequestCount === 2 ? staleFind.promise : findResult;
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const target =
+          query.targetSeq === bookmarkTarget.seq ? bookmarkTarget : findTarget;
+        const hidden =
+          target.seq === bookmarkTarget.seq &&
+          (query.filter?.levels ?? []).includes("error");
+        return eventNeighborhood(
+          target,
+          hidden ? "hidden_by_filter" : "found",
+        );
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "auth" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(1),
+    );
+
+    const errorFacet = within(screen.getByTestId("log-explorer-filters"))
+      .getByText("error")
+      .closest("label");
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
+    );
+
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-find-race"),
+    );
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(screen.getByTestId("detail-metadata").textContent).toContain(
+        "seq 2",
+      ),
+    );
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="2"]')
+        ?.classList.contains("log-explorer__row--selected"),
+    ).toBe(true);
+    expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-request");
+
+    staleFind.resolve(findResult);
+    await act(async () => {
+      await staleFind.promise;
+    });
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="2"]')
+        ?.classList.contains("log-explorer__row--selected"),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      (screen.getByRole("checkbox", {
+        name: /error 3/i,
+      }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+  });
+
   it("reports a missing bookmark target without claiming navigation success", async () => {
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
       {

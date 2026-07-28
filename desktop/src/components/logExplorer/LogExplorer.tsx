@@ -379,6 +379,7 @@ export function LogExplorer({ corpusId }: Props) {
   const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
     () => {},
   );
+  const suppressNextFindRefreshRef = useRef(false);
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
@@ -1284,6 +1285,10 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   useEffect(() => {
+    if (suppressNextFindRefreshRef.current) {
+      suppressNextFindRefreshRef.current = false;
+      return;
+    }
     findRefreshRef.current(filters);
   }, [filters]);
 
@@ -1650,6 +1655,16 @@ export function LogExplorer({ corpusId }: Props) {
         revealLanes = [revealLane, ...lanes.slice(1)];
         setLanes(revealLanes);
       }
+      // Preserve the active Find definition for Restore prior view, but do not
+      // let either an in-flight request or the filter-change refresh race this
+      // explicit bookmark seek.
+      findRequestRef.current += 1;
+      const activeFindRequest = activeFindRequestRef.current;
+      activeFindRequestRef.current = null;
+      if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
+      setFindSearching(false);
+      setFindCancelling(false);
+      suppressNextFindRefreshRef.current = true;
       setFilters(openFilters);
       setFilterDraft("");
       const status = await seekToSeq(seq, {
