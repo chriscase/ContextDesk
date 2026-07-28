@@ -34,6 +34,7 @@ vi.mock("../../lib/host", () => ({
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostSaveChatSession: vi.fn(),
+  hostSetChatLinkedCorpus: vi.fn(),
   hostCancelTurn: vi.fn(async () => undefined),
   hostSetModelToolsEnabled: vi.fn(async () => true),
   hostRenameChatSession: vi.fn(),
@@ -120,6 +121,16 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
+      async (sessionId, corpusId, draftSession) => {
+        if (!draftSession) return null;
+        return host.hostSaveChatSession({
+          ...draftSession,
+          id: sessionId,
+          linked_corpus_id: corpusId,
+        });
+      },
+    );
     vi.mocked(host.hostCancelTurn).mockResolvedValue(undefined);
     vi.mocked(host.hostSetModelToolsEnabled).mockResolvedValue(true);
     vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
@@ -538,6 +549,16 @@ describe("LinkedChatRail", () => {
     fireEvent.keyDown(composer, { key: "Enter" });
     await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
     expect(createdSessionId).not.toBeNull();
+    expect(host.hostSetChatLinkedCorpus).toHaveBeenCalledWith(
+      createdSessionId,
+      "c1",
+      expect.objectContaining({
+        id: createdSessionId,
+        linked_corpus_id: "c1",
+        messages: [],
+      }),
+      expect.any(String),
+    );
     expect(host.agentTurn).toHaveBeenCalledWith(
       createdSessionId,
       "line one",
@@ -567,6 +588,34 @@ describe("LinkedChatRail", () => {
         screen.getByLabelText("Chat message"),
       ),
     );
+  });
+
+  it("stops before the first turn when governed linked-chat creation fails", async () => {
+    vi.mocked(host.hostSetChatLinkedCorpus).mockRejectedValueOnce(
+      new Error("linked corpus artifacts are unavailable"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByLabelText("Chat message");
+    fireEvent.change(composer, {
+      target: { value: "Investigate this corpus" },
+    });
+    fireEvent.keyDown(composer, { key: "Enter" });
+
+    expect(
+      await screen.findByText(/linked corpus artifacts are unavailable/i),
+    ).toBeTruthy();
+    expect(host.agentTurn).not.toHaveBeenCalled();
+    expect(host.hostSaveChatSession).not.toHaveBeenCalled();
+    expect(screen.getByText("No chat selected")).toBeTruthy();
   });
 
   it("stops the exact active session once and waits for the host terminal event", async () => {

@@ -32,6 +32,7 @@ import {
   hostPinChatSession,
   hostRenameChatSession,
   hostSaveChatSession,
+  hostSetChatLinkedCorpus,
   hostSetModelToolsEnabled,
   modelSelectionKey,
   parseModelSelectionKey,
@@ -619,7 +620,16 @@ export function LinkedChatRail({
         s.chatModel = preferred.id;
         s.providerProfileId = preferred.provider_id;
       }
-      const saved = await hostSaveChatSession(sessionToDto(s));
+      // A linked corpus is a host-governed grant, so the generic renderer save
+      // path intentionally cannot create it. Persist the empty first-turn
+      // draft and its validated corpus link atomically through the governed
+      // mutation instead.
+      const saved = await hostSetChatLinkedCorpus(
+        s.id,
+        corpusId,
+        sessionToDto(s),
+        s.updatedAt,
+      );
       if (saved) {
         if (preferred) {
           setSelectionByChat((current) => ({

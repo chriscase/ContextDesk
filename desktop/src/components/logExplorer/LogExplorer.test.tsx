@@ -406,6 +406,16 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
+    vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
+      async (sessionId, corpusId, draftSession) => {
+        if (!draftSession) return null;
+        return host.hostSaveChatSession({
+          ...draftSession,
+          id: sessionId,
+          linked_corpus_id: corpusId,
+        });
+      },
+    );
     vi.mocked(host.agentTurn).mockResolvedValue([]);
   });
 
