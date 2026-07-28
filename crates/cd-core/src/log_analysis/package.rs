@@ -539,7 +539,7 @@ fn import_corpus_zip_reader_with_limits<R: Read + Seek>(
         // hidden under the staging name. Drop the DB handle before rename for
         // Windows compatibility.
         let report = {
-            let opened = LogCorpus::open(cache_root, &staging_id)?;
+            let opened = LogCorpus::open_import_staging(cache_root, &staging_id, &new_id)?;
             let opened_meta = opened.meta()?;
             PackageImportReport {
                 corpus_id: new_id.clone(),

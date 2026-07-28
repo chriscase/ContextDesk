@@ -310,11 +310,33 @@ impl LogCorpus {
     /// Open existing corpus.
     pub fn open(cache_root: &Path, id: &str) -> CoreResult<Self> {
         validate_corpus_id(id)?;
-        let root = contained_existing_corpus_root(cache_root, id)?;
+        Self::open_contained(cache_root, id, id)
+    }
+
+    /// Open a package import while it is still hidden under its staging name.
+    ///
+    /// The directory name is intentionally not a public corpus id. Keep this
+    /// narrow so package validation cannot weaken the public identifier policy.
+    pub(super) fn open_import_staging(
+        cache_root: &Path,
+        staging_id: &str,
+        published_id: &str,
+    ) -> CoreResult<Self> {
+        validate_import_staging_id(staging_id)?;
+        validate_corpus_id(published_id)?;
+        Self::open_contained(cache_root, staging_id, published_id)
+    }
+
+    fn open_contained(
+        cache_root: &Path,
+        directory_id: &str,
+        metadata_id: &str,
+    ) -> CoreResult<Self> {
+        let root = contained_existing_corpus_root(cache_root, directory_id)?;
         let meta = read_meta_file(&root)?;
-        if meta.id != id {
+        if meta.id != metadata_id {
             return Err(CoreError::Message(format!(
-                "corpus metadata id mismatch: requested {id}"
+                "corpus metadata id mismatch: requested {metadata_id}"
             )));
         }
         let name = meta.name.clone();
@@ -323,11 +345,11 @@ impl LogCorpus {
         if !db_path.exists() {
             if root.join("events.jsonl").exists() {
                 return Err(CoreError::Message(format!(
-                    "corpus {id} is legacy mem_columnar (events.jsonl); re-ingest under DuckDB"
+                    "corpus {metadata_id} is legacy mem_columnar (events.jsonl); re-ingest under DuckDB"
                 )));
             }
             return Err(CoreError::Message(format!(
-                "corpus {id} missing events.duckdb"
+                "corpus {metadata_id} missing events.duckdb"
             )));
         }
         let conn = Connection::open(&db_path).map_err(duck_err)?;
@@ -349,7 +371,7 @@ impl LogCorpus {
             }
         }
         Ok(Self {
-            id: id.to_string(),
+            id: metadata_id.to_string(),
             name,
             root,
             meta: Mutex::new(meta),
@@ -904,6 +926,13 @@ fn validate_corpus_id(id: &str) -> CoreResult<()> {
     }
 }
 
+fn validate_import_staging_id(id: &str) -> CoreResult<()> {
+    let Some(suffix) = id.strip_prefix(".import-") else {
+        return Err(CoreError::Message("invalid import staging id".into()));
+    };
+    validate_corpus_id(suffix).map_err(|_| CoreError::Message("invalid import staging id".into()))
+}
+
 fn contained_existing_corpus_root(cache_root: &Path, id: &str) -> CoreResult<PathBuf> {
     let cache_root = std::fs::canonicalize(cache_root)
         .map_err(|_| CoreError::Message(format!("corpus not found: {id}")))?;
@@ -1086,6 +1115,41 @@ mod tests {
             0,
             "rejected identifiers must not initialize an escaped database"
         );
+    }
+
+    #[test]
+    fn import_staging_open_is_contained_without_becoming_a_public_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "staged").unwrap();
+        let published_id = corpus.id().to_string();
+        let published_root = corpus.root().to_path_buf();
+        drop(corpus);
+
+        let staging_id = format!(".import-{published_id}");
+        let staging_root = dir.path().join("log_corpora").join(&staging_id);
+        std::fs::rename(&published_root, &staging_root).unwrap();
+
+        let public_error = LogCorpus::open(dir.path(), &staging_id)
+            .err()
+            .expect("staging names must not become public corpus ids");
+        assert!(public_error.to_string().contains("invalid corpus id"));
+
+        let staged =
+            LogCorpus::open_import_staging(dir.path(), &staging_id, &published_id).unwrap();
+        assert_eq!(staged.id(), published_id);
+        drop(staged);
+
+        for unsafe_id in [
+            ".import-",
+            ".import-../escape",
+            ".import-nested/corpus",
+            "import-safe",
+        ] {
+            let error = LogCorpus::open_import_staging(dir.path(), unsafe_id, &published_id)
+                .err()
+                .expect("unsafe staging id must be rejected");
+            assert!(error.to_string().contains("invalid import staging id"));
+        }
     }
 
     #[test]
