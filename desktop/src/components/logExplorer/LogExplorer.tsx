@@ -100,7 +100,6 @@ import {
   HELP_FIND_VS_FILTER,
   HELP_LANE_COMPOSE,
   HELP_LONG_LINES,
-  HELP_TIMELINE_NAVIGATOR,
   HELP_TIME_LINK,
 } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
@@ -4954,11 +4953,6 @@ export function LogExplorer({ corpusId }: Props) {
                   );
                 }
               }}
-            />
-            <HelpTip
-              label="Investigation timeline help"
-              title="Investigation timeline"
-              content={HELP_TIMELINE_NAVIGATOR}
             />
             {linkMode === "align_time" ? (
               <span

@@ -29,9 +29,9 @@ const summary: host.SharedTimelineSummaryDto = {
   ],
   counts: [30, 0, 0, 12],
   severitySeries: [
-    { severity: "error", counts: [0, 0, 0, 12] },
+    { severity: "error", counts: [1, 0, 0, 12] },
     { severity: "warn", counts: [0, 0, 0, 0] },
-    { severity: "info", counts: [30, 0, 0, 0] },
+    { severity: "info", counts: [29, 0, 0, 0] },
     { severity: "debug", counts: [0, 0, 0, 0] },
     { severity: "other", counts: [0, 0, 0, 0] },
   ],
@@ -96,8 +96,9 @@ describe("TimelineNavigator", () => {
     expect(toggle.getAttribute("aria-label")).toBe("Collapse timeline");
 
     fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle.getAttribute("aria-label")).toBe("Expand timeline");
+    const collapsedToggle = screen.getByTestId("timeline-navigator-toggle");
+    expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(collapsedToggle.getAttribute("aria-label")).toBe("Expand timeline");
     expect(screen.getByText("Collapsed · no timeline work")).toBeTruthy();
     const callsWhileOpen = vi.mocked(host.hostLogSharedTimelineSummary).mock
       .calls.length;
@@ -113,10 +114,11 @@ describe("TimelineNavigator", () => {
       callsWhileOpen,
     );
 
-    toggle.focus();
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(document.activeElement).toBe(toggle);
+    collapsedToggle.focus();
+    fireEvent.click(collapsedToggle);
+    const reopenedToggle = screen.getByTestId("timeline-navigator-toggle");
+    expect(reopenedToggle.getAttribute("aria-expanded")).toBe("true");
+    await waitFor(() => expect(document.activeElement).toBe(reopenedToggle));
     await waitFor(() =>
       expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(
         callsWhileOpen + 1,
@@ -268,6 +270,44 @@ describe("TimelineNavigator", () => {
     );
     expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
     expect(screen.getByTestId("timeline-resident-range")).toBeTruthy();
+  });
+
+  it("keeps controls inside a full-width track instead of reserving a side column", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    const track = await screen.findByTestId("timeline-navigator-track");
+    expect(track.querySelector(".timeline-navigator__topline")).toBeTruthy();
+    expect(track.querySelector(".timeline-navigator__chart")).toBeTruthy();
+    expect(track.querySelector(".timeline-navigator__data")).toBeTruthy();
+    expect(
+      track.parentElement?.querySelector(":scope > .timeline-navigator__data"),
+    ).toBeNull();
+    expect(screen.getByTestId("timeline-bucket-0").className).toContain(
+      "timeline-navigator__bucket--has-error",
+    );
+    expect(screen.getByTestId("timeline-bucket-3").className).toContain(
+      "timeline-navigator__bucket--has-error",
+    );
+    expect(
+      screen
+        .getByTestId("timeline-bucket-0")
+        .style.getPropertyValue("--error-signal-height"),
+    ).toBe("4px");
+    expect(
+      screen
+        .getByTestId("timeline-bucket-3")
+        .style.getPropertyValue("--error-signal-height"),
+    ).toBe("12px");
+    expect(
+      screen.getByTestId("timeline-bucket-3").getAttribute("aria-label"),
+    ).toContain("Error 12");
   });
 
   it("commits keyboard seeks only after a navigation key is released", async () => {

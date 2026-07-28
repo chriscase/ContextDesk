@@ -18,6 +18,8 @@ import {
   formatCanonicalUtc,
   timeQualityLabel,
 } from "../../lib/logExplorer/types";
+import { HELP_TIMELINE_NAVIGATOR } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
 import "./TimelineNavigator.css";
 
 const NAVIGATOR_BUCKETS = 96;
@@ -229,6 +231,12 @@ export function TimelineNavigator({
 
   const counts = summary?.counts ?? [];
   const maxCount = Math.max(1, ...counts);
+  const maxErrorCount = summary
+    ? Math.max(
+        1,
+        ...counts.map((_, index) => levelCounts(summary, index).error),
+      )
+    : 1;
 
   const residentIndexes = useMemo(() => {
     if (!summary || summary.spanFrom == null || summary.bucketCount === 0) {
@@ -292,31 +300,36 @@ export function TimelineNavigator({
     }
   };
 
+  const toggleTimeline = (
+    <button
+      type="button"
+      className="timeline-navigator__toggle"
+      aria-expanded={open}
+      aria-controls="log-explorer-timeline-navigator"
+      data-testid="timeline-navigator-toggle"
+      ref={toggleRef}
+      aria-label={open ? "Collapse timeline" : "Expand timeline"}
+      onClick={() => {
+        setOpen((value) => {
+          const next = !value;
+          if (!next) setStatus("Timeline collapsed · no timeline work");
+          return next;
+        });
+        requestAnimationFrame(() => toggleRef.current?.focus());
+      }}
+    >
+      <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+      Timeline
+    </button>
+  );
+
   return (
     <section
       className="log-explorer__navigator timeline-navigator"
       data-testid="timeline-navigator"
       data-open={open ? "true" : "false"}
     >
-      <button
-        type="button"
-        className="timeline-navigator__toggle"
-        aria-expanded={open}
-        aria-controls="log-explorer-timeline-navigator"
-        data-testid="timeline-navigator-toggle"
-        ref={toggleRef}
-        aria-label={open ? "Collapse timeline" : "Expand timeline"}
-        onClick={() => {
-          setOpen((value) => {
-            const next = !value;
-            if (!next) setStatus("Timeline collapsed · no timeline work");
-            return next;
-          });
-        }}
-      >
-        <span aria-hidden="true">{open ? "▾" : "▸"}</span>
-        Timeline
-      </button>
+      {toggleTimeline}
       {!open ? (
         <span className="timeline-navigator__collapsed-copy">
           Collapsed · no timeline work
@@ -341,17 +354,46 @@ export function TimelineNavigator({
           ) : null}
           {summary && summary.bucketCount > 0 ? (
             <>
-              <div className="timeline-navigator__track">
-                <div
-                  className="timeline-navigator__legend"
-                  aria-label="Timeline severity legend"
-                >
-                  {LEVELS.map(({ key, label, glyph }) => (
-                    <span key={key} data-level={key}>
-                      <b aria-hidden="true">{glyph}</b>
-                      {label}
-                    </span>
-                  ))}
+              <div
+                className="timeline-navigator__track"
+                data-testid="timeline-navigator-track"
+              >
+                <div className="timeline-navigator__topline">
+                  <div
+                    className="timeline-navigator__legend"
+                    aria-label="Timeline severity legend"
+                  >
+                    {LEVELS.map(({ key, label, glyph }) => (
+                      <span key={key} data-level={key}>
+                        <b aria-hidden="true">{glyph}</b>
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="timeline-navigator__actions">
+                    <details className="timeline-navigator__data">
+                      <summary>Timeline data</summary>
+                      <ol>
+                        {counts.map((count, index) => (
+                          <li key={index}>
+                            {compactTime(
+                              summary,
+                              bucketBounds(summary, index).start,
+                            )}
+                            : {count} events
+                            {levelSummary(summary, index)
+                              ? ` (${levelSummary(summary, index)})`
+                              : " (empty)"}
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                    <HelpTip
+                      label="Investigation timeline help"
+                      title="Investigation timeline"
+                      content={HELP_TIMELINE_NAVIGATOR}
+                    />
+                  </div>
                 </div>
                 <div
                   className="log-explorer__navigator-bars timeline-navigator__chart"
@@ -382,6 +424,9 @@ export function TimelineNavigator({
                           count === 0
                             ? "timeline-navigator__bucket--empty"
                             : "",
+                          levels.error > 0
+                            ? "timeline-navigator__bucket--has-error"
+                            : "",
                           residentIndexes.has(index)
                             ? "log-explorer__navigator-bucket--resident"
                             : "",
@@ -403,6 +448,10 @@ export function TimelineNavigator({
                               count === 0
                                 ? "0%"
                                 : `${Math.round((count / maxCount) * 100)}%`,
+                            "--error-signal-height":
+                              levels.error === 0
+                                ? "0px"
+                                : `${3 + Math.round((levels.error / maxErrorCount) * 9)}px`,
                           } as CSSProperties
                         }
                         onClick={() => void seekBucket(index)}
@@ -486,20 +535,6 @@ export function TimelineNavigator({
                   </span>
                 </div>
               </div>
-              <details className="timeline-navigator__data">
-                <summary>Timeline data</summary>
-                <ol>
-                  {counts.map((count, index) => (
-                    <li key={index}>
-                      {compactTime(summary, bucketBounds(summary, index).start)}
-                      : {count} events
-                      {levelSummary(summary, index)
-                        ? ` (${levelSummary(summary, index)})`
-                        : " (empty)"}
-                    </li>
-                  ))}
-                </ol>
-              </details>
               {laneSummaries.length > 0 ? (
                 <div
                   className="log-explorer__navigator-lane-coverage"
