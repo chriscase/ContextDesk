@@ -19,11 +19,13 @@ const NAVIGATOR_BUCKETS = 96;
 type Props = {
   corpusId: string;
   filter: EventQueryDto;
+  emptySourceScope?: boolean;
   residentEvents: ExplorerEventDto[];
   lanes?: {
     id: string;
     label: string;
     sources: string[];
+    emptySourceScope?: boolean;
   }[];
   onSeekSeq: (seq: number, target?: ExplorerEventDto) => Promise<void> | void;
 };
@@ -64,6 +66,7 @@ function bucketLabel(summary: TimelineSummaryDto, index: number) {
 export function TimelineNavigator({
   corpusId,
   filter,
+  emptySourceScope = false,
   residentEvents,
   lanes = [],
   onSeekSeq,
@@ -79,12 +82,25 @@ export function TimelineNavigator({
   const seekRequest = useRef(0);
   const filterKey = JSON.stringify(filter);
   const laneKey = JSON.stringify(
-    lanes.map((lane) => ({ id: lane.id, sources: lane.sources })),
+    lanes.map((lane) => ({
+      id: lane.id,
+      sources: lane.sources,
+      emptySourceScope: lane.emptySourceScope,
+    })),
   );
 
   useEffect(() => {
     if (!open) {
       summaryRequest.current += 1;
+      return;
+    }
+    if (emptySourceScope) {
+      summaryRequest.current += 1;
+      setLoading(false);
+      setError(null);
+      setSummary(null);
+      setLaneSummaries([]);
+      setStatus("No events match the visible lane sources");
       return;
     }
     const request = ++summaryRequest.current;
@@ -94,17 +110,19 @@ export function TimelineNavigator({
     const laneRequests =
       lanes.length > 1
         ? lanes.slice(0, 4).map((lane) =>
-            hostLogTimelineSummary(
-              corpusId,
-              {
-                ...filter,
-                sources:
-                  lane.sources.length > 0
-                    ? lane.sources
-                    : (filter.sources ?? []),
-              },
-              NAVIGATOR_BUCKETS,
-            ),
+            lane.emptySourceScope
+              ? Promise.resolve<TimelineSummaryDto | null>(null)
+              : hostLogTimelineSummary(
+                  corpusId,
+                  {
+                    ...filter,
+                    sources:
+                      lane.sources.length > 0
+                        ? lane.sources
+                        : (filter.sources ?? []),
+                  },
+                  NAVIGATOR_BUCKETS,
+                ),
           )
         : [];
     void Promise.allSettled([
@@ -132,7 +150,9 @@ export function TimelineNavigator({
                   error:
                     result?.status === "rejected"
                       ? String(result.reason)
-                      : null,
+                      : result?.value == null
+                        ? "no events match visible lane"
+                        : null,
                 };
               })
             : [],
@@ -158,7 +178,7 @@ export function TimelineNavigator({
     };
     // Keys intentionally represent the complete serializable predicates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corpusId, filterKey, laneKey, open]);
+  }, [corpusId, emptySourceScope, filterKey, laneKey, open]);
 
   const counts = useMemo(() => {
     const values = Array.from(

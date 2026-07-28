@@ -523,6 +523,25 @@ function effectiveLaneSources(
   return composeLaneSources(lane?.sources ?? [], filters.sources);
 }
 
+/**
+ * The primary Navigator can only summarize sources that at least one visible
+ * lane can actually reveal. Otherwise a valid bucket can choose an event that
+ * the fail-closed seek contract must reject as outside the visible lanes.
+ */
+function visibleLaneSourceScope(
+  lanes: LaneConfig[],
+  laneCount: number,
+  filters: ExplorerFilters,
+): string[] | undefined {
+  const ordered = new Set<string>();
+  for (const lane of lanes.slice(0, laneCount)) {
+    const sources = effectiveLaneSources(lane, filters);
+    if (sources == null) return undefined;
+    for (const source of sources) ordered.add(source);
+  }
+  return [...ordered];
+}
+
 function levelClass(level: string): string {
   const l = level.toLowerCase();
   return `log-explorer__level log-explorer__level--${l}`;
@@ -2552,6 +2571,11 @@ export function LogExplorer({ corpusId }: Props) {
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
     return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
+  const navigatorSourceScope = visibleLaneSourceScope(
+    lanes,
+    laneCount,
+    filters,
+  );
 
   return (
     <div
@@ -3689,13 +3713,19 @@ export function LogExplorer({ corpusId }: Props) {
                 afterTs: null,
                 beforeSeq: null,
                 beforeTs: null,
+                sources: navigatorSourceScope,
               })}
+              emptySourceScope={navigatorSourceScope?.length === 0}
               residentEvents={Object.values(laneEvents).flat()}
-              lanes={lanes.slice(0, laneCount).map((lane) => ({
-                id: lane.id,
-                label: lane.label,
-                sources: lane.sources,
-              }))}
+              lanes={lanes.slice(0, laneCount).map((lane) => {
+                const sources = effectiveLaneSources(lane, filters);
+                return {
+                  id: lane.id,
+                  label: lane.label,
+                  sources: sources ?? [],
+                  emptySourceScope: sources?.length === 0,
+                };
+              })}
               onSeekSeq={async (seq, target) => {
                 const targetLane =
                   visibleLaneForSource(target?.source) ??

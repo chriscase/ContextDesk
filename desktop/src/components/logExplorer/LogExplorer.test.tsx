@@ -3215,6 +3215,20 @@ describe("LogExplorer shell", () => {
     fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
 
+    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        sources: ["api.log", "worker.log", "queue.log", "db.log"],
+      }),
+      96,
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        sources: ["api.log", "worker.log", "queue.log", "db.log"],
+        limit: 1,
+      }),
+    );
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
         "c1",
