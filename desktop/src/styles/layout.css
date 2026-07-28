@@ -642,7 +642,7 @@ html[data-platform="macos"] .titlebar {
   padding: 0.55rem 1rem 0.75rem;
 }
 
-.composer-dock > * {
+.composer-dock > .chat-input-surface {
   width: 100%;
   max-width: 56rem;
   margin-inline: auto;

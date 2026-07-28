@@ -134,6 +134,16 @@ describe("ChatPane first-chat home", () => {
     );
     expect(onSubmit).not.toHaveBeenCalled();
     const context = screen.getByTestId("session-context-bar");
+    const composer = screen
+      .getByPlaceholderText("Message ContextDesk…")
+      .closest(".composer");
+    expect(composer).toBeTruthy();
+    expect(context.parentElement).toBe(composer!.parentElement);
+    expect(context.parentElement?.classList.contains("composer-dock")).toBe(
+      true,
+    );
+    expect(context.classList.contains("chat-input-surface")).toBe(true);
+    expect(composer!.classList.contains("chat-input-surface")).toBe(true);
     expect(context.hasAttribute("open")).toBe(false);
     expect(
       within(context).getByText(/No files, skill, or log corpus/),

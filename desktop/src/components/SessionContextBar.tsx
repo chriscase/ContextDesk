@@ -185,7 +185,9 @@ export function SessionContextBar({
 
   return (
     <details
-      className={`session-context-bar${dragOver ? " is-dragover" : ""}`}
+      className={`session-context-bar chat-input-surface${
+        dragOver ? " is-dragover" : ""
+      }`}
       data-testid="session-context-bar"
       open={expanded || dragOver}
       onToggle={(event) => setExpanded(event.currentTarget.open)}
