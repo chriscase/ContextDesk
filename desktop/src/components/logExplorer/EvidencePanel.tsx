@@ -1,8 +1,13 @@
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { ExplorerEventDto, LogBookmarkEventRefDto } from "../../lib/host";
-import { IconChevronRight } from "../icons";
+import { IconChevronDown, IconChevronRight } from "../icons";
 
-export type InvestigationRailMode = "evidence" | "chat";
+export type InvestigationRailMode = "investigation" | "chat";
 
 export type EvidenceItemView = {
   id: string;
@@ -20,57 +25,160 @@ export type EvidencePreviewView = {
   staleCount: number;
 };
 
+export type FindingItemView = {
+  id: string;
+  kind: "observation" | "inference" | "hypothesis";
+  lifecycle: "accepted" | "resolved";
+  title: string;
+  whyItMatters: string;
+  evidenceIds: string[];
+  provenanceLabel: string;
+};
+
+export type NoteItemView = {
+  id: string;
+  title: string;
+  body: string;
+  evidenceIds: string[];
+  findingIds: string[];
+  provenanceLabel: string;
+};
+
+export type BookmarkItemView = {
+  id: string;
+  label: string;
+  note: string | null;
+  seqFrom: number;
+  seqTo: number;
+  eventRefs: LogBookmarkEventRefDto[];
+  evidenceStatus: "legacy_range" | "verified" | "missing" | "stale";
+};
+
+type MaterialFilter =
+  | "all"
+  | "findings"
+  | "evidence"
+  | "notes"
+  | "bookmarks";
+type MaterialDetail =
+  | { type: "finding"; id: string }
+  | { type: "note"; id: string }
+  | { type: "bookmark"; id: string };
+
 export function InvestigationModeControl({
   mode,
-  evidenceCount,
+  investigationCount,
   chatCount,
   onChange,
 }: {
   mode: InvestigationRailMode;
-  evidenceCount: number;
+  investigationCount: number;
   chatCount: number;
   onChange: (mode: InvestigationRailMode) => void;
 }) {
-  const labelId = useId();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const options: {
+    mode: InvestigationRailMode;
+    label: string;
+    count: number;
+    description: string;
+  }[] = [
+    {
+      mode: "investigation",
+      label: "Investigation",
+      count: investigationCount,
+      description: "Findings, evidence, notes, and bookmarks",
+    },
+    {
+      mode: "chat",
+      label: "Chat",
+      count: chatCount,
+      description: "Corpus-linked governed conversations",
+    },
+  ];
+  const current = options.find((option) => option.mode === mode)!;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpen(false);
+      queueMicrotask(() => triggerRef.current?.focus());
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
   return (
-    <div className="log-explorer__investigation-mode-picker">
-      <span id={labelId} className="log-explorer__investigation-mode-label">
+    <div ref={rootRef} className="log-explorer__investigation-mode-picker">
+      <span className="log-explorer__investigation-mode-label">
         Investigation
       </span>
-      <div
-        className="log-explorer__investigation-mode-options"
-        role="group"
-        aria-labelledby={labelId}
+      <button
+        ref={triggerRef}
+        type="button"
+        className="log-explorer__investigation-mode-trigger"
+        aria-label={`Investigation workspace view: ${current.label}, ${current.count} items`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
       >
-        <button
-          type="button"
-          className={`log-explorer__investigation-mode-option${
-            mode === "evidence"
-              ? " log-explorer__investigation-mode-option--active"
-              : ""
-          }`}
-          aria-pressed={mode === "evidence"}
-          onClick={() => onChange("evidence")}
+        <span>{current.label}</span>
+        <span
+          className="log-explorer__investigation-mode-count"
+          aria-label={`${current.count} ${current.label.toLowerCase()} items`}
         >
-          Evidence
-          <span aria-label={`${evidenceCount} saved evidence items`}>
-            {evidenceCount}
-          </span>
-        </button>
-        <button
-          type="button"
-          className={`log-explorer__investigation-mode-option${
-            mode === "chat"
-              ? " log-explorer__investigation-mode-option--active"
-              : ""
-          }`}
-          aria-pressed={mode === "chat"}
-          onClick={() => onChange("chat")}
+          {current.count}
+        </span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div
+          className="log-explorer__investigation-mode-menu"
+          role="menu"
+          aria-label="Investigation view"
         >
-          Chat
-          <span aria-label={`${chatCount} linked chats`}>{chatCount}</span>
-        </button>
-      </div>
+          {options.map((option) => (
+            <button
+              key={option.mode}
+              type="button"
+              role="menuitemradio"
+              aria-checked={option.mode === mode}
+              className={`log-explorer__investigation-mode-option${
+                option.mode === mode
+                  ? " log-explorer__investigation-mode-option--active"
+                  : ""
+              }`}
+              onClick={() => {
+                onChange(option.mode);
+                setOpen(false);
+                queueMicrotask(() => triggerRef.current?.focus());
+              }}
+            >
+              <span className="log-explorer__investigation-mode-option-copy">
+                <span>{option.label}</span>
+                <span>{option.description}</span>
+              </span>
+              <span
+                className="log-explorer__investigation-mode-count"
+                aria-label={`${option.count} ${option.label.toLowerCase()} items`}
+              >
+                {option.count}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -88,9 +196,16 @@ function statusLabel(status: EvidenceItemView["evidenceStatus"]): string {
   return "Changed";
 }
 
+function findingKindLabel(kind: FindingItemView["kind"]): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
 export function EvidencePanel({
   modeControl,
   items,
+  findings = [],
+  notes = [],
+  bookmarks = [],
   preview,
   busy,
   error,
@@ -99,12 +214,18 @@ export function EvidencePanel({
   desktopGridColumn,
   onPreview,
   onReveal,
+  onEditFinding,
+  onEditNote,
+  onActivateBookmark,
   onClearPreview,
   onToggleCollapsed,
   onRequestClose,
 }: {
   modeControl: ReactNode;
   items: EvidenceItemView[];
+  findings?: FindingItemView[];
+  notes?: NoteItemView[];
+  bookmarks?: BookmarkItemView[];
   preview: EvidencePreviewView | null;
   busy: boolean;
   error: string | null;
@@ -113,16 +234,38 @@ export function EvidencePanel({
   desktopGridColumn?: number;
   onPreview: (item: EvidenceItemView) => void;
   onReveal: (item: EvidenceItemView) => void;
+  onEditFinding?: (
+    item: FindingItemView,
+    trigger: HTMLButtonElement,
+  ) => void;
+  onEditNote?: (item: NoteItemView, trigger: HTMLButtonElement) => void;
+  onActivateBookmark?: (item: BookmarkItemView) => void;
   onClearPreview: () => void;
   onToggleCollapsed?: () => void;
   onRequestClose?: () => void;
 }) {
+  const [filter, setFilter] = useState<MaterialFilter>("all");
+  const [detail, setDetail] = useState<MaterialDetail | null>(null);
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
   const previousCollapsedRef = useRef(collapsed);
   const activePreviewItem = preview
     ? (items.find((item) => item.id === preview.evidenceId) ?? null)
     : null;
+  const activeFinding =
+    detail?.type === "finding"
+      ? (findings.find((item) => item.id === detail.id) ?? null)
+      : null;
+  const activeNote =
+    detail?.type === "note"
+      ? (notes.find((item) => item.id === detail.id) ?? null)
+      : null;
+  const activeBookmark =
+    detail?.type === "bookmark"
+      ? (bookmarks.find((item) => item.id === detail.id) ?? null)
+      : null;
+  const materialCount =
+    items.length + findings.length + notes.length + bookmarks.length;
 
   useEffect(() => {
     const previous = previousCollapsedRef.current;
@@ -153,18 +296,18 @@ export function EvidencePanel({
           type="button"
           className="log-explorer__chat-reopen"
           data-testid="expand-investigation-rail"
-          aria-label={`Expand Investigation rail, ${items.length} evidence item${
-            items.length === 1 ? "" : "s"
+          aria-label={`Expand Investigation rail, ${materialCount} saved item${
+            materialCount === 1 ? "" : "s"
           }`}
           onClick={onToggleCollapsed}
         >
           <span aria-hidden="true">Investigate</span>
-          {items.length > 0 ? (
+          {materialCount > 0 ? (
             <span
               className="log-explorer__chat-reopen-count"
               aria-hidden="true"
             >
-              {items.length}
+              {materialCount}
             </span>
           ) : null}
         </button>
@@ -185,16 +328,18 @@ export function EvidencePanel({
           : { gridColumn: desktopGridColumn }
       }
       role={compactLayout ? "dialog" : undefined}
-      aria-label={compactLayout ? "Investigation drawer" : "Saved evidence"}
+      aria-label={compactLayout ? "Investigation drawer" : "Investigation"}
     >
       <div className="log-explorer__investigation-mode-control">
         {modeControl}
       </div>
       <header className="log-explorer__evidence-header">
         <div>
-          <div className="log-explorer__chat-header-title">Saved evidence</div>
+          <div className="log-explorer__chat-header-title">
+            Investigation record
+          </div>
           <div className="log-explorer__chat-header-meta">
-            Durable · corpus linked · payload free
+            Durable · human authored · corpus linked
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
@@ -227,6 +372,25 @@ export function EvidencePanel({
         <div className="log-explorer__evidence-error" role="alert">
           {error}
         </div>
+      ) : null}
+
+      {!activePreviewItem && !activeFinding && !activeNote && !activeBookmark ? (
+        <label className="log-explorer__material-filter">
+          <span className="sr-only">Show investigation material</span>
+          <select
+            value={filter}
+            onChange={(event) =>
+              setFilter(event.target.value as MaterialFilter)
+            }
+          >
+            <option value="all">All material · {materialCount}</option>
+            <option value="findings">Findings · {findings.length}</option>
+            <option value="evidence">Evidence · {items.length}</option>
+            <option value="notes">Notes · {notes.length}</option>
+            <option value="bookmarks">Bookmarks · {bookmarks.length}</option>
+          </select>
+          <IconChevronDown />
+        </label>
       ) : null}
 
       {activePreviewItem && preview ? (
@@ -293,69 +457,380 @@ export function EvidencePanel({
             Reveal in Explorer
           </button>
         </section>
+      ) : activeFinding ? (
+        <section
+          className="log-explorer__evidence-preview"
+          aria-label={`Finding ${activeFinding.title}`}
+          data-testid={`finding-detail-${activeFinding.id}`}
+        >
+          <div className="log-explorer__evidence-preview-header">
+            <div>
+              <div className="log-explorer__material-kicker">
+                {findingKindLabel(activeFinding.kind)} ·{" "}
+                {activeFinding.lifecycle}
+              </div>
+              <div className="log-explorer__evidence-card-title">
+                {activeFinding.title}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              onClick={() => setDetail(null)}
+            >
+              Back
+            </button>
+          </div>
+          <div>
+            <div className="log-explorer__material-section-label">
+              Why it matters
+            </div>
+            <p className="log-explorer__material-body">
+              {activeFinding.whyItMatters}
+            </p>
+          </div>
+          <div>
+            <div className="log-explorer__material-section-label">
+              Supporting evidence
+            </div>
+            <div className="log-explorer__citation-list">
+              {activeFinding.evidenceIds.map((evidenceId) => {
+                const cited = items.find((item) => item.id === evidenceId);
+                return cited ? (
+                  <button
+                    key={evidenceId}
+                    type="button"
+                    className="log-explorer__citation"
+                    disabled={busy}
+                    onClick={() => {
+                      setDetail(null);
+                      onPreview(cited);
+                    }}
+                  >
+                    <span>{cited.title}</span>
+                    <span>{evidenceSummary(cited)}</span>
+                  </button>
+                ) : (
+                  <span
+                    key={evidenceId}
+                    className="log-explorer__citation log-explorer__citation--missing"
+                  >
+                    Unavailable evidence
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+          <div className="log-explorer__evidence-provenance">
+            {activeFinding.provenanceLabel}
+          </div>
+          {onEditFinding ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={busy}
+              onClick={(event) =>
+                onEditFinding(activeFinding, event.currentTarget)
+              }
+            >
+              Edit finding
+            </button>
+          ) : null}
+        </section>
+      ) : activeNote ? (
+        <section
+          className="log-explorer__evidence-preview"
+          aria-label={`Note ${activeNote.title}`}
+          data-testid={`note-detail-${activeNote.id}`}
+        >
+          <div className="log-explorer__evidence-preview-header">
+            <div>
+              <div className="log-explorer__material-kicker">Cited note</div>
+              <div className="log-explorer__evidence-card-title">
+                {activeNote.title}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              onClick={() => setDetail(null)}
+            >
+              Back
+            </button>
+          </div>
+          <p className="log-explorer__material-body">{activeNote.body}</p>
+          <div>
+            <div className="log-explorer__material-section-label">
+              Citations
+            </div>
+            <div className="log-explorer__citation-list">
+              {activeNote.evidenceIds.map((evidenceId) => {
+                const cited = items.find((item) => item.id === evidenceId);
+                return cited ? (
+                  <button
+                    key={evidenceId}
+                    type="button"
+                    className="log-explorer__citation"
+                    disabled={busy}
+                    onClick={() => {
+                      setDetail(null);
+                      onPreview(cited);
+                    }}
+                  >
+                    <span>{cited.title}</span>
+                    <span>{evidenceSummary(cited)}</span>
+                  </button>
+                ) : (
+                  <span
+                    key={evidenceId}
+                    className="log-explorer__citation log-explorer__citation--missing"
+                  >
+                    Unavailable evidence
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+          <div className="log-explorer__evidence-provenance">
+            {activeNote.provenanceLabel}
+          </div>
+          {onEditNote ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              disabled={busy}
+              onClick={(event) => onEditNote(activeNote, event.currentTarget)}
+            >
+              Edit note
+            </button>
+          ) : null}
+        </section>
+      ) : activeBookmark ? (
+        <section
+          className="log-explorer__evidence-preview"
+          aria-label={`Bookmark ${activeBookmark.label}`}
+          data-testid={`bookmark-detail-${activeBookmark.id}`}
+        >
+          <div className="log-explorer__evidence-preview-header">
+            <div>
+              <div className="log-explorer__material-kicker">
+                {activeBookmark.evidenceStatus === "legacy_range"
+                  ? "Legacy range bookmark"
+                  : "Exact bookmark"}
+              </div>
+              <div className="log-explorer__evidence-card-title">
+                {activeBookmark.label}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="log-explorer__btn"
+              onClick={() => setDetail(null)}
+            >
+              Back
+            </button>
+          </div>
+          <div className="log-explorer__material-body">
+            {activeBookmark.eventRefs.length > 0
+              ? `${activeBookmark.eventRefs.length} exact event ${
+                  activeBookmark.eventRefs.length === 1
+                    ? "identity"
+                    : "identities"
+                }`
+              : `Legacy seq range ${activeBookmark.seqFrom}–${activeBookmark.seqTo}`}
+          </div>
+          {activeBookmark.note ? (
+            <div className="log-explorer__bookmark-legacy-note">
+              <div className="log-explorer__material-section-label">
+                Legacy bookmark annotation
+              </div>
+              <p className="log-explorer__material-body">
+                {activeBookmark.note}
+              </p>
+              <div className="log-explorer__chat-header-meta">
+                Shown for reference only · not imported as a trusted
+                Investigation note
+              </div>
+            </div>
+          ) : null}
+          {onActivateBookmark ? (
+            <button
+              type="button"
+              className="log-explorer__btn log-explorer__btn--active"
+              disabled={
+                busy ||
+                activeBookmark.evidenceStatus === "missing" ||
+                activeBookmark.evidenceStatus === "stale"
+              }
+              onClick={() => onActivateBookmark(activeBookmark)}
+            >
+              Reveal bookmark
+            </button>
+          ) : null}
+        </section>
       ) : (
         <div className="log-explorer__evidence-list">
-          {items.length === 0 ? (
+          {materialCount === 0 ? (
             <div className="log-explorer__evidence-empty">
               <div className="log-explorer__evidence-empty-title">
-                No evidence saved yet
+                Your investigation record is empty
               </div>
               <p>
-                Select one or more log rows, then choose <b>Save evidence</b>.
-                Exact event identities are retained without copying raw
-                payloads.
+                Select log rows to save exact evidence, record a finding, or
+                write a cited note. Saved material stays linked to this corpus.
               </p>
             </div>
           ) : (
-            items.map((item) => (
-              <article
-                key={item.id}
-                className="log-explorer__evidence-card"
-                data-testid={`evidence-item-${item.id}`}
-              >
-                <div className="log-explorer__evidence-card-heading">
-                  <div>
+            <>
+              {(filter === "all" || filter === "findings") &&
+                findings.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="log-explorer__evidence-card log-explorer__material-card"
+                    data-testid={`finding-item-${item.id}`}
+                    onClick={() => setDetail({ type: "finding", id: item.id })}
+                  >
+                    <div className="log-explorer__evidence-card-heading">
+                      <div>
+                        <div className="log-explorer__material-kicker">
+                          {findingKindLabel(item.kind)}
+                        </div>
+                        <div className="log-explorer__evidence-card-title">
+                          {item.title}
+                        </div>
+                      </div>
+                      <span
+                        className={`log-explorer__evidence-status log-explorer__finding-status--${item.lifecycle}`}
+                      >
+                        {item.lifecycle}
+                      </span>
+                    </div>
+                    <div className="log-explorer__chat-header-meta">
+                      {item.evidenceIds.length} evidence{" "}
+                      {item.evidenceIds.length === 1 ? "citation" : "citations"}
+                    </div>
+                  </button>
+                ))}
+              {(filter === "all" || filter === "evidence") &&
+                items.map((item) => (
+                  <article
+                    key={item.id}
+                    className="log-explorer__evidence-card"
+                    data-testid={`evidence-item-${item.id}`}
+                  >
+                    <div className="log-explorer__evidence-card-heading">
+                      <div>
+                        <div className="log-explorer__material-kicker">
+                          Evidence
+                        </div>
+                        <div className="log-explorer__evidence-card-title">
+                          {item.title}
+                        </div>
+                        <div className="log-explorer__chat-header-meta">
+                          {evidenceSummary(item)}
+                        </div>
+                      </div>
+                      <span
+                        className={`log-explorer__evidence-status log-explorer__evidence-status--${item.evidenceStatus}`}
+                      >
+                        {statusLabel(item.evidenceStatus)}
+                      </span>
+                    </div>
+                    <div className="log-explorer__evidence-provenance">
+                      {item.provenanceLabel}
+                    </div>
+                    <div className="log-explorer__evidence-card-actions">
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        disabled={busy}
+                        onClick={() => onPreview(item)}
+                      >
+                        Preview
+                      </button>
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        disabled={busy || item.evidenceStatus !== "verified"}
+                        title={
+                          item.evidenceStatus === "verified"
+                            ? "Reveal this evidence in the Explorer"
+                            : "Reveal requires verified event identities"
+                        }
+                        onClick={() => onReveal(item)}
+                      >
+                        Reveal
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              {(filter === "all" || filter === "notes") &&
+                notes.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="log-explorer__evidence-card log-explorer__material-card"
+                    data-testid={`note-item-${item.id}`}
+                    onClick={() => setDetail({ type: "note", id: item.id })}
+                  >
+                    <div className="log-explorer__material-kicker">
+                      Cited note
+                    </div>
                     <div className="log-explorer__evidence-card-title">
                       {item.title}
                     </div>
-                    <div className="log-explorer__chat-header-meta">
-                      {evidenceSummary(item)}
+                    <div className="log-explorer__material-card-excerpt">
+                      {item.body}
                     </div>
-                  </div>
-                  <span
-                    className={`log-explorer__evidence-status log-explorer__evidence-status--${item.evidenceStatus}`}
-                  >
-                    {statusLabel(item.evidenceStatus)}
-                  </span>
-                </div>
-                <div className="log-explorer__evidence-provenance">
-                  {item.provenanceLabel}
-                </div>
-                <div className="log-explorer__evidence-card-actions">
-                  <button
-                    type="button"
-                    className="log-explorer__btn"
-                    disabled={busy}
-                    onClick={() => onPreview(item)}
-                  >
-                    Preview
+                    <div className="log-explorer__chat-header-meta">
+                      {item.evidenceIds.length} evidence{" "}
+                      {item.evidenceIds.length === 1 ? "citation" : "citations"}
+                    </div>
                   </button>
+                ))}
+              {(filter === "all" || filter === "bookmarks") &&
+                bookmarks.map((item) => (
                   <button
+                    key={item.id}
                     type="button"
-                    className="log-explorer__btn"
-                    disabled={busy || item.evidenceStatus !== "verified"}
-                    title={
-                      item.evidenceStatus === "verified"
-                        ? "Reveal this evidence in the Explorer"
-                        : "Reveal requires verified event identities"
+                    className="log-explorer__evidence-card log-explorer__material-card"
+                    data-testid={`investigation-bookmark-${item.id}`}
+                    onClick={() =>
+                      setDetail({ type: "bookmark", id: item.id })
                     }
-                    onClick={() => onReveal(item)}
                   >
-                    Reveal
+                    <div className="log-explorer__evidence-card-heading">
+                      <div>
+                        <div className="log-explorer__material-kicker">
+                          {item.evidenceStatus === "legacy_range"
+                            ? "Legacy bookmark"
+                            : "Bookmark"}
+                        </div>
+                        <div className="log-explorer__evidence-card-title">
+                          {item.label}
+                        </div>
+                      </div>
+                      <span
+                        className={`log-explorer__evidence-status log-explorer__evidence-status--${item.evidenceStatus}`}
+                      >
+                        {item.evidenceStatus === "legacy_range"
+                          ? "Range"
+                          : statusLabel(
+                              item.evidenceStatus as EvidenceItemView["evidenceStatus"],
+                            )}
+                      </span>
+                    </div>
+                    <div className="log-explorer__chat-header-meta">
+                      {item.eventRefs.length > 0
+                        ? `${item.eventRefs.length} exact ${
+                            item.eventRefs.length === 1 ? "event" : "events"
+                          }`
+                        : `seq ${item.seqFrom}–${item.seqTo}`}
+                    </div>
                   </button>
-                </div>
-              </article>
-            ))
+                ))}
+            </>
           )}
         </div>
       )}
