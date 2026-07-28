@@ -661,6 +661,83 @@ describe("LinkedChatRail", () => {
     );
   });
 
+  it("ends streaming, keeps a host-readiness error visible, and permits retry", async () => {
+    let stored = sessionDto("s-host-timeout", "Logs · fixture");
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: stored.messages.at(-1)?.content ?? "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.agentTurn)
+      .mockRejectedValueOnce(
+        new Error(
+          "Workspace access timed out before the linked investigation could start. Re-select or grant access to the workspace, then retry.",
+        ),
+      )
+      .mockImplementationOnce(
+        async (_id, _text, _fl, _m, _p, onEvent) => {
+          const events: host.EventDto[] = [
+            {
+              kind: "text_delta",
+              payload: { text: "Retry completed with workspace access." },
+            },
+            { kind: "turn_completed", payload: {} },
+          ];
+          for (const event of events) onEvent?.(event);
+          return events;
+        },
+      );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Investigate the corpus" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    expect((await screen.findByRole("status")).textContent).toContain(
+      "Workspace access timed out",
+    );
+    expect(screen.queryByText(/assistant · streaming/i)).toBeNull();
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
+    ).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "Retry the investigation" },
+    });
+    const send = screen.getByTestId("send-linked-chat") as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    fireEvent.click(send);
+    expect(
+      await screen.findByText("Retry completed with workspace access."),
+    ).toBeTruthy();
+    await screen.findByText("Linked chat response saved");
+    expect(host.agentTurn).toHaveBeenCalledTimes(2);
+  });
+
   it("jump-to-latest restores follow mode after deliberate upward scroll", async () => {
     const history = Array.from({ length: 20 }, (_, i) => ({
       id: `m-${i}`,
