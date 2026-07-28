@@ -309,11 +309,14 @@ impl LogCorpus {
 
     /// Open existing corpus.
     pub fn open(cache_root: &Path, id: &str) -> CoreResult<Self> {
-        let root = cache_root.join("log_corpora").join(id);
-        if !root.join("meta.json").exists() {
-            return Err(CoreError::Message(format!("corpus not found: {id}")));
-        }
+        validate_corpus_id(id)?;
+        let root = contained_existing_corpus_root(cache_root, id)?;
         let meta = read_meta_file(&root)?;
+        if meta.id != id {
+            return Err(CoreError::Message(format!(
+                "corpus metadata id mismatch: requested {id}"
+            )));
+        }
         let name = meta.name.clone();
         let db_path = root.join("events.duckdb");
         // Legacy mem corpora only had events.jsonl — refuse silent wrong engine.
@@ -862,6 +865,7 @@ impl LogCorpus {
 
     /// Discard corpus directory.
     pub fn discard(cache_root: &Path, id: &str) -> CoreResult<()> {
+        validate_corpus_id(id)?;
         let root = cache_root.join("log_corpora").join(id);
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
@@ -885,6 +889,40 @@ impl LogCorpus {
         out.sort();
         Ok(out)
     }
+}
+
+fn validate_corpus_id(id: &str) -> CoreResult<()> {
+    let is_safe = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if is_safe {
+        Ok(())
+    } else {
+        Err(CoreError::Message("invalid corpus id".into()))
+    }
+}
+
+fn contained_existing_corpus_root(cache_root: &Path, id: &str) -> CoreResult<PathBuf> {
+    let cache_root = std::fs::canonicalize(cache_root)
+        .map_err(|_| CoreError::Message(format!("corpus not found: {id}")))?;
+    let corpora_root = std::fs::canonicalize(cache_root.join("log_corpora"))
+        .map_err(|_| CoreError::Message(format!("corpus not found: {id}")))?;
+    if !corpora_root.starts_with(&cache_root) {
+        return Err(CoreError::Message(
+            "log corpus directory escapes cache root".into(),
+        ));
+    }
+
+    let root = std::fs::canonicalize(corpora_root.join(id))
+        .map_err(|_| CoreError::Message(format!("corpus not found: {id}")))?;
+    if !root.starts_with(&corpora_root) {
+        return Err(CoreError::Message(format!(
+            "corpus directory escapes cache root: {id}"
+        )));
+    }
+    Ok(root)
 }
 
 fn init_schema(conn: &Connection) -> CoreResult<()> {
@@ -1003,7 +1041,121 @@ pub fn template_content_hash(pattern: &str) -> String {
 mod tests {
     use super::super::drain::TemplateInfo;
     use super::*;
+    use std::fs::File;
     use std::time::Instant;
+
+    fn assert_rejected_before_db_initialization(cache: &Path, id: &str) {
+        let error = LogCorpus::open(cache, id)
+            .err()
+            .expect("unsafe corpus id must be rejected");
+        assert!(
+            error.to_string().contains("invalid corpus id"),
+            "unexpected error for {id:?}: {error}"
+        );
+    }
+
+    #[test]
+    fn open_rejects_unsafe_corpus_ids_before_db_initialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outside = cache.join("escape-target");
+        std::fs::create_dir_all(cache.join("log_corpora")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        File::create(outside.join("events.duckdb")).unwrap();
+
+        for id in [
+            "",
+            ".",
+            "..",
+            "../escape-target",
+            "nested/corpus",
+            r"nested\corpus",
+            "/tmp/corpus",
+            r"C:\temp\corpus",
+            r"\\server\share\corpus",
+            "corpus:name",
+            " corpus ",
+        ] {
+            assert_rejected_before_db_initialization(&cache, id);
+        }
+
+        assert_eq!(
+            std::fs::metadata(outside.join("events.duckdb"))
+                .unwrap()
+                .len(),
+            0,
+            "rejected identifiers must not initialize an escaped database"
+        );
+    }
+
+    #[test]
+    fn open_rejects_metadata_id_mismatch_before_db_initialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "mismatch").unwrap();
+        let id = corpus.id().to_string();
+        let root = corpus.root().to_path_buf();
+        let mut meta = corpus.meta().unwrap();
+        drop(corpus);
+
+        meta.id = "different-safe-id".into();
+        write_meta_file(&root, &meta).unwrap();
+        File::create(root.join("events.duckdb")).unwrap();
+
+        let error = LogCorpus::open(dir.path(), &id)
+            .err()
+            .expect("metadata mismatch must be rejected");
+        assert!(error.to_string().contains("metadata id mismatch"));
+        assert_eq!(
+            std::fs::metadata(root.join("events.duckdb")).unwrap().len(),
+            0,
+            "metadata mismatch must be rejected before DuckDB initialization"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symlink_escape_before_db_initialization() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let external_cache = dir.path().join("external-cache");
+        std::fs::create_dir_all(cache.join("log_corpora")).unwrap();
+        let external = LogCorpus::create(&external_cache, "external").unwrap();
+        let id = external.id().to_string();
+        let external_root = external.root().to_path_buf();
+        drop(external);
+        symlink(&external_root, cache.join("log_corpora").join(&id)).unwrap();
+
+        let error = LogCorpus::open(&cache, &id)
+            .err()
+            .expect("symlink escape must be rejected");
+        assert!(error.to_string().contains("escapes cache root"));
+    }
+
+    #[test]
+    fn open_accepts_generated_and_safe_legacy_corpus_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = LogCorpus::create(dir.path(), "generated").unwrap();
+        let generated_id = generated.id().to_string();
+        let generated_root = generated.root().to_path_buf();
+        drop(generated);
+        assert_eq!(
+            LogCorpus::open(dir.path(), &generated_id).unwrap().id(),
+            generated_id
+        );
+
+        let legacy_id = "legacy-current_1";
+        let legacy_root = dir.path().join("log_corpora").join(legacy_id);
+        std::fs::rename(&generated_root, &legacy_root).unwrap();
+        let mut meta = read_meta_file(&legacy_root).unwrap();
+        meta.id = legacy_id.into();
+        write_meta_file(&legacy_root, &meta).unwrap();
+        assert_eq!(
+            LogCorpus::open(dir.path(), legacy_id).unwrap().id(),
+            legacy_id
+        );
+    }
 
     #[test]
     fn legacy_meta_without_stats_still_opens() {
