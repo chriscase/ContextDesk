@@ -50,7 +50,11 @@ fn default_max_results_per_source() -> usize {
     8
 }
 fn default_deadline_ms() -> u64 {
-    60_000
+    // One bounded turn can include provider cold start, tool selection,
+    // retrieval, and final synthesis. Two minutes is patient enough for local
+    // and private-network profiles while cancellation and the hard ceiling
+    // remain authoritative.
+    120_000
 }
 fn default_order() -> Vec<SourceKind> {
     vec![
@@ -160,6 +164,7 @@ mod tests {
 
     #[test]
     fn default_memory_first() {
+        assert_eq!(RouterBudget::default().deadline_ms, 120_000);
         let avail = [SourceKind::Wiki, SourceKind::Memory, SourceKind::Files];
         let ranked = rank_sources("how does auth work", &avail, &RouterBudget::default());
         assert_eq!(ranked[0], SourceKind::Memory);
