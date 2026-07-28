@@ -23,17 +23,28 @@ use std::path::{Component, Path, PathBuf};
 use uuid::{Uuid, Version};
 
 /// Investigation document schema understood by this build.
-pub const INVESTIGATION_SCHEMA_VERSION: u32 = 1;
+pub const INVESTIGATION_SCHEMA_VERSION: u32 = 2;
+const MIN_INVESTIGATION_SCHEMA_VERSION: u32 = 1;
 /// Maximum durable investigation documents under one store root.
 pub const MAX_INVESTIGATION_DOCUMENTS: usize = 256;
 /// Maximum append-only revisions retained for one investigation.
 pub const MAX_INVESTIGATION_REVISIONS: u64 = 4_096;
 /// Maximum evidence items in one investigation.
 pub const MAX_INVESTIGATION_EVIDENCE_ITEMS: usize = 1_024;
+/// Maximum findings in one investigation.
+pub const MAX_INVESTIGATION_FINDINGS: usize = 1_024;
+/// Maximum notes in one investigation.
+pub const MAX_INVESTIGATION_NOTES: usize = 2_048;
 /// Maximum exact references across one investigation.
 pub const MAX_INVESTIGATION_TOTAL_EVENT_REFS: usize = 8_192;
 /// Maximum UTF-8 bytes in an investigation or evidence title.
 pub const MAX_INVESTIGATION_TITLE_BYTES: usize = 256;
+/// Maximum UTF-8 bytes in a finding rationale.
+pub const MAX_FINDING_WHY_IT_MATTERS_BYTES: usize = 4_096;
+/// Maximum UTF-8 bytes in a note body.
+pub const MAX_INVESTIGATION_NOTE_BODY_BYTES: usize = 16_384;
+/// Maximum explicit evidence or finding citations on one item.
+pub const MAX_INVESTIGATION_ITEM_CITATIONS: usize = 256;
 /// Maximum corpus links represented by the versioned document model.
 pub const MAX_INVESTIGATION_CORPUS_LINKS: usize = 16;
 
@@ -69,6 +80,37 @@ pub enum EvidenceProvenance {
     Human,
 }
 
+/// Human authorship provenance for durable investigation analysis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanProvenance {
+    /// A person explicitly authored and saved the item.
+    Human,
+}
+
+/// Epistemic kind of a human-authored finding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+    /// A directly observed fact supported by cited evidence.
+    Observation,
+    /// A reasoned conclusion drawn from cited evidence.
+    Inference,
+    /// A testable explanation that still requires confirmation.
+    Hypothesis,
+}
+
+/// Human-controlled lifecycle of a durable finding.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingLifecycle {
+    /// The finding is accepted as part of the active investigation record.
+    #[default]
+    Accepted,
+    /// The finding has been addressed or otherwise resolved.
+    Resolved,
+}
+
 /// A durable exact-event evidence item.
 ///
 /// Only identity hints are persisted. Payloads are resolved transiently from
@@ -92,6 +134,116 @@ pub struct EvidenceItem {
     pub updated_at: i64,
 }
 
+/// A durable human-authored finding with explicit evidence citations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingItem {
+    /// Stable UUIDv7 finding identifier.
+    pub id: String,
+    /// Epistemic kind selected by the author.
+    pub kind: FindingKind,
+    /// Human-controlled lifecycle state.
+    #[serde(default)]
+    pub lifecycle: FindingLifecycle,
+    /// Human-facing, redacted title.
+    pub title: String,
+    /// Human-facing, redacted and bounded explanation of significance.
+    pub why_it_matters: String,
+    /// Explicit durable evidence identifiers supporting this finding.
+    pub evidence_ids: Vec<String>,
+    /// Explicit human-only authorship provenance.
+    pub provenance: HumanProvenance,
+    /// Creation time as Unix seconds.
+    pub created_at: i64,
+    /// Last update time as Unix seconds.
+    pub updated_at: i64,
+}
+
+/// A durable human-authored note with explicit citations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteItem {
+    /// Stable UUIDv7 note identifier.
+    pub id: String,
+    /// Human-facing, redacted title.
+    pub title: String,
+    /// Human-facing, redacted and bounded note body.
+    pub body: String,
+    /// Explicit durable evidence identifiers supporting this note.
+    pub evidence_ids: Vec<String>,
+    /// Optional durable finding identifiers discussed by this note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding_ids: Option<Vec<String>>,
+    /// Explicit human-only authorship provenance.
+    pub provenance: HumanProvenance,
+    /// Creation time as Unix seconds.
+    pub created_at: i64,
+    /// Last update time as Unix seconds.
+    pub updated_at: i64,
+}
+
+/// Input for one atomic human finding mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AddFindingInput {
+    /// Epistemic kind selected by the author.
+    pub kind: FindingKind,
+    /// Human-facing title to redact and validate.
+    pub title: String,
+    /// Human-facing explanation to redact and validate.
+    pub why_it_matters: String,
+    /// Exact selected event identities to validate and cite.
+    pub event_refs: Vec<BookmarkEventRef>,
+}
+
+/// Input for one atomic human note mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AddNoteInput {
+    /// Human-facing title to redact and validate.
+    pub title: String,
+    /// Human-facing body to redact and validate.
+    pub body: String,
+    /// Exact selected event identities to validate and cite.
+    pub event_refs: Vec<BookmarkEventRef>,
+    /// Existing findings to cite, or an empty vector for none.
+    #[serde(default)]
+    pub finding_ids: Vec<String>,
+}
+
+/// Replacement values for an expected-revision finding edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditFindingInput {
+    /// Existing UUIDv7 finding identifier.
+    pub finding_id: String,
+    /// Replacement epistemic kind.
+    pub kind: FindingKind,
+    /// Replacement lifecycle state.
+    pub lifecycle: FindingLifecycle,
+    /// Replacement human-facing title to redact and validate.
+    pub title: String,
+    /// Replacement human-facing explanation to redact and validate.
+    pub why_it_matters: String,
+}
+
+/// Replacement values for an expected-revision note edit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditNoteInput {
+    /// Existing UUIDv7 note identifier.
+    pub note_id: String,
+    /// Replacement human-facing title to redact and validate.
+    pub title: String,
+    /// Replacement human-facing body to redact and validate.
+    pub body: String,
+    /// Replacement existing evidence citations.
+    pub evidence_ids: Vec<String>,
+    /// Replacement existing finding citations, or an empty vector for none.
+    #[serde(default)]
+    pub finding_ids: Vec<String>,
+}
+
 /// Complete append-only investigation revision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +262,18 @@ pub struct InvestigationDocument {
     pub corpus_links: Vec<InvestigationCorpusLink>,
     /// Durable, human-provenance exact evidence.
     pub evidence: Vec<EvidenceItem>,
+    /// Durable human-authored findings.
+    ///
+    /// This additive field defaults empty so existing schema-version-1
+    /// revisions remain readable.
+    #[serde(default)]
+    pub findings: Vec<FindingItem>,
+    /// Durable human-authored notes.
+    ///
+    /// This additive field defaults empty so existing schema-version-1
+    /// revisions remain readable.
+    #[serde(default)]
+    pub notes: Vec<NoteItem>,
     /// Creation time as Unix seconds.
     pub created_at: i64,
     /// Last update time as Unix seconds.
@@ -132,6 +296,10 @@ pub struct InvestigationSummary {
     pub corpus_links: Vec<InvestigationCorpusLink>,
     /// Number of saved evidence items.
     pub evidence_count: usize,
+    /// Number of saved findings.
+    pub finding_count: usize,
+    /// Number of saved notes.
+    pub note_count: usize,
     /// Creation time as Unix seconds.
     pub created_at: i64,
     /// Last update time as Unix seconds.
@@ -147,6 +315,8 @@ impl From<&InvestigationDocument> for InvestigationSummary {
             status: document.status,
             corpus_links: document.corpus_links.clone(),
             evidence_count: document.evidence.len(),
+            finding_count: document.findings.len(),
+            note_count: document.notes.len(),
             created_at: document.created_at,
             updated_at: document.updated_at,
         }
@@ -266,6 +436,8 @@ impl InvestigationStore {
                             corpus_id: corpus.id().to_string(),
                         }],
                         evidence: Vec::new(),
+                        findings: Vec::new(),
+                        notes: Vec::new(),
                         created_at: now,
                         updated_at: now,
                     };
@@ -402,11 +574,352 @@ impl InvestigationStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| CoreError::Message("investigation revision overflow".into()))?;
+        document.schema_version = INVESTIGATION_SCHEMA_VERSION;
         document.updated_at = now;
 
         let directory = self.investigation_directory(investigation_id)?;
         publish_revision(&directory, &document)?;
         resolve_document(document, corpus)
+    }
+
+    /// Atomically save exact selected evidence and a human-authored finding.
+    ///
+    /// The selected references are canonicalized against `corpus`. An existing
+    /// evidence item for the exact canonical set is reused; otherwise a
+    /// payload-free evidence item is created in the same append-only revision
+    /// as the finding. A rapid retry of the same semantic mutation is
+    /// idempotent, including when its original expected revision just lost a
+    /// publication race to the identical mutation.
+    pub fn add_human_finding(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        input: AddFindingInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        let title = sanitize_title("finding title", input.title)?;
+        let why_it_matters = sanitize_body(
+            "finding why it matters",
+            input.why_it_matters,
+            MAX_FINDING_WHY_IT_MATTERS_BYTES,
+        )?;
+        let kind = input.kind;
+        let mut document = self.load_document(investigation_id)?;
+        ensure_active_single_corpus(&document, corpus)?;
+        let event_refs = canonicalize_exact_event_refs(corpus, input.event_refs)?;
+
+        if finding_for_exact_set(
+            &document,
+            corpus.id(),
+            &event_refs,
+            kind,
+            &title,
+            &why_it_matters,
+        )
+        .is_some()
+        {
+            return resolve_document(document, corpus);
+        }
+        if document.revision != expected_revision {
+            return Err(stale_revision_error(
+                investigation_id,
+                expected_revision,
+                document.revision,
+            ));
+        }
+        if document.findings.len() >= MAX_INVESTIGATION_FINDINGS {
+            return Err(CoreError::Message(format!(
+                "investigation exceeds {MAX_INVESTIGATION_FINDINGS} findings"
+            )));
+        }
+
+        let evidence_id =
+            reuse_or_append_exact_evidence(&mut document, &title, corpus.id(), event_refs.clone())?;
+        let now = crate::embed::now_unix_secs();
+        document.findings.push(FindingItem {
+            id: Uuid::now_v7().to_string(),
+            kind,
+            lifecycle: FindingLifecycle::Accepted,
+            title: title.clone(),
+            why_it_matters: why_it_matters.clone(),
+            evidence_ids: vec![evidence_id],
+            provenance: HumanProvenance::Human,
+            created_at: now,
+            updated_at: now,
+        });
+        advance_revision(&mut document, now)?;
+
+        let directory = self.investigation_directory(investigation_id)?;
+        match publish_revision(&directory, &document) {
+            Ok(()) => resolve_document(document, corpus),
+            Err(publication_error) => {
+                let latest = self.load_document(investigation_id)?;
+                if finding_for_exact_set(
+                    &latest,
+                    corpus.id(),
+                    &event_refs,
+                    kind,
+                    &title,
+                    &why_it_matters,
+                )
+                .is_some()
+                {
+                    resolve_document(latest, corpus)
+                } else {
+                    Err(publication_error)
+                }
+            }
+        }
+    }
+
+    /// Atomically save exact selected evidence and a human-authored note.
+    ///
+    /// Every supplied finding identifier must already exist in this
+    /// investigation. Empty `finding_ids` are stored as no finding citations.
+    /// Evidence reuse, append-only publication, and rapid-retry idempotence
+    /// follow the same contract as [`Self::add_human_finding`].
+    pub fn add_human_note(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        input: AddNoteInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        let title = sanitize_title("note title", input.title)?;
+        let body = sanitize_body("note body", input.body, MAX_INVESTIGATION_NOTE_BODY_BYTES)?;
+        let mut document = self.load_document(investigation_id)?;
+        ensure_active_single_corpus(&document, corpus)?;
+        let event_refs = canonicalize_exact_event_refs(corpus, input.event_refs)?;
+        let finding_ids = validate_requested_finding_ids(&document, input.finding_ids)?;
+
+        if note_for_exact_set(
+            &document,
+            corpus.id(),
+            &event_refs,
+            &title,
+            &body,
+            finding_ids.as_deref(),
+        )
+        .is_some()
+        {
+            return resolve_document(document, corpus);
+        }
+        if document.revision != expected_revision {
+            return Err(stale_revision_error(
+                investigation_id,
+                expected_revision,
+                document.revision,
+            ));
+        }
+        if document.notes.len() >= MAX_INVESTIGATION_NOTES {
+            return Err(CoreError::Message(format!(
+                "investigation exceeds {MAX_INVESTIGATION_NOTES} notes"
+            )));
+        }
+
+        let evidence_id =
+            reuse_or_append_exact_evidence(&mut document, &title, corpus.id(), event_refs.clone())?;
+        let now = crate::embed::now_unix_secs();
+        document.notes.push(NoteItem {
+            id: Uuid::now_v7().to_string(),
+            title: title.clone(),
+            body: body.clone(),
+            evidence_ids: vec![evidence_id],
+            finding_ids: finding_ids.clone(),
+            provenance: HumanProvenance::Human,
+            created_at: now,
+            updated_at: now,
+        });
+        advance_revision(&mut document, now)?;
+
+        let directory = self.investigation_directory(investigation_id)?;
+        match publish_revision(&directory, &document) {
+            Ok(()) => resolve_document(document, corpus),
+            Err(publication_error) => {
+                let latest = self.load_document(investigation_id)?;
+                if note_for_exact_set(
+                    &latest,
+                    corpus.id(),
+                    &event_refs,
+                    &title,
+                    &body,
+                    finding_ids.as_deref(),
+                )
+                .is_some()
+                {
+                    resolve_document(latest, corpus)
+                } else {
+                    Err(publication_error)
+                }
+            }
+        }
+    }
+
+    /// Replace editable fields on one human finding in a new revision.
+    ///
+    /// Evidence citations and authorship provenance remain immutable. Supplying
+    /// values already present is idempotent and does not publish a revision.
+    pub fn edit_human_finding(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        input: EditFindingInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        validate_uuid_v7("finding id", &input.finding_id)?;
+        let title = sanitize_title("finding title", input.title)?;
+        let why_it_matters = sanitize_body(
+            "finding why it matters",
+            input.why_it_matters,
+            MAX_FINDING_WHY_IT_MATTERS_BYTES,
+        )?;
+        let mut document = self.load_document(investigation_id)?;
+        ensure_active_single_corpus(&document, corpus)?;
+        let existing = document
+            .findings
+            .iter()
+            .find(|finding| finding.id == input.finding_id)
+            .ok_or_else(|| {
+                CoreError::Message(format!(
+                    "finding {} not found in investigation {investigation_id}",
+                    input.finding_id
+                ))
+            })?;
+        if existing.kind == input.kind
+            && existing.lifecycle == input.lifecycle
+            && existing.title == title
+            && existing.why_it_matters == why_it_matters
+        {
+            return resolve_document(document, corpus);
+        }
+        if document.revision != expected_revision {
+            return Err(stale_revision_error(
+                investigation_id,
+                expected_revision,
+                document.revision,
+            ));
+        }
+
+        let now = crate::embed::now_unix_secs();
+        let finding = document
+            .findings
+            .iter_mut()
+            .find(|finding| finding.id == input.finding_id)
+            .expect("finding existence was checked");
+        finding.kind = input.kind;
+        finding.lifecycle = input.lifecycle;
+        finding.title = title;
+        finding.why_it_matters = why_it_matters;
+        finding.updated_at = now;
+        advance_revision(&mut document, now)?;
+
+        let directory = self.investigation_directory(investigation_id)?;
+        match publish_revision(&directory, &document) {
+            Ok(()) => resolve_document(document, corpus),
+            Err(publication_error) => {
+                let latest = self.load_document(investigation_id)?;
+                let edited = document
+                    .findings
+                    .iter()
+                    .find(|finding| finding.id == input.finding_id)
+                    .expect("edited finding remains present");
+                let matches_retry = latest.findings.iter().any(|finding| {
+                    finding.id == input.finding_id
+                        && finding.kind == input.kind
+                        && finding.lifecycle == input.lifecycle
+                        && finding.title == edited.title
+                        && finding.why_it_matters == edited.why_it_matters
+                });
+                if matches_retry {
+                    resolve_document(latest, corpus)
+                } else {
+                    Err(publication_error)
+                }
+            }
+        }
+    }
+
+    /// Replace editable fields and citations on one human note in a new revision.
+    ///
+    /// Authorship provenance remains immutable. Every replacement citation must
+    /// already exist in the same investigation. Supplying values already
+    /// present is idempotent and does not publish a revision.
+    pub fn edit_human_note(
+        &self,
+        investigation_id: &str,
+        expected_revision: u64,
+        corpus: &LogCorpus,
+        input: EditNoteInput,
+    ) -> CoreResult<ResolvedInvestigationDocument> {
+        validate_uuid_v7("note id", &input.note_id)?;
+        let title = sanitize_title("note title", input.title)?;
+        let body = sanitize_body("note body", input.body, MAX_INVESTIGATION_NOTE_BODY_BYTES)?;
+        let mut document = self.load_document(investigation_id)?;
+        ensure_active_single_corpus(&document, corpus)?;
+        let evidence_ids = validate_requested_evidence_ids(&document, input.evidence_ids)?;
+        let finding_ids = validate_requested_finding_ids(&document, input.finding_ids)?;
+        let existing = document
+            .notes
+            .iter()
+            .find(|note| note.id == input.note_id)
+            .ok_or_else(|| {
+                CoreError::Message(format!(
+                    "note {} not found in investigation {investigation_id}",
+                    input.note_id
+                ))
+            })?;
+        if existing.title == title
+            && existing.body == body
+            && existing.evidence_ids == evidence_ids
+            && existing.finding_ids == finding_ids
+        {
+            return resolve_document(document, corpus);
+        }
+        if document.revision != expected_revision {
+            return Err(stale_revision_error(
+                investigation_id,
+                expected_revision,
+                document.revision,
+            ));
+        }
+
+        let now = crate::embed::now_unix_secs();
+        let note = document
+            .notes
+            .iter_mut()
+            .find(|note| note.id == input.note_id)
+            .expect("note existence was checked");
+        note.title = title;
+        note.body = body;
+        note.evidence_ids = evidence_ids;
+        note.finding_ids = finding_ids;
+        note.updated_at = now;
+        advance_revision(&mut document, now)?;
+
+        let directory = self.investigation_directory(investigation_id)?;
+        match publish_revision(&directory, &document) {
+            Ok(()) => resolve_document(document, corpus),
+            Err(publication_error) => {
+                let latest = self.load_document(investigation_id)?;
+                let edited = document
+                    .notes
+                    .iter()
+                    .find(|note| note.id == input.note_id)
+                    .expect("edited note remains present");
+                let matches_retry = latest.notes.iter().any(|note| {
+                    note.id == input.note_id
+                        && note.title == edited.title
+                        && note.body == edited.body
+                        && note.evidence_ids == edited.evidence_ids
+                        && note.finding_ids == edited.finding_ids
+                });
+                if matches_retry {
+                    resolve_document(latest, corpus)
+                } else {
+                    Err(publication_error)
+                }
+            }
+        }
     }
 
     /// Preview one evidence item without mutating the durable document or Explorer view.
@@ -547,9 +1060,54 @@ fn sanitize_title(kind: &str, title: String) -> CoreResult<String> {
     Ok(redacted)
 }
 
+fn sanitize_body(kind: &str, body: String, max_bytes: usize) -> CoreResult<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(CoreError::Message(format!("{kind} must not be empty")));
+    }
+    if body.len() > max_bytes {
+        return Err(CoreError::Message(format!(
+            "{kind} exceeds {max_bytes} UTF-8 bytes"
+        )));
+    }
+    if body
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(CoreError::Message(format!(
+            "{kind} contains unsupported control characters"
+        )));
+    }
+    let redaction = redact_candidate(body);
+    if redaction.blocked {
+        return Err(CoreError::Message(
+            redaction
+                .block_reason
+                .unwrap_or_else(|| format!("{kind} appears credential-dominant")),
+        ));
+    }
+    let redacted = redaction.text.trim().to_string();
+    if redacted.is_empty() || redacted.len() > max_bytes {
+        return Err(CoreError::Message(format!(
+            "{kind} is empty or exceeds {max_bytes} UTF-8 bytes after redaction"
+        )));
+    }
+    Ok(redacted)
+}
+
 fn validate_stored_title(kind: &str, title: &str) -> CoreResult<()> {
     let sanitized = sanitize_title(kind, title.to_string())?;
     if sanitized != title {
+        return Err(CoreError::Message(format!(
+            "{kind} is not in canonical redacted form"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_body(kind: &str, body: &str, max_bytes: usize) -> CoreResult<()> {
+    let sanitized = sanitize_body(kind, body.to_string(), max_bytes)?;
+    if sanitized != body {
         return Err(CoreError::Message(format!(
             "{kind} is not in canonical redacted form"
         )));
@@ -602,16 +1160,214 @@ fn validate_source_identity(source: &str) -> CoreResult<()> {
     Ok(())
 }
 
+fn ensure_active_single_corpus(
+    document: &InvestigationDocument,
+    corpus: &LogCorpus,
+) -> CoreResult<()> {
+    if document.status != InvestigationStatus::Active {
+        return Err(CoreError::Message(format!(
+            "investigation {} is archived",
+            document.id
+        )));
+    }
+    ensure_corpus_link(document, corpus.id())?;
+    if document
+        .evidence
+        .iter()
+        .any(|item| item.corpus_id != corpus.id())
+    {
+        return Err(CoreError::Message(
+            "investigation mutation requires one authoritative corpus".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_evidence_for_set<'a>(
+    document: &'a InvestigationDocument,
+    corpus_id: &str,
+    event_refs: &[BookmarkEventRef],
+) -> Option<&'a EvidenceItem> {
+    document.evidence.iter().find(|item| {
+        item.corpus_id == corpus_id && exact_event_sets_equal(&item.event_refs, event_refs)
+    })
+}
+
+fn finding_for_exact_set<'a>(
+    document: &'a InvestigationDocument,
+    corpus_id: &str,
+    event_refs: &[BookmarkEventRef],
+    kind: FindingKind,
+    title: &str,
+    why_it_matters: &str,
+) -> Option<&'a FindingItem> {
+    let evidence_id = exact_evidence_for_set(document, corpus_id, event_refs)?
+        .id
+        .as_str();
+    document.findings.iter().find(|finding| {
+        finding.kind == kind
+            && finding.title == title
+            && finding.why_it_matters == why_it_matters
+            && finding.evidence_ids.as_slice() == [evidence_id]
+    })
+}
+
+fn note_for_exact_set<'a>(
+    document: &'a InvestigationDocument,
+    corpus_id: &str,
+    event_refs: &[BookmarkEventRef],
+    title: &str,
+    body: &str,
+    finding_ids: Option<&[String]>,
+) -> Option<&'a NoteItem> {
+    let evidence_id = exact_evidence_for_set(document, corpus_id, event_refs)?
+        .id
+        .as_str();
+    document.notes.iter().find(|note| {
+        note.title == title
+            && note.body == body
+            && note.evidence_ids.as_slice() == [evidence_id]
+            && note.finding_ids.as_deref() == finding_ids
+    })
+}
+
+fn reuse_or_append_exact_evidence(
+    document: &mut InvestigationDocument,
+    title: &str,
+    corpus_id: &str,
+    event_refs: Vec<BookmarkEventRef>,
+) -> CoreResult<String> {
+    if let Some(existing) = exact_evidence_for_set(document, corpus_id, &event_refs) {
+        return Ok(existing.id.clone());
+    }
+    if document.evidence.len() >= MAX_INVESTIGATION_EVIDENCE_ITEMS {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_INVESTIGATION_EVIDENCE_ITEMS} evidence items"
+        )));
+    }
+    let existing_refs = document.evidence.iter().try_fold(0usize, |total, item| {
+        total
+            .checked_add(item.event_refs.len())
+            .ok_or_else(|| CoreError::Message("investigation reference count overflow".into()))
+    })?;
+    let total_refs = existing_refs
+        .checked_add(event_refs.len())
+        .ok_or_else(|| CoreError::Message("investigation reference count overflow".into()))?;
+    if total_refs > MAX_INVESTIGATION_TOTAL_EVENT_REFS {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_INVESTIGATION_TOTAL_EVENT_REFS} exact event references"
+        )));
+    }
+
+    let id = Uuid::now_v7().to_string();
+    let now = crate::embed::now_unix_secs();
+    document.evidence.push(EvidenceItem {
+        id: id.clone(),
+        title: title.to_string(),
+        provenance: EvidenceProvenance::Human,
+        corpus_id: corpus_id.to_string(),
+        event_refs,
+        created_at: now,
+        updated_at: now,
+    });
+    Ok(id)
+}
+
+fn validate_requested_finding_ids(
+    document: &InvestigationDocument,
+    finding_ids: Vec<String>,
+) -> CoreResult<Option<Vec<String>>> {
+    if finding_ids.len() > MAX_INVESTIGATION_ITEM_CITATIONS {
+        return Err(CoreError::Message(format!(
+            "note exceeds {MAX_INVESTIGATION_ITEM_CITATIONS} finding citations"
+        )));
+    }
+    let available = document
+        .findings
+        .iter()
+        .map(|finding| finding.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    for finding_id in &finding_ids {
+        validate_uuid_v7("finding citation id", finding_id)?;
+        if !seen.insert(finding_id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "note repeats finding citation {finding_id}"
+            )));
+        }
+        if !available.contains(finding_id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "note cites missing finding {finding_id}"
+            )));
+        }
+    }
+    Ok((!finding_ids.is_empty()).then_some(finding_ids))
+}
+
+fn validate_requested_evidence_ids(
+    document: &InvestigationDocument,
+    evidence_ids: Vec<String>,
+) -> CoreResult<Vec<String>> {
+    if evidence_ids.is_empty() || evidence_ids.len() > MAX_INVESTIGATION_ITEM_CITATIONS {
+        return Err(CoreError::Message(format!(
+            "note evidence citations must contain 1..={MAX_INVESTIGATION_ITEM_CITATIONS} ids"
+        )));
+    }
+    let available = document
+        .evidence
+        .iter()
+        .map(|evidence| evidence.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    for evidence_id in &evidence_ids {
+        validate_uuid_v7("evidence citation id", evidence_id)?;
+        if !seen.insert(evidence_id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "note repeats evidence citation {evidence_id}"
+            )));
+        }
+        if !available.contains(evidence_id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "note cites missing evidence {evidence_id}"
+            )));
+        }
+    }
+    Ok(evidence_ids)
+}
+
+fn advance_revision(document: &mut InvestigationDocument, now: i64) -> CoreResult<()> {
+    document.revision = document
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| CoreError::Message("investigation revision overflow".into()))?;
+    if document.revision > MAX_INVESTIGATION_REVISIONS {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_INVESTIGATION_REVISIONS} revisions"
+        )));
+    }
+    document.schema_version = INVESTIGATION_SCHEMA_VERSION;
+    document.updated_at = now;
+    Ok(())
+}
+
 fn validate_document(
     document: &InvestigationDocument,
     expected_id: Option<&str>,
     expected_revision: Option<u64>,
 ) -> CoreResult<()> {
-    if document.schema_version != INVESTIGATION_SCHEMA_VERSION {
+    if !(MIN_INVESTIGATION_SCHEMA_VERSION..=INVESTIGATION_SCHEMA_VERSION)
+        .contains(&document.schema_version)
+    {
         return Err(CoreError::Message(format!(
-            "investigation schema version {} is unsupported; expected {INVESTIGATION_SCHEMA_VERSION}",
+            "investigation schema version {} is unsupported; expected {MIN_INVESTIGATION_SCHEMA_VERSION}..={INVESTIGATION_SCHEMA_VERSION}",
             document.schema_version
         )));
+    }
+    if document.schema_version == 1 && (!document.findings.is_empty() || !document.notes.is_empty())
+    {
+        return Err(CoreError::Message(
+            "investigation schema version 1 cannot contain findings or notes".into(),
+        ));
     }
     validate_uuid_v7("investigation id", &document.id)?;
     if expected_id.is_some_and(|expected| expected != document.id) {
@@ -713,6 +1469,90 @@ fn validate_document(
         return Err(CoreError::Message(format!(
             "investigation exceeds {MAX_INVESTIGATION_TOTAL_EVENT_REFS} exact event references"
         )));
+    }
+
+    if document.findings.len() > MAX_INVESTIGATION_FINDINGS {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_INVESTIGATION_FINDINGS} findings"
+        )));
+    }
+    let mut finding_ids = HashSet::new();
+    for finding in &document.findings {
+        validate_uuid_v7("finding id", &finding.id)?;
+        if !finding_ids.insert(finding.id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "investigation repeats finding id {}",
+                finding.id
+            )));
+        }
+        validate_stored_title("finding title", &finding.title)?;
+        validate_stored_body(
+            "finding why it matters",
+            &finding.why_it_matters,
+            MAX_FINDING_WHY_IT_MATTERS_BYTES,
+        )?;
+        if finding.created_at > finding.updated_at {
+            return Err(CoreError::Message(format!(
+                "finding {} updated_at precedes created_at",
+                finding.id
+            )));
+        }
+        validate_citation_ids("finding evidence", &finding.evidence_ids, &evidence_ids)?;
+    }
+
+    if document.notes.len() > MAX_INVESTIGATION_NOTES {
+        return Err(CoreError::Message(format!(
+            "investigation exceeds {MAX_INVESTIGATION_NOTES} notes"
+        )));
+    }
+    let mut note_ids = HashSet::new();
+    for note in &document.notes {
+        validate_uuid_v7("note id", &note.id)?;
+        if !note_ids.insert(note.id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "investigation repeats note id {}",
+                note.id
+            )));
+        }
+        validate_stored_title("note title", &note.title)?;
+        validate_stored_body("note body", &note.body, MAX_INVESTIGATION_NOTE_BODY_BYTES)?;
+        if note.created_at > note.updated_at {
+            return Err(CoreError::Message(format!(
+                "note {} updated_at precedes created_at",
+                note.id
+            )));
+        }
+        validate_citation_ids("note evidence", &note.evidence_ids, &evidence_ids)?;
+        if let Some(citations) = note.finding_ids.as_deref() {
+            validate_citation_ids("note finding", citations, &finding_ids)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_citation_ids(
+    kind: &str,
+    citations: &[String],
+    available: &HashSet<&str>,
+) -> CoreResult<()> {
+    if citations.is_empty() || citations.len() > MAX_INVESTIGATION_ITEM_CITATIONS {
+        return Err(CoreError::Message(format!(
+            "{kind} citations must contain 1..={MAX_INVESTIGATION_ITEM_CITATIONS} ids"
+        )));
+    }
+    let mut seen = HashSet::new();
+    for citation in citations {
+        validate_uuid_v7(&format!("{kind} citation id"), citation)?;
+        if !seen.insert(citation.as_str()) {
+            return Err(CoreError::Message(format!(
+                "{kind} repeats citation {citation}"
+            )));
+        }
+        if !available.contains(citation.as_str()) {
+            return Err(CoreError::Message(format!(
+                "{kind} cites missing id {citation}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1058,6 +1898,239 @@ mod tests {
         ]
     }
 
+    fn finding_input(corpus: &LogCorpus) -> AddFindingInput {
+        AddFindingInput {
+            kind: FindingKind::Observation,
+            title: "Failure boundary".into(),
+            why_it_matters: "The selected events bracket the incident.".into(),
+            event_refs: selected_refs(corpus),
+        }
+    }
+
+    fn note_input(corpus: &LogCorpus, finding_ids: Vec<String>, title: &str) -> AddNoteInput {
+        AddNoteInput {
+            title: title.into(),
+            body: "Follow up with the service owner.".into(),
+            event_refs: selected_refs(corpus),
+            finding_ids,
+        }
+    }
+
+    #[test]
+    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v2() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Legacy investigation", &corpus).unwrap();
+        let revision_path = durable.path().join(&document.id).join(revision_filename(1));
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(1);
+        legacy.as_object_mut().unwrap().remove("findings");
+        legacy.as_object_mut().unwrap().remove("notes");
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&revision_path, &legacy_bytes).unwrap();
+
+        let loaded = store.load(&document.id, &corpus).unwrap();
+        assert_eq!(loaded.document.schema_version, 1);
+        assert!(loaded.document.findings.is_empty());
+        assert!(loaded.document.notes.is_empty());
+        assert_eq!(std::fs::read(&revision_path).unwrap(), legacy_bytes);
+        assert!(!durable
+            .path()
+            .join(&document.id)
+            .join(revision_filename(2))
+            .exists());
+
+        let upgraded = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        assert_eq!(upgraded.document.schema_version, 2);
+        assert_eq!(upgraded.document.revision, 2);
+        assert!(revision_path.exists());
+    }
+
+    #[test]
+    fn investigation_findings_and_notes_reopen_with_exact_citations_and_counts() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let corpus_id = corpus.id().to_string();
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Cited analysis", &corpus).unwrap();
+
+        let with_finding = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let finding = with_finding.document.findings[0].clone();
+        let evidence_id = with_finding.document.evidence[0].id.clone();
+        assert_eq!(finding.lifecycle, FindingLifecycle::Accepted);
+        assert_eq!(finding.evidence_ids, vec![evidence_id.clone()]);
+        assert_eq!(with_finding.document.evidence.len(), 1);
+
+        let with_note = store
+            .add_human_note(
+                &document.id,
+                2,
+                &corpus,
+                note_input(&corpus, vec![finding.id.clone()], "Owner follow-up"),
+            )
+            .unwrap();
+        assert_eq!(with_note.document.evidence.len(), 1);
+        assert_eq!(with_note.document.notes[0].evidence_ids, vec![evidence_id]);
+        assert_eq!(
+            with_note.document.notes[0].finding_ids,
+            Some(vec![finding.id])
+        );
+
+        drop(corpus);
+        let reopened_corpus = LogCorpus::open(cache.path(), &corpus_id).unwrap();
+        let reopened = InvestigationStore::new(durable.path())
+            .load(&document.id, &reopened_corpus)
+            .unwrap();
+        assert_eq!(reopened.document.findings.len(), 1);
+        assert_eq!(reopened.document.notes.len(), 1);
+        let summary = InvestigationStore::new(durable.path()).list().unwrap();
+        assert_eq!(summary[0].finding_count, 1);
+        assert_eq!(summary[0].note_count, 1);
+    }
+
+    #[test]
+    fn investigation_finding_and_note_retries_are_idempotent() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Retry safety", &corpus).unwrap();
+
+        let first = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let retry = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        assert_eq!(retry.document.revision, first.document.revision);
+        assert_eq!(retry.document.findings.len(), 1);
+        assert_eq!(retry.document.evidence.len(), 1);
+
+        let finding_id = first.document.findings[0].id.clone();
+        let note = note_input(&corpus, vec![finding_id], "Retry note");
+        let first_note = store
+            .add_human_note(&document.id, 2, &corpus, note.clone())
+            .unwrap();
+        let retry_note = store
+            .add_human_note(&document.id, 2, &corpus, note)
+            .unwrap();
+        assert_eq!(retry_note.document.revision, first_note.document.revision);
+        assert_eq!(retry_note.document.notes.len(), 1);
+        assert_eq!(retry_note.document.evidence.len(), 1);
+    }
+
+    #[test]
+    fn investigation_edits_findings_and_notes_in_append_only_revisions() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Editable analysis", &corpus).unwrap();
+        let with_finding = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let finding_id = with_finding.document.findings[0].id.clone();
+        let with_note = store
+            .add_human_note(
+                &document.id,
+                2,
+                &corpus,
+                note_input(&corpus, vec![finding_id.clone()], "Original note"),
+            )
+            .unwrap();
+        let note_id = with_note.document.notes[0].id.clone();
+        let evidence_id = with_note.document.evidence[0].id.clone();
+
+        let edited_finding = store
+            .edit_human_finding(
+                &document.id,
+                3,
+                &corpus,
+                EditFindingInput {
+                    finding_id: finding_id.clone(),
+                    kind: FindingKind::Inference,
+                    lifecycle: FindingLifecycle::Resolved,
+                    title: "Corrected finding".into(),
+                    why_it_matters: "The owner confirmed the causal boundary.".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(edited_finding.document.revision, 4);
+        assert_eq!(
+            edited_finding.document.findings[0].lifecycle,
+            FindingLifecycle::Resolved
+        );
+
+        let edited_note = store
+            .edit_human_note(
+                &document.id,
+                4,
+                &corpus,
+                EditNoteInput {
+                    note_id,
+                    title: "Corrected note".into(),
+                    body: "The follow-up is complete.".into(),
+                    evidence_ids: vec![evidence_id],
+                    finding_ids: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(edited_note.document.revision, 5);
+        assert_eq!(edited_note.document.notes[0].finding_ids, None);
+        assert_eq!(edited_note.document.notes[0].title, "Corrected note");
+        assert!(durable
+            .path()
+            .join(&document.id)
+            .join(revision_filename(3))
+            .exists());
+        assert!(durable
+            .path()
+            .join(&document.id)
+            .join(revision_filename(5))
+            .exists());
+
+        let no_op = store
+            .edit_human_finding(
+                &document.id,
+                4,
+                &corpus,
+                EditFindingInput {
+                    finding_id,
+                    kind: FindingKind::Inference,
+                    lifecycle: FindingLifecycle::Resolved,
+                    title: "Corrected finding".into(),
+                    why_it_matters: "The owner confirmed the causal boundary.".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(no_op.document.revision, 5);
+
+        let stale_edit = store
+            .edit_human_finding(
+                &document.id,
+                4,
+                &corpus,
+                EditFindingInput {
+                    finding_id: no_op.document.findings[0].id.clone(),
+                    kind: FindingKind::Hypothesis,
+                    lifecycle: FindingLifecycle::Accepted,
+                    title: "Conflicting stale edit".into(),
+                    why_it_matters: "This writer did not observe revision five.".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(stale_edit
+            .to_string()
+            .contains("stale investigation revision"));
+    }
+
     #[test]
     fn investigation_noncontiguous_evidence_reopens_and_duplicate_is_idempotent() {
         let cache = tempfile::tempdir().unwrap();
@@ -1136,6 +2209,26 @@ mod tests {
         let stale = event_ref(&corpus, 10, "changed.log", 1_700_000_010);
         assert!(store
             .add_exact_evidence(&document.id, 1, "Stale row", &corpus, vec![stale])
+            .unwrap_err()
+            .to_string()
+            .contains("no longer matches"));
+        let missing = event_ref(&corpus, 999, "api/app.log", 1_700_000_010);
+        let mut missing_finding = finding_input(&corpus);
+        missing_finding.event_refs = vec![missing];
+        assert!(store
+            .add_human_finding(&document.id, 1, &corpus, missing_finding)
+            .unwrap_err()
+            .to_string()
+            .contains("missing"));
+        let stale = event_ref(&corpus, 10, "changed.log", 1_700_000_010);
+        let stale_note = AddNoteInput {
+            title: "Stale note".into(),
+            body: "This must not persist.".into(),
+            event_refs: vec![stale],
+            finding_ids: Vec::new(),
+        };
+        assert!(store
+            .add_human_note(&document.id, 1, &corpus, stale_note)
             .unwrap_err()
             .to_string()
             .contains("no longer matches"));
@@ -1317,6 +2410,19 @@ mod tests {
         let loaded = second.load(&document.id, &corpus).unwrap();
         assert_eq!(loaded.document.revision, winner.document.revision);
         assert_eq!(loaded.document.evidence[0].title, "Winner");
+
+        let stale_finding = first
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap_err();
+        assert!(stale_finding
+            .to_string()
+            .contains("stale investigation revision"));
+        assert!(first
+            .load(&document.id, &corpus)
+            .unwrap()
+            .document
+            .findings
+            .is_empty());
     }
 
     #[test]
@@ -1371,13 +2477,33 @@ mod tests {
         let corpus = evidence_corpus(&cache);
         let store = InvestigationStore::new(durable.path());
         let document = store.create("Payload boundary", &corpus).unwrap();
-        store
+        let with_evidence = store
             .add_exact_evidence(
                 &document.id,
                 1,
                 "Exact evidence",
                 &corpus,
                 vec![event_ref(&corpus, 10, "api/app.log", 1_700_000_010)],
+            )
+            .unwrap();
+        let with_finding = store
+            .add_human_finding(
+                &document.id,
+                with_evidence.document.revision,
+                &corpus,
+                finding_input(&corpus),
+            )
+            .unwrap();
+        store
+            .add_human_note(
+                &document.id,
+                with_finding.document.revision,
+                &corpus,
+                note_input(
+                    &corpus,
+                    vec![with_finding.document.findings[0].id.clone()],
+                    "Payload-free note",
+                ),
             )
             .unwrap();
 
@@ -1423,5 +2549,183 @@ mod tests {
             .unwrap();
         assert!(!added.document.evidence[0].title.contains(&secret));
         assert!(added.document.evidence[0].title.contains("sk-***"));
+
+        let finding = store
+            .add_human_finding(
+                &document.id,
+                added.document.revision,
+                &corpus,
+                AddFindingInput {
+                    kind: FindingKind::Hypothesis,
+                    title: format!("Finding around {secret} in deployment"),
+                    why_it_matters: format!(
+                        "The owner should rotate {secret} after confirming the boundary."
+                    ),
+                    event_refs: selected_refs(&corpus),
+                },
+            )
+            .unwrap();
+        let saved_finding = &finding.document.findings[0];
+        assert!(!saved_finding.title.contains(&secret));
+        assert!(!saved_finding.why_it_matters.contains(&secret));
+        assert!(saved_finding.title.contains("sk-***"));
+        assert!(saved_finding.why_it_matters.contains("sk-***"));
+
+        let note = store
+            .add_human_note(
+                &document.id,
+                finding.document.revision,
+                &corpus,
+                AddNoteInput {
+                    title: format!("Note about {secret} during review"),
+                    body: format!("Discussed rotating {secret} with the service owner."),
+                    event_refs: selected_refs(&corpus),
+                    finding_ids: vec![saved_finding.id.clone()],
+                },
+            )
+            .unwrap();
+        assert!(!note.document.notes[0].title.contains(&secret));
+        assert!(!note.document.notes[0].body.contains(&secret));
+
+        let mut blocked = finding_input(&corpus);
+        blocked.why_it_matters = secret.clone();
+        assert!(store
+            .add_human_finding(&document.id, note.document.revision, &corpus, blocked)
+            .is_err());
+    }
+
+    #[test]
+    fn investigation_finding_note_bounds_and_citations_fail_closed() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Analysis validation", &corpus).unwrap();
+
+        let mut long_finding = finding_input(&corpus);
+        long_finding.why_it_matters = "x".repeat(MAX_FINDING_WHY_IT_MATTERS_BYTES + 1);
+        assert!(store
+            .add_human_finding(&document.id, 1, &corpus, long_finding)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
+
+        let missing_finding_id = Uuid::now_v7().to_string();
+        let missing_citation = note_input(&corpus, vec![missing_finding_id], "Missing citation");
+        assert!(store
+            .add_human_note(&document.id, 1, &corpus, missing_citation)
+            .unwrap_err()
+            .to_string()
+            .contains("missing finding"));
+
+        let with_finding = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let finding_id = with_finding.document.findings[0].id.clone();
+        let too_many_citations = AddNoteInput {
+            title: "Too many citations".into(),
+            body: "This should fail before publication.".into(),
+            event_refs: selected_refs(&corpus),
+            finding_ids: (0..=MAX_INVESTIGATION_ITEM_CITATIONS)
+                .map(|_| Uuid::now_v7().to_string())
+                .collect(),
+        };
+        assert!(store
+            .add_human_note(&document.id, 2, &corpus, too_many_citations)
+            .unwrap_err()
+            .to_string()
+            .contains("finding citations"));
+        let duplicate = note_input(
+            &corpus,
+            vec![finding_id.clone(), finding_id],
+            "Duplicate citation",
+        );
+        assert!(store
+            .add_human_note(&document.id, 2, &corpus, duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("repeats finding citation"));
+
+        let mut long_note = note_input(&corpus, Vec::new(), "Long body");
+        long_note.body = "x".repeat(MAX_INVESTIGATION_NOTE_BODY_BYTES + 1);
+        assert!(store
+            .add_human_note(&document.id, 2, &corpus, long_note)
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds"));
+
+        let note = store
+            .add_human_note(
+                &document.id,
+                2,
+                &corpus,
+                note_input(&corpus, Vec::new(), "Editable citations"),
+            )
+            .unwrap();
+        let missing_evidence = Uuid::now_v7().to_string();
+        assert!(store
+            .edit_human_note(
+                &document.id,
+                note.document.revision,
+                &corpus,
+                EditNoteInput {
+                    note_id: note.document.notes[0].id.clone(),
+                    title: "Still valid".into(),
+                    body: "But its replacement citation is not.".into(),
+                    evidence_ids: vec![missing_evidence],
+                    finding_ids: Vec::new(),
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("missing evidence"));
+        assert_eq!(
+            store.load(&document.id, &corpus).unwrap().document.revision,
+            note.document.revision
+        );
+
+        let mut too_many_findings = with_finding.document.clone();
+        let seed_finding = too_many_findings.findings[0].clone();
+        while too_many_findings.findings.len() <= MAX_INVESTIGATION_FINDINGS {
+            let mut finding = seed_finding.clone();
+            finding.id = Uuid::now_v7().to_string();
+            too_many_findings.findings.push(finding);
+        }
+        assert!(validate_document(&too_many_findings, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("findings"));
+
+        let mut too_many_notes = note.document.clone();
+        let seed_note = too_many_notes.notes[0].clone();
+        while too_many_notes.notes.len() <= MAX_INVESTIGATION_NOTES {
+            let mut note = seed_note.clone();
+            note.id = Uuid::now_v7().to_string();
+            too_many_notes.notes.push(note);
+        }
+        assert!(validate_document(&too_many_notes, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("notes"));
+
+        let mut archived = note.document.clone();
+        archived.status = InvestigationStatus::Archived;
+        advance_revision(&mut archived, crate::embed::now_unix_secs()).unwrap();
+        publish_revision(&durable.path().join(&document.id), &archived).unwrap();
+        assert!(store
+            .add_human_finding(
+                &document.id,
+                archived.revision,
+                &corpus,
+                AddFindingInput {
+                    kind: FindingKind::Observation,
+                    title: "Archived write".into(),
+                    why_it_matters: "Archived investigations must reject this.".into(),
+                    event_refs: selected_refs(&corpus),
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("archived"));
     }
 }

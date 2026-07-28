@@ -128,6 +128,10 @@ vi.mock("../../lib/host", () => ({
   hostLogDeleteBookmark: vi.fn(),
   hostLogLoadActiveInvestigation: vi.fn(async () => null),
   hostLogAddInvestigationEvidence: vi.fn(),
+  hostLogAddInvestigationFinding: vi.fn(),
+  hostLogAddInvestigationNote: vi.fn(),
+  hostLogEditInvestigationFinding: vi.fn(),
+  hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
@@ -205,13 +209,15 @@ function resolvedInvestigation(
 ): host.ResolvedInvestigationDocumentDto {
   return {
     document: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: "019fa8d0-0000-7000-8000-000000000001",
       revision: 2,
       title: "Investigation · fixture",
       status: "active",
       corpusLinks: [{ corpusId: "c1" }],
       evidence: [item],
+      findings: [],
+      notes: [],
       createdAt: 1,
       updatedAt: 2,
     },
@@ -1747,10 +1753,190 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     fireEvent.click(
       await screen.findByRole("button", {
-        name: /Evidence 1 saved evidence item/,
+        name: /Investigation workspace view: Chat/,
       }),
     );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
+    );
     expect(await screen.findByText(item.title)).toBeTruthy();
+  });
+
+  it("atomically creates durable human findings and cited notes from exact selected identities", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const evidenceItem: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000012",
+      title: "Retry storm follows database timeout",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [eventRef],
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000013",
+      kind: "inference",
+      lifecycle: "accepted",
+      title: "Retry storm follows database timeout",
+      whyItMatters: "Retries amplify the original failure.",
+      evidenceIds: [evidenceItem.id],
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const note: host.InvestigationNoteItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000014",
+      title: "Compare against deployment",
+      body: "Confirm whether the onset follows the release window.",
+      evidenceIds: [evidenceItem.id],
+      findingIds: [],
+      provenance: "human",
+      createdAt: 4,
+      updatedAt: 4,
+    };
+    const savedFinding = resolvedInvestigation(evidenceItem, event);
+    savedFinding.document.revision = 3;
+    savedFinding.document.findings = [finding];
+    const savedNote: host.ResolvedInvestigationDocumentDto = {
+      ...savedFinding,
+      document: {
+        ...savedFinding.document,
+        revision: 4,
+        findings: [finding],
+        notes: [note],
+      },
+    };
+    const resolvedFinding = { ...finding, lifecycle: "resolved" as const };
+    const savedEdit: host.ResolvedInvestigationDocumentDto = {
+      ...savedNote,
+      document: {
+        ...savedNote.document,
+        revision: 5,
+        findings: [resolvedFinding],
+      },
+    };
+    vi.mocked(host.hostLogAddInvestigationFinding).mockResolvedValue(
+      savedFinding,
+    );
+    vi.mocked(host.hostLogAddInvestigationNote).mockResolvedValue(savedNote);
+    vi.mocked(host.hostLogEditInvestigationFinding).mockResolvedValue(
+      savedEdit,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("auth failure"));
+    fireEvent.click(screen.getByRole("button", { name: "Add…" }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: /Create finding/ }),
+    );
+    const findingDialog = await screen.findByRole("dialog", {
+      name: "Create finding",
+    });
+    fireEvent.click(
+      within(findingDialog).getByRole("button", { name: /Inference/ }),
+    );
+    fireEvent.change(within(findingDialog).getByLabelText("Finding title"), {
+      target: { value: finding.title },
+    });
+    fireEvent.change(within(findingDialog).getByLabelText("Why it matters"), {
+      target: { value: finding.whyItMatters },
+    });
+    fireEvent.click(
+      within(findingDialog).getByRole("button", { name: "Save finding" }),
+    );
+
+    await waitFor(() =>
+      expect(host.hostLogAddInvestigationFinding).toHaveBeenCalledWith("c1", {
+        investigationId: null,
+        expectedRevision: null,
+        kind: "inference",
+        title: finding.title,
+        whyItMatters: finding.whyItMatters,
+        eventRefs: [eventRef],
+      }),
+    );
+    const panel = await screen.findByTestId("log-explorer-evidence");
+    fireEvent.click(within(panel).getByTestId(`finding-item-${finding.id}`));
+    expect(
+      within(panel).getByTestId(`finding-detail-${finding.id}`).textContent,
+    ).toContain(finding.whyItMatters);
+    fireEvent.click(within(panel).getByRole("button", { name: "Back" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Add…" }));
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: /Create cited note/ }),
+    );
+    const noteDialog = await screen.findByRole("dialog", {
+      name: "Create cited note",
+    });
+    fireEvent.change(within(noteDialog).getByLabelText("Note title"), {
+      target: { value: note.title },
+    });
+    fireEvent.change(within(noteDialog).getByLabelText("Investigation note"), {
+      target: { value: note.body },
+    });
+    fireEvent.click(
+      within(noteDialog).getByRole("button", { name: "Save note" }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogAddInvestigationNote).toHaveBeenCalledWith("c1", {
+        investigationId: savedFinding.document.id,
+        expectedRevision: savedFinding.document.revision,
+        title: note.title,
+        body: note.body,
+        eventRefs: [eventRef],
+      }),
+    );
+    expect(await screen.findByText(note.title)).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId(`finding-item-${finding.id}`));
+    fireEvent.click(screen.getByRole("button", { name: "Edit finding" }));
+    const editDialog = await screen.findByRole("dialog", {
+      name: "Edit finding",
+    });
+    fireEvent.change(within(editDialog).getByLabelText("Finding status"), {
+      target: { value: "resolved" },
+    });
+    fireEvent.click(
+      within(editDialog).getByRole("button", { name: "Save changes" }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogEditInvestigationFinding).toHaveBeenCalledWith("c1", {
+        investigationId: savedNote.document.id,
+        expectedRevision: savedNote.document.revision,
+        findingId: finding.id,
+        kind: finding.kind,
+        lifecycle: "resolved",
+        title: finding.title,
+        whyItMatters: finding.whyItMatters,
+      }),
+    );
+    expect(
+      screen.getByTestId(`finding-detail-${finding.id}`).textContent,
+    ).toContain("Inference · resolved");
+
+    view.unmount();
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(savedEdit);
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Investigation workspace view: Chat/,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Investigation.*3/ }),
+    );
+    expect(
+      await screen.findByTestId(`finding-item-${finding.id}`),
+    ).toBeTruthy();
+    expect(screen.getByTestId(`note-item-${note.id}`)).toBeTruthy();
   });
 
   it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {
@@ -1789,8 +1975,11 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     fireEvent.click(
       await screen.findByRole("button", {
-        name: /Evidence 1 saved evidence item/,
+        name: /Investigation workspace view: Chat/,
       }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
     );
     fireEvent.click(
       within(await screen.findByTestId(`evidence-item-${item.id}`)).getByRole(

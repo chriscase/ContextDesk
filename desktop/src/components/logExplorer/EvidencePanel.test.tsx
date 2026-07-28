@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EvidencePanel,
   InvestigationModeControl,
+  type BookmarkItemView,
   type EvidenceItemView,
+  type FindingItemView,
+  type NoteItemView,
 } from "./EvidencePanel";
 
 const evidence: EvidenceItemView = {
@@ -30,11 +33,40 @@ const evidence: EvidenceItemView = {
   provenanceLabel: "Saved manually",
 };
 
+const finding: FindingItemView = {
+  id: "finding-1",
+  kind: "inference",
+  lifecycle: "accepted",
+  title: "Retries amplify the database timeout",
+  whyItMatters: "The retry storm increases queue pressure.",
+  evidenceIds: [evidence.id],
+  provenanceLabel: "Authored manually",
+};
+
+const note: NoteItemView = {
+  id: "note-1",
+  title: "Compare with deployment",
+  body: "Check whether this started after the release window.",
+  evidenceIds: [evidence.id],
+  findingIds: [finding.id],
+  provenanceLabel: "Authored manually",
+};
+
+const legacyBookmark: BookmarkItemView = {
+  id: "bookmark-1",
+  label: "Original triage marker",
+  note: "Potential root cause",
+  seqFrom: 4,
+  seqTo: 9,
+  eventRefs: [],
+  evidenceStatus: "legacy_range",
+};
+
 function modeControl() {
   return (
     <InvestigationModeControl
-      mode="evidence"
-      evidenceCount={1}
+      mode="investigation"
+      investigationCount={1}
       chatCount={2}
       onChange={() => undefined}
     />
@@ -114,24 +146,87 @@ describe("EvidencePanel", () => {
     ).toBe(true);
   });
 
+  it("filters a unified investigation record and opens cited material details", () => {
+    const preview = vi.fn();
+    const activateBookmark = vi.fn();
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        findings={[finding]}
+        notes={[note]}
+        bookmarks={[legacyBookmark]}
+        preview={null}
+        busy={false}
+        error={null}
+        onPreview={preview}
+        onReveal={() => undefined}
+        onActivateBookmark={activateBookmark}
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    expect(
+      (screen.getByLabelText(
+        "Show investigation material",
+      ) as HTMLSelectElement).value,
+    ).toBe("all");
+    fireEvent.click(screen.getByTestId("finding-item-finding-1"));
+    const detail = screen.getByTestId("finding-detail-finding-1");
+    expect(detail.textContent).toContain("Inference · accepted");
+    expect(detail.textContent).toContain(finding.whyItMatters);
+    fireEvent.click(
+      within(detail).getByRole("button", { name: /Checkout timeout cluster/ }),
+    );
+    expect(preview).toHaveBeenCalledWith(evidence);
+
+    fireEvent.change(screen.getByLabelText("Show investigation material"), {
+      target: { value: "notes" },
+    });
+    expect(screen.queryByTestId("finding-item-finding-1")).toBeNull();
+    fireEvent.click(screen.getByTestId("note-item-note-1"));
+    expect(screen.getByTestId("note-detail-note-1").textContent).toContain(
+      note.body,
+    );
+    fireEvent.click(
+      within(screen.getByTestId("note-detail-note-1")).getByRole("button", {
+        name: "Back",
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("Show investigation material"), {
+      target: { value: "bookmarks" },
+    });
+    fireEvent.click(screen.getByTestId("investigation-bookmark-bookmark-1"));
+    const bookmarkDetail = screen.getByTestId("bookmark-detail-bookmark-1");
+    expect(bookmarkDetail.textContent).toContain(
+      "not imported as a trusted Investigation note",
+    );
+    fireEvent.click(
+      within(bookmarkDetail).getByRole("button", {
+        name: "Reveal bookmark",
+      }),
+    );
+    expect(activateBookmark).toHaveBeenCalledWith(legacyBookmark);
+  });
+
   it("keeps the shared rail mode selector explicit and screen-reader labeled", () => {
     const change = vi.fn();
     render(
       <InvestigationModeControl
-        mode="evidence"
-        evidenceCount={3}
+        mode="investigation"
+        investigationCount={3}
         chatCount={2}
         onChange={change}
       />,
     );
 
-    expect(
-      screen
-        .getByRole("button", { name: /Evidence 3 saved evidence items/ })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
     fireEvent.click(
-      screen.getByRole("button", { name: /Chat 2 linked chats/ }),
+      screen.getByRole("button", {
+        name: /Investigation workspace view: Investigation, 3 items/,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Chat.*2/ }),
     );
     expect(change).toHaveBeenCalledWith("chat");
   });
@@ -172,7 +267,7 @@ describe("EvidencePanel", () => {
       />,
     );
     const reopen = screen.getByRole("button", {
-      name: "Expand Investigation rail, 1 evidence item",
+      name: "Expand Investigation rail, 1 saved item",
     });
     await vi.waitFor(() => expect(document.activeElement).toBe(reopen));
 

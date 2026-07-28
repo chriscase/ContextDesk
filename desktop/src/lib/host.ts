@@ -1896,6 +1896,36 @@ export type InvestigationEvidenceItemDto = {
   updatedAt: number;
 };
 
+export type InvestigationFindingKind =
+  | "observation"
+  | "inference"
+  | "hypothesis";
+
+export type InvestigationFindingLifecycle = "accepted" | "resolved";
+
+export type InvestigationFindingItemDto = {
+  id: string;
+  kind: InvestigationFindingKind;
+  lifecycle: InvestigationFindingLifecycle;
+  title: string;
+  whyItMatters: string;
+  evidenceIds: string[];
+  provenance: "human";
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type InvestigationNoteItemDto = {
+  id: string;
+  title: string;
+  body: string;
+  evidenceIds: string[];
+  findingIds?: string[] | null;
+  provenance: "human";
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type InvestigationDocumentDto = {
   schemaVersion: number;
   id: string;
@@ -1904,6 +1934,8 @@ export type InvestigationDocumentDto = {
   status: "active" | "archived";
   corpusLinks: { corpusId: string }[];
   evidence: InvestigationEvidenceItemDto[];
+  findings?: InvestigationFindingItemDto[];
+  notes?: InvestigationNoteItemDto[];
   createdAt: number;
   updatedAt: number;
 };
@@ -2158,6 +2190,103 @@ export async function hostLogAddInvestigationEvidence(
         expectedRevision: args.expectedRevision ?? null,
         title: args.title,
         eventRefs: args.eventRefs,
+      },
+    },
+  );
+}
+
+export async function hostLogAddInvestigationFinding(
+  corpusId: string,
+  args: {
+    investigationId?: string | null;
+    expectedRevision?: number | null;
+    kind: InvestigationFindingKind;
+    title: string;
+    whyItMatters: string;
+    eventRefs: LogBookmarkEventRefDto[];
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation findings require Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_add_investigation_finding",
+    {
+      args: {
+        corpusId,
+        investigationId: args.investigationId ?? null,
+        expectedRevision: args.expectedRevision ?? null,
+        kind: args.kind,
+        title: args.title,
+        whyItMatters: args.whyItMatters,
+        eventRefs: args.eventRefs,
+      },
+    },
+  );
+}
+
+export async function hostLogAddInvestigationNote(
+  corpusId: string,
+  args: {
+    investigationId?: string | null;
+    expectedRevision?: number | null;
+    title: string;
+    body: string;
+    eventRefs: LogBookmarkEventRefDto[];
+    findingIds?: string[];
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation notes require Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>("log_add_investigation_note", {
+    args: {
+      corpusId,
+      investigationId: args.investigationId ?? null,
+      expectedRevision: args.expectedRevision ?? null,
+      title: args.title,
+      body: args.body,
+      eventRefs: args.eventRefs,
+      findingIds: args.findingIds ?? [],
+    },
+  });
+}
+
+export async function hostLogEditInvestigationFinding(
+  corpusId: string,
+  args: {
+    investigationId: string;
+    expectedRevision: number;
+    findingId: string;
+    kind: InvestigationFindingKind;
+    lifecycle: InvestigationFindingLifecycle;
+    title: string;
+    whyItMatters: string;
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation findings require Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_edit_investigation_finding",
+    { args: { corpusId, ...args } },
+  );
+}
+
+export async function hostLogEditInvestigationNote(
+  corpusId: string,
+  args: {
+    investigationId: string;
+    expectedRevision: number;
+    noteId: string;
+    title: string;
+    body: string;
+    evidenceIds: string[];
+    findingIds?: string[];
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation notes require Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_edit_investigation_note",
+    {
+      args: {
+        corpusId,
+        ...args,
+        findingIds: args.findingIds ?? [],
       },
     },
   );

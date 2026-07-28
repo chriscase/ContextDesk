@@ -5431,6 +5431,28 @@ struct LogAddInvestigationEvidenceArgs {
     event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
 }
 
+fn investigation_mutation_target(
+    store: &cd_core::investigations::InvestigationStore,
+    corpus: &cd_core::log_analysis::LogCorpus,
+    investigation_id: Option<String>,
+    expected_revision: Option<u64>,
+) -> Result<(String, u64), String> {
+    match (investigation_id, expected_revision) {
+        (Some(id), Some(revision)) => Ok((id, revision)),
+        (None, None) => {
+            if let Some(summary) = active_investigation_for_corpus(store, corpus.id())? {
+                Ok((summary.id, summary.revision))
+            } else {
+                let created = store
+                    .create(format!("Investigation · {}", corpus.name()), corpus)
+                    .map_err(|e| e.to_string())?;
+                Ok((created.id, created.revision))
+            }
+        }
+        _ => Err("Investigation identity and expected revision must be supplied together".into()),
+    }
+}
+
 /// Save exact selected identities into the corpus's durable Investigation.
 #[tauri::command]
 fn log_add_investigation_evidence(
@@ -5445,26 +5467,12 @@ fn log_add_investigation_evidence(
     let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
     let store = investigation_store(&state)?;
-
-    let (investigation_id, expected_revision) =
-        match (args.investigation_id, args.expected_revision) {
-            (Some(id), Some(revision)) => (id, revision),
-            (None, None) => {
-                if let Some(summary) = active_investigation_for_corpus(&store, &args.corpus_id)? {
-                    (summary.id, summary.revision)
-                } else {
-                    let created = store
-                        .create(format!("Investigation · {}", corpus.name()), &corpus)
-                        .map_err(|e| e.to_string())?;
-                    (created.id, created.revision)
-                }
-            }
-            _ => {
-                return Err(
-                    "Investigation identity and expected revision must be supplied together".into(),
-                )
-            }
-        };
+    let (investigation_id, expected_revision) = investigation_mutation_target(
+        &store,
+        &corpus,
+        args.investigation_id,
+        args.expected_revision,
+    )?;
 
     store
         .add_exact_evidence(
@@ -5473,6 +5481,188 @@ fn log_add_investigation_evidence(
             args.title,
             &corpus,
             args.event_refs,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogAddInvestigationFindingArgs {
+    corpus_id: String,
+    investigation_id: Option<String>,
+    expected_revision: Option<u64>,
+    kind: cd_core::investigations::FindingKind,
+    title: String,
+    why_it_matters: String,
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+}
+
+/// Atomically save exact selected identities and a human-authored finding.
+#[tauri::command]
+fn log_add_investigation_finding(
+    state: State<'_, AppState>,
+    args: LogAddInvestigationFindingArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let store = investigation_store(&state)?;
+    let (investigation_id, expected_revision) = investigation_mutation_target(
+        &store,
+        &corpus,
+        args.investigation_id,
+        args.expected_revision,
+    )?;
+
+    store
+        .add_human_finding(
+            &investigation_id,
+            expected_revision,
+            &corpus,
+            cd_core::investigations::AddFindingInput {
+                kind: args.kind,
+                title: args.title,
+                why_it_matters: args.why_it_matters,
+                event_refs: args.event_refs,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogAddInvestigationNoteArgs {
+    corpus_id: String,
+    investigation_id: Option<String>,
+    expected_revision: Option<u64>,
+    title: String,
+    body: String,
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+    #[serde(default)]
+    finding_ids: Vec<String>,
+}
+
+/// Atomically save exact selected identities and a human-authored cited note.
+#[tauri::command]
+fn log_add_investigation_note(
+    state: State<'_, AppState>,
+    args: LogAddInvestigationNoteArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let store = investigation_store(&state)?;
+    let (investigation_id, expected_revision) = investigation_mutation_target(
+        &store,
+        &corpus,
+        args.investigation_id,
+        args.expected_revision,
+    )?;
+
+    store
+        .add_human_note(
+            &investigation_id,
+            expected_revision,
+            &corpus,
+            cd_core::investigations::AddNoteInput {
+                title: args.title,
+                body: args.body,
+                event_refs: args.event_refs,
+                finding_ids: args.finding_ids,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogEditInvestigationFindingArgs {
+    corpus_id: String,
+    investigation_id: String,
+    expected_revision: u64,
+    finding_id: String,
+    kind: cd_core::investigations::FindingKind,
+    lifecycle: cd_core::investigations::FindingLifecycle,
+    title: String,
+    why_it_matters: String,
+}
+
+/// Edit human-controlled finding fields under optimistic concurrency.
+#[tauri::command]
+fn log_edit_investigation_finding(
+    state: State<'_, AppState>,
+    args: LogEditInvestigationFindingArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .edit_human_finding(
+            &args.investigation_id,
+            args.expected_revision,
+            &corpus,
+            cd_core::investigations::EditFindingInput {
+                finding_id: args.finding_id,
+                kind: args.kind,
+                lifecycle: args.lifecycle,
+                title: args.title,
+                why_it_matters: args.why_it_matters,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogEditInvestigationNoteArgs {
+    corpus_id: String,
+    investigation_id: String,
+    expected_revision: u64,
+    note_id: String,
+    title: String,
+    body: String,
+    evidence_ids: Vec<String>,
+    #[serde(default)]
+    finding_ids: Vec<String>,
+}
+
+/// Edit human-controlled note fields and citations under optimistic concurrency.
+#[tauri::command]
+fn log_edit_investigation_note(
+    state: State<'_, AppState>,
+    args: LogEditInvestigationNoteArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .edit_human_note(
+            &args.investigation_id,
+            args.expected_revision,
+            &corpus,
+            cd_core::investigations::EditNoteInput {
+                note_id: args.note_id,
+                title: args.title,
+                body: args.body,
+                evidence_ids: args.evidence_ids,
+                finding_ids: args.finding_ids,
+            },
         )
         .map_err(|e| e.to_string())
 }
@@ -6438,6 +6628,10 @@ pub fn run() {
             log_delete_bookmark,
             log_load_active_investigation,
             log_add_investigation_evidence,
+            log_add_investigation_finding,
+            log_add_investigation_note,
+            log_edit_investigation_finding,
+            log_edit_investigation_note,
             log_preview_investigation_evidence,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,

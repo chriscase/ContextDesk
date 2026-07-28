@@ -19,7 +19,11 @@ import {
   hostGetLogCorpus,
   hostLogAddBookmark,
   hostLogAddInvestigationEvidence,
+  hostLogAddInvestigationFinding,
+  hostLogAddInvestigationNote,
   hostLogDeleteBookmark,
+  hostLogEditInvestigationFinding,
+  hostLogEditInvestigationNote,
   hostLogFacets,
   hostLogLoadActiveInvestigation,
   hostLogListBookmarks,
@@ -103,10 +107,18 @@ import { LinkedChatRail } from "./LinkedChatRail";
 import {
   EvidencePanel,
   InvestigationModeControl,
+  type BookmarkItemView,
   type EvidenceItemView,
   type EvidencePreviewView,
+  type FindingItemView,
   type InvestigationRailMode,
+  type NoteItemView,
 } from "./EvidencePanel";
+import {
+  CreateInvestigationItemDialog,
+  type InvestigationItemDraft,
+} from "./CreateInvestigationItemDialog";
+import { InvestigationAddMenu } from "./InvestigationAddMenu";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
 import {
@@ -624,6 +636,49 @@ function investigationEvidenceViews(
   });
 }
 
+function investigationFindingViews(
+  resolved: ResolvedInvestigationDocumentDto | null,
+): FindingItemView[] {
+  return (resolved?.document.findings ?? []).map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    lifecycle: item.lifecycle,
+    title: item.title,
+    whyItMatters: item.whyItMatters,
+    evidenceIds: item.evidenceIds,
+    provenanceLabel: "Authored manually",
+  }));
+}
+
+function investigationNoteViews(
+  resolved: ResolvedInvestigationDocumentDto | null,
+): NoteItemView[] {
+  return (resolved?.document.notes ?? []).map((item) => ({
+    id: item.id,
+    title: item.title,
+    body: item.body,
+    evidenceIds: item.evidenceIds,
+    findingIds: item.findingIds ?? [],
+    provenanceLabel: "Authored manually",
+  }));
+}
+
+function investigationBookmarkViews(
+  bookmarks: LogBookmarkDto[],
+): BookmarkItemView[] {
+  return bookmarks.map((bookmark) => ({
+    id: bookmark.id,
+    label: bookmark.label,
+    note: bookmark.note ?? null,
+    seqFrom: bookmark.seqFrom,
+    seqTo: bookmark.seqTo,
+    eventRefs: bookmark.eventRefs ?? [],
+    evidenceStatus:
+      bookmark.evidenceStatus ??
+      (bookmark.eventRefs?.length ? "verified" : "legacy_range"),
+  }));
+}
+
 export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
@@ -715,6 +770,16 @@ export function LogExplorer({ corpusId }: Props) {
   const [evidencePreview, setEvidencePreview] =
     useState<EvidencePreviewView | null>(null);
   const [saveEvidenceOpen, setSaveEvidenceOpen] = useState(false);
+  const [investigationAddMenuOpen, setInvestigationAddMenuOpen] =
+    useState(false);
+  const [createInvestigationItem, setCreateInvestigationItem] = useState<
+    "finding" | "note" | null
+  >(null);
+  const [editInvestigationItem, setEditInvestigationItem] = useState<
+    | { type: "finding"; item: FindingItemView }
+    | { type: "note"; item: NoteItemView }
+    | null
+  >(null);
   const [chatDraftRequest, setChatDraftRequest] = useState<{
     id: number;
     text: string;
@@ -819,6 +884,8 @@ export function LogExplorer({ corpusId }: Props) {
   const filtersCollapseRef = useRef<HTMLButtonElement>(null);
   const filtersReopenRef = useRef<HTMLButtonElement>(null);
   const saveEvidenceTriggerRef = useRef<HTMLButtonElement>(null);
+  const investigationAddTriggerRef = useRef<HTMLButtonElement>(null);
+  const investigationEditTriggerRef = useRef<HTMLButtonElement>(null);
   const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
@@ -2138,15 +2205,8 @@ export function LogExplorer({ corpusId }: Props) {
       setInvestigation(updated);
       setEvidencePreview(null);
       setSaveEvidenceOpen(false);
-      setInvestigationMode("evidence");
+      setInvestigationMode("investigation");
       setChatCollapsed(false);
-      window.setTimeout(() => {
-        rootRef.current
-          ?.querySelector<HTMLElement>(
-            '.log-explorer__investigation-mode-option[aria-pressed="true"]',
-          )
-          ?.focus();
-      }, 0);
       if (breakpoint === "narrow") {
         setNarrowFiltersOpen(false);
         setNarrowChatOpen(true);
@@ -2159,6 +2219,158 @@ export function LogExplorer({ corpusId }: Props) {
               selection.eventRefs.length === 1 ? "identity" : "identities"
             } to Investigation`,
       );
+    } catch (saveError) {
+      const message = String(saveError);
+      setInvestigationError(message);
+      if (message.toLowerCase().includes("stale investigation revision")) {
+        try {
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        } catch {
+          // Keep the original optimistic-concurrency error visible.
+        }
+      }
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const dismissInvestigationAddMenu = useCallback(
+    () => setInvestigationAddMenuOpen(false),
+    [],
+  );
+
+  const openCreateInvestigationItem = (type: "finding" | "note") => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setInvestigationAddMenuOpen(false);
+      setStatus(
+        selected.size === 0 && !detail
+          ? "Select one or more visible rows before adding investigation material"
+          : "Selection changed before it could be cited — reselect the evidence",
+      );
+      return;
+    }
+    setInvestigationError(null);
+    setInvestigationAddMenuOpen(false);
+    setCreateInvestigationItem(type);
+  };
+
+  const saveInvestigationItem = async (draft: InvestigationItemDraft) => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setCreateInvestigationItem(null);
+      return;
+    }
+    const priorFindingCount = investigation?.document.findings?.length ?? 0;
+    const priorNoteCount = investigation?.document.notes?.length ?? 0;
+    investigationLoadRequestRef.current += 1;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const common = {
+        investigationId: investigation?.document.id ?? null,
+        expectedRevision: investigation?.document.revision ?? null,
+        title: draft.title,
+        eventRefs: selection.eventRefs,
+      };
+      const updated =
+        draft.type === "finding"
+          ? await hostLogAddInvestigationFinding(corpusId, {
+              ...common,
+              kind: draft.kind,
+              whyItMatters: draft.body,
+            })
+          : await hostLogAddInvestigationNote(corpusId, {
+              ...common,
+              body: draft.body,
+            });
+      setInvestigation(updated);
+      setEvidencePreview(null);
+      setCreateInvestigationItem(null);
+      setInvestigationMode("investigation");
+      setChatCollapsed(false);
+      if (breakpoint === "narrow") {
+        setNarrowFiltersOpen(false);
+        setNarrowChatOpen(true);
+      }
+      const wasDuplicate =
+        draft.type === "finding"
+          ? (updated.document.findings?.length ?? 0) === priorFindingCount
+          : (updated.document.notes?.length ?? 0) === priorNoteCount;
+      setStatus(
+        wasDuplicate
+          ? `That exact ${draft.type} is already saved`
+          : `Saved human-authored ${draft.type} with ${selection.eventRefs.length} exact evidence ${
+              selection.eventRefs.length === 1 ? "citation" : "citations"
+            }`,
+      );
+    } catch (saveError) {
+      const message = String(saveError);
+      setInvestigationError(message);
+      if (message.toLowerCase().includes("stale investigation revision")) {
+        try {
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        } catch {
+          // Keep the original optimistic-concurrency error visible.
+        }
+      }
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const openEditFinding = (
+    item: FindingItemView,
+    trigger: HTMLButtonElement,
+  ) => {
+    investigationEditTriggerRef.current = trigger;
+    setInvestigationError(null);
+    setEditInvestigationItem({ type: "finding", item });
+  };
+
+  const openEditNote = (item: NoteItemView, trigger: HTMLButtonElement) => {
+    investigationEditTriggerRef.current = trigger;
+    setInvestigationError(null);
+    setEditInvestigationItem({ type: "note", item });
+  };
+
+  const saveEditedInvestigationItem = async (
+    draft: InvestigationItemDraft,
+  ) => {
+    if (!investigation || !editInvestigationItem) return;
+    investigationLoadRequestRef.current += 1;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated =
+        draft.type === "finding" &&
+        editInvestigationItem.type === "finding"
+          ? await hostLogEditInvestigationFinding(corpusId, {
+              investigationId: investigation.document.id,
+              expectedRevision: investigation.document.revision,
+              findingId: editInvestigationItem.item.id,
+              kind: draft.kind,
+              lifecycle: draft.lifecycle,
+              title: draft.title,
+              whyItMatters: draft.body,
+            })
+          : draft.type === "note" && editInvestigationItem.type === "note"
+            ? await hostLogEditInvestigationNote(corpusId, {
+                investigationId: investigation.document.id,
+                expectedRevision: investigation.document.revision,
+                noteId: editInvestigationItem.item.id,
+                title: draft.title,
+                body: draft.body,
+                evidenceIds: editInvestigationItem.item.evidenceIds,
+                findingIds: editInvestigationItem.item.findingIds,
+              })
+            : null;
+      if (!updated) {
+        throw new Error("Investigation editor type changed unexpectedly");
+      }
+      setInvestigation(updated);
+      setEditInvestigationItem(null);
+      setStatus(`Updated ${draft.type}`);
     } catch (saveError) {
       const message = String(saveError);
       setInvestigationError(message);
@@ -2949,21 +3161,28 @@ export function LogExplorer({ corpusId }: Props) {
   );
   const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const evidenceItems = investigationEvidenceViews(investigation);
+  const findingItems = investigationFindingViews(investigation);
+  const noteItems = investigationNoteViews(investigation);
+  const bookmarkItems = investigationBookmarkViews(bookmarks);
+  const investigationMaterialCount =
+    evidenceItems.length +
+    findingItems.length +
+    noteItems.length +
+    bookmarkItems.length;
+  const editEvidenceRefs = editInvestigationItem
+    ? editInvestigationItem.item.evidenceIds.flatMap(
+        (evidenceId) =>
+          evidenceItems.find((item) => item.id === evidenceId)?.eventRefs ?? [],
+      )
+    : [];
   const chooseInvestigationMode = (mode: InvestigationRailMode) => {
     setInvestigationMode(mode);
     setInvestigationError(null);
-    queueMicrotask(() => {
-      rootRef.current
-        ?.querySelector<HTMLElement>(
-          `.log-explorer__investigation-mode-option[aria-pressed="true"]`,
-        )
-        ?.focus();
-    });
   };
   const investigationModeControl = (
     <InvestigationModeControl
       mode={investigationMode}
-      evidenceCount={evidenceItems.length}
+      investigationCount={investigationMaterialCount}
       chatCount={chatSummary.chatCount}
       onChange={chooseInvestigationMode}
     />
@@ -3363,9 +3582,10 @@ export function LogExplorer({ corpusId }: Props) {
             }}
           >
             Investigation ·{" "}
-            {investigationMode === "evidence" ? "Evidence" : "Chat"}
-            {investigationMode === "evidence" && evidenceItems.length > 0
-              ? ` (${evidenceItems.length})`
+            {investigationMode === "investigation" ? "Workspace" : "Chat"}
+            {investigationMode === "investigation" &&
+            investigationMaterialCount > 0
+              ? ` (${investigationMaterialCount})`
               : investigationMode === "chat" && chatSummary.chatCount > 0
                 ? ` (${chatSummary.chatCount})`
                 : ""}
@@ -4097,6 +4317,27 @@ export function LogExplorer({ corpusId }: Props) {
                 >
                   Save evidence
                 </button>
+                <div className="log-explorer__selection-add">
+                  <button
+                    ref={investigationAddTriggerRef}
+                    type="button"
+                    className="log-explorer__btn"
+                    aria-haspopup="menu"
+                    aria-expanded={investigationAddMenuOpen}
+                    onClick={() =>
+                      setInvestigationAddMenuOpen((open) => !open)
+                    }
+                  >
+                    Add…
+                  </button>
+                  {investigationAddMenuOpen ? (
+                    <InvestigationAddMenu
+                      triggerRef={investigationAddTriggerRef}
+                      onChoose={openCreateInvestigationItem}
+                      onDismiss={dismissInvestigationAddMenu}
+                    />
+                  ) : null}
+                </div>
               </div>
             </div>
           ) : null}
@@ -4552,10 +4793,13 @@ export function LogExplorer({ corpusId }: Props) {
             queueMicrotask(() => narrowChatToggleRef.current?.focus());
           }}
         />
-        {investigationMode === "evidence" ? (
+        {investigationMode === "investigation" ? (
           <EvidencePanel
             modeControl={investigationModeControl}
             items={evidenceItems}
+            findings={findingItems}
+            notes={noteItems}
+            bookmarks={bookmarkItems}
             preview={evidencePreview}
             busy={investigationBusy}
             error={investigationError}
@@ -4564,6 +4808,14 @@ export function LogExplorer({ corpusId }: Props) {
             desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
             onPreview={(item) => void previewInvestigationEvidence(item)}
             onReveal={(item) => void revealInvestigationEvidence(item)}
+            onEditFinding={openEditFinding}
+            onEditNote={openEditNote}
+            onActivateBookmark={(item) => {
+              const bookmark = bookmarks.find(
+                (candidate) => candidate.id === item.id,
+              );
+              if (bookmark) void activateBookmark(bookmark);
+            }}
             onClearPreview={() => setEvidencePreview(null)}
             onToggleCollapsed={() =>
               setChatCollapsed((collapsed) => !collapsed)
@@ -4596,6 +4848,55 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={saveEvidenceTriggerRef}
           onSave={(title) => void saveSelectedEvidence(title)}
           onDismiss={() => setSaveEvidenceOpen(false)}
+        />
+      ) : null}
+
+      {createInvestigationItem ? (
+        <CreateInvestigationItemDialog
+          type={createInvestigationItem}
+          eventCount={selectedEvidenceRefs()?.eventRefs.length ?? 0}
+          sourceCount={
+            new Set(
+              (selectedEvidenceRefs()?.eventRefs ?? []).map(
+                (eventRef) => eventRef.source,
+              ),
+            ).size
+          }
+          busy={investigationBusy}
+          error={investigationError}
+          triggerRef={investigationAddTriggerRef}
+          onSave={(draft) => void saveInvestigationItem(draft)}
+          onDismiss={() => setCreateInvestigationItem(null)}
+        />
+      ) : null}
+
+      {editInvestigationItem ? (
+        <CreateInvestigationItemDialog
+          type={editInvestigationItem.type}
+          initialDraft={
+            editInvestigationItem.type === "finding"
+              ? {
+                  type: "finding",
+                  kind: editInvestigationItem.item.kind,
+                  lifecycle: editInvestigationItem.item.lifecycle,
+                  title: editInvestigationItem.item.title,
+                  body: editInvestigationItem.item.whyItMatters,
+                }
+              : {
+                  type: "note",
+                  title: editInvestigationItem.item.title,
+                  body: editInvestigationItem.item.body,
+                }
+          }
+          eventCount={editEvidenceRefs.length}
+          sourceCount={
+            new Set(editEvidenceRefs.map((eventRef) => eventRef.source)).size
+          }
+          busy={investigationBusy}
+          error={investigationError}
+          triggerRef={investigationEditTriggerRef}
+          onSave={(draft) => void saveEditedInvestigationItem(draft)}
+          onDismiss={() => setEditInvestigationItem(null)}
         />
       ) : null}
 
