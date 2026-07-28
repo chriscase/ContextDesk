@@ -293,6 +293,132 @@ function ToolbarPicker<T extends string>({
   );
 }
 
+function ToolbarActionMenu({
+  label,
+  testId,
+  actions,
+}: {
+  label: string;
+  testId: string;
+  actions: {
+    id: string;
+    label: string;
+    description: string;
+    testId?: string;
+    run: () => void;
+  }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const close = useCallback((restoreFocus = true) => {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && !rootRef.current?.contains(target)) close(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    queueMicrotask(() =>
+      rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus(),
+    );
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [close, open]);
+
+  const moveFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const items = Array.from(
+      rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]',
+      ) ?? [],
+    );
+    if (items.length === 0) return;
+    const current = items.indexOf(event.currentTarget);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
+            items.length;
+    items[next]?.focus();
+  };
+
+  return (
+    <div className="log-explorer__toolbar-picker" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
+        data-testid={testId}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="log-explorer__picker-value">{label}</span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div
+          id={id}
+          className="log-explorer__picker-menu log-explorer__picker-menu--actions"
+          role="menu"
+          aria-label={`${label} actions`}
+        >
+          {actions.map((action) => (
+            <button
+              key={action.id}
+              type="button"
+              className="log-explorer__picker-option"
+              role="menuitem"
+              data-testid={action.testId}
+              onKeyDown={moveFocus}
+              onClick={() => {
+                action.run();
+                close();
+              }}
+            >
+              <span className="log-explorer__picker-copy">
+                <span className="log-explorer__picker-option-title">
+                  {action.label}
+                </span>
+                <span className="log-explorer__picker-description">
+                  {action.description}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TimeLinkVisual({ mode }: { mode: TimeLinkMode }) {
   return (
     <svg
@@ -2655,35 +2781,38 @@ export function LogExplorer({ corpusId }: Props) {
             ]}
             onChange={setDensity}
           />
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="col-autofit"
-            title="Auto-fit columns to source lengths"
-            onClick={() => {
-              const sources = Object.keys(facets?.sources ?? {});
-              const messages = Object.values(laneEvents)
-                .flat()
-                .slice(0, 200)
-                .map((event) => event.message);
-              setColWidths(autoFitColWidths(sources, messages));
-              setStatus("Columns auto-fitted");
-            }}
-          >
-            Auto-fit cols
-          </button>
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="col-reset"
-            title="Reset column widths to defaults"
-            onClick={() => {
-              setColWidths([...DEFAULT_COL_WIDTHS]);
-              setStatus("Column widths reset");
-            }}
-          >
-            Reset cols
-          </button>
+          <ToolbarActionMenu
+            label="Columns"
+            testId="columns-menu"
+            actions={[
+              {
+                id: "auto-fit",
+                label: "Auto-fit columns",
+                description:
+                  "Fit source and message widths to the resident evidence.",
+                testId: "col-autofit",
+                run: () => {
+                  const sources = Object.keys(facets?.sources ?? {});
+                  const messages = Object.values(laneEvents)
+                    .flat()
+                    .slice(0, 200)
+                    .map((event) => event.message);
+                  setColWidths(autoFitColWidths(sources, messages));
+                  setStatus("Columns auto-fitted");
+                },
+              },
+              {
+                id: "reset",
+                label: "Reset columns",
+                description: "Restore the balanced default column widths.",
+                testId: "col-reset",
+                run: () => {
+                  setColWidths([...DEFAULT_COL_WIDTHS]);
+                  setStatus("Column widths reset");
+                },
+              },
+            ]}
+          />
           <button
             type="button"
             className="log-explorer__btn"

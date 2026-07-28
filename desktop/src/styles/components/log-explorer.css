@@ -177,6 +177,10 @@
   z-index: 40;
 }
 
+.log-explorer__picker-menu--actions {
+  min-width: 15rem;
+}
+
 .log-explorer__picker-option {
   align-items: center;
   appearance: none;

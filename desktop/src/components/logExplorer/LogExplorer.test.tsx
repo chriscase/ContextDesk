@@ -428,6 +428,20 @@ describe("LogExplorer shell", () => {
 
     chooseRowMode("Deep");
     expect(screen.getByTestId("row-mode-picker").textContent).toContain("Deep");
+
+    const columnsTrigger = screen.getByTestId("columns-menu");
+    fireEvent.click(columnsTrigger);
+    const autoFit = screen.getByRole("menuitem", {
+      name: /^Auto-fit columns\b/,
+    });
+    const reset = screen.getByRole("menuitem", {
+      name: /^Reset columns\b/,
+    });
+    await waitFor(() => expect(document.activeElement).toBe(autoFit));
+    fireEvent.keyDown(autoFit, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(reset);
+    fireEvent.keyDown(reset, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
@@ -651,10 +665,12 @@ describe("LogExplorer shell", () => {
       expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
     );
 
+    fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-autofit"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("40rem"),
     );
+    fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-reset"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("12rem"),
