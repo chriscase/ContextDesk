@@ -4511,13 +4511,27 @@ fn desktop_local_log_embed_plan(
     (policy, host.local_log_embed_backend())
 }
 
+fn desktop_log_ingest_embed_plan_nonblocking(
+    host: &Arc<Mutex<Option<ToolHost>>>,
+) -> (
+    cd_core::log_analysis::LogEmbedPolicy,
+    Option<std::sync::Arc<dyn cd_core::embed::EmbedBackend>>,
+) {
+    host.try_lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(desktop_local_log_embed_plan))
+        .unwrap_or_else(|| (cd_core::log_analysis::LogEmbedPolicy::local_default(), None))
+}
+
 /// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
 /// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
 ///
 /// Runs on a blocking thread pool so the UI event loop is not starved (macOS
 /// "Not Responding" during large zip/dir imports). Ordinary imports use the
-/// product-local ONNX backend; actual streamed input over 64 MiB is deferred.
-/// Keyword/structured analysis remains available in deferred mode.
+/// product-local ONNX backend when it is already available. Import never waits
+/// for the broader workspace/tool host: keyword/structured analysis remains
+/// available while that host is still starting, and input over 64 MiB remains
+/// deferred.
 #[tauri::command]
 async fn ingest_log_path(
     app: tauri::AppHandle,
@@ -4525,13 +4539,8 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
-    ensure_host(&state)?;
     let cache = log_cache_dir(&state)?;
-    let (policy, embed_backend) = {
-        let host = state.host.lock().expect("host");
-        let host = host.as_ref().ok_or_else(|| "host not ready".to_string())?;
-        desktop_local_log_embed_plan(host)
-    };
+    let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
     let progress = TauriProcessProgress { app: app.clone() };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -6008,17 +6017,40 @@ mod help_host_tests {
 #[cfg(test)]
 mod startup_host_tests {
     use super::{
-        build_and_install_background_index, host_readiness_terminal_events, log_search_cancel_key,
-        normalize_log_corpus_id, wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight,
-        HostReadinessFailure,
+        build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
+        host_readiness_terminal_events, log_search_cancel_key, normalize_log_corpus_id,
+        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
     use cd_core::tool_host::ToolHost;
     use cd_core::workspace::Workspace;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn log_ingest_embed_plan_does_not_wait_for_the_workspace_host_lock() {
+        let host = Arc::new(Mutex::new(None::<ToolHost>));
+        let held = host.lock().expect("held host lock");
+        let host_for_worker = Arc::clone(&host);
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(desktop_log_ingest_embed_plan_nonblocking(&host_for_worker));
+        });
+
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        worker.join().expect("embed-plan worker");
+        let (policy, backend) =
+            result.expect("embed planning must not wait for the held host lock");
+
+        assert!(backend.is_none());
+        assert_eq!(
+            policy.model_id,
+            cd_core::log_analysis::LogEmbedPolicy::local_default().model_id
+        );
+    }
 
     #[test]
     fn packaged_startup_warms_host_after_window_setup_not_before() {
