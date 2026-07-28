@@ -96,6 +96,11 @@ import {
   VirtualizedEventList,
   type LineMode,
 } from "./VirtualizedEventList";
+import {
+  applyThemeToDocument,
+  subscribeThemeChanges,
+  THEME_STORAGE_KEY,
+} from "../../lib/themeBridge";
 import "../../styles/components/log-explorer.css";
 
 type Props = {
@@ -426,6 +431,17 @@ export function LogExplorer({ corpusId }: Props) {
         ? previous
         : next,
     );
+  }, []);
+
+  useEffect(() => {
+    try {
+      applyThemeToDocument(localStorage.getItem(THEME_STORAGE_KEY));
+    } catch {
+      // theme-init already supplied the safe default.
+    }
+    return subscribeThemeChanges((theme) => {
+      applyThemeToDocument(theme);
+    });
   }, []);
 
   useEffect(() => {

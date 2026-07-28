@@ -7,6 +7,16 @@
   --font-mono: "IBM Plex Mono", "SF Mono", "JetBrains Mono", ui-monospace, Menlo,
     Consolas, monospace;
 
+  /* Compatibility aliases used by the standalone Log Explorer. Keep these
+     semantic so every skin resolves them instead of falling back to dark hex. */
+  --font-ui: var(--font-sans);
+  --fg: var(--text);
+  --fg-default: var(--text);
+  --fg-primary: var(--text);
+  --fg-muted: var(--text-muted);
+  --text-secondary: var(--text-muted);
+  --border-subtle: var(--border);
+
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 12px;

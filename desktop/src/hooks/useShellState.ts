@@ -29,6 +29,7 @@ import type { CompositionTarget } from "../components/panes/CompositionPane";
 import type { MemoryDoc } from "../components/panes/MemoryPane";
 import type { PaneId, UiScale } from "../lib/session";
 import { parseSkinId, type SkinId } from "../lib/skins";
+import { broadcastThemeChange } from "../lib/themeBridge";
 
 function loadTheme(): SkinId {
   return parseSkinId(localStorage.getItem("cd-theme"));
@@ -271,6 +272,7 @@ export function useShellState() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("cd-theme", theme);
+    void broadcastThemeChange(theme);
   }, [theme]);
   useEffect(() => {
     document.documentElement.setAttribute("data-ui-scale", uiScale);
