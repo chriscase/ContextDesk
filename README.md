@@ -2,9 +2,25 @@
 
 [![CI](https://github.com/chriscase/ContextDesk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chriscase/ContextDesk/actions/workflows/ci.yml?query=branch%3Amain)
 
-**ContextDesk is a local-first knowledge workbench that answers questions about your own files, memory, and connected sources — with citations — and confirms every write before it happens.**
+**ContextDesk is a local-first evidence workbench for your files, memory,
+databases, connected sources, and incident logs. It gathers bounded context
+deterministically, lets an AI synthesize what the evidence means, and keeps the
+citations and investigation trail visible.**
 
-Point it at folders you allowlist and at markdown project memory, ask how a subsystem works, and get streaming answers with file citations and a visible search trail. Run it **fully local** with [Ollama](https://ollama.com) (no product account, no API key), **or** connect an optional **Grok Build** session you already use on this machine (Settings → AI, explicit opt-in — credentials stay in the OS host, never the webview). It is a *research & synthesis* tool, not a code-editing agent — pair it with your coding agent when you need edits. The name is a working title; the whole product is rename-friendly via [`branding.toml`](branding.toml).
+Allowlist a workspace, import a post-mortem log corpus, or connect a governed
+read source. ContextDesk searches and filters those sources on the host, fits
+the most relevant results into explicit context limits, and then asks the
+selected model to synthesize an answer. It does not paste an entire corpus into
+chat, silently grant a model access, or let model prose masquerade as a tool
+result. Every write still requires the appropriate confirmation.
+
+Run it **fully local** with [Ollama](https://ollama.com) (no product account or
+API key), or connect an optional **Grok Build** session already authorized on
+the machine (Settings → AI, explicit opt-in; credentials remain in the OS host,
+never the webview). ContextDesk is a research, synthesis, and investigation
+tool—not a code-editing agent—so pair it with your coding agent when you need
+source changes. The name is a working title; the product remains rename-friendly
+through [`branding.toml`](branding.toml).
 
 | | |
 |--|--|
@@ -38,6 +54,32 @@ Narrow / practical 800×600 minimum (Chat → Logs → Help, no primary chrome c
 
 <p align="center"><img src="docs/media/gallery/main-nav-800x600.png" alt="800×600 contact strip: Chat, Logs, Help" width="900" /></p>
 <p align="center"><sub>Contact strip of the three 800×600 frames above. Wide first-chat is max width on the built-in Retina display (~1427 logical px), not an external ultrawide capture.</sub></p>
+
+### From raw evidence to a durable investigation
+
+1. **Bring only authorized evidence.** Allowlist workspace folders, connect
+   read-only sources, or import a deterministic post-mortem log corpus. Import
+   preserves source provenance and labels time quality rather than inventing
+   certainty for malformed or order-only timestamps.
+2. **Narrow the question before asking the model.** Find highlights identities;
+   Filter reduces rows; composed lanes compare sources; the Navigator seeks
+   bounded regions. Newly imported logs can expose a separately stored
+   **Original (redacted)** record on explicit request without placing that
+   representation into ordinary rows or chat context.
+3. **Let governed tools gather evidence.** Ordinary chat and corpus-linked chat
+   have different scopes. A linked turn begins with bounded log retrieval and
+   may use other already-authorized read sources when the question calls for
+   them. A tools-disabled profile is reported honestly instead of pretending
+   that retrieval happened.
+4. **Keep the useful result.** Evidence selections, bookmarks, cited findings,
+   notes, and reversible saved views turn a promising chat answer into an
+   investigation that can be revisited and checked against the source.
+
+The bundled Help Center explains the complete context path, permission
+boundaries, and result caps with accessible diagrams. For a cautious first
+trial on real organizational data, use the
+[company log-data trial runbook](docs/COMPANY_LOG_DATA_TRIAL.md) and keep all
+truth/evaluation material outside the imported directory.
 
 ---
 
