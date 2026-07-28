@@ -167,12 +167,17 @@ pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
             file.version
         )));
     }
-    if file.bookmarks.len() > MAX_BOOKMARKS {
+    validate_bookmark_bounds(&file.bookmarks)?;
+    Ok(file.bookmarks)
+}
+
+fn validate_bookmark_bounds(bookmarks: &[Bookmark]) -> CoreResult<()> {
+    if bookmarks.len() > MAX_BOOKMARKS {
         return Err(CoreError::Message(format!(
             "bookmark sidecar exceeds {MAX_BOOKMARKS} entries"
         )));
     }
-    let total_event_refs = file.bookmarks.iter().try_fold(0usize, |total, bookmark| {
+    let total_event_refs = bookmarks.iter().try_fold(0usize, |total, bookmark| {
         if bookmark.event_refs.len() > MAX_BOOKMARK_EVENT_REFS {
             return Err(CoreError::Message(format!(
                 "bookmark {} exceeds {MAX_BOOKMARK_EVENT_REFS} exact event references",
@@ -188,10 +193,11 @@ pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
             "bookmark sidecar exceeds {MAX_BOOKMARK_TOTAL_EVENT_REFS} exact event references"
         )));
     }
-    Ok(file.bookmarks)
+    Ok(())
 }
 
 fn write_all(corpus: &LogCorpus, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
+    validate_bookmark_bounds(&bookmarks)?;
     let file = BookmarkFile {
         version: BOOKMARKS_VERSION,
         bookmarks,
@@ -653,6 +659,23 @@ mod tests {
             source: source.into(),
             timestamp_hint,
             time_quality_hint: TimeQuality::Wall,
+        }
+    }
+
+    fn test_bookmark(id: impl Into<String>, event_refs: Vec<BookmarkEventRef>) -> Bookmark {
+        let now = crate::embed::now_unix_secs();
+        Bookmark {
+            id: id.into(),
+            label: "boundary fixture".into(),
+            seq_from: 10,
+            seq_to: 10,
+            ts_from: None,
+            ts_to: None,
+            event_refs,
+            color: None,
+            note: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1125,22 +1148,13 @@ mod tests {
         let event_refs = (0..=MAX_BOOKMARK_EVENT_REFS)
             .map(|_| evidence_ref(&corpus, 10, "api.log", 1_700_000_010))
             .collect::<Vec<_>>();
-        let now = crate::embed::now_unix_secs();
-        write_all(
-            &corpus,
-            vec![Bookmark {
-                id: "oversized".into(),
-                label: "oversized exact set".into(),
-                seq_from: 10,
-                seq_to: 10,
-                ts_from: Some(1_700_000_010),
-                ts_to: Some(1_700_000_010),
-                event_refs,
-                color: None,
-                note: None,
-                created_at: now,
-                updated_at: now,
-            }],
+        let malformed = BookmarkFile {
+            version: BOOKMARKS_VERSION,
+            bookmarks: vec![test_bookmark("oversized", event_refs)],
+        };
+        std::fs::write(
+            bookmarks_path(&corpus),
+            serde_json::to_vec_pretty(&malformed).unwrap(),
         )
         .unwrap();
 
@@ -1148,5 +1162,80 @@ mod tests {
         assert!(error
             .to_string()
             .contains("exceeds 512 exact event references"));
+    }
+
+    #[test]
+    fn add_refuses_to_publish_more_than_the_bookmark_count_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&dir);
+        let bookmarks = (0..MAX_BOOKMARKS)
+            .map(|index| test_bookmark(format!("boundary-{index}"), vec![]))
+            .collect::<Vec<_>>();
+        write_all(&corpus, bookmarks).unwrap();
+        assert_eq!(list_bookmarks(&corpus).unwrap().len(), MAX_BOOKMARKS);
+
+        let error = add_range_bookmark(
+            &corpus,
+            NewBookmark {
+                seq_from: 20,
+                seq_to: 20,
+                label: "one too many".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("bookmark sidecar exceeds 1024 entries"));
+        assert_eq!(list_bookmarks(&corpus).unwrap().len(), MAX_BOOKMARKS);
+    }
+
+    #[test]
+    fn add_refuses_to_publish_more_than_the_total_reference_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&dir);
+        let repeated_ref = evidence_ref(&corpus, 10, "api.log", 1_700_000_010);
+        let bookmarks = (0..(MAX_BOOKMARK_TOTAL_EVENT_REFS / MAX_BOOKMARK_EVENT_REFS))
+            .map(|index| {
+                test_bookmark(
+                    format!("reference-boundary-{index}"),
+                    vec![repeated_ref.clone(); MAX_BOOKMARK_EVENT_REFS],
+                )
+            })
+            .collect::<Vec<_>>();
+        write_all(&corpus, bookmarks).unwrap();
+        assert_eq!(
+            list_bookmarks(&corpus)
+                .unwrap()
+                .iter()
+                .map(|bookmark| bookmark.event_refs.len())
+                .sum::<usize>(),
+            MAX_BOOKMARK_TOTAL_EVENT_REFS
+        );
+
+        let error = add_evidence_bookmark(
+            &corpus,
+            NewEvidenceBookmark {
+                event_refs: vec![evidence_ref(&corpus, 11, "api.log", 1_700_000_011)],
+                label: "one too many references".into(),
+                note: None,
+                color: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("bookmark sidecar exceeds 8192 exact event references"));
+        assert_eq!(
+            list_bookmarks(&corpus)
+                .unwrap()
+                .iter()
+                .map(|bookmark| bookmark.event_refs.len())
+                .sum::<usize>(),
+            MAX_BOOKMARK_TOTAL_EVENT_REFS
+        );
     }
 }
