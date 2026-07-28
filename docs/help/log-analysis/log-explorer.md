@@ -33,7 +33,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Find vs Filter | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist |
 | Counts | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total |
 | Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
-| Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; manual **Load older/newer** remains as fallback |
+| Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; a local **Retry** appears only after a page failure |
 | Timestamps | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time |
 | Columns | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally |
 | Long lines | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event |

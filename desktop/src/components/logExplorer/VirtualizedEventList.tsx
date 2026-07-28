@@ -9,6 +9,7 @@
  */
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -201,6 +202,8 @@ export function VirtualizedEventList({
   }, [displayRows]);
   const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
+  const onNearBottomRef = useRef(onNearBottom);
+  onNearBottomRef.current = onNearBottom;
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(400);
   const edgeCooldown = useRef(0);
@@ -238,6 +241,19 @@ export function VirtualizedEventList({
     },
     [onLinkedScrollTop, onNearBottom, onNearTop, edgeRowH],
   );
+
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || !onNearBottomRef.current || el.clientHeight <= 0) return;
+    // A short first page may not create a scrollbar. Prefetch until the
+    // viewport is useful (or the parent reports the end) so removing routine
+    // paging buttons cannot strand the user.
+    if (el.scrollHeight > el.clientHeight + edgeRowH) return;
+    const now = Date.now();
+    if (now - edgeCooldown.current < 200) return;
+    edgeCooldown.current = now;
+    onNearBottomRef.current();
+  }, [displayRows.length, edgeRowH, viewportH]);
 
   const setRef = useCallback((el: HTMLDivElement | null) => {
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
