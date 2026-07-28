@@ -311,6 +311,80 @@ describe("LinkedChatRail", () => {
     expect(host.agentTurn).not.toHaveBeenCalled();
   });
 
+  it("sends with Return, preserves Shift+Return and IME composition, and blocks rapid duplicates", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: "c1",
+              },
+            ]
+          : [],
+    );
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    const composer = (await screen.findByLabelText(
+      "Chat message",
+    )) as HTMLTextAreaElement;
+
+    fireEvent.change(composer, { target: { value: "line one" } });
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
+    expect(host.agentTurn).not.toHaveBeenCalled();
+    expect(composer.value).toBe("line one");
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
+    expect((screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled).toBe(
+      true,
+    );
+
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "Grounded response." } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+    expect(await screen.findByText("Grounded response.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Chat message")),
+    );
+  });
+
   it("collapses to an accessible reopen strip without losing the active draft", async () => {
     const active = sessionDto("chat-a", "Chat A");
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
@@ -786,6 +860,12 @@ describe("LinkedChatRail", () => {
       expect(screen.queryByTestId("linked-chat-jump-latest")).toBeNull(),
     );
 
+    // The user may scroll away again while the provider is still working.
+    thread.scrollTop = 0;
+    fireEvent.scroll(thread);
+    const existingJump = await screen.findByTestId("linked-chat-jump-latest");
+    expect(existingJump.textContent).toBe("Jump to latest");
+
     await act(async () => {
       resolveTurn?.([
         {
@@ -799,6 +879,13 @@ describe("LinkedChatRail", () => {
     expect(
       await within(thread).findByText("Fresh assistant evidence answer."),
     ).toBeTruthy();
+    expect(screen.getByTestId("linked-chat-jump-latest").textContent).toBe(
+      "New response · Jump to latest",
+    );
+    fireEvent.click(screen.getByTestId("linked-chat-jump-latest"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-jump-latest")).toBeNull(),
+    );
     expect(
       await within(thread).findByText("Continue investigation"),
     ).toBeTruthy();
@@ -1100,6 +1187,7 @@ describe("LinkedChatRail", () => {
     fireEvent.scroll(thread);
 
     const jump = await screen.findByTestId("linked-chat-jump-latest");
+    expect(jump.textContent).toBe("Jump to latest");
     // Keyboard-accessible control.
     jump.focus();
     expect(document.activeElement).toBe(jump);

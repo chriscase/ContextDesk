@@ -50,6 +50,7 @@ import {
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
+import { IconChevronRight } from "../icons";
 import { MarkdownBody } from "../MarkdownBody";
 import { SourceCitations } from "../SourceCitations";
 import { ToolCallList } from "../ToolCallList";
@@ -77,6 +78,8 @@ type Props = {
   compactLayout?: boolean;
   /** Normal/wide layout: retain state while presenting only a reopen strip. */
   collapsed?: boolean;
+  /** Explicit desktop grid track so optional splitters cannot shift the rail. */
+  desktopGridColumn?: number;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
   /** Compact parent indicator without duplicating chat/session state. */
@@ -230,6 +233,7 @@ export function LinkedChatRail({
   onApplyNav,
   compactLayout = false,
   collapsed = false,
+  desktopGridColumn,
   developerMode = false,
   onRailSummary,
   onRequestClose,
@@ -246,6 +250,7 @@ export function LinkedChatRail({
   >({});
   const [modelLoadError, setModelLoadError] = useState<string | null>(null);
   const modelHelpId = useId();
+  const composerHelpId = useId();
   /**
    * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
    * chat A must not leak into chat B when the user switches mid-turn (#543).
@@ -275,6 +280,9 @@ export function LinkedChatRail({
   const [detachedByChat, setDetachedByChat] = useState<Record<string, boolean>>(
     {},
   );
+  const [newContentByChat, setNewContentByChat] = useState<
+    Record<string, boolean>
+  >({});
   /** Per-chat drafts so switching chats does not lose unsent text. */
   const draftsRef = useRef<Record<string, string>>({});
   /** Per-chat scroll offsets so returning to a chat restores position. */
@@ -286,6 +294,11 @@ export function LinkedChatRail({
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
   const previousCollapsedRef = useRef(collapsed);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusComposerAfterTurnRef = useRef<string | null>(null);
+  const sendingChatsRef = useRef<Set<string>>(new Set());
+  const detachedByChatRef = useRef(detachedByChat);
+  detachedByChatRef.current = detachedByChat;
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -370,6 +383,18 @@ export function LinkedChatRail({
   }, [modelOptions]);
   const showJump =
     Boolean(activeChatId) && (detachedByChat[activeChatId!] || !followActive);
+  const hasNewContent = activeChatId
+    ? (newContentByChat[activeChatId] ?? false)
+    : false;
+
+  useEffect(() => {
+    const target = focusComposerAfterTurnRef.current;
+    if (!target || busy || collapsed) return;
+    if (activeChatId === target) {
+      composerRef.current?.focus();
+    }
+    focusComposerAfterTurnRef.current = null;
+  }, [activeChatId, busy, collapsed]);
 
   const refreshChats = useCallback(async () => {
     try {
@@ -405,12 +430,22 @@ export function LinkedChatRail({
     const near = isNearBottom(el);
     setFollowByChat((m) => ({ ...m, [activeChatId]: near }));
     setDetachedByChat((m) => ({ ...m, [activeChatId]: !near }));
+    if (near) {
+      setNewContentByChat((current) => ({
+        ...current,
+        [activeChatId]: false,
+      }));
+    }
   };
 
   const jumpToLatest = () => {
     if (!activeChatId) return;
     setFollowByChat((m) => ({ ...m, [activeChatId]: true }));
     setDetachedByChat((m) => ({ ...m, [activeChatId]: false }));
+    setNewContentByChat((current) => ({
+      ...current,
+      [activeChatId]: false,
+    }));
     scrollToLatest("smooth");
   };
 
@@ -624,7 +659,8 @@ export function LinkedChatRail({
       sessionId = await createLinkedChat();
       if (!sessionId) return;
     }
-    if (busyByChat[sessionId]) return;
+    if (busyByChat[sessionId] || sendingChatsRef.current.has(sessionId)) return;
+    sendingChatsRef.current.add(sessionId);
     setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
     setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
     setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
@@ -633,6 +669,10 @@ export function LinkedChatRail({
     // Sending always re-engages follow for this chat (#529).
     setFollowByChat((m) => ({ ...m, [sessionId!]: true }));
     setDetachedByChat((m) => ({ ...m, [sessionId!]: false }));
+    setNewContentByChat((current) => ({
+      ...current,
+      [sessionId!]: false,
+    }));
 
     const userMsg: ChatMsg = {
       id: crypto.randomUUID(),
@@ -658,6 +698,15 @@ export function LinkedChatRail({
         (ev) => {
           // Only update if still viewing this chat.
           if (activeChatIdRef.current !== sessionId) return;
+          if (
+            ev.kind === "text_delta" &&
+            detachedByChatRef.current[sessionId!]
+          ) {
+            setNewContentByChat((current) => ({
+              ...current,
+              [sessionId!]: true,
+            }));
+          }
           setMessages((msgs) => {
             const base =
               msgs.find((x) => x.id === assistantId) ??
@@ -758,6 +807,10 @@ export function LinkedChatRail({
         );
       }
     } finally {
+      sendingChatsRef.current.delete(sessionId);
+      if (activeChatIdRef.current === sessionId) {
+        focusComposerAfterTurnRef.current = sessionId;
+      }
       setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
     }
   };
@@ -811,10 +864,9 @@ export function LinkedChatRail({
   };
 
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      void sendChat();
-    }
+    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    if (!busy && draft.trim()) void sendChat();
   };
 
   const onSwitcherKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -886,6 +938,11 @@ export function LinkedChatRail({
         data-testid="log-explorer-chat"
         data-collapsed="true"
         aria-label="Linked corpus chat collapsed"
+        style={
+          desktopGridColumn == null
+            ? undefined
+            : { gridColumn: desktopGridColumn }
+        }
       >
         <button
           ref={reopenRef}
@@ -916,6 +973,11 @@ export function LinkedChatRail({
         compactLayout ? " log-explorer__chat--compact-layout" : ""
       }`}
       data-testid="log-explorer-chat"
+      style={
+        desktopGridColumn == null
+          ? undefined
+          : { gridColumn: desktopGridColumn }
+      }
       role={compactLayout ? "dialog" : undefined}
       aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
@@ -941,12 +1003,13 @@ export function LinkedChatRail({
             <button
               ref={collapseToggleRef}
               type="button"
-              className="log-explorer__btn"
+              className="log-explorer__rail-collapse log-explorer__rail-collapse--chat"
               aria-label="Collapse linked chat rail"
+              title="Collapse chat"
               data-testid="collapse-linked-chat"
               onClick={toggleCollapsed}
             >
-              Collapse chat
+              <IconChevronRight />
             </button>
           ) : null}
           {compactLayout && onRequestClose ? (
@@ -1255,7 +1318,7 @@ export function LinkedChatRail({
             data-testid="linked-chat-jump-latest"
             onClick={jumpToLatest}
           >
-            New messages · Jump to latest
+            {hasNewContent ? "New response · Jump to latest" : "Jump to latest"}
           </button>
         )}
       </div>
@@ -1265,6 +1328,7 @@ export function LinkedChatRail({
         data-testid="log-explorer-chat-composer"
       >
         <textarea
+          ref={composerRef}
           className="log-explorer__search"
           rows={compactLayout ? 2 : 3}
           placeholder="Ask about these logs…"
@@ -1278,7 +1342,13 @@ export function LinkedChatRail({
           }}
           onKeyDown={onComposerKey}
           aria-label="Chat message"
+          aria-describedby={composerHelpId}
+          aria-keyshortcuts="Enter Shift+Enter"
+          title="Return to send · Shift+Return for a newline"
         />
+        <span id={composerHelpId} className="sr-only">
+          Press Return to send. Press Shift and Return for a newline.
+        </span>
         <button
           type="button"
           className="log-explorer__btn log-explorer__btn--active"
