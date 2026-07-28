@@ -2264,6 +2264,8 @@
 }
 
 .log-explorer__msg--wrap {
+  line-height: 18px;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   overflow: auto;
   text-overflow: unset;

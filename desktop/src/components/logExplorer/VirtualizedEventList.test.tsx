@@ -6,7 +6,11 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { eventRowHeight, VirtualizedEventList } from "./VirtualizedEventList";
+import {
+  eventRowHeight,
+  measuredEventRowHeight,
+  VirtualizedEventList,
+} from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
 
 function makeEvents(n: number): ExplorerEventDto[] {
@@ -300,6 +304,46 @@ describe("VirtualizedEventList", () => {
     expect(eventRowHeight(short!, "full", false, 28, 4)).toBe(28);
     expect(eventRowHeight(multiline!, "full", false, 28, 4)).toBe(66);
     expect(eventRowHeight(long!, "full", false, 28, 4)).toBe(156);
+  });
+
+  it("remeasures wrapped payloads from painted content without clipping or blank maximum height", async () => {
+    const event = makeEvents(1)[0]!;
+    event.message = `STACK_TRACE_SENTINEL ${"frame detail ".repeat(40)}`;
+    const props = {
+      events: [event],
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      previewLines: 4,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(<VirtualizedEventList {...props} />);
+    const message = screen.getByText(/STACK_TRACE_SENTINEL/);
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 90,
+    });
+
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 5, 2]} />);
+
+    const row = document.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`);
+    await waitFor(() => expect(row?.style.height).toBe("102px"));
+    expect(message.style.maxHeight).toBe("144px");
+    expect(message.style.overflowWrap).toBe("anywhere");
+
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 18,
+    });
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 6, 2]} />);
+    await waitFor(() => expect(row?.style.height).toBe("28px"));
+  });
+
+  it("caps measured payload height at the selected preview depth", () => {
+    expect(measuredEventRowHeight(900, 28, 8)).toBe(156);
+    expect(measuredEventRowHeight(18, 28, 8)).toBe(28);
   });
 
   it("uses the user preview depth and a backend hit-centered excerpt", () => {

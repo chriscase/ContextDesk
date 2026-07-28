@@ -272,6 +272,22 @@ export function eventRowHeight(
   );
 }
 
+export function measuredEventRowHeight(
+  scrollHeight: number,
+  compactH: number,
+  maxLines: number,
+): number {
+  if (scrollHeight <= PREVIEW_LINE_HEIGHT + 1) return compactH;
+  const visibleContentHeight = Math.min(
+    scrollHeight,
+    maxLines * PREVIEW_LINE_HEIGHT,
+  );
+  return Math.max(
+    compactH,
+    visibleContentHeight + PREVIEW_VERTICAL_CHROME,
+  );
+}
+
 export function centeredLiteralExcerpt(
   message: string,
   keyword: string,
@@ -321,6 +337,10 @@ export function VirtualizedEventList({
     lineMode === "full"
       ? Math.min(24, boundedPreviewLines * 2)
       : boundedPreviewLines;
+  const [measurementRevision, setMeasurementRevision] = useState(0);
+  const [measuredRowHeights, setMeasuredRowHeights] = useState<
+    Map<number, number>
+  >(new Map());
   const edgeRowH =
     lineMode === "compact"
       ? baseRowH
@@ -332,6 +352,8 @@ export function VirtualizedEventList({
     () =>
       alignedRows ??
       events.map((event) => {
+        const expanded = expandedSeqs?.has(event.seq) ?? false;
+        const wraps = lineMode === "full" || lineMode === "wrap" || expanded;
         const matchExcerpt = matchExcerpts?.[event.seq];
         const filterExcerpt =
           !matchExcerpt && filterKeyword
@@ -341,14 +363,16 @@ export function VirtualizedEventList({
           key: String(event.seq),
           ts: event.ts,
           event,
-          height: eventRowHeight(
-            event,
-            lineMode,
-            expandedSeqs?.has(event.seq) ?? false,
-            compactH,
-            boundedPreviewLines,
-            matchExcerpt ?? filterExcerpt ?? event.message,
-          ),
+          height:
+            (wraps ? measuredRowHeights.get(event.seq) : undefined) ??
+            eventRowHeight(
+              event,
+              lineMode,
+              expanded,
+              compactH,
+              boundedPreviewLines,
+              matchExcerpt ?? filterExcerpt ?? event.message,
+            ),
         };
       }),
     [
@@ -360,6 +384,7 @@ export function VirtualizedEventList({
       filterKeyword,
       lineMode,
       matchExcerpts,
+      measuredRowHeights,
     ],
   );
 
@@ -381,6 +406,16 @@ export function VirtualizedEventList({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(400);
   const edgeCooldown = useRef(0);
+
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      setMeasurementRevision((revision) => revision + 1);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   const { heights, offsets, totalH } = useMemo(() => {
     const heights: number[] = new Array(displayRows.length);
@@ -594,11 +629,70 @@ export function VirtualizedEventList({
   );
 
   useLayoutEffect(() => {
-    if (focusToSeq == null) return;
+    setMeasuredRowHeights(new Map());
+  }, [
+    boundedPreviewLines,
+    compactH,
+    filterKeyword,
+    gridCols,
+    lineMode,
+    matchExcerpts,
+  ]);
+
+  useLayoutEffect(() => {
+    if (alignedRows) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const next = new Map<number, number>();
+    for (const message of el.querySelectorAll<HTMLElement>(
+      "[data-row-message-seq]",
+    )) {
+      const seq = Number(message.dataset.rowMessageSeq);
+      if (!Number.isFinite(seq) || message.scrollHeight <= 0) continue;
+      next.set(
+        seq,
+        measuredEventRowHeight(
+          message.scrollHeight,
+          compactH,
+          maxPreviewLines,
+        ),
+      );
+    }
+    if (next.size === 0) return;
+    setMeasuredRowHeights((current) => {
+      let changed = false;
+      const merged = new Map(current);
+      for (const [seq, height] of next) {
+        if (merged.get(seq) !== height) {
+          merged.set(seq, height);
+          changed = true;
+        }
+      }
+      return changed ? merged : current;
+    });
+  }, [
+    alignedRows,
+    compactH,
+    gridCols,
+    lineMode,
+    matchExcerpts,
+    maxPreviewLines,
+    measurementRevision,
+    slice,
+  ]);
+
+  const lastFocusSeq = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (focusToSeq == null) {
+      lastFocusSeq.current = null;
+      return;
+    }
+    if (focusToSeq === lastFocusSeq.current) return;
     const row = parentRef.current?.querySelector<HTMLElement>(
       `[data-seq="${focusToSeq}"]`,
     );
     if (!row) return;
+    lastFocusSeq.current = focusToSeq;
     row.focus();
     onFocusToSeq?.(focusToSeq);
   }, [focusToSeq, onFocusToSeq, slice]);
@@ -818,6 +912,7 @@ export function VirtualizedEventList({
                       ? "log-explorer__msg log-explorer__msg--wrap"
                       : "log-explorer__msg"
                   }
+                  data-row-message-seq={wrapText ? e.seq : undefined}
                   title={e.message}
                   aria-label={
                     excerpted
@@ -826,7 +921,10 @@ export function VirtualizedEventList({
                   }
                   style={
                     wrapText
-                      ? { maxHeight: `${visiblePreviewLines * 1.35}em` }
+                      ? {
+                          maxHeight: `${visiblePreviewLines * PREVIEW_LINE_HEIGHT}px`,
+                          overflowWrap: "anywhere",
+                        }
                       : undefined
                   }
                 >
