@@ -9,11 +9,15 @@ import {
 import {
   hostGetHandbookManifest,
   hostGetHandbookPage,
+  hostExportHandbookDocument,
   hostOpenExternalUrl,
   hostResolveHandbookLink,
+  type HandbookExportFormat,
+  type HandbookExportScope,
   type HandbookManifestDto,
   type HandbookPageDto,
 } from "../../lib/host";
+import { saveFileDialog } from "../../lib/dialogs";
 import {
   applyThemeToDocument,
   subscribeThemeChanges,
@@ -26,6 +30,7 @@ import {
   HandbookMarkdown,
   HandbookTableOfContents,
 } from "./HandbookMarkdown";
+import { renderHandbookExportHtml } from "./HandbookExport";
 
 type Props = {
   initialChapterId?: string;
@@ -44,6 +49,11 @@ export function EngineeringHandbook({ initialChapterId, onNavigate }: Props) {
   const [manifestLoading, setManifestLoading] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportStatus, setExportStatus] = useState<{
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
   const articleRef = useRef<HTMLElement>(null);
@@ -51,6 +61,7 @@ export function EngineeringHandbook({ initialChapterId, onNavigate }: Props) {
   const requestRef = useRef(0);
   const focusPageRef = useRef<string | null>(null);
   const pendingAnchorRef = useRef<string | null>(null);
+  const exportMenuRef = useRef<HTMLDetailsElement>(null);
 
   const headings = useMemo(
     () => collectHandbookHeadings(page?.body ?? ""),
@@ -264,6 +275,86 @@ export function EngineeringHandbook({ initialChapterId, onNavigate }: Props) {
     if (activeChapterId) void loadChapter(activeChapterId);
   };
 
+  const exportDocument = async (
+    scope: HandbookExportScope,
+    format: HandbookExportFormat,
+  ) => {
+    if (!manifest || !page || exporting) return;
+    exportMenuRef.current?.removeAttribute("open");
+    setExportStatus(null);
+    const extension = format === "html" ? "html" : "md";
+    const currentName = page.id
+      .split("/")
+      .at(-1)
+      ?.replace(/\.md$/i, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-");
+    const defaultName =
+      scope === "complete"
+        ? `contextdesk-engineering-handbook.${extension}`
+        : `contextdesk-handbook-${currentName || "chapter"}.${extension}`;
+    const path = await saveFileDialog(
+      `Export ${
+        scope === "complete" ? "complete handbook" : "current chapter"
+      } as ${format === "html" ? "HTML" : "Markdown"}`,
+      defaultName,
+      [
+        {
+          name: format === "html" ? "HTML document" : "Markdown document",
+          extensions: [extension],
+        },
+      ],
+    );
+    if (!path) return;
+    setExporting(true);
+    try {
+      const pages =
+        scope === "complete"
+          ? await Promise.all(
+              manifest.chapters.map((chapter) =>
+                chapter.id === page.id
+                  ? Promise.resolve(page)
+                  : hostGetHandbookPage(chapter.id),
+              ),
+            )
+          : [page];
+      const renderedHtml =
+        format === "html"
+          ? await renderHandbookExportHtml(
+              manifest,
+              pages,
+              hostResolveHandbookLink,
+            )
+          : null;
+      const bytes = await hostExportHandbookDocument({
+        path,
+        scope,
+        format,
+        pageId: scope === "current" ? page.id : null,
+        renderedHtml,
+      });
+      setExportStatus({
+        kind: "success",
+        message: `Exported ${
+          scope === "complete" ? "complete handbook" : "current chapter"
+        } · ${format === "html" ? "HTML" : "Markdown"} · ${Math.max(
+          1,
+          Math.round(bytes / 1024),
+        )} KB`,
+      });
+    } catch (exportError) {
+      setExportStatus({
+        kind: "error",
+        message: messageFrom(
+          exportError,
+          "The handbook could not be exported.",
+        ),
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const loading = manifestLoading || pageLoading;
 
   return (
@@ -277,21 +368,79 @@ export function EngineeringHandbook({ initialChapterId, onNavigate }: Props) {
           <h1>{manifest?.title ?? "Engineering Handbook"}</h1>
           <p>{manifest?.audience ?? "ContextDesk engineers and reviewers"}</p>
         </div>
-        <div className="handbook-header__status">
-          <span aria-hidden>●</span>
-          Offline
+        <div className="handbook-header__actions">
+          <details className="handbook-export" ref={exportMenuRef}>
+            <summary aria-label="Export engineering handbook">
+              {exporting ? "Exporting…" : "Export"}
+              <span aria-hidden>⌄</span>
+            </summary>
+            <div aria-label="Handbook export options">
+              <strong>Current chapter</strong>
+              <button
+                type="button"
+                disabled={exporting || !page}
+                onClick={() => void exportDocument("current", "markdown")}
+              >
+                Markdown
+              </button>
+              <button
+                type="button"
+                disabled={exporting || !page}
+                onClick={() => void exportDocument("current", "html")}
+              >
+                HTML
+              </button>
+              <strong>Complete handbook</strong>
+              <button
+                type="button"
+                disabled={exporting || !page}
+                onClick={() => void exportDocument("complete", "markdown")}
+              >
+                Markdown
+              </button>
+              <button
+                type="button"
+                disabled={exporting || !page}
+                onClick={() => void exportDocument("complete", "html")}
+              >
+                HTML
+              </button>
+            </div>
+          </details>
+          <div className="handbook-header__status">
+            <span aria-hidden>●</span>
+            Offline
+          </div>
         </div>
       </header>
 
       <div className="sr-only" aria-live="polite">
-        {error
-          ? `Handbook error: ${error}`
-          : loading
-            ? "Loading the engineering handbook"
-            : page
-              ? `Opened ${page.title}`
-              : "Engineering handbook ready"}
+        {exportStatus?.message ??
+          (error
+            ? `Handbook error: ${error}`
+            : loading
+              ? "Loading the engineering handbook"
+              : page
+                ? `Opened ${page.title}`
+                : "Engineering handbook ready")}
       </div>
+
+      {exportStatus ? (
+        <div
+          className="handbook-export-status"
+          data-kind={exportStatus.kind}
+          role={exportStatus.kind === "error" ? "alert" : "status"}
+        >
+          {exportStatus.message}
+          <button
+            type="button"
+            aria-label="Dismiss export status"
+            onClick={() => setExportStatus(null)}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       <div className="handbook-layout">
         <nav className="handbook-chapters" aria-label="Handbook chapters">

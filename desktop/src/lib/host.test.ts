@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  hostExportHandbookDocument,
   hostGetHandbookPage,
   hostOpenEngineeringHandbook,
   hostResolveHandbookLink,
@@ -183,6 +184,14 @@ describe("engineering handbook host boundary (#683)", () => {
       "docs/design/PROVEN_METHODS.md",
       "LOG_EXPLORER.md",
     );
+    invokeMock.mockResolvedValueOnce(4096);
+    await hostExportHandbookDocument({
+      path: "/tmp/handbook.html",
+      scope: "complete",
+      format: "html",
+      renderedHtml:
+        '<!doctype html><html data-contextdesk-handbook-export="1"></html>',
+    });
 
     expect(invokeMock.mock.calls).toEqual([
       ["open_engineering_handbook", undefined],
@@ -192,6 +201,17 @@ describe("engineering handbook host boundary (#683)", () => {
         {
           fromPageId: "docs/design/PROVEN_METHODS.md",
           target: "LOG_EXPLORER.md",
+        },
+      ],
+      [
+        "export_handbook_document",
+        {
+          path: "/tmp/handbook.html",
+          scope: "complete",
+          format: "html",
+          pageId: null,
+          renderedHtml:
+            '<!doctype html><html data-contextdesk-handbook-export="1"></html>',
         },
       ],
     ]);

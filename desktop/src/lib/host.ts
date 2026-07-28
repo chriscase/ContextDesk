@@ -214,6 +214,28 @@ export async function hostResolveHandbookLink(
   });
 }
 
+export type HandbookExportScope = "current" | "complete";
+export type HandbookExportFormat = "markdown" | "html";
+
+export async function hostExportHandbookDocument(args: {
+  path: string;
+  scope: HandbookExportScope;
+  format: HandbookExportFormat;
+  pageId?: string | null;
+  renderedHtml?: string | null;
+}): Promise<number> {
+  if (!isTauri()) {
+    throw new Error("Handbook export requires the desktop app.");
+  }
+  return invoke<number>("export_handbook_document", {
+    path: args.path,
+    scope: args.scope,
+    format: args.format,
+    pageId: args.pageId ?? null,
+    renderedHtml: args.renderedHtml ?? null,
+  });
+}
+
 /** Session-scoped context pack entry (#341). */
 export type SessionContextEntryDto = {
   rel_path: string;

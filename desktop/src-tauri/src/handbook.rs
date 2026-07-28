@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_PAGE_BYTES: u64 = 1_048_576;
+const MAX_HTML_EXPORT_BYTES: usize = 8 * 1_048_576;
 const HANDBOOK_CHAPTERS: &[&str] = &[
     "docs/design/PROVEN_METHODS.md",
     "docs/design/proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md",
@@ -103,6 +104,97 @@ impl HandbookIndex {
         })
     }
 
+    pub(crate) fn export_document(
+        &self,
+        path: &Path,
+        scope: &str,
+        format: &str,
+        page_id: Option<&str>,
+        rendered_html: Option<&str>,
+    ) -> Result<usize, String> {
+        if !path.is_absolute() {
+            return Err("handbook export path must be absolute".into());
+        }
+        let expected_extension = match format {
+            "markdown" => "md",
+            "html" => "html",
+            _ => return Err("unsupported handbook export format".into()),
+        };
+        if path.extension().and_then(|value| value.to_str()) != Some(expected_extension) {
+            return Err(format!(
+                "handbook {format} export requires a .{expected_extension} destination"
+            ));
+        }
+        if path.parent().is_none_or(|parent| !parent.is_dir()) {
+            return Err("handbook export destination is unavailable".into());
+        }
+
+        let content = match format {
+            "markdown" => self.export_markdown(scope, page_id)?,
+            "html" => {
+                self.validate_export_scope(scope, page_id)?;
+                validate_rendered_html(
+                    rendered_html.ok_or_else(|| "rendered handbook HTML is missing".to_string())?,
+                )?
+                .to_string()
+            }
+            _ => unreachable!(),
+        };
+        fs::write(path, content.as_bytes())
+            .map_err(|error| format!("handbook export could not be written: {error}"))?;
+        Ok(content.len())
+    }
+
+    fn validate_export_scope(&self, scope: &str, page_id: Option<&str>) -> Result<(), String> {
+        match scope {
+            "current" => {
+                let id =
+                    page_id.ok_or_else(|| "current handbook export requires a page".to_string())?;
+                if !self
+                    .manifest
+                    .chapters
+                    .iter()
+                    .any(|chapter| chapter.id == id)
+                {
+                    return Err("handbook export page is not a declared chapter".into());
+                }
+                let _ = self.page(id)?;
+                Ok(())
+            }
+            "complete" if page_id.is_none() => Ok(()),
+            "complete" => Err("complete handbook export cannot select one page".into()),
+            _ => Err("unsupported handbook export scope".into()),
+        }
+    }
+
+    fn export_markdown(&self, scope: &str, page_id: Option<&str>) -> Result<String, String> {
+        self.validate_export_scope(scope, page_id)?;
+        if scope == "current" {
+            let page = self.page(page_id.expect("validated current page"))?;
+            return Ok(format!(
+                "<!-- ContextDesk handbook source: {} -->\n\n{}",
+                page.id, page.body
+            ));
+        }
+
+        let mut output = String::from(
+            "<!-- ContextDesk portable Engineering Handbook export.\n\
+             Canonical source paths are recorded before each chapter. Relative links retain\n\
+             their repository meaning for agents and source review. -->\n\n",
+        );
+        for (index, chapter) in self.manifest.chapters.iter().enumerate() {
+            if index > 0 {
+                output.push_str("\n\n---\n\n");
+            }
+            let page = self.page(&chapter.id)?;
+            output.push_str(&format!(
+                "<!-- ContextDesk handbook source: {} -->\n\n{}",
+                page.id, page.body
+            ));
+        }
+        Ok(output)
+    }
+
     pub(crate) fn resolve_link(
         &self,
         from_page_id: &str,
@@ -149,6 +241,32 @@ impl HandbookIndex {
             anchor: anchor.map(str::to_string),
         })
     }
+}
+
+fn validate_rendered_html(value: &str) -> Result<&str, String> {
+    if value.is_empty() || value.len() > MAX_HTML_EXPORT_BYTES {
+        return Err("rendered handbook HTML is empty or exceeds the export limit".into());
+    }
+    let lower = value.to_ascii_lowercase();
+    if !lower.starts_with("<!doctype html>")
+        || !lower.contains("data-contextdesk-handbook-export=\"1\"")
+    {
+        return Err("rendered handbook HTML is missing its export identity".into());
+    }
+    for forbidden in [
+        "<script",
+        "<iframe",
+        "<object",
+        "<embed",
+        "javascript:",
+        " src=",
+        "@import",
+    ] {
+        if lower.contains(forbidden) {
+            return Err("rendered handbook HTML contains active or remote content".into());
+        }
+    }
+    Ok(value)
 }
 
 fn nonempty(value: &str) -> Option<&str> {
@@ -276,5 +394,71 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn exports_canonical_current_and_complete_markdown() {
+        let index = HandbookIndex::load(checked_in_root()).expect("handbook");
+        let current = index
+            .export_markdown("current", Some("docs/design/PROVEN_METHODS.md"))
+            .expect("current markdown");
+        assert!(current.contains("ContextDesk handbook source: docs/design/PROVEN_METHODS.md"));
+        assert!(current.contains("# Proven methods handbook"));
+        assert!(!current.contains("# Log evidence pipeline"));
+
+        let complete = index
+            .export_markdown("complete", None)
+            .expect("complete markdown");
+        assert!(complete.contains("# Proven methods handbook"));
+        assert!(complete.contains("# Deterministic context assembly before model synthesis"));
+        assert!(complete.contains("# Log evidence pipeline"));
+        assert!(complete.contains("# Durable investigation loop"));
+        assert!(complete.contains("# Proven method chapter template"));
+        assert!(index
+            .export_markdown("current", Some("docs/ARCHITECTURE.md"))
+            .is_err());
+    }
+
+    #[test]
+    fn export_write_enforces_scope_extension_and_inert_html() {
+        let index = HandbookIndex::load(checked_in_root()).expect("handbook");
+        let temp = tempfile::tempdir().expect("temp");
+        let markdown_path = temp.path().join("handbook.md");
+        let bytes = index
+            .export_document(&markdown_path, "complete", "markdown", None, None)
+            .expect("markdown export");
+        assert_eq!(bytes, fs::read(&markdown_path).expect("read").len());
+
+        let html_path = temp.path().join("handbook.html");
+        let html = "<!doctype html><html data-contextdesk-handbook-export=\"1\"><body><svg></svg></body></html>";
+        index
+            .export_document(
+                &html_path,
+                "current",
+                "html",
+                Some("docs/design/PROVEN_METHODS.md"),
+                Some(html),
+            )
+            .expect("html export");
+        assert_eq!(fs::read_to_string(html_path).expect("html"), html);
+
+        assert!(index
+            .export_document(
+                &temp.path().join("wrong.txt"),
+                "complete",
+                "markdown",
+                None,
+                None,
+            )
+            .is_err());
+        assert!(index
+            .export_document(
+                &temp.path().join("unsafe.html"),
+                "complete",
+                "html",
+                None,
+                Some("<!doctype html><html data-contextdesk-handbook-export=\"1\"><script>bad()</script></html>"),
+            )
+            .is_err());
     }
 }

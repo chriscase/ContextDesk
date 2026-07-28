@@ -1,18 +1,25 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  hostExportHandbookDocument,
   hostGetHandbookManifest,
   hostGetHandbookPage,
   hostOpenExternalUrl,
   hostResolveHandbookLink,
 } from "../../lib/host";
+import { saveFileDialog } from "../../lib/dialogs";
 import { EngineeringHandbook } from "./EngineeringHandbook";
 
 vi.mock("../../lib/host", () => ({
+  hostExportHandbookDocument: vi.fn(),
   hostGetHandbookManifest: vi.fn(),
   hostGetHandbookPage: vi.fn(),
   hostOpenExternalUrl: vi.fn(),
   hostResolveHandbookLink: vi.fn(),
+}));
+
+vi.mock("../../lib/dialogs", () => ({
+  saveFileDialog: vi.fn(),
 }));
 
 const manifest = {
@@ -53,6 +60,8 @@ describe("EngineeringHandbook", () => {
       return pages[id as keyof typeof pages];
     });
     vi.mocked(hostOpenExternalUrl).mockResolvedValue();
+    vi.mocked(hostExportHandbookDocument).mockResolvedValue(4_096);
+    vi.mocked(saveFileDialog).mockResolvedValue(null);
     vi.mocked(hostResolveHandbookLink).mockResolvedValue({
       kind: "internal",
       pageId: "evidence",
@@ -289,5 +298,45 @@ describe("EngineeringHandbook", () => {
       "Handbook is not bundled",
     );
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("exports current Markdown and complete self-contained HTML", async () => {
+    vi.mocked(saveFileDialog)
+      .mockResolvedValueOnce("/tmp/contextdesk-handbook-architecture.md")
+      .mockResolvedValueOnce("/tmp/contextdesk-engineering-handbook.html");
+    render(<EngineeringHandbook />);
+    await screen.findByRole("heading", { name: "Architecture", level: 1 });
+
+    fireEvent.click(screen.getByLabelText("Export engineering handbook"));
+    fireEvent.click(screen.getAllByRole("button", { name: "Markdown" })[0]);
+    await waitFor(() =>
+      expect(hostExportHandbookDocument).toHaveBeenCalledWith({
+        path: "/tmp/contextdesk-handbook-architecture.md",
+        scope: "current",
+        format: "markdown",
+        pageId: "architecture",
+        renderedHtml: null,
+      }),
+    );
+    expect((await screen.findByRole("status")).textContent).toContain(
+      "current chapter · Markdown",
+    );
+
+    fireEvent.click(screen.getByLabelText("Export engineering handbook"));
+    fireEvent.click(screen.getAllByRole("button", { name: "HTML" })[1]);
+    await waitFor(() =>
+      expect(hostExportHandbookDocument).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          path: "/tmp/contextdesk-engineering-handbook.html",
+          scope: "complete",
+          format: "html",
+          pageId: null,
+          renderedHtml: expect.stringContaining(
+            'data-contextdesk-handbook-export="1"',
+          ),
+        }),
+      ),
+    );
+    expect(hostGetHandbookPage).toHaveBeenCalledWith("evidence");
   });
 });

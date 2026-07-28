@@ -6625,6 +6625,24 @@ fn get_handbook_page(state: State<'_, AppState>, id: String) -> Result<HandbookP
 }
 
 #[tauri::command]
+fn export_handbook_document(
+    state: State<'_, AppState>,
+    path: String,
+    scope: String,
+    format: String,
+    page_id: Option<String>,
+    rendered_html: Option<String>,
+) -> Result<usize, String> {
+    handbook_index(&state)?.export_document(
+        std::path::Path::new(&path),
+        &scope,
+        &format,
+        page_id.as_deref(),
+        rendered_html.as_deref(),
+    )
+}
+
+#[tauri::command]
 fn resolve_handbook_link(
     state: State<'_, AppState>,
     from_page_id: String,
@@ -6731,6 +6749,7 @@ pub fn run() {
             get_help_asset,
             get_handbook_manifest,
             get_handbook_page,
+            export_handbook_document,
             resolve_handbook_link,
             open_engineering_handbook,
             session_context_list,
@@ -7051,6 +7070,7 @@ mod help_host_tests {
         for registration in [
             "get_handbook_manifest,",
             "get_handbook_page,",
+            "export_handbook_document,",
             "resolve_handbook_link,",
             "open_engineering_handbook,",
         ] {
