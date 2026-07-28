@@ -262,6 +262,22 @@ fn linked_broader_read_requested(user_text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Whether a linked-log request explicitly needs the full workspace host.
+///
+/// Pure log questions can safely run against a turn-local read-only log host
+/// while optional workspace/memory startup is delayed. Requests naming those
+/// broader sources must remain provider-free until the governed host is ready.
+pub fn linked_request_requires_workspace_host(user_text: &str) -> bool {
+    linked_workspace_search_requested(user_text) || linked_broader_read_requested(user_text)
+}
+
+fn linked_workspace_evidence_required(user_text: &str, specs: &[ToolSpec]) -> bool {
+    linked_workspace_search_requested(user_text)
+        && specs
+            .iter()
+            .any(|tool| tool.name == crate::tools::names::SEARCH_KB)
+}
+
 /// Heuristic: assistant text that defers work instead of answering from evidence.
 fn looks_like_planning_only(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -669,7 +685,7 @@ pub async fn run_agent_turn_with_sink(
         Vec::new()
     };
     let linked_workspace_search_required =
-        linked_turn && linked_workspace_search_requested(user_text);
+        linked_turn && linked_workspace_evidence_required(user_text, &specs);
     let linked_broader_reads_required = linked_turn && linked_broader_read_requested(user_text);
     let linked_workspace_specs = if linked_workspace_search_required {
         specs
@@ -696,6 +712,17 @@ pub async fn run_agent_turn_with_sink(
     // #480/#516: explicit immutable viewport snapshot for this linked turn only.
     if let Some(context) = opts.log_explorer_context.as_ref() {
         system_content.push_str(&context.system_hint());
+    }
+    if linked_turn
+        && host.log_only_tool_surface()
+        && linked_request_requires_workspace_host(user_text)
+    {
+        system_content.push_str(
+            "\nLIMITED CONTEXT: workspace files, durable memory, databases, and connectors are \
+             unavailable for this turn. Investigate the linked logs with the offered read-only \
+             log tools, clearly disclose the unavailable requested sources, and make no claims \
+             about evidence you could not retrieve.\n",
+        );
     }
 
     if history.is_empty() {
@@ -741,6 +768,9 @@ pub async fn run_agent_turn_with_sink(
     ];
     if linked_turn {
         trail.push("linked_log_required_cross_source_reads".into());
+        if host.log_only_tool_surface() {
+            trail.push("linked_log_only_fallback".into());
+        }
         if !linked_grounding_specs.is_empty() {
             trail.push("linked_grounding_surface:search_logs".into());
         }
@@ -1758,6 +1788,30 @@ mod tests {
         ));
         assert!(!linked_broader_read_requested(
             "Cross-check the linked logs against the workspace runbook."
+        ));
+        assert!(linked_request_requires_workspace_host(
+            "Cross-check the linked logs against durable memory."
+        ));
+        assert!(linked_request_requires_workspace_host(
+            "Compare this with our workspace runbook."
+        ));
+        assert!(!linked_request_requires_workspace_host(
+            "Show the most important problem in these logs."
+        ));
+        let log_only = crate::log_analysis::log_tool_specs()
+            .into_iter()
+            .filter(|tool| tool.side_effect == ToolSideEffect::Read)
+            .collect::<Vec<_>>();
+        assert!(
+            !linked_workspace_evidence_required(
+                "Compare these logs with the workspace runbook.",
+                &log_only
+            ),
+            "unavailable workspace evidence must not strand log-only synthesis"
+        );
+        assert!(linked_workspace_evidence_required(
+            "Compare these logs with the workspace runbook.",
+            &crate::tools::mvp_tool_specs()
         ));
     }
 

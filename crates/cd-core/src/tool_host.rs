@@ -153,6 +153,11 @@ pub struct ToolHost {
     active_log_corpus: Option<String>,
     /// Turn-scoped corpus that provider-generated arguments cannot override.
     scoped_log_corpus: Option<String>,
+    /// Restrict the advertised/executable model surface to read-only log tools.
+    ///
+    /// Used by the desktop's turn-local linked-log fallback when the optional
+    /// workspace/memory host is unavailable. This never broadens permissions.
+    log_only_tool_surface: bool,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -249,6 +254,7 @@ impl ToolHost {
             log_cache_dir: None,
             active_log_corpus: None,
             scoped_log_corpus: None,
+            log_only_tool_surface: false,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -889,6 +895,20 @@ impl ToolHost {
         self.scoped_log_corpus.as_deref()
     }
 
+    /// Restrict model-visible tools to the read-only log-analysis surface.
+    ///
+    /// The flag is deliberately host-wide: name resolution and execution use
+    /// the same catalog, so an unadvertised workspace, memory, connector, or
+    /// write tool cannot be smuggled into a restricted turn.
+    pub fn set_log_only_tool_surface(&mut self, enabled: bool) {
+        self.log_only_tool_surface = enabled;
+    }
+
+    /// Whether this host is restricted to read-only log analysis.
+    pub fn log_only_tool_surface(&self) -> bool {
+        self.log_only_tool_surface
+    }
+
     /// Resolve corpus id from tool args, falling back to the host active corpus.
     fn resolve_log_corpus(&self, args: &Value, tool: &str) -> CoreResult<String> {
         if let Some(cid) = self.scoped_log_corpus.as_deref() {
@@ -1051,6 +1071,15 @@ impl ToolHost {
     /// Tool specs; Confluence / web / X tools omitted when not enabled.
     /// Appends enabled dynamic connector tools (#127).
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
+        if self.log_only_tool_surface {
+            if !self.log_analysis_enabled {
+                return Vec::new();
+            }
+            return crate::log_analysis::log_tool_specs()
+                .into_iter()
+                .filter(|tool| tool.side_effect == ToolSideEffect::Read)
+                .collect();
+        }
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
             specs.retain(|t| !confluence_tool_name(&t.name));
@@ -1266,6 +1295,13 @@ impl ToolHost {
         let resolved = self.resolve_execute_name(name);
         let name = resolved.as_str();
         let side = self.side_effect_for(name);
+        if self.log_only_tool_surface
+            && (!crate::log_analysis::is_log_tool(name) || side != ToolSideEffect::Read)
+        {
+            return Err(CoreError::Policy(format!(
+                "tool `{name}` is unavailable in the read-only linked-log fallback"
+            )));
+        }
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
 
@@ -5958,6 +5994,69 @@ mod tests {
                 .unwrap(),
             "abc-123"
         );
+    }
+
+    #[test]
+    fn log_only_surface_exposes_exact_read_only_catalog() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_analysis(true, Some(PathBuf::from("/tmp/contextdesk-log-cache")));
+        host.set_log_only_tool_surface(true);
+
+        let specs = host.specs_for_model();
+        let actual = specs
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let expected = crate::log_analysis::log_tool_specs()
+            .into_iter()
+            .filter(|tool| tool.side_effect == ToolSideEffect::Read)
+            .map(|tool| tool.name)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(
+            actual,
+            expected.iter().map(String::as_str).collect(),
+            "fallback must expose every read-only log tool and nothing else"
+        );
+        assert!(!actual.contains(names::SEARCH_KB));
+        assert!(!actual.contains(names::SAVE_MEMORY));
+        assert!(!actual.contains(crate::log_analysis::INGEST_LOGS));
+        assert!(specs
+            .iter()
+            .all(|tool| tool.side_effect == ToolSideEffect::Read));
+    }
+
+    #[test]
+    fn log_only_surface_is_empty_until_log_analysis_is_enabled() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_only_tool_surface(true);
+        assert!(host.specs_for_model().is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_only_surface_rejects_unadvertised_and_write_tools_at_execution() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_analysis(true, Some(PathBuf::from("/tmp/contextdesk-log-cache")));
+        host.set_log_only_tool_surface(true);
+
+        for (tool, args) in [
+            (names::SEARCH_KB, json!({"query": "secret"})),
+            (names::SAVE_MEMORY, json!({"content": "secret"})),
+            (
+                crate::log_analysis::INGEST_LOGS,
+                json!({"path": "/tmp/logs"}),
+            ),
+            ("mcp__private__read", json!({})),
+        ] {
+            let error = host
+                .execute(tool, &args, None)
+                .await
+                .expect_err("restricted host must reject unadvertised/write tools");
+            assert!(
+                matches!(error, CoreError::Policy(_)),
+                "{tool} returned {error}"
+            );
+        }
     }
 
     #[tokio::test]

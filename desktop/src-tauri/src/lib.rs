@@ -313,6 +313,87 @@ fn host_readiness_terminal_events(
     ]
 }
 
+fn linked_log_fallback_notice() -> cd_core::events::StreamEvent {
+    cd_core::events::StreamEvent::Error {
+        code: "linked_log_only_fallback".into(),
+        message: "Workspace context is still starting, but the linked log corpus is ready. \
+             Continuing with bounded read-only log tools for this turn; workspace files, \
+             memory, and connectors are not available."
+            .into(),
+    }
+}
+
+fn build_linked_log_fallback_host(
+    state: &AppState,
+    context: &cd_core::agent::LogExplorerTurnContext,
+) -> Result<ToolHost, String> {
+    // This host is deliberately independent from configured workspace roots.
+    let workspace = Workspace {
+        id: "linked-log-fallback".into(),
+        name: "Linked log investigation".into(),
+        roots: Vec::new(),
+    };
+    let cache = log_cache_dir(state)?;
+
+    let mut host = ToolHost::new(
+        workspace,
+        cd_core::index::KeywordIndex::new(),
+        state.audit_log.clone(),
+    );
+    let cfg = state.config.lock().expect("config").clone();
+    host.set_router_budget(cfg.router);
+    host.set_model_context_budgets(cfg.model_context_budgets);
+    host.set_log_analysis(true, Some(cache));
+    host.set_log_only_tool_surface(true);
+    host.set_log_corpus_scope(Some(context.corpus_id.clone()));
+    host.set_active_log_corpus(Some(context.corpus_id.clone()));
+    Ok(host)
+}
+
+fn validate_linked_log_corpus(
+    state: &AppState,
+    context: &cd_core::agent::LogExplorerTurnContext,
+) -> Result<(), String> {
+    let cache = log_cache_dir(state)?;
+    validate_linked_log_corpus_at(&cache, &context.corpus_id)
+}
+
+fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
+    // Opening validates metadata, engine artifacts, templates, and DuckDB
+    // schema before any provider receives the turn.
+    cd_core::log_analysis::LogCorpus::open(cache, corpus_id)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn take_ready_linked_host<F>(
+    shared: &Arc<Mutex<Option<ToolHost>>>,
+    fallback: F,
+) -> Result<(ToolHost, bool), String>
+where
+    F: FnOnce() -> Result<ToolHost, String>,
+{
+    let ready = shared.try_lock().ok().and_then(|mut guard| guard.take());
+    match ready {
+        Some(host) => Ok((host, false)),
+        None => fallback().map(|host| (host, true)),
+    }
+}
+
+fn linked_log_host_terminal_events() -> [cd_core::events::StreamEvent; 2] {
+    [
+        cd_core::events::StreamEvent::Error {
+            code: "linked_log_host_unavailable".into(),
+            message: "The linked log corpus is unavailable or invalid. This turn stopped before \
+                      contacting the provider. Reopen Log Explorer or re-import the logs, then retry."
+                .into(),
+        },
+        cd_core::events::StreamEvent::TurnCompleted {
+            reason: "linked_log_host_unavailable".into(),
+        },
+    ]
+}
+
 struct BackgroundIndexBuild {
     index: cd_core::index::KeywordIndex,
     stats: cd_core::index::ReindexStats,
@@ -398,6 +479,83 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn install_prepared_durable_memory(
+    live: &mut ToolHost,
+    prepared: &ToolHost,
+    expected_workspace_id: &str,
+) -> bool {
+    if live.workspace.id != expected_workspace_id {
+        return false;
+    }
+    let Some(store) = prepared.durable_memory_store() else {
+        return false;
+    };
+    live.set_candidate_inbox(prepared.candidate_inbox());
+    live.set_edge_store(prepared.edge_store());
+    live.set_harvest_db_path(prepared.harvest_db_path_for_ui());
+    live.set_durable_memory(store, true);
+    live.set_ambient_recall_enabled(prepared.ambient_recall_enabled());
+    true
+}
+
+fn spawn_durable_memory_warmup(
+    host_arc: Arc<Mutex<Option<ToolHost>>>,
+    workspace: Workspace,
+    audit_log: Option<cd_core::audit::AuditLog>,
+    branding: Branding,
+    memory_config: cd_core::memory::MemoryConfig,
+    embed_backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
+    embed_model: String,
+) {
+    if !memory_config.durable_memory_enabled {
+        return;
+    }
+    let expected_workspace_id = workspace.id.clone();
+    let _ = std::thread::Builder::new()
+        .name("cd-memory-warmup".into())
+        .spawn(move || {
+            // Prepare against an isolated host. Protected-folder stalls remain
+            // confined to this optional worker and cannot hold HostInitFlight
+            // or the live ToolHost mutex.
+            let mut prepared =
+                ToolHost::new(workspace, cd_core::index::KeywordIndex::new(), audit_log);
+            prepared.set_embed_backend_with_model(embed_backend, &embed_model);
+            if let Err(error) = cd_core::memory::attach_durable_memory_to_host(
+                &mut prepared,
+                &branding,
+                &memory_config,
+            ) {
+                tracing::warn!(error = %error, "durable memory warmup failed; core host remains ready");
+                return;
+            }
+            // A live agent turn may temporarily own the shared host. Wait only
+            // in this optional installer; never delay startup or a turn.
+            for _ in 0..1_200 {
+                if let Ok(mut guard) = host_arc.try_lock() {
+                    if let Some(host) = guard.as_mut() {
+                        if install_prepared_durable_memory(
+                            host,
+                            &prepared,
+                            &expected_workspace_id,
+                        ) {
+                            tracing::info!("durable memory attached after isolated warmup");
+                        } else {
+                            tracing::debug!(
+                                "discarding durable memory prepared for a replaced workspace"
+                            );
+                        }
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            tracing::warn!(
+                "durable memory prepared but live host stayed unavailable; retry on next rebuild"
+            );
+        });
+}
+
 fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
     // Stop previous watcher before replacing the host (#116).
     if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
@@ -425,13 +583,13 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     host.attach_connectors(&cfg.connectors);
     apply_host_connectors(&mut host, &cfg, state);
     apply_active_log_corpus_to_host(state, &mut host);
-    // Durable memory (MEMORY.md Phase 1) — product seam; without this, tools stay
-    // on legacy memory_fs and ambient/recall never run.
-    if let Err(e) =
-        cd_core::memory::attach_durable_memory_to_host(&mut host, &state.branding, &cfg.memory)
-    {
-        tracing::warn!(error = %e, "durable memory attach failed; using memory_fs fallback");
-    }
+    // Publish the core workspace/log host before optional durable-memory I/O.
+    // Memory tools remain absent until their isolated warmup installs a fully
+    // prepared store; no partially initialized capability is advertised.
+    host.set_durable_memory_enabled(false);
+    host.set_ambient_recall_enabled(false);
+    let memory_embed_backend = host.embed_backend();
+    let memory_embed_model = host.embed_model().to_string();
 
     {
         let mut st = state.index_status.lock().expect("index_status");
@@ -448,6 +606,16 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     }
 
     *state.host.lock().expect("host") = Some(host);
+
+    spawn_durable_memory_warmup(
+        Arc::clone(&state.host),
+        ws.clone(),
+        state.audit_log.clone(),
+        state.branding.clone(),
+        cfg.memory.clone(),
+        memory_embed_backend,
+        memory_embed_model,
+    );
 
     // Background full/incremental refresh off the UI / turn critical path
     // (#117, #596). Build a separate index snapshot without holding the live
@@ -3038,18 +3206,51 @@ async fn agent_turn(
         }
     }
 
-    let app = window.app_handle().clone();
-    if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
-        let state = app.state::<AppState>();
-        ensure_host(&state)
-    })
-    .await
-    {
-        for event in host_readiness_terminal_events(&failure) {
-            let _ = on_event.send(cd_core::research::event_to_dto(&event));
+    // Linked log turns never join optional workspace/memory initialization.
+    // They take an already-published full host when immediately available and
+    // otherwise use an independent turn-local read-only log host.
+    let (mut host, using_fallback_host) = if let Some(context) = log_explorer_context.as_ref() {
+        if let Err(error) = validate_linked_log_corpus(&state, context) {
+            tracing::warn!(error = %error, "linked log corpus preflight failed");
+            for event in linked_log_host_terminal_events() {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+        match take_ready_linked_host(&state.host, || {
+            build_linked_log_fallback_host(&state, context)
+        }) {
+            Ok((host, using_fallback)) => {
+                if using_fallback {
+                    let notice = linked_log_fallback_notice();
+                    let _ = on_event.send(cd_core::research::event_to_dto(&notice));
+                }
+                (host, using_fallback)
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "linked log-only fallback construction failed");
+                for event in linked_log_host_terminal_events() {
+                    let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        let app = window.app_handle().clone();
+        if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
+            let state = app.state::<AppState>();
+            ensure_host(&state)
+        })
+        .await
+        {
+            for event in host_readiness_terminal_events(&failure) {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+        let mut host_guard = state.host.lock().expect("host");
+        (host_guard.take().ok_or("host missing")?, false)
+    };
 
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
@@ -3069,15 +3270,12 @@ async fn agent_turn(
         let _ = channel.send(dto);
     };
 
-    // #114: take host out of the mutex so we never hold it across `.await`.
-    // No block_in_place — turn is a normal async future.
-    let mut host = {
-        let mut host_guard = state.host.lock().expect("host");
-        host_guard.take().ok_or("host missing")?
-    };
+    // #114: host was taken out of the mutex before this awaitable turn.
     // Bind session context pack for this turn (#341): search_kb / read_file_slice.
-    if let Ok(base) = session_context_base(&state) {
-        host.set_session_context_base(Some(base));
+    if !using_fallback_host {
+        if let Ok(base) = session_context_base(&state) {
+            host.set_session_context_base(Some(base));
+        }
     }
     host.set_active_session_id(Some(req.session_id.clone()));
     // Linked turns bind the turn-scoped corpus; ordinary chats must not inherit
@@ -3122,9 +3320,9 @@ async fn agent_turn(
         .await
         .map_err(|e| e.to_string())
     };
-    host.set_log_corpus_scope(previous_log_scope);
-    host.set_active_log_corpus(previous_log_corpus);
-    {
+    if !using_fallback_host {
+        host.set_log_corpus_scope(previous_log_scope);
+        host.set_active_log_corpus(previous_log_corpus);
         let mut host_guard = state.host.lock().expect("host");
         *host_guard = Some(host);
     }
@@ -6114,7 +6312,9 @@ mod help_host_tests {
 mod startup_host_tests {
     use super::{
         build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
-        host_readiness_terminal_events, log_search_cancel_key, normalize_log_corpus_id,
+        host_readiness_terminal_events, install_prepared_durable_memory,
+        linked_log_fallback_notice, linked_log_host_terminal_events, log_search_cancel_key,
+        normalize_log_corpus_id, take_ready_linked_host, validate_linked_log_corpus_at,
         wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
     };
     use cd_core::events::StreamEvent;
@@ -6170,6 +6370,55 @@ mod startup_host_tests {
             src.contains(".name(\"cd-host-warmup\".into())"),
             "background host warmup should stay named for native diagnostics"
         );
+        let rebuild_start = src.find("fn rebuild_host(").expect("rebuild_host");
+        let rebuild = &src[rebuild_start..];
+        let publish = rebuild
+            .find("*state.host.lock().expect(\"host\") = Some(host)")
+            .expect("core host publication");
+        let memory = rebuild
+            .find("spawn_durable_memory_warmup(")
+            .expect("isolated memory warmup");
+        assert!(
+            publish < memory,
+            "optional durable-memory I/O must begin only after the core host is published"
+        );
+        assert!(
+            src.contains(".name(\"cd-memory-warmup\".into())"),
+            "optional memory warmup must remain isolated on a named worker"
+        );
+    }
+
+    #[test]
+    fn prepared_memory_installs_only_into_the_matching_ready_host() {
+        let workspace = Workspace::new("memory", vec![std::env::temp_dir()]);
+        let expected_id = workspace.id.clone();
+        let mut prepared = ToolHost::new(workspace.clone(), KeywordIndex::new(), None);
+        prepared.set_durable_memory(
+            Arc::new(
+                cd_core::memory::TwoScopeMemory::open_in_memory(expected_id.clone())
+                    .expect("memory"),
+            ),
+            true,
+        );
+        prepared.set_ambient_recall_enabled(true);
+
+        let mut live = ToolHost::new(workspace, KeywordIndex::new(), None);
+        assert!(install_prepared_durable_memory(
+            &mut live,
+            &prepared,
+            &expected_id
+        ));
+        assert!(live.durable_memory_active());
+        assert!(live.ambient_recall_enabled());
+
+        let other = Workspace::new("other", vec![std::env::temp_dir()]);
+        let mut replaced = ToolHost::new(other, KeywordIndex::new(), None);
+        assert!(!install_prepared_durable_memory(
+            &mut replaced,
+            &prepared,
+            &expected_id
+        ));
+        assert!(!replaced.durable_memory_active());
     }
 
     #[test]
@@ -6192,6 +6441,82 @@ mod startup_host_tests {
             guard < host,
             "provider-free linked refusal must not wait for workspace host/index warmup"
         );
+    }
+
+    #[test]
+    fn linked_log_selection_never_waits_for_a_locked_workspace_host() {
+        let shared = Arc::new(Mutex::new(None::<ToolHost>));
+        let held = shared.lock().expect("simulate permanently blocked host");
+        let started = std::time::Instant::now();
+        let (host, used_fallback) = take_ready_linked_host(&shared, || {
+            Ok(ToolHost::new(
+                Workspace::new("linked fallback", Vec::new()),
+                KeywordIndex::new(),
+                None,
+            ))
+        })
+        .expect("fallback");
+        assert!(used_fallback);
+        assert!(host.workspace.roots.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "linked fallback must not join the blocked initialization flight"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn linked_log_selection_recovers_to_an_already_ready_full_host() {
+        let workspace = Workspace::new("ready", vec![std::env::temp_dir()]);
+        let expected_id = workspace.id.clone();
+        let shared = Arc::new(Mutex::new(Some(ToolHost::new(
+            workspace,
+            KeywordIndex::new(),
+            None,
+        ))));
+        let (host, used_fallback) = take_ready_linked_host(&shared, || {
+            panic!("ready host should be taken without constructing fallback")
+        })
+        .expect("ready host");
+        assert!(!used_fallback);
+        assert_eq!(host.workspace.id, expected_id);
+    }
+
+    #[test]
+    fn linked_corpus_preflight_rejects_missing_and_corrupt_artifacts() {
+        let cache = tempfile::tempdir().expect("cache");
+        assert!(validate_linked_log_corpus_at(cache.path(), "missing").is_err());
+
+        let root = cache.path().join("log_corpora").join("corrupt");
+        std::fs::create_dir_all(&root).expect("corpus dir");
+        std::fs::write(root.join("meta.json"), b"not json").expect("corrupt meta");
+        std::fs::write(root.join("events.duckdb"), b"not duckdb").expect("corrupt db");
+        assert!(validate_linked_log_corpus_at(cache.path(), "corrupt").is_err());
+
+        let events = linked_log_host_terminal_events();
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Error { code, message }
+                if code == "linked_log_host_unavailable"
+                    && message.contains("before contacting the provider")
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::TurnCompleted { reason }
+                if reason == "linked_log_host_unavailable"
+        ));
+    }
+
+    #[test]
+    fn linked_log_fallback_notice_discloses_unavailable_context() {
+        let event = linked_log_fallback_notice();
+        assert!(matches!(
+            event,
+            StreamEvent::Error { code, message }
+                if code == "linked_log_only_fallback"
+                    && message.contains("Continuing with bounded read-only log tools")
+                    && message.contains("workspace files, memory, and connectors are not available")
+        ));
     }
 
     #[test]
