@@ -153,6 +153,38 @@ describe("VirtualizedEventList", () => {
     expect(onFocusToSeq).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for a sought backend page before consuming and mounting its target", async () => {
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+      scrollToSeq: 50,
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={makeEvents(8)} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "clientHeight", {
+      configurable: true,
+      value: 140,
+    });
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    expect(document.querySelector('[data-seq="50"]')).toBeNull();
+
+    rerender(<VirtualizedEventList {...props} events={makeEvents(60)} />);
+
+    await waitFor(() => {
+      expect((list as HTMLDivElement).scrollTop).toBeGreaterThan(0);
+      expect(document.querySelector('[data-seq="50"]')).toBeTruthy();
+    });
+  });
+
   it("uses content-aware variable row offsets when preserving the anchor", () => {
     const base = makeEvents(8).slice(2);
     const props = {

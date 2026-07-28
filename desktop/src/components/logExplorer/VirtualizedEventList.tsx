@@ -306,16 +306,18 @@ export function VirtualizedEventList({
   }, [linkedScrollTop]);
 
   const lastScrollSeq = useRef<number | null>(null);
-  if (scrollToSeq != null && scrollToSeq !== lastScrollSeq.current) {
-    lastScrollSeq.current = scrollToSeq;
+  useLayoutEffect(() => {
+    if (scrollToSeq == null || scrollToSeq === lastScrollSeq.current) return;
+    const el = parentRef.current;
     const idx = displayRows.findIndex((row) => row.event?.seq === scrollToSeq);
-    if (idx >= 0 && parentRef.current) {
-      const top = Math.max(0, (offsets[idx] ?? 0) - viewportH / 3);
-      queueMicrotask(() => {
-        parentRef.current?.scrollTo({ top, behavior: "smooth" });
-      });
-    }
-  }
+    // A backend seek usually announces its target before the replacement
+    // resident page commits. Do not consume the target against stale rows.
+    if (!el || idx < 0) return;
+    const top = Math.max(0, (offsets[idx] ?? 0) - viewportH / 3);
+    el.scrollTop = top;
+    setScrollTop(top);
+    lastScrollSeq.current = scrollToSeq;
+  }, [displayRows, offsets, scrollToSeq, viewportH]);
 
   let start = 0;
   {
