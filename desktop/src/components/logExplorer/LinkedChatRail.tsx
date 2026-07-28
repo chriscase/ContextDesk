@@ -69,6 +69,8 @@ type Props = {
   onApplyNav: (action: LogNavAction) => void;
   /** Narrow layout: keep rail usable without page overflow. */
   compactLayout?: boolean;
+  /** Normal/wide layout: retain state while presenting only a reopen strip. */
+  collapsed?: boolean;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
   /** Compact parent indicator without duplicating chat/session state. */
@@ -78,6 +80,7 @@ type Props = {
     busy: boolean;
   }) => void;
   onRequestClose?: () => void;
+  onToggleCollapsed?: () => void;
 };
 
 const NEAR_BOTTOM_PX = 64;
@@ -197,9 +200,11 @@ export function LinkedChatRail({
   agentContext,
   onApplyNav,
   compactLayout = false,
+  collapsed = false,
   developerMode = false,
   onRailSummary,
   onRequestClose,
+  onToggleCollapsed,
 }: Props) {
   const [chats, setChats] = useState<SessionMetaDto[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -244,6 +249,9 @@ export function LinkedChatRail({
   const openGenRef = useRef(0);
   const switcherToggleRef = useRef<HTMLButtonElement>(null);
   const manageToggleRef = useRef<HTMLButtonElement>(null);
+  const collapseToggleRef = useRef<HTMLButtonElement>(null);
+  const reopenRef = useRef<HTMLButtonElement>(null);
+  const previousCollapsedRef = useRef(collapsed);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -251,6 +259,16 @@ export function LinkedChatRail({
   activeChatIdRef.current = activeChatId;
 
   const windowed = useMessageWindow(messages, threadRef);
+
+  useEffect(() => {
+    const previous = previousCollapsedRef.current;
+    previousCollapsedRef.current = collapsed;
+    if (compactLayout || previous === collapsed) return;
+    queueMicrotask(() => {
+      if (collapsed) reopenRef.current?.focus();
+      else collapseToggleRef.current?.focus();
+    });
+  }, [collapsed, compactLayout]);
 
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
@@ -675,6 +693,37 @@ export function LinkedChatRail({
     }
   };
 
+  if (collapsed && !compactLayout) {
+    return (
+      <aside
+        id="log-explorer-chat-panel"
+        className="log-explorer__chat log-explorer__chat--rail log-explorer__chat--collapsed"
+        data-testid="log-explorer-chat"
+        data-collapsed="true"
+        aria-label="Linked corpus chat collapsed"
+      >
+        <button
+          ref={reopenRef}
+          type="button"
+          className="log-explorer__chat-reopen"
+          data-testid="expand-linked-chat"
+          aria-label={`Expand linked chat rail${chats.length > 0 ? `, ${chats.length} chat${chats.length === 1 ? "" : "s"}` : ""}`}
+          onClick={onToggleCollapsed}
+        >
+          <span aria-hidden="true">Chat</span>
+          {chats.length > 0 ? (
+            <span
+              className="log-explorer__chat-reopen-count"
+              aria-hidden="true"
+            >
+              {chats.length}
+            </span>
+          ) : null}
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside
       id="log-explorer-chat-panel"
@@ -700,6 +749,18 @@ export function LinkedChatRail({
           </div>
         </div>
         <div className="log-explorer__chat-header-actions">
+          {!compactLayout && onToggleCollapsed ? (
+            <button
+              ref={collapseToggleRef}
+              type="button"
+              className="log-explorer__btn"
+              aria-label="Collapse linked chat rail"
+              data-testid="collapse-linked-chat"
+              onClick={onToggleCollapsed}
+            >
+              Hide
+            </button>
+          ) : null}
           {compactLayout && onRequestClose ? (
             <button
               type="button"

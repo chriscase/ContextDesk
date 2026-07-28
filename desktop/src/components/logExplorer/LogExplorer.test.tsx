@@ -304,6 +304,26 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    const body = screen.getByTestId("log-explorer-body");
+
+    expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    expect(screen.getByTestId("splitter-chat")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+
+    expect(root.getAttribute("data-chat-collapsed")).toBe("true");
+    expect(screen.queryByTestId("splitter-chat")).toBeNull();
+    expect(body.style.gridTemplateColumns).toContain("0px 42px");
+    expect(screen.queryByTestId("log-explorer-chat-thread")).toBeNull();
+    fireEvent.click(screen.getByTestId("expand-linked-chat"));
+
+    expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    expect(screen.getByTestId("splitter-chat")).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
+  });
+
   it("focuses Find with the platform find shortcut", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
@@ -395,6 +415,8 @@ describe("LogExplorer shell", () => {
         expect(root.getAttribute("data-breakpoint")).toBe("narrow"),
       );
       expect(root.getAttribute("data-lane-count")).toBe("1");
+      expect(screen.queryByTestId("collapse-linked-chat")).toBeNull();
+      expect(screen.queryByTestId("expand-linked-chat")).toBeNull();
       expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
       fireEvent.click(screen.getByTestId("line-mode-full"));
       await waitFor(() =>
