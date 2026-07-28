@@ -626,6 +626,12 @@ html[data-platform="macos"] .titlebar {
   padding: 0.55rem 1rem 0.75rem;
 }
 
+.composer-dock > * {
+  width: 100%;
+  max-width: 56rem;
+  margin-inline: auto;
+}
+
 .pane-tabs {
   flex: 0 0 auto;
   display: flex;
