@@ -671,7 +671,7 @@
   fill: var(--accent);
 }
 
-.handbook-diagram > p {
+.handbook-diagram > p:not(.sr-only) {
   margin: 0;
   padding: 0 var(--space-4) var(--space-4);
   color: var(--text-muted);

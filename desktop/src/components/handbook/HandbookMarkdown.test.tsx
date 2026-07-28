@@ -79,6 +79,7 @@ describe("HandbookMarkdown", () => {
     expect(svg?.textContent).toContain("Trusted host");
     expect(svg?.querySelectorAll(".handbook-diagram__svg-node").length).toBe(3);
     expect(svg?.querySelectorAll(".handbook-diagram__svg-edge").length).toBe(2);
+    expect(svg?.getAttribute("data-layout")).toBe("lr");
     expect(
       svg?.querySelector(".handbook-diagram__svg-node")?.getAttribute("fill"),
     ).toBeNull();
@@ -89,6 +90,31 @@ describe("HandbookMarkdown", () => {
 
     fireEvent.click(screen.getByText("Read diagram source"));
     expect(screen.getByText(/flowchart LR/)).toBeTruthy();
+  });
+
+  it("adapts an over-wide flow into a readable vertical overview", () => {
+    const wideFlow = [
+      "```mermaid",
+      "flowchart LR",
+      '  A["One"] --> B["Two"] --> C["Three"] --> D["Four"]',
+      '  D --> E["Five"] --> F["Six"]',
+      "  D --> F",
+      "```",
+    ].join("\n");
+    const { container } = render(
+      <HandbookMarkdown body={wideFlow} headings={[]} onNavigate={vi.fn()} />,
+    );
+    const svg = container.querySelector(".handbook-diagram__canvas svg");
+
+    expect(svg?.getAttribute("data-layout")).toBe("responsive-top-to-bottom");
+    expect(svg?.getAttribute("style")).toBeNull();
+    expect(svg?.querySelectorAll(".handbook-diagram__svg-node").length).toBe(6);
+    expect(svg?.querySelectorAll(".handbook-diagram__svg-edge").length).toBe(6);
+    const skipEdge = svg?.querySelector('[data-edge="D-F"]');
+    const skipPathNumbers = [
+      ...(skipEdge?.getAttribute("d") ?? "").matchAll(/\d+/g),
+    ].map(([value]) => Number(value));
+    expect(skipPathNumbers[2]).toBeGreaterThan(skipPathNumbers[0] + 100);
   });
 
   it("renders a labeled sequence SVG and fails visibly for unsupported syntax", () => {
@@ -125,6 +151,43 @@ describe("HandbookMarkdown", () => {
     expect(
       unsupported.closest("figure")?.querySelector(".handbook-diagram__canvas"),
     ).toBeNull();
+  });
+
+  it("uses authored diagram titles and fails closed on partial semantics", () => {
+    const complex = [
+      "```mermaid",
+      "sequenceDiagram",
+      "  %% title: Governed context assembly",
+      "  actor U as User",
+      "  participant H as Trusted host",
+      "  alt Tools unavailable",
+      "    H-->>U: Show an honest failure",
+      "  end",
+      "```",
+      "",
+      "```mermaid",
+      "flowchart TB",
+      "  %% title: Permission boundary",
+      "  subgraph Trusted",
+      '    H["Host"]',
+      "  end",
+      '  U["Untrusted input"] --> H',
+      "```",
+    ].join("\n");
+    const { container } = render(
+      <HandbookMarkdown body={complex} headings={[]} onNavigate={vi.fn()} />,
+    );
+
+    expect(
+      screen.getByRole("figure", { name: "Governed context assembly" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("figure", { name: "Permission boundary" }),
+    ).toBeTruthy();
+    expect(screen.getAllByText(/unsupported Mermaid syntax/i)).toHaveLength(2);
+    expect(
+      container.querySelectorAll(".handbook-diagram__canvas"),
+    ).toHaveLength(0);
   });
 
   it("builds stable unique heading ids and keyboard-operable local navigation", () => {

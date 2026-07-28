@@ -31,6 +31,7 @@ type MermaidEdge = {
 type MermaidModel = {
   kind: "flow" | "sequence" | "state";
   direction: "LR" | "TB";
+  title?: string;
   nodes: MermaidNode[];
   edges: MermaidEdge[];
 };
@@ -113,6 +114,14 @@ function mermaidLabel(value: string): string {
     .trim();
 }
 
+function mermaidTitle(source: string): string | undefined {
+  const line = source
+    .split("\n")
+    .map((candidate) => candidate.trim())
+    .find((candidate) => /^%%\s*title\s*:/i.test(candidate));
+  return line?.replace(/^%%\s*title\s*:\s*/i, "").trim() || undefined;
+}
+
 function parseMermaidNode(
   value: string,
   aliases: Map<string, string>,
@@ -152,6 +161,7 @@ function parseMermaid(source: string): MermaidModel | null {
   const aliases = new Map<string, string>();
   const nodes = new Map<string, MermaidNode>();
   const edges: MermaidEdge[] = [];
+  const title = mermaidTitle(source);
   const remember = (node: MermaidNode | null) => {
     if (!node) return;
     nodes.set(node.id, node);
@@ -159,6 +169,14 @@ function parseMermaid(source: string): MermaidModel | null {
 
   if (kind === "sequence") {
     for (const line of lines.slice(1)) {
+      if (/^%%/.test(line)) continue;
+      if (
+        /^(?:alt|else|opt|loop|par|and|critical|option|break|rect|end)\b/i.test(
+          line,
+        )
+      ) {
+        return null;
+      }
       const participant = line.match(
         /^(?:participant|actor)\s+([A-Za-z][\w-]*)(?:\s+as\s+(.+))?$/,
       );
@@ -171,7 +189,7 @@ function parseMermaid(source: string): MermaidModel | null {
       const message = line.match(
         /^([A-Za-z][\w-]*)\s*(-{1,2}>>?)\s*([A-Za-z][\w-]*)\s*:\s*(.+)$/,
       );
-      if (!message) continue;
+      if (!message) return null;
       const from = message[1];
       const to = message[3];
       remember({ id: from, label: aliases.get(from) ?? from });
@@ -181,10 +199,10 @@ function parseMermaid(source: string): MermaidModel | null {
   } else {
     const relationSeparator = /\s*(?:-->|---|==>|-\.->)\s*/;
     for (const line of lines.slice(1)) {
+      if (/^%%/.test(line)) continue;
+      if (/^(?:subgraph\b|end$)/i.test(line)) return null;
       if (
-        /^(?:%%|subgraph\b|end$|direction\b|classDef\b|class\b|style\b|linkStyle\b)/i.test(
-          line,
-        )
+        /^(?:direction\b|classDef\b|class\b|style\b|linkStyle\b)/i.test(line)
       ) {
         continue;
       }
@@ -209,14 +227,16 @@ function parseMermaid(source: string): MermaidModel | null {
         }
         continue;
       }
-      remember(parseMermaidNode(line, aliases));
+      const node = parseMermaidNode(line, aliases);
+      if (!node) return null;
+      remember(node);
     }
   }
 
   for (const [id, node] of nodes) {
     nodes.set(id, { ...node, label: aliases.get(id) ?? node.label });
   }
-  return { kind, direction, nodes: [...nodes.values()], edges };
+  return { kind, direction, title, nodes: [...nodes.values()], edges };
 }
 
 function summarizeMermaid(source: string): MermaidSummary {
@@ -268,11 +288,13 @@ function layoutFlow(model: MermaidModel): {
   nodes: PositionedNode[];
   width: number;
   height: number;
+  nodeWidth: number;
+  nodeHeight: number;
 } {
   const nodeWidth = 184;
-  const nodeHeight = 76;
-  const rankGap = 72;
-  const laneGap = 28;
+  const nodeHeight = model.direction === "TB" ? 64 : 76;
+  const rankGap = model.direction === "TB" ? 28 : 72;
+  const laneGap = model.direction === "TB" ? 24 : 28;
   const indegree = new Map(model.nodes.map((node) => [node.id, 0]));
   const outgoing = new Map<string, MermaidEdge[]>();
   for (const edge of model.edges) {
@@ -315,10 +337,18 @@ function layoutFlow(model: MermaidModel): {
     ...orderedRanks.map((rank) => groups.get(rank)?.length ?? 0),
   );
   const rankCount = Math.max(1, orderedRanks.length);
+  const hasVerticalSkipEdge =
+    model.direction === "TB" &&
+    model.edges.some(
+      (edge) => (ranks.get(edge.to) ?? 0) - (ranks.get(edge.from) ?? 0) > 1,
+    );
   const width =
     model.direction === "LR"
       ? 32 + rankCount * nodeWidth + (rankCount - 1) * rankGap
-      : 32 + widestLane * nodeWidth + (widestLane - 1) * laneGap;
+      : 32 +
+        widestLane * nodeWidth +
+        (widestLane - 1) * laneGap +
+        (hasVerticalSkipEdge ? 60 : 0);
   const height =
     model.direction === "LR"
       ? 32 + widestLane * nodeHeight + (widestLane - 1) * laneGap
@@ -346,7 +376,7 @@ function layoutFlow(model: MermaidModel): {
       nodes.push({ ...node, x, y });
     });
   });
-  return { nodes, width, height };
+  return { nodes, width, height, nodeWidth, nodeHeight };
 }
 
 function DiagramText({ label, x, y }: { label: string; x: number; y: number }) {
@@ -370,16 +400,30 @@ function FlowSvg({
   model: MermaidModel;
   markerId: string;
 }) {
-  const layout = layoutFlow(model);
+  const naturalLayout = layoutFlow(model);
+  const displayModel =
+    model.direction === "LR" && naturalLayout.width > 1200
+      ? { ...model, direction: "TB" as const }
+      : model;
+  const layout =
+    displayModel === model ? naturalLayout : layoutFlow(displayModel);
   const positions = new Map(layout.nodes.map((node) => [node.id, node]));
-  const nodeWidth = 184;
-  const nodeHeight = 76;
+  const { nodeWidth, nodeHeight } = layout;
   return (
     <svg
       aria-hidden="true"
+      data-layout={
+        displayModel.direction === model.direction
+          ? model.direction.toLowerCase()
+          : "responsive-top-to-bottom"
+      }
       focusable="false"
       viewBox={`0 0 ${layout.width} ${layout.height}`}
-      style={{ minWidth: `${layout.width}px` }}
+      style={
+        displayModel.direction === "LR"
+          ? { minWidth: `${layout.width}px` }
+          : undefined
+      }
     >
       <defs>
         <marker
@@ -398,19 +442,25 @@ function FlowSvg({
         const from = positions.get(edge.from);
         const to = positions.get(edge.to);
         if (!from || !to) return null;
-        const horizontal = model.direction === "LR";
+        const horizontal = displayModel.direction === "LR";
         const startX = horizontal ? from.x + nodeWidth : from.x + nodeWidth / 2;
         const startY = horizontal
           ? from.y + nodeHeight / 2
           : from.y + nodeHeight;
         const endX = horizontal ? to.x : to.x + nodeWidth / 2;
         const endY = horizontal ? to.y + nodeHeight / 2 : to.y;
+        const skipsVerticalRank =
+          !horizontal && endY - startY > nodeHeight + 40;
+        const verticalDetourX = startX + nodeWidth / 2 + 44;
         const bend = horizontal
           ? `C${(startX + endX) / 2} ${startY},${(startX + endX) / 2} ${endY},${endX} ${endY}`
-          : `C${startX} ${(startY + endY) / 2},${endX} ${(startY + endY) / 2},${endX} ${endY}`;
+          : skipsVerticalRank
+            ? `C${verticalDetourX} ${startY + 20},${verticalDetourX} ${endY - 20},${endX} ${endY}`
+            : `C${startX} ${(startY + endY) / 2},${endX} ${(startY + endY) / 2},${endX} ${endY}`;
         return (
           <path
             className="handbook-diagram__svg-edge"
+            data-edge={`${edge.from}-${edge.to}`}
             d={`M${startX} ${startY}${bend}`}
             key={`${edge.from}-${edge.to}-${index}`}
             markerEnd={`url(#${markerId})`}
@@ -533,11 +583,13 @@ function MermaidDiagram({ source, index }: { source: string; index: number }) {
   const summary = summarizeMermaid(source);
   const markerId = `handbook-diagram-arrow-${index}`;
   const diagramTitle =
-    model?.kind === "sequence"
+    model?.title ??
+    mermaidTitle(source) ??
+    (model?.kind === "sequence"
       ? "Context sequence"
       : model?.kind === "state"
         ? "State lifecycle"
-        : "System flow";
+        : "System flow");
   const description =
     summary.relations.length > 0
       ? summary.relations.join(". ")
@@ -557,7 +609,9 @@ function MermaidDiagram({ source, index }: { source: string; index: number }) {
         </span>
         <span>
           <strong id={`handbook-diagram-${index}-title`}>{diagramTitle}</strong>
-          <small>Theme-aware view of the canonical Mermaid source</small>
+          <small>
+            Theme-aware responsive view of the canonical Mermaid source
+          </small>
         </span>
       </figcaption>
 
@@ -571,7 +625,9 @@ function MermaidDiagram({ source, index }: { source: string; index: number }) {
         </div>
       ) : null}
 
-      <p id={`handbook-diagram-${index}-summary`}>{description}</p>
+      <p className="sr-only" id={`handbook-diagram-${index}-summary`}>
+        {description}
+      </p>
       <details>
         <summary>Read diagram source</summary>
         <pre>
