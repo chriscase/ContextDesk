@@ -114,16 +114,19 @@ export function SourceCitations({ citations, onOpenFile }: Props) {
           {items.map((c) => {
             const name = c.label || "Source";
             const title = (c.title || name).trim();
+            const showSourceMeta = name.trim() !== title;
             const web = isHttpUrl(c.id);
             const actionable = web || Boolean(onOpenFile);
             const hue = hueFromString(name);
             const body = (
               <>
                 <span className="sources__title-text">{title}</span>
-                <span className="sources__meta">
-                  {name}
-                  {web ? <IconLink className="sources__ext" /> : null}
-                </span>
+                {showSourceMeta ? (
+                  <span className="sources__meta">
+                    {name}
+                    {web ? <IconLink className="sources__ext" /> : null}
+                  </span>
+                ) : null}
               </>
             );
             return (
