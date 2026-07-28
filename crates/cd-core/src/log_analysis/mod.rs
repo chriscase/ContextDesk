@@ -61,7 +61,7 @@ pub use query::{
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
 };
-pub use search::{search_logs, SearchHit, SearchLogsQuery};
+pub use search::{search_logs, SearchEvidenceIdentity, SearchHit, SearchLogsQuery};
 
 pub use store::{
     CorpusEmbeddingStatus, CorpusId, CorpusMeta, CorpusStats, CorpusSummary, EmbeddingState,

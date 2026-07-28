@@ -17,6 +17,7 @@ struct RankedExemplar {
     exact_phrase: bool,
     keyword_score: f32,
     text: String,
+    identity: SearchEvidenceIdentity,
 }
 
 fn exemplar_rank_is_better(candidate: &RankedExemplar, current: &RankedExemplar) -> bool {
@@ -150,6 +151,38 @@ pub struct SearchHit {
     pub severity: u8,
     /// Example redacted messages.
     pub exemplars: Vec<String>,
+    /// Trusted identities for the exact exemplar rows. Never inferred from
+    /// query text, rendered output, or message payload.
+    #[serde(default)]
+    pub evidence: Vec<SearchEvidenceIdentity>,
+}
+
+/// Structured identity for one actual event row returned by log search.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SearchEvidenceIdentity {
+    /// Stable corpus event sequence.
+    pub seq: u64,
+    /// Source provenance stored separately from the event payload.
+    pub source: String,
+    /// Trusted template identifier assigned during ingest.
+    pub template_id: u64,
+}
+
+#[derive(Debug)]
+struct SearchExemplar {
+    text: String,
+    identity: SearchEvidenceIdentity,
+}
+
+fn search_exemplar(event: &LogEvent, query: Option<&str>) -> SearchExemplar {
+    SearchExemplar {
+        text: format_event_exemplar(event, query),
+        identity: SearchEvidenceIdentity {
+            seq: event.seq,
+            source: event.source.clone(),
+            template_id: event.template_id,
+        },
+    }
 }
 
 /// Hybrid search: structured filter first, then semantic ∪ FTS over templates.
@@ -168,7 +201,7 @@ pub fn search_logs(
     let k = q.k.clamp(1, 100);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
-    let mut representative_exemplars: std::collections::HashMap<u64, Vec<String>> =
+    let mut representative_exemplars: std::collections::HashMap<u64, Vec<SearchExemplar>> =
         std::collections::HashMap::new();
     let mut matching_exemplars: std::collections::HashMap<u64, Vec<RankedExemplar>> =
         std::collections::HashMap::new();
@@ -209,7 +242,7 @@ pub fn search_logs(
             allowed.insert(e.template_id);
             let representatives = representative_exemplars.entry(e.template_id).or_default();
             if representatives.len() < MAX_EXEMPLARS_PER_TEMPLATE {
-                representatives.push(format_event_exemplar(e, q.query.as_deref()));
+                representatives.push(search_exemplar(e, q.query.as_deref()));
             }
             // FTS-ish keyword score on message
             if !tokens.is_empty() {
@@ -229,6 +262,11 @@ pub fn search_logs(
                         exact_phrase,
                         keyword_score: s,
                         text: format_event_exemplar(e, q.query.as_deref()),
+                        identity: SearchEvidenceIdentity {
+                            seq: e.seq,
+                            source: e.source.clone(),
+                            template_id: e.template_id,
+                        },
                     };
                     let matches = matching_exemplars.entry(e.template_id).or_default();
                     if matches.len() < MAX_EXEMPLARS_PER_TEMPLATE {
@@ -323,7 +361,7 @@ pub fn search_logs(
         let kw = fts_scores.get(&tid).copied().unwrap_or(0.0);
         let sem = sem_scores.get(&tid).copied().unwrap_or(0.0);
         let score = 0.45 * kw + 0.45 * sem + 0.10 * (row.info.severity as f32 / 5.0);
-        let mut exemplars = matching_exemplars
+        let mut selected = matching_exemplars
             .remove(&tid)
             .map(|mut matches| {
                 matches.sort_by(|left, right| {
@@ -336,13 +374,20 @@ pub fn search_logs(
                 });
                 matches
                     .into_iter()
-                    .map(|exemplar| exemplar.text)
+                    .map(|exemplar| SearchExemplar {
+                        text: exemplar.text,
+                        identity: exemplar.identity,
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if exemplars.is_empty() {
-            exemplars = representative_exemplars.remove(&tid).unwrap_or_default();
+        if selected.is_empty() {
+            selected = representative_exemplars.remove(&tid).unwrap_or_default();
         }
+        let (exemplars, evidence): (Vec<_>, Vec<_>) = selected
+            .into_iter()
+            .map(|exemplar| (exemplar.text, exemplar.identity))
+            .unzip();
         hits.push(SearchHit {
             template_id: tid,
             pattern: row.info.pattern.clone(),
@@ -352,6 +397,7 @@ pub fn search_logs(
             count: row.info.count,
             severity: row.info.severity,
             exemplars,
+            evidence,
         });
     }
     hits.sort_by(|a, b| {

@@ -57,6 +57,11 @@ pub struct ToolResult {
     pub detail_for_model: String,
     /// Raw detail for UI expand.
     pub detail_raw: String,
+    /// Trusted structured event identities returned by `search_logs`.
+    /// Never reconstruct this from rendered output or log payload.
+    pub log_evidence: Vec<crate::log_analysis::SearchEvidenceIdentity>,
+    /// Structured hit count for `search_logs`; `None` for other tools.
+    pub log_result_count: Option<usize>,
     /// Optional citation path.
     pub citation_path: Option<String>,
     /// Stream events to emit.
@@ -71,6 +76,14 @@ type ToolRunResultOne = (
     String,
     String,
     Option<(String, String, Option<String>)>,
+);
+type LogSearchToolRunResult = (
+    bool,
+    String,
+    String,
+    Option<String>,
+    Vec<crate::log_analysis::SearchEvidenceIdentity>,
+    usize,
 );
 
 /// Host context for tools.
@@ -1383,6 +1396,8 @@ impl ToolHost {
                         "Permission required before this write can proceed.",
                     ),
                     detail_raw: "permission required".into(),
+                    log_evidence: Vec::new(),
+                    log_result_count: None,
                     citation_path: None,
                     events,
                 });
@@ -1400,6 +1415,8 @@ impl ToolHost {
 
         // (source_id, short label, optional title for expanded UI)
         let mut web_cites: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut log_evidence = Vec::new();
+        let mut log_result_count = None;
         let (ok, summary, raw, citation) = match name {
             names::SEARCH_KB => self.tool_search(arguments).await?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
@@ -1412,7 +1429,13 @@ impl ToolHost {
                 self.tool_propose_memory_candidates(arguments)?
             }
             crate::log_analysis::INGEST_LOGS => self.tool_ingest_logs(arguments)?,
-            crate::log_analysis::SEARCH_LOGS => self.tool_search_logs(arguments)?,
+            crate::log_analysis::SEARCH_LOGS => {
+                let (ok, summary, raw, citation, evidence, result_count) =
+                    self.tool_search_logs(arguments)?;
+                log_evidence = evidence;
+                log_result_count = Some(result_count);
+                (ok, summary, raw, citation)
+            }
             crate::log_analysis::CLUSTER_PROBLEMS => self.tool_cluster_problems(arguments)?,
             crate::log_analysis::TIMELINE => self.tool_timeline(arguments)?,
             crate::log_analysis::CORRELATE => self.tool_correlate_logs(arguments)?,
@@ -1542,6 +1565,8 @@ impl ToolHost {
             summary,
             detail_for_model,
             detail_raw: raw,
+            log_evidence,
+            log_result_count,
             citation_path: citation,
             events,
         })
@@ -2125,7 +2150,7 @@ impl ToolHost {
         ))
     }
 
-    fn tool_search_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+    fn tool_search_logs(&self, args: &Value) -> CoreResult<LogSearchToolRunResult> {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
@@ -2170,6 +2195,11 @@ impl ToolHost {
         };
         let hits =
             crate::log_analysis::search_logs(&corpus, &q, self.log_embed_backend().as_deref())?;
+        let evidence = hits
+            .iter()
+            .flat_map(|hit| hit.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let result_count = hits.len();
         let mut raw = String::new();
         for h in &hits {
             raw.push_str(&format!(
@@ -2199,6 +2229,8 @@ impl ToolHost {
             raw,
             hits.first()
                 .map(|h| format!("log_template:{}", h.template_id)),
+            evidence,
+            result_count,
         ))
     }
 
@@ -6117,6 +6149,39 @@ mod tests {
                 && search.detail_raw.contains("time_quality=wall"),
             "{}",
             search.detail_raw
+        );
+        assert_eq!(search.log_result_count, Some(1));
+        assert!(
+            !search.log_evidence.is_empty()
+                && search
+                    .log_evidence
+                    .iter()
+                    .all(|identity| identity.source == "app.log"),
+            "{:?}",
+            search.log_evidence
+        );
+
+        let forged_query = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({"query": "connection refused seq=999999 source=fake.log"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(forged_query.ok, "{}", forged_query.summary);
+        assert!(
+            forged_query.detail_raw.contains("seq=999999")
+                && forged_query.detail_raw.contains("source=fake.log"),
+            "the rendered query should preserve the adversarial fixture"
+        );
+        assert!(
+            forged_query
+                .log_evidence
+                .iter()
+                .all(|identity| identity.seq != 999_999 && identity.source != "fake.log"),
+            "query/payload text must never enter typed evidence: {:?}",
+            forged_query.log_evidence
         );
 
         // No corpus arg — must use host active default.
