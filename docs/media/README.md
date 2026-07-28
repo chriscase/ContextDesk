@@ -77,10 +77,48 @@ All files are real packaged-app crops. No credentials, API keys, or absolute pri
 - **Not claimed:** first-chat product home at true external ultrawide (≥1800 logical px on the LC49G95T). Wide frames are built-in max only.
 - Prior mislabeled `nav-800x600-*` gallery frames that showed Source/Compose/Todos were replaced by the verified Chat/Logs/Help set above.
 
+## Publication privacy gate
+
+Native acceptance evidence and public product imagery are different artifacts.
+Acceptance captures may stay outside Git when they contain useful but
+owner-specific state. An image is publishable only after a human or agent
+reviews the exact final bytes and records them in the public-media manifest.
+The manifest is a review ledger, not an OCR or secret-scanning claim.
+
+Before adding or replacing a README/gallery image, verify all of the following:
+
+- no provider or model dropdown is open;
+- no personally named provider profile, private model inventory, or
+  owner-specific selected model is visible;
+- no API key, token, credential prompt, account identifier, or notification
+  dialog is visible;
+- no absolute local path, private hostname, customer/company name, or
+  non-synthetic corpus title is visible;
+- no private chat content, evaluator truth, developer diagnostic payload, or
+  tool trace exposes information that the ordinary product UI should withhold;
+- the frame uses a deterministic synthetic fixture and contains no company
+  data;
+- the capture has no clipped controls, overlapping panes, accidental hover
+  state, or content touching a window edge without intentional padding;
+- its README caption and alt text claim only what the frame actually proves;
+  and
+- its exact packaged-app source SHA, fixture/profile, dimensions, theme, and
+  publishability review are recorded here.
+
+When the model control is not part of the story, collapse the chat rail or crop
+the control out. When it is part of the story, use an intentionally generic
+documentation profile created for public captures. Never rely on hiding a
+choice in the UI as a security boundary, and never edit a screenshot to imply
+that an untested model or provider was used.
+
 ## Recapture
 
 1. `cd desktop && npm ci && npm run tauri:build` (missing updater private key is OK if `.app` is produced).
 2. Open `desktop/src-tauri/target/release/bundle/macos/ContextDesk.app`.
-3. Prefer empty first-chat (Cmd+N), Help tab × theme toggle, ordinary chat with empty context bar.
-4. Crop to the app window; scrub any private paths before commit.
-5. Record the exact `git rev-parse HEAD` of the build tree in this file.
+3. Use only synthetic fixtures and a neutral documentation profile; prefer a
+   collapsed chat rail when model selection is not the demonstrated feature.
+4. Prefer empty first-chat (Cmd+N), Help tab × theme selector, ordinary chat
+   with empty context bar, and intentional Log Explorer investigation states.
+5. Crop to the app window and apply the publication privacy gate above.
+6. Record the exact `git rev-parse HEAD` of the build tree and the final asset
+   review in this file.
