@@ -248,7 +248,7 @@ describe("OperationalMetricTracks", () => {
       ),
     ).toBe(true);
     fireEvent.click(summaries[0]!);
-    expect(screen.getByText("one missing CPU sample")).toBeTruthy();
+    expect(screen.getByText("synthetic CPU collector outage")).toBeTruthy();
     expect(
       screen.getAllByText(
         "The line stays broken; missing samples are not interpolated.",
