@@ -44,6 +44,8 @@ export type MessageRowProps = {
   openCompositionFromMemoryId?: (sourceId: string) => void;
   /** Open a canonical bundled Help citation without treating it as a file. */
   onOpenHelpCitation?: (locator: string) => void;
+  /** Open the session-attached corpus for a governed log citation. */
+  onOpenLogCitation?: (sourceId: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
 };
@@ -93,6 +95,7 @@ function MessageRowImpl({
   setMemoryPath,
   openCompositionFromMemoryId,
   onOpenHelpCitation,
+  onOpenLogCitation,
   onHeightChange,
 }: MessageRowProps) {
   const rootRef = useRef<HTMLElement | null>(null);
@@ -154,6 +157,13 @@ function MessageRowImpl({
               onOpenHelpCitation?.(path);
               return;
             }
+            if (
+              path.startsWith("log_template:") ||
+              path.startsWith("log_event:")
+            ) {
+              onOpenLogCitation?.(path);
+              return;
+            }
             // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
             if (path.startsWith("memory:")) {
               if (openCompositionFromMemoryId) {
@@ -208,6 +218,13 @@ function MessageRowImpl({
                   if (!cite) return;
                   if (cite.startsWith("help://")) {
                     onOpenHelpCitation?.(cite);
+                    return;
+                  }
+                  if (
+                    cite.startsWith("log_template:") ||
+                    cite.startsWith("log_event:")
+                  ) {
+                    onOpenLogCitation?.(cite);
                     return;
                   }
                   if (isHttpUrl(cite)) {

@@ -368,20 +368,25 @@ fn build_linked_log_fallback_host(
     Ok(host)
 }
 
-fn validate_linked_log_corpus(
-    state: &AppState,
-    context: &cd_core::agent::LogExplorerTurnContext,
-) -> Result<(), String> {
-    let cache = log_cache_dir(state)?;
-    validate_linked_log_corpus_at(&cache, &context.corpus_id)
-}
-
 fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
     // Opening validates metadata, engine artifacts, templates, and DuckDB
     // schema before any provider receives the turn.
     cd_core::log_analysis::LogCorpus::open(cache, corpus_id)
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn linked_log_preflight_at(
+    cache: &std::path::Path,
+    context: &cd_core::agent::LogExplorerTurnContext,
+    tools_profile: Option<&ProviderProfile>,
+    session_id: &str,
+) -> Option<Vec<cd_core::events::StreamEvent>> {
+    if validate_linked_log_corpus_at(cache, &context.corpus_id).is_err() {
+        return Some(linked_log_host_terminal_events().into());
+    }
+    tools_profile
+        .and_then(|profile| cd_core::research::linked_tools_unavailable_events(profile, session_id))
 }
 
 fn take_ready_linked_host<F>(
@@ -2625,6 +2630,43 @@ fn validate_log_explorer_turn_context(
         .map_err(|e| e.to_string())
 }
 
+fn linked_log_turn_context(
+    session: Option<&Session>,
+    window_id: &str,
+    explorer_request: Option<LogExplorerTurnContextReq>,
+) -> Result<Option<cd_core::agent::LogExplorerTurnContext>, String> {
+    if let Some(request) = explorer_request {
+        let session =
+            session.ok_or_else(|| "Log Explorer chat session is not available".to_string())?;
+        return validate_log_explorer_turn_context(session, window_id, request).map(Some);
+    }
+    session
+        .and_then(|session| session.linked_corpus_id.as_deref())
+        .map(cd_core::agent::LogExplorerTurnContext::for_main_chat)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+fn load_session_for_turn(
+    store: &cd_core::sessions::SessionStore,
+    session_id: &str,
+) -> Result<Option<Session>, String> {
+    match store.load(session_id) {
+        Ok(session) => Ok(Some(session)),
+        Err(error) => {
+            if store.exists(session_id).map_err(|e| e.to_string())? {
+                Err(format!(
+                    "Chat session is unavailable or corrupt; the turn stopped before provider contact: {error}"
+                ))
+            } else {
+                // A never-sent ordinary draft is intentionally ephemeral. It
+                // cannot carry a durable linked corpus.
+                Ok(None)
+            }
+        }
+    }
+}
+
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
     let config_dir = ensure_config_dir(&state.branding).ok();
     let roots: Vec<_> = cfg
@@ -3262,26 +3304,25 @@ async fn agent_turn(
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
 
-    let log_explorer_context = match req.log_explorer_context {
-        Some(request) => {
-            let session = session_store(&state)?
-                .load(&req.session_id)
-                .map_err(|e| e.to_string())?;
-            Some(validate_log_explorer_turn_context(
-                &session,
-                window.label(),
-                request,
-            )?)
-        }
-        None => None,
-    };
+    // Resolve the linked corpus only from the durable session. Explorer may
+    // contribute a bounded viewport brief, but neither the model nor an
+    // ordinary main-chat turn request chooses or broadens corpus scope.
+    let store = session_store(&state)?;
+    let stored_session = load_session_for_turn(&store, &req.session_id)?;
+    let log_explorer_context = linked_log_turn_context(
+        stored_session.as_ref(),
+        window.label(),
+        req.log_explorer_context,
+    )?;
 
-    // A linked turn on a chat-only profile has a deterministic, provider-free
-    // answer. Emit it before host construction so workspace background indexing
-    // cannot strand the UI in streaming state (#596).
-    if !req.force_local && log_explorer_context.is_some() {
+    // Validate the durable corpus before capability checks or provider/host
+    // construction. A stale link must never be masked by a tools-disabled
+    // profile or silently broadened into an ordinary turn.
+    if let Some(context) = log_explorer_context.as_ref() {
+        let cache = log_cache_dir(&state)?;
+        let tools_profile = (!req.force_local).then_some(&profile);
         if let Some(events) =
-            cd_core::research::linked_tools_unavailable_events(&profile, &req.session_id)
+            linked_log_preflight_at(&cache, context, tools_profile, &req.session_id)
         {
             for event in events {
                 let _ = on_event.send(cd_core::research::event_to_dto(&event));
@@ -3295,13 +3336,6 @@ async fn agent_turn(
     // otherwise use an independent turn-local read-only log host.
     let (mut host, using_fallback_host, borrowed_host_generation) =
         if let Some(context) = log_explorer_context.as_ref() {
-            if let Err(error) = validate_linked_log_corpus(&state, context) {
-                tracing::warn!(error = %error, "linked log corpus preflight failed");
-                for event in linked_log_host_terminal_events() {
-                    let _ = on_event.send(cd_core::research::event_to_dto(&event));
-                }
-                return Ok(());
-            }
             match take_ready_linked_host(&state.host, &state.host_generation, || {
                 build_linked_log_fallback_host(&state, context)
             }) {
@@ -5808,17 +5842,47 @@ fn list_chat_sessions_for_corpus(
 }
 
 /// Set or clear `linked_corpus_id` on a chat session.
+fn set_chat_linked_corpus_at(
+    store: &cd_core::sessions::SessionStore,
+    cache: &std::path::Path,
+    session_id: &str,
+    corpus_id: Option<String>,
+    draft_session: Option<Session>,
+) -> Result<Session, String> {
+    let mut session = match store.load(session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            if store.exists(session_id).map_err(|e| e.to_string())? {
+                return Err(format!("chat session is unavailable or corrupt: {error}"));
+            }
+            let draft = draft_session.ok_or_else(|| "chat session does not exist".to_string())?;
+            if draft.id != session_id || draft.trashed {
+                return Err("draft chat identity is invalid".into());
+            }
+            draft
+        }
+    };
+    let corpus_id = normalize_log_corpus_id(corpus_id);
+    if let Some(corpus_id) = corpus_id.as_deref() {
+        // Validate before mutating or saving. A failed attach leaves both an
+        // existing durable chat and a new empty draft unchanged.
+        validate_linked_log_corpus_at(cache, corpus_id)?;
+    }
+    session.set_linked_corpus_id(corpus_id);
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
 #[tauri::command]
 fn set_chat_linked_corpus(
     state: State<'_, AppState>,
     session_id: String,
     corpus_id: Option<String>,
+    draft_session: Option<Session>,
 ) -> Result<cd_core::sessions::Session, String> {
     let store = session_store(&state)?;
-    let mut session = store.load(&session_id).map_err(|e| e.to_string())?;
-    session.set_linked_corpus_id(corpus_id);
-    store.save(&session).map_err(|e| e.to_string())?;
-    Ok(session)
+    let cache = log_cache_dir(&state)?;
+    set_chat_linked_corpus_at(&store, &cache, &session_id, corpus_id, draft_session)
 }
 
 /// Build the SPA URL for a Log Explorer window.
@@ -7084,13 +7148,14 @@ mod startup_host_tests {
     use super::{
         build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
         host_readiness_terminal_events, install_prepared_durable_memory,
-        linked_log_fallback_notice, linked_log_host_terminal_events, log_search_cancel_key,
-        normalize_log_corpus_id, restore_host_if_generation_matches, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure,
+        linked_log_fallback_notice, linked_log_host_terminal_events, linked_log_preflight_at,
+        log_search_cancel_key, normalize_log_corpus_id, restore_host_if_generation_matches,
+        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
+        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
+    use cd_core::providers::ProviderProfile;
     use cd_core::tool_host::ToolHost;
     use cd_core::workspace::Workspace;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -7355,6 +7420,110 @@ mod startup_host_tests {
             StreamEvent::TurnCompleted { reason }
                 if reason == "linked_log_host_unavailable"
         ));
+    }
+
+    #[test]
+    fn stale_link_precedes_tools_capability_for_every_profile() {
+        let cache = tempfile::tempdir().expect("cache");
+        let context = cd_core::agent::LogExplorerTurnContext::for_main_chat("discarded").unwrap();
+        let mut tools_disabled = ProviderProfile::ollama_local();
+        tools_disabled.capabilities.tools = false;
+        let tools_enabled = ProviderProfile::ollama_local();
+
+        for profile in [&tools_disabled, &tools_enabled] {
+            let events =
+                linked_log_preflight_at(cache.path(), &context, Some(profile), "session-a")
+                    .expect("terminal stale-corpus events");
+            assert!(matches!(
+                events.first(),
+                Some(StreamEvent::Error { code, message })
+                    if code == "linked_log_host_unavailable"
+                        && message.contains("before contacting the provider")
+            ));
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    StreamEvent::Error { code, .. } if code == "linked_tools_unavailable"
+                )),
+                "stale corpus must win before tool capability: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_attach_leaves_existing_and_empty_draft_sessions_unchanged() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+
+        let existing = cd_core::sessions::Session::new("Existing");
+        store.save(&existing).expect("save existing");
+        assert!(set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &existing.id,
+            Some("missing-corpus".into()),
+            None,
+        )
+        .is_err());
+        assert!(store
+            .load(&existing.id)
+            .expect("existing unchanged")
+            .linked_corpus_id
+            .is_none());
+
+        let draft = cd_core::sessions::Session::new("Draft");
+        assert!(set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft.id,
+            Some("missing-corpus".into()),
+            Some(draft.clone()),
+        )
+        .is_err());
+        assert!(
+            !store.exists(&draft.id).expect("draft existence"),
+            "failed attach must not create a durable draft"
+        );
+    }
+
+    #[test]
+    fn validated_attach_atomically_creates_an_empty_linked_chat() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+        let draft = cd_core::sessions::Session::new("Incident");
+
+        let saved = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft.id,
+            Some(report.corpus_id.clone()),
+            Some(draft.clone()),
+        )
+        .expect("validated attach");
+        assert!(saved.messages.is_empty());
+        assert_eq!(
+            saved.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        assert_eq!(
+            store
+                .load(&draft.id)
+                .expect("reopen")
+                .linked_corpus_id
+                .as_deref(),
+            Some(report.corpus_id.as_str())
+        );
     }
 
     #[test]
@@ -7771,8 +7940,12 @@ mod chat_session_host_tests {
             },
         )
         .expect("matching linked context");
-        assert_eq!(context.window_id, "log-explorer-a");
         assert_eq!(context.corpus_id, "corpus-a");
+        assert!(matches!(
+            context.origin,
+            cd_core::agent::LinkedLogTurnOrigin::Explorer { ref window_id, .. }
+                if window_id == "log-explorer-a"
+        ));
 
         let mismatch = validate_log_explorer_turn_context(
             &linked,
@@ -7795,6 +7968,67 @@ mod chat_session_host_tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn ordinary_unlinked_session_resolves_no_log_context() {
+        let ordinary = Session::new("Ordinary");
+        assert!(linked_log_turn_context(Some(&ordinary), "main", None)
+            .expect("ordinary context")
+            .is_none());
+        assert!(linked_log_turn_context(None, "main", None)
+            .expect("ephemeral ordinary chat")
+            .is_none());
+    }
+
+    #[test]
+    fn main_chat_linked_context_comes_only_from_the_durable_session() {
+        let mut linked = Session::new("Incident");
+        linked.set_linked_corpus_id(Some("corpus-a".into()));
+
+        let context = linked_log_turn_context(Some(&linked), "main", None)
+            .expect("valid context")
+            .expect("linked context");
+        assert_eq!(context.corpus_id, "corpus-a");
+        assert_eq!(
+            context.origin,
+            cd_core::agent::LinkedLogTurnOrigin::MainChat
+        );
+    }
+
+    #[test]
+    fn stale_main_chat_link_fails_corpus_preflight_before_provider_host_path() {
+        let cache = tempfile::tempdir().expect("cache");
+        let mut linked = Session::new("Incident");
+        linked.set_linked_corpus_id(Some("discarded-corpus".into()));
+        let context = linked_log_turn_context(Some(&linked), "main", None)
+            .expect("valid durable link")
+            .expect("linked context");
+
+        let error = validate_linked_log_corpus_at(cache.path(), &context.corpus_id)
+            .expect_err("stale corpus must fail closed");
+        assert!(!error.trim().is_empty());
+    }
+
+    #[test]
+    fn corrupt_durable_session_cannot_degrade_into_an_ordinary_turn() {
+        let root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(root.path());
+        let session = Session::new("Incident");
+        store.save(&session).expect("save");
+        std::fs::write(
+            root.path().join(format!("{}.json", session.id)),
+            b"{not-json",
+        )
+        .expect("corrupt session");
+
+        let error = load_session_for_turn(&store, &session.id)
+            .expect_err("corrupt durable session must fail closed");
+        assert!(error.contains("before provider contact"), "{error}");
+
+        assert!(load_session_for_turn(&store, "new-ephemeral")
+            .expect("ephemeral draft")
+            .is_none());
     }
 }
 

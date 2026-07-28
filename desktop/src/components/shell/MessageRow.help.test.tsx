@@ -84,4 +84,39 @@ describe("MessageRow Help citation routing (#439)", () => {
     expect(hostReadFile).not.toHaveBeenCalled();
     expect(setPane).not.toHaveBeenCalledWith("source");
   });
+
+  it("routes a governed log citation to the attached corpus instead of file access", () => {
+    const openLog = vi.fn();
+    const setPane = vi.fn();
+    render(
+      <MessageRow
+        msg={{
+          id: "log-citation",
+          role: "assistant",
+          content: "The bounded search found one template.",
+          streaming: false,
+          citations: [
+            {
+              id: "log_template:7",
+              label: "api/app.log",
+              title: "Template 7",
+            },
+          ],
+        }}
+        turnStartedAt={null}
+        effectiveChatModel="test"
+        setSourcePath={vi.fn()}
+        setSourceContent={vi.fn()}
+        setPane={setPane}
+        onOpenLogCitation={openLog}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sources" }));
+    fireEvent.click(screen.getByRole("button", { name: /Template 7/ }));
+
+    expect(openLog).toHaveBeenCalledWith("log_template:7");
+    expect(hostReadFile).not.toHaveBeenCalled();
+    expect(setPane).not.toHaveBeenCalledWith("source");
+  });
 });

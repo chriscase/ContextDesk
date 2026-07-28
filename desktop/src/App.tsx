@@ -30,6 +30,7 @@ import {
   hostGetDurableMemory,
   hostOpenExternalUrl,
   hostSaveCompositionDraft,
+  hostSetChatLinkedCorpus,
   hostSetDefaultChatModel,
   hostWriteMemory,
   modelSelectionKey,
@@ -42,7 +43,12 @@ import {
 } from "./lib/errorReport";
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
-import { foldPreview, nowIso } from "./lib/session";
+import {
+  foldPreview,
+  nowIso,
+  sessionFromDto,
+  sessionToDto,
+} from "./lib/session";
 import {
   helpOpenRequest,
   parseHelpLocator,
@@ -242,6 +248,42 @@ export function App() {
       );
     });
   };
+
+  const setSessionLinkedCorpus = useCallback(
+    async (corpusId: string | null) => {
+      const target = ensureActiveSession();
+      const next = {
+        ...target,
+        linkedCorpusId: corpusId,
+        updatedAt: nowIso(),
+      };
+      setSessions((all) => {
+        const exists = all.some((session) => session.id === target.id);
+        return exists
+          ? all.map((session) => (session.id === target.id ? next : session))
+          : [next, ...all];
+      });
+      try {
+        const confirmed = await hostSetChatLinkedCorpus(
+          target.id,
+          corpusId,
+          sessionToDto(target),
+        );
+        const resolved = confirmed ? sessionFromDto(confirmed) : next;
+        setSessions((all) =>
+          all.map((session) =>
+            session.id === resolved.id ? resolved : session,
+          ),
+        );
+      } catch (error) {
+        setSessions((all) =>
+          all.map((session) => (session.id === target.id ? target : session)),
+        );
+        throw error;
+      }
+    },
+    [ensureActiveSession, setSessions],
+  );
 
   const openChatCtxMenu = (e: ReactMouseEvent, id: string) => {
     e.preventDefault();
@@ -835,6 +877,8 @@ export function App() {
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
                   pinnedSkillId: activeSession?.pinnedSkillId ?? null,
+                  linkedCorpusId: activeSession?.linkedCorpusId ?? null,
+                  onLinkedCorpusChange: setSessionLinkedCorpus,
                   onPinnedSkillChange: (skillId) => {
                     if (!resolvedSessionId) return;
                     setSessions((all) => {

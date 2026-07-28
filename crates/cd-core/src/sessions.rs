@@ -1055,6 +1055,12 @@ impl SessionStore {
         Ok(serde_json::from_str(&raw)?)
     }
 
+    /// Whether an authoritative session file exists for a validated id.
+    pub fn exists(&self, id: &str) -> CoreResult<bool> {
+        Self::validate_id(id)?;
+        Ok(self.path(id).exists())
+    }
+
     /// Delete session file if present (permanent).
     pub fn delete(&self, id: &str) -> CoreResult<()> {
         Self::validate_id(id)?;
@@ -2188,6 +2194,20 @@ mod tests {
         reopened.set_linked_corpus_id(None);
         store.save(&reopened).unwrap();
         assert!(store.list_meta_for_corpus("corpus-abc").unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_linked_chat_roundtrips_before_its_first_turn() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut linked = Session::new("Incident");
+        linked.set_linked_corpus_id(Some("corpus-a".into()));
+        assert!(linked.messages.is_empty());
+
+        store.save(&linked).unwrap();
+        let reopened = store.load(&linked.id).unwrap();
+        assert!(reopened.messages.is_empty());
+        assert_eq!(reopened.linked_corpus_id.as_deref(), Some("corpus-a"));
     }
 
     #[test]

@@ -26,6 +26,13 @@ import {
   type Msg,
 } from "../lib/session";
 
+export function shouldPersistUiSession(session: ChatSession): boolean {
+  return (
+    !session.trashed &&
+    (session.messages.length > 0 || Boolean(session.linkedCorpusId))
+  );
+}
+
 export function useChatSessions() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [sessionsReady, setSessionsReady] = useState(false);
@@ -53,7 +60,9 @@ export function useChatSessions() {
   );
 
   const persistSession = useCallback(async (s: ChatSession) => {
-    if (s.messages.length === 0 || s.trashed) return s;
+    if (!shouldPersistUiSession(s)) {
+      return s;
+    }
     let next = { ...s, updatedAt: nowIso() };
     if (!next.titleLocked && isPlaceholderTitle(next.title)) {
       const firstUser = next.messages.find((m) => m.role === "user");
@@ -199,47 +208,50 @@ export function useChatSessions() {
     setActiveSessionId(s.id);
   }, [sessionsReady, sessions]);
 
-  const renameSessionById = useCallback(async (id: string) => {
-    const cur = sessions.find((s) => s.id === id);
-    if (!cur) return null;
-    return cur;
-  }, [sessions]);
-
-  const applyRename = useCallback(
-    async (id: string, title: string) => {
-      const t = title.trim();
-      if (!t) return;
-      try {
-        await hostRenameChatSession(id, t);
-      } catch {
-        /* local */
-      }
-      setSessions((all) =>
-        all.map((s) =>
-          s.id === id
-            ? { ...s, title: t, titleLocked: true, updatedAt: nowIso() }
-            : s,
-        ),
-      );
+  const renameSessionById = useCallback(
+    async (id: string) => {
+      const cur = sessions.find((s) => s.id === id);
+      if (!cur) return null;
+      return cur;
     },
-    [],
+    [sessions],
   );
 
-  const togglePinById = useCallback(async (id: string) => {
-    const cur = sessions.find((s) => s.id === id);
-    if (!cur) return;
-    const next = !cur.pinned;
+  const applyRename = useCallback(async (id: string, title: string) => {
+    const t = title.trim();
+    if (!t) return;
     try {
-      await hostPinChatSession(id, next);
+      await hostRenameChatSession(id, t);
     } catch {
       /* local */
     }
     setSessions((all) =>
       all.map((s) =>
-        s.id === id ? { ...s, pinned: next, updatedAt: nowIso() } : s,
+        s.id === id
+          ? { ...s, title: t, titleLocked: true, updatedAt: nowIso() }
+          : s,
       ),
     );
-  }, [sessions]);
+  }, []);
+
+  const togglePinById = useCallback(
+    async (id: string) => {
+      const cur = sessions.find((s) => s.id === id);
+      if (!cur) return;
+      const next = !cur.pinned;
+      try {
+        await hostPinChatSession(id, next);
+      } catch {
+        /* local */
+      }
+      setSessions((all) =>
+        all.map((s) =>
+          s.id === id ? { ...s, pinned: next, updatedAt: nowIso() } : s,
+        ),
+      );
+    },
+    [sessions],
+  );
 
   const trashSessionById = useCallback(
     async (id: string) => {

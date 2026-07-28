@@ -169,7 +169,9 @@ It excludes:
 ## 5. Invariants and trust boundaries
 
 1. **Binding is explicit.** An ordinary conversation cannot inherit a
-   foreground Log Explorer corpus merely because the window is open.
+   foreground Log Explorer corpus merely because the window is open. A main
+   chat receives log tools only after the user attaches one imported corpus to
+   that durable session.
 2. **Source eligibility is host-owned.** The model cannot enable a connector,
    widen a root, change a side-effect class, or self-grant permission.
 3. **A linked log answer is provisional until a bounded log tool succeeds.**
@@ -369,9 +371,9 @@ synthesis step.
 | Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
 | Core integration | Linked turn requires successful log tool; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
 | Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
-| Host/session     | Link persists on linked chat only; active session context pack is isolated; cancellation targets exact session                                                                                   |
-| Component UI     | First question can create linked chat; Return/Shift+Return/IME; model selector; errors remain visible; autoscroll/unread semantics                                                               |
-| Packaged/native  | Tools-enabled provider performs a general zero-prep log question; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen                    |
+| Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
+| Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
+| Packaged/native  | Tools-enabled provider performs a general zero-prep log question from main chat and Explorer; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
 | Slow provider    | Cold start, retrieval success then synthesis timeout, cancellation, and synthesis-only recovery after #649 ships                                                                                 |
 
 Evaluator fixtures must store expected findings outside every imported corpus,
@@ -386,6 +388,10 @@ assert the sentinel is absent from model-facing messages.
   bounded execution, structured log identities.
 - [`sessions.rs`](../../../crates/cd-core/src/sessions.rs): durable linked corpus
   metadata and hard model-context budget.
+- [`SessionContextBar.tsx`](../../../desktop/src/components/SessionContextBar.tsx):
+  explicit single-corpus selection, availability, detach, and Explorer entry.
+- [`desktop/src-tauri/src/lib.rs`](../../../desktop/src-tauri/src/lib.rs):
+  atomic validated attachment and provider-free corpus preflight.
 - [`router.rs`](../../../crates/cd-core/src/router.rs): turn budgets and source
   ranking.
 - [`injection.rs`](../../../crates/cd-core/src/injection.rs): untrusted result
@@ -407,6 +413,7 @@ assert the sentinel is absent from model-facing messages.
 | Slice                       | Status      | What is true now                                                           | What is not claimed                                                       |
 | --------------------------- | ----------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Ordinary chat isolation     | **Shipped** | No ambient log-tool inheritance                                            | No claim that every future source is automatically isolated without tests |
+| Main-chat log attachment    | **Local integration** | One host-validated durable corpus, bounded linked-log tools, and reversible detach | Multi-corpus context remains #693; no hidden all-corpus fallback |
 | Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |

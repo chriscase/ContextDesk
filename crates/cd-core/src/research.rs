@@ -1513,12 +1513,7 @@ mod tests {
         profile.label = "Grok Build session".into();
         profile.base_url = "http://127.0.0.1:9".into();
         profile.capabilities.tools = false;
-        let context = crate::agent::LogExplorerTurnContext::new(
-            "log-explorer",
-            "corpus-1",
-            "corpusId=corpus-1; sources=api.log",
-        )
-        .unwrap();
+        let context = crate::agent::LogExplorerTurnContext::for_main_chat("corpus-1").unwrap();
         let mut linked_history = vec![];
         let linked = research_turn_with_cancel_and_context(
             &mut host,

@@ -134,7 +134,9 @@ describe("ChatPane first-chat home", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     const context = screen.getByTestId("session-context-bar");
     expect(context.hasAttribute("open")).toBe(false);
-    expect(within(context).getByText(/No files or skill/)).toBeTruthy();
+    expect(
+      within(context).getByText(/No files, skill, or log corpus/),
+    ).toBeTruthy();
   });
 
   it("shows workspace-aware starters only when workspace content is authorized", async () => {
