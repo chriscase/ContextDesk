@@ -3372,6 +3372,8 @@ struct ModelOptionDto {
     group: String,
     /// True when this is the app default for new chats.
     is_default: bool,
+    /// Whether this provider profile can execute native tools.
+    tools_enabled: bool,
 }
 
 fn model_selection_key(provider_id: &str, model_id: &str) -> String {
@@ -3853,6 +3855,7 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
             out.push(ModelOptionDto {
                 is_default: selection_key == default_key
                     || (id == default_model && profile.id == default_pid),
+                tools_enabled: profile.capabilities.tools,
                 label: id.clone(),
                 selection_key,
                 id,
@@ -3880,6 +3883,11 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
                 provider_label: label.clone(),
                 group: label,
                 is_default: true,
+                tools_enabled: cfg
+                    .providers
+                    .active()
+                    .map(|profile| profile.capabilities.tools)
+                    .unwrap_or(true),
             },
         );
     }

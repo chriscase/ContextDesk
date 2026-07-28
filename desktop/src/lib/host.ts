@@ -873,6 +873,8 @@ export type ModelOptionDto = {
   provider_label: string;
   group: string;
   is_default: boolean;
+  /** Whether this provider profile can execute native tools. */
+  tools_enabled: boolean;
 };
 
 export function parseModelSelectionKey(key: string): {

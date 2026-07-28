@@ -12,6 +12,17 @@ import * as host from "../../lib/host";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
+  modelSelectionKey: (providerId: string, modelId: string) =>
+    `${providerId}::${modelId}`,
+  parseModelSelectionKey: (key: string) => {
+    const split = key.indexOf("::");
+    return split > 0
+      ? {
+          providerId: key.slice(0, split),
+          modelId: key.slice(split + 2),
+        }
+      : { providerId: null, modelId: key };
+  },
   createLogSearchRequestId: vi.fn(() => "find-request"),
   hostCancelLogSearch: vi.fn(async () => true),
   hostGetLogCorpus: vi.fn(async () => ({
@@ -24,6 +35,18 @@ vi.mock("../../lib/host", () => ({
   })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
   hostLogListBookmarks: vi.fn(async () => []),
+  hostListChatModels: vi.fn(async () => [
+    {
+      id: "triage-1",
+      label: "triage-1",
+      selection_key: "tools-provider::triage-1",
+      provider_id: "tools-provider",
+      provider_label: "Tools Provider",
+      group: "Tools Provider",
+      is_default: true,
+      tools_enabled: true,
+    },
+  ]),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostLogFacets: vi.fn(async () => ({
@@ -280,6 +303,18 @@ describe("LogExplorer shell", () => {
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
+    vi.mocked(host.hostListChatModels).mockResolvedValue([
+      {
+        id: "triage-1",
+        label: "triage-1",
+        selection_key: "tools-provider::triage-1",
+        provider_id: "tools-provider",
+        provider_label: "Tools Provider",
+        group: "Tools Provider",
+        is_default: true,
+        tools_enabled: true,
+      },
+    ]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
     vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-request");
     vi.mocked(host.hostCancelLogSearch).mockResolvedValue(true);
@@ -3380,8 +3415,8 @@ describe("LogExplorer shell", () => {
         stored?.id,
         "What failed?",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({
@@ -3395,6 +3430,8 @@ describe("LogExplorer shell", () => {
       ]);
       expect(stored?.messages[0]?.content).toBe("What failed?");
       expect(stored?.messages[1]?.content).toBe("The API failed first.");
+      expect(stored?.chat_model).toBe("triage-1");
+      expect(stored?.provider_profile_id).toBe("tools-provider");
     });
 
     fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
@@ -3647,8 +3684,8 @@ describe("LogExplorer shell", () => {
         expect.any(String),
         "Question A",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({
@@ -3680,8 +3717,8 @@ describe("LogExplorer shell", () => {
         expect.any(String),
         "Question B",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({
