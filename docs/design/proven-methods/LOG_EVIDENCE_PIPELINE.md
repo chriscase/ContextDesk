@@ -38,25 +38,26 @@ The reusable method is a layered evidence plane:
 
 ## 2. Status and evidence
 
-| Capability | Status | ContextDesk evidence | Literal residual |
-| --- | --- | --- | --- |
-| Streaming batch ingest and omission accounting | **Shipped** | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | Live tailing remains later work |
-| Redaction before ordinary event persistence/embedding | **Shipped** | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs) | Redaction cannot prove all domain-specific PII is removed |
-| Bounded redacted Original representation | **Local integration** | `prepare_original_record` and additive store fields on the acceptance branch | Must be promoted and natively verified before “shipped” |
-| JSON numeric/RFC3339 timestamp parsing | **Shipped** | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) | Whole-second storage and incomplete provenance |
-| Explicit-offset logfmt/RFC5424 normalization | **Local integration** | #681, local commit on the acceptance branch | Keep #681 open until promotion/proof |
-| Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**, preserved by local #681 work | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) | Per-source timezone/year policy remains #670 |
-| Full timestamp provenance, precision, DST, skew policy | **Planned** | #670 | No current claim of seamless arbitrary timestamp alignment |
-| DuckDB event store | **Shipped** | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | None for current batch architecture |
-| Drain templates and template-only embedding | **Shipped** | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up |
-| Bounded event query, facets, Find, timeline summaries | **Shipped** | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs) | First-class richer timeline is still being promoted/refined |
-| Search/correlation/anomaly/trace tool surface | **Shipped** | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs) | Provider quality requires tools-enabled acceptance |
-| Durable noise/squelch policy | **Planned** | #671 | Filters exist; governed reusable noise policy does not |
+| Capability                                                  | Status                                    | ContextDesk evidence                                                                                                                           | Literal residual                                            |
+| ----------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Streaming batch ingest and omission accounting              | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs)                                                                              | Live tailing remains later work                             |
+| Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
+| Bounded redacted Original representation                    | **Local integration**                     | `prepare_original_record` and additive store fields on the acceptance branch                                                                   | Must be promoted and natively verified before “shipped”     |
+| JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
+| Explicit-offset logfmt/RFC5424 normalization                | **Local integration**                     | #681, local commit on the acceptance branch                                                                                                    | Keep #681 open until promotion/proof                        |
+| Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**, preserved by local #681 work | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Per-source timezone/year policy remains #670                |
+| Full timestamp provenance, precision, DST, skew policy      | **Planned**                               | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
+| DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
+| Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
+| Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | First-class richer timeline is still being promoted/refined |
+| Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
+| Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
 
 ```mermaid
 flowchart LR
+%% title: Bounded log evidence pipeline
     A["Source bytes"]
     B["Record framing<br/>streamed + bounded"]
     C["Normalize encoding<br/>and line ending"]
@@ -113,14 +114,14 @@ number of strings embedded/analyzed at template scale.
 
 ### Source record contract
 
-| Concept | Meaning | Rule |
-| --- | --- | --- |
-| source identity | Relative file/object identity | Never a private absolute path in UI/model DTOs |
-| ingest sequence | Stable order assigned during import | Always available; corpus-scoped |
-| source bytes | Complete framed record before text decoding | Counted for accounting; not necessarily retained |
-| normalized text | UTF-8 text after deterministic replacement and line-ending normalization | Encoding change is recorded |
-| redacted text | Complete normalized text after secret scrub | Parser and template input |
-| bounded Original | Prefix of redacted text at a UTF-8 boundary | Must state truncation, source byte count, encoding normalization, and redaction |
+| Concept          | Meaning                                                                  | Rule                                                                            |
+| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| source identity  | Relative file/object identity                                            | Never a private absolute path in UI/model DTOs                                  |
+| ingest sequence  | Stable order assigned during import                                      | Always available; corpus-scoped                                                 |
+| source bytes     | Complete framed record before text decoding                              | Counted for accounting; not necessarily retained                                |
+| normalized text  | UTF-8 text after deterministic replacement and line-ending normalization | Encoding change is recorded                                                     |
+| redacted text    | Complete normalized text after secret scrub                              | Parser and template input                                                       |
+| bounded Original | Prefix of redacted text at a UTF-8 boundary                              | Must state truncation, source byte count, encoding normalization, and redaction |
 
 The current local-integration Original contract caps one stored redacted record
 at 64 KiB. It is “Original (redacted),” not raw bytes and not necessarily the
@@ -129,27 +130,50 @@ explicitly for an inspector.
 
 ### Event contract
 
-| Field | Meaning | Important semantics |
-| --- | --- | --- |
-| `corpus_id` + `seq` | Authoritative event identity | `seq` is meaningful only inside its corpus |
-| `source` | Relative provenance | Revalidated for saved evidence |
-| `ts` | Wall-clock whole seconds or ingest-order fallback today | Must be paired with quality |
-| `time_quality` | `wall`, `mixed`, or `order_only` projections | A reliable source cannot upgrade an unreliable one |
-| `level` | Normalized severity token | Original spelling may only be available in redacted Original |
-| `service`, `host`, `trace_id` | Optional parsed facets | Missing is not empty evidence |
-| `template_id` | Repeated-message pattern identity | Supplemental to event citation, not a replacement |
-| `message`, `params` | Redacted parsed content | Bounded in result DTOs |
+| Field                         | Meaning                                                 | Important semantics                                          |
+| ----------------------------- | ------------------------------------------------------- | ------------------------------------------------------------ |
+| `corpus_id` + `seq`           | Authoritative event identity                            | `seq` is meaningful only inside its corpus                   |
+| `source`                      | Relative provenance                                     | Revalidated for saved evidence                               |
+| `ts`                          | Wall-clock whole seconds or ingest-order fallback today | Must be paired with quality                                  |
+| `time_quality`                | `wall`, `mixed`, or `order_only` projections            | A reliable source cannot upgrade an unreliable one           |
+| `level`                       | Normalized severity token                               | Original spelling may only be available in redacted Original |
+| `service`, `host`, `trace_id` | Optional parsed facets                                  | Missing is not empty evidence                                |
+| `template_id`                 | Repeated-message pattern identity                       | Supplemental to event citation, not a replacement            |
+| `message`, `params`           | Redacted parsed content                                 | Bounded in result DTOs                                       |
 
 ### Time truth model
 
 The portable model should separate at least:
 
-| Basis | Meaning | Alignable by default? |
-| --- | --- | :---: |
-| Wall | UTC instant supported by explicit zone/offset or trusted source rule | yes, at its recorded precision |
-| Relative | Duration from a source-local origin | no, unless an explicit mapping is validated |
-| Order | Ingest/source order only | no |
-| Legacy inferred | Old record classified by a heuristic | only with visible limitation |
+| Basis           | Meaning                                                              |            Alignable by default?            |
+| --------------- | -------------------------------------------------------------------- | :-----------------------------------------: |
+| Wall            | UTC instant supported by explicit zone/offset or trusted source rule |       yes, at its recorded precision        |
+| Relative        | Duration from a source-local origin                                  | no, unless an explicit mapping is validated |
+| Order           | Ingest/source order only                                             |                     no                      |
+| Legacy inferred | Old record classified by a heuristic                                 |        only with visible limitation         |
+
+```mermaid
+flowchart LR
+%% title: Timestamp evidence classification for alignment
+    Z["Explicit UTC instant<br/>or numeric epoch"]
+    O["Explicit numeric offset"]
+    W["Wall-time evidence<br/>normalized to UTC"]
+    A["Eligible for exact-time alignment<br/>at recorded precision"]
+    L["Offsetless · yearless · ambiguous<br/>malformed · missing"]
+    Q["Order-only evidence<br/>stable ingest sequence"]
+    C["No inferred timezone, year,<br/>or cross-source wall-time alignment"]
+
+    Z --> W
+    O --> W
+    W --> A
+    L --> Q --> C
+```
+
+The diagram separates two outcomes rather than suggesting that every timestamp
+can be normalized. Explicit instants can participate in exact-time alignment at
+their stored precision. Ambiguous or unsupported forms remain navigable by
+stable ingest order and must not be promoted to shared wall time without a
+separately configured and disclosed source rule.
 
 Current ContextDesk production storage has one whole-second `i64` and uses a
 wall/order quality heuristic. It does not yet persist full `time_basis`,
@@ -297,22 +321,22 @@ identity, ambiguity state, and non-destructive skew overlays.
 
 ## 7. Performance and bounds
 
-| Dimension | ContextDesk bound/policy | Behavior |
-| --- | ---: | --- |
-| Source ingest memory | Streamed record/file buffers | Does not load whole corpus |
-| Original (local integration) | 64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction |
-| Ordinary event page | 200 default; core hard cap in query API | Keyset page |
-| Timeline buckets | 256 maximum | Clamp; no event bodies |
-| Find/regex pattern | 256 characters | Reject |
-| Search excerpt | 160 characters | UTF-8-safe truncate |
-| Bounded regex scan | 50,000 resident/candidate events in the proven path | Refuse/limit broader work |
-| Tool reported-time window | 7 days | Both bounds required; lower inclusive, upper exclusive |
-| View selected identities | 64 | Sort/deduplicate/truncate for model hint |
-| Bookmark exact refs/item | 512 | Reject larger save |
-| Bookmark total refs/sidecar | 8,192 | Reject malformed/oversized sidecar |
-| Template embeddings at ordinary ingest | Top 256 templates | Persist honest partial state |
-| Embedding defer threshold | More than 64 MiB streamed source bytes | Publish keyword/structured corpus |
-| Trusted reanalysis | Up to 2,048 templates | Atomic sidecar publication |
+| Dimension                              |                            ContextDesk bound/policy | Behavior                                               |
+| -------------------------------------- | --------------------------------------------------: | ------------------------------------------------------ |
+| Source ingest memory                   |                        Streamed record/file buffers | Does not load whole corpus                             |
+| Original (local integration)           |                     64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction     |
+| Ordinary event page                    |             200 default; core hard cap in query API | Keyset page                                            |
+| Timeline buckets                       |                                         256 maximum | Clamp; no event bodies                                 |
+| Find/regex pattern                     |                                      256 characters | Reject                                                 |
+| Search excerpt                         |                                      160 characters | UTF-8-safe truncate                                    |
+| Bounded regex scan                     | 50,000 resident/candidate events in the proven path | Refuse/limit broader work                              |
+| Tool reported-time window              |                                              7 days | Both bounds required; lower inclusive, upper exclusive |
+| View selected identities               |                                                  64 | Sort/deduplicate/truncate for model hint               |
+| Bookmark exact refs/item               |                                                 512 | Reject larger save                                     |
+| Bookmark total refs/sidecar            |                                               8,192 | Reject malformed/oversized sidecar                     |
+| Template embeddings at ordinary ingest |                                   Top 256 templates | Persist honest partial state                           |
+| Embedding defer threshold              |              More than 64 MiB streamed source bytes | Publish keyword/structured corpus                      |
+| Trusted reanalysis                     |                               Up to 2,048 templates | Atomic sidecar publication                             |
 
 Reference-machine measurements for the existing deterministic 100k-event proof
 are useful regression evidence, not universal targets: 100,000 events across 10
@@ -324,21 +348,21 @@ latency, template count, and cancellation—not only ingest throughput.
 
 ## 8. Failure and recovery
 
-| Failure | Detection | User-visible state | Recovery | Guarantee |
-| --- | --- | --- | --- | --- |
-| Invalid UTF-8 | Decoder reports replacement | Encoding normalized label | Inspect redacted Original | Event retained |
-| Secret pattern | Redactor changes/blocks content | Redaction indicator | None without privileged source outside app | Secret not persisted in ordinary fields |
-| Unknown format | Parser cannot defend structure | Plain/order-only quality | Configure future source rule or use search | Record not dropped |
-| Offsetless local timestamp | No explicit zone/rule | Order-only/unresolved | Future previewed per-source rule (#670) | Workstation zone not guessed |
-| Yearless syslog | No reference-year policy | Order-only/unresolved | Future explicit rollover policy | Current year not guessed |
-| Fractional timestamp today | Whole-second store | Precision limitation | #670 schema evolution | No false subsecond claim |
-| Mixed time quality | Per-source/corpus classification | Align disabled or limited | Inspect/fix source policy | Reliable peer does not upgrade it |
-| Embedding unavailable/timeout | Embed status | Keyword-only/deferred/partial | Trusted reanalysis | Corpus remains usable |
-| Import omission/read error | Per-file counters/reasons | Partial corpus status | Correct input and reimport | Missing data not hidden |
-| Cancelled ingest/reanalysis | Cancel flag/progress | Cancelled | Retry | Previous published corpus/index preserved |
-| Malformed package | Preflight/hash/schema checks | Import error | Obtain valid package | No partial corpus publication |
-| Stale evidence identity | Source/time hint revalidation | Stale/missing | Locate replacement explicitly | No silent rebinding |
-| Noise overwhelms results | User observation/filter counts | Temporary filter only today | #671 durable policy later | No hidden permanent squelch |
+| Failure                       | Detection                        | User-visible state            | Recovery                                   | Guarantee                                 |
+| ----------------------------- | -------------------------------- | ----------------------------- | ------------------------------------------ | ----------------------------------------- |
+| Invalid UTF-8                 | Decoder reports replacement      | Encoding normalized label     | Inspect redacted Original                  | Event retained                            |
+| Secret pattern                | Redactor changes/blocks content  | Redaction indicator           | None without privileged source outside app | Secret not persisted in ordinary fields   |
+| Unknown format                | Parser cannot defend structure   | Plain/order-only quality      | Configure future source rule or use search | Record not dropped                        |
+| Offsetless local timestamp    | No explicit zone/rule            | Order-only/unresolved         | Future previewed per-source rule (#670)    | Workstation zone not guessed              |
+| Yearless syslog               | No reference-year policy         | Order-only/unresolved         | Future explicit rollover policy            | Current year not guessed                  |
+| Fractional timestamp today    | Whole-second store               | Precision limitation          | #670 schema evolution                      | No false subsecond claim                  |
+| Mixed time quality            | Per-source/corpus classification | Align disabled or limited     | Inspect/fix source policy                  | Reliable peer does not upgrade it         |
+| Embedding unavailable/timeout | Embed status                     | Keyword-only/deferred/partial | Trusted reanalysis                         | Corpus remains usable                     |
+| Import omission/read error    | Per-file counters/reasons        | Partial corpus status         | Correct input and reimport                 | Missing data not hidden                   |
+| Cancelled ingest/reanalysis   | Cancel flag/progress             | Cancelled                     | Retry                                      | Previous published corpus/index preserved |
+| Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
+| Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
+| Noise overwhelms results      | User observation/filter counts   | Temporary filter only today   | #671 durable policy later                  | No hidden permanent squelch               |
 
 ## 9. Observability
 
@@ -399,17 +423,17 @@ details, not only a hover tooltip.
 
 ## 12. Test recipe
 
-| Layer | Required proof |
-| --- | --- |
-| Parser unit | JSON/logfmt/RFC5424/plain; positive/negative offsets; `Z`; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
-| Redaction unit | Complete-record redaction precedes truncation; secret absent from parser/store; invalid UTF-8 and CRLF accounting |
-| Store integration | Stable corpus+seq+source identity; exact/noncontiguous references; legacy schema read; additive Original unavailable/available behavior |
-| Query integration | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets |
-| Package | Frozen version fixture; path traversal, duplicate, cap, hash, too-new reader, staging cleanup |
-| Deterministic corpus | Known cross-zone shared instant, ambiguous controls, noise families, long line, secret sentinel, stale identity |
-| Desktop component | Inspector tabs/copy; time-quality labels; Find versus Filter; lane membership; gaps; timeline seek; focus restoration |
-| Packaged/native | Narrow/normal/wide/ultrawide; 25k/100k corpora; Original fresh/legacy; useful time; resizable columns; long rows; two-way paging |
-| Scale | 100k deterministic regression every acceptance pass; larger generated corpora periodically with machine metadata |
+| Layer                | Required proof                                                                                                                               |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Parser unit          | JSON/logfmt/RFC5424/plain; positive/negative offsets; `Z`; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
+| Redaction unit       | Complete-record redaction precedes truncation; secret absent from parser/store; invalid UTF-8 and CRLF accounting                            |
+| Store integration    | Stable corpus+seq+source identity; exact/noncontiguous references; legacy schema read; additive Original unavailable/available behavior      |
+| Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets               |
+| Package              | Frozen version fixture; path traversal, duplicate, cap, hash, too-new reader, staging cleanup                                                |
+| Deterministic corpus | Known cross-zone shared instant, ambiguous controls, noise families, long line, secret sentinel, stale identity                              |
+| Desktop component    | Inspector tabs/copy; time-quality labels; Find versus Filter; lane membership; gaps; timeline seek; focus restoration                        |
+| Packaged/native      | Narrow/normal/wide/ultrawide; 25k/100k corpora; Original fresh/legacy; useful time; resizable columns; long rows; two-way paging             |
+| Scale                | 100k deterministic regression every acceptance pass; larger generated corpora periodically with machine metadata                             |
 
 The cross-zone fixture's expected answer must stay outside imported roots. Tests
 should assert all supported explicit-offset forms resolve to the known UTC
@@ -443,17 +467,17 @@ instant while ambiguous controls remain order-only.
 
 ## 14. Shipped / partial / planned matrix
 
-| Slice | Status | What is true now | What is not claimed |
-| --- | --- | --- | --- |
-| Batch ingest/store/templates | **Shipped** | Embedded local pipeline and deterministic states | Live sources/tailing |
-| Redacted Original | **Local integration** | Implemented on acceptance branch with bounded metadata | Available on current `main` |
-| Explicit-offset JSON | **Shipped** | Defensible RFC3339/epoch to whole seconds | Full provenance/subseconds |
-| Explicit-offset logfmt/RFC5424 | **Local integration** | #681 implementation/tests exist locally | Shipped until promotion |
-| Arbitrary timestamp diversity | **Planned/partial** | Ambiguous inputs fail to order rather than guess | #670 timezone/year/DST/skew contract |
-| Query/facets/search | **Shipped** | Bounded event and template-aware retrieval | Unbounded regex or raw dumps |
-| Timeline | **Partial/local enhancement** | Bounded summary ships; richer navigator is in acceptance work | Metric tracks and full #670 trust model |
-| Noise suppression | **Planned** | Temporary filters exist | Durable auditable squelch policy (#671) |
-| Template “reduction” | **Shipped** | Events/templates ratio | Storage compression claim |
+| Slice                          | Status                        | What is true now                                              | What is not claimed                     |
+| ------------------------------ | ----------------------------- | ------------------------------------------------------------- | --------------------------------------- |
+| Batch ingest/store/templates   | **Shipped**                   | Embedded local pipeline and deterministic states              | Live sources/tailing                    |
+| Redacted Original              | **Local integration**         | Implemented on acceptance branch with bounded metadata        | Available on current `main`             |
+| Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
+| Explicit-offset logfmt/RFC5424 | **Local integration**         | #681 implementation/tests exist locally                       | Shipped until promotion                 |
+| Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
+| Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
+| Timeline                       | **Partial/local enhancement** | Bounded summary ships; richer navigator is in acceptance work | Metric tracks and full #670 trust model |
+| Noise suppression              | **Planned**                   | Temporary filters exist                                       | Durable auditable squelch policy (#671) |
+| Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
 
 ## 15. Reimplementation notes
 

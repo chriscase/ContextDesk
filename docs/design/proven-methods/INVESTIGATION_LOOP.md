@@ -30,19 +30,19 @@ view state.
 
 ## 2. Status and evidence
 
-| Capability | Status | ContextDesk evidence | Residual |
-| --- | --- | --- | --- |
-| Exact single/range/noncontiguous bookmarks | **Shipped** | [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs) | Bookmarks are not exported in package v1 |
-| Duplicate-resistant exact evidence save | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) | Full packaged matrix keeps #656 open |
-| Human Observation/Inference/Hypothesis | **Partial** | Core/UI path exists in [`CreateInvestigationItemDialog.tsx`](../../../desktop/src/components/logExplorer/CreateInvestigationItemDialog.tsx) | Model proposals are not shipped; packaged matrix remains |
-| Human cited notes | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Report composition and packaged matrix remain |
-| Append-only optimistic revisions | **Shipped** | [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) `InvestigationStore` | Multi-device sync is not claimed |
-| Preview authoritative evidence without view mutation | **Partial** | `preview_evidence` and the Investigation rail exist on `main` | Native stale-reference proof remains in #656 |
-| Payload-free saved view recipe | **Shipped** | `FindingViewRecipe` and [`investigationView.ts`](../../../desktop/src/lib/logExplorer/investigationView.ts) are on `main` through PR #666 | Broader proposal history remains |
-| Explicit Apply and Restore prior view | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path | Native responsive/restart matrix remains |
-| Linked-chat `log_nav` proposal | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts) | It is navigation intent, not a durable finding proposal |
-| Model/detector finding proposal review queue | **Planned** | #646 | No typed proposal tool/history yet |
-| Notes-to-report assembly/export | **Planned** | #532 | Do not call current rail a report workflow |
+| Capability                                           | Status      | ContextDesk evidence                                                                                                                                                                 | Residual                                                 |
+| ---------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| Exact single/range/noncontiguous bookmarks           | **Shipped** | [`bookmarks.rs`](../../../crates/cd-core/src/log_analysis/bookmarks.rs)                                                                                                              | Bookmarks are not exported in package v1                 |
+| Duplicate-resistant exact evidence save              | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx)     | Full packaged matrix keeps #656 open                     |
+| Human Observation/Inference/Hypothesis               | **Partial** | Core/UI path exists in [`CreateInvestigationItemDialog.tsx`](../../../desktop/src/components/logExplorer/CreateInvestigationItemDialog.tsx)                                          | Model proposals are not shipped; packaged matrix remains |
+| Human cited notes                                    | **Partial** | Core/UI path exists in [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) and [`EvidencePanel.tsx`](../../../desktop/src/components/logExplorer/EvidencePanel.tsx) | Report composition and packaged matrix remain            |
+| Append-only optimistic revisions                     | **Shipped** | [`investigations.rs`](../../../crates/cd-core/src/investigations.rs) `InvestigationStore`                                                                                            | Multi-device sync is not claimed                         |
+| Preview authoritative evidence without view mutation | **Partial** | `preview_evidence` and the Investigation rail exist on `main`                                                                                                                        | Native stale-reference proof remains in #656             |
+| Payload-free saved view recipe                       | **Shipped** | `FindingViewRecipe` and [`investigationView.ts`](../../../desktop/src/lib/logExplorer/investigationView.ts) are on `main` through PR #666                                            | Broader proposal history remains                         |
+| Explicit Apply and Restore prior view                | **Partial** | [`LogExplorer.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.tsx) contains the core/UI path                                                                           | Native responsive/restart matrix remains                 |
+| Linked-chat `log_nav` proposal                       | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs), [`logNav.ts`](../../../desktop/src/lib/logExplorer/logNav.ts)                                         | It is navigation intent, not a durable finding proposal  |
+| Model/detector finding proposal review queue         | **Planned** | #646                                                                                                                                                                                 | No typed proposal tool/history yet                       |
+| Notes-to-report assembly/export                      | **Planned** | #532                                                                                                                                                                                 | Do not call current rail a report workflow               |
 
 ## 3. Reusable method
 
@@ -60,6 +60,7 @@ becomes the only source of truth.
 
 ```mermaid
 flowchart LR
+%% title: Durable evidence-led investigation loop
     E["Explore<br/>filter · find · lanes · timeline"]
     S["Select exact events"]
     B["Bookmark<br/>quick navigation"]
@@ -107,29 +108,29 @@ are linked later.
 
 ### Evidence reference
 
-| Field | Meaning | Rule |
-| --- | --- | --- |
-| source collection id | Corpus/database/document collection | Stable and scope-bound |
-| record id | Event sequence or source-native stable id | Never inferred from payload text |
-| source identity | Relative file/table/object identity | Revalidated |
-| time/quality hint | Helps detect change and navigate | Hint cannot override authoritative record |
+| Field                | Meaning                                   | Rule                                      |
+| -------------------- | ----------------------------------------- | ----------------------------------------- |
+| source collection id | Corpus/database/document collection       | Stable and scope-bound                    |
+| record id            | Event sequence or source-native stable id | Never inferred from payload text          |
+| source identity      | Relative file/table/object identity       | Revalidated                               |
+| time/quality hint    | Helps detect change and navigate          | Hint cannot override authoritative record |
 
 Evidence sets preserve exact membership and order semantics. A selection
 `[2, 9, 15]` is not widened to `[2..15]`.
 
 ### Finding
 
-| Field | Meaning |
-| --- | --- |
-| stable finding id | Durable UUID-like identity |
-| epistemic kind | Observation, Inference, or Hypothesis |
-| lifecycle | Human-controlled accepted/resolved today; proposal states later |
-| title | Concise redacted human text |
-| why it matters | Bounded redacted rationale |
-| evidence ids | Explicit same-investigation citations |
-| view recipe | Optional logical reconstruction |
-| provenance | Human today; future model proposal must remain distinct |
-| revision timestamps | Audit and concurrency support |
+| Field               | Meaning                                                         |
+| ------------------- | --------------------------------------------------------------- |
+| stable finding id   | Durable UUID-like identity                                      |
+| epistemic kind      | Observation, Inference, or Hypothesis                           |
+| lifecycle           | Human-controlled accepted/resolved today; proposal states later |
+| title               | Concise redacted human text                                     |
+| why it matters      | Bounded redacted rationale                                      |
+| evidence ids        | Explicit same-investigation citations                           |
+| view recipe         | Optional logical reconstruction                                 |
+| provenance          | Human today; future model proposal must remain distinct         |
+| revision timestamps | Audit and concurrency support                                   |
 
 ### Note
 
@@ -156,14 +157,14 @@ window-size and density changes better than screenshot-like geometry.
 
 ### Revision document
 
-| Property | Rule |
-| --- | --- |
-| schema version | Unknown future versions fail closed |
-| revision | Monotonic, expected on every mutation |
-| publication | New no-clobber revision; prior revision remains readable |
-| payload | References and redacted human text only |
+| Property       | Rule                                                      |
+| -------------- | --------------------------------------------------------- |
+| schema version | Unknown future versions fail closed                       |
+| revision       | Monotonic, expected on every mutation                     |
+| publication    | New no-clobber revision; prior revision remains readable  |
+| payload        | References and redacted human text only                   |
 | store location | Durable application data, outside disposable corpus cache |
-| lifecycle | Active or archived |
+| lifecycle      | Active or archived                                        |
 
 ## 5. Invariants and trust boundaries
 
@@ -269,6 +270,7 @@ class today.
 
 ```mermaid
 stateDiagram-v2
+%% title: Planned finding proposal review lifecycle
     [*] --> Proposed: model or detector
     Proposed --> Previewed: user inspects evidence
     Previewed --> Accepted: explicit accept/edit
@@ -297,23 +299,23 @@ Future report assembly should:
 
 Current ContextDesk bounds illustrate a defendable durable store:
 
-| Dimension | Bound | Behavior |
-| --- | ---: | --- |
-| Investigation documents/store | 256 | Refuse additional document |
-| Revisions/investigation | 4,096 | Refuse overflow |
-| Evidence items | 1,024 | Refuse overflow |
-| Findings | 1,024 | Refuse overflow |
-| Notes | 2,048 | Refuse overflow |
-| Total exact event refs | 8,192 | Refuse overflow |
-| Exact refs/evidence or bookmark item | 512 | Refuse overflow |
-| Corpus links/document | 16 | Refuse invalid cardinality |
-| Title | 256 UTF-8 bytes | Redact then validate |
-| Finding rationale | 4,096 UTF-8 bytes | Redact then validate |
-| Note body | 16,384 UTF-8 bytes | Redact then validate |
-| Citations/item | 256 | Refuse overflow |
-| Revision file | 16 MiB | Refuse read/write |
-| Lanes/view recipe | 1–4 | Refuse invalid recipe |
-| Filter values/view recipe | 256 per collection | Refuse invalid recipe |
+| Dimension                            |              Bound | Behavior                   |
+| ------------------------------------ | -----------------: | -------------------------- |
+| Investigation documents/store        |                256 | Refuse additional document |
+| Revisions/investigation              |              4,096 | Refuse overflow            |
+| Evidence items                       |              1,024 | Refuse overflow            |
+| Findings                             |              1,024 | Refuse overflow            |
+| Notes                                |              2,048 | Refuse overflow            |
+| Total exact event refs               |              8,192 | Refuse overflow            |
+| Exact refs/evidence or bookmark item |                512 | Refuse overflow            |
+| Corpus links/document                |                 16 | Refuse invalid cardinality |
+| Title                                |    256 UTF-8 bytes | Redact then validate       |
+| Finding rationale                    |  4,096 UTF-8 bytes | Redact then validate       |
+| Note body                            | 16,384 UTF-8 bytes | Redact then validate       |
+| Citations/item                       |                256 | Refuse overflow            |
+| Revision file                        |             16 MiB | Refuse read/write          |
+| Lanes/view recipe                    |                1–4 | Refuse invalid recipe      |
+| Filter values/view recipe            | 256 per collection | Refuse invalid recipe      |
 
 Preview work is bounded by stored identity caps and source query limits. Listing
 investigations should use summary projections and must not resolve every event
@@ -321,19 +323,19 @@ payload.
 
 ## 8. Failure and recovery
 
-| Failure | Detection | User-visible state | Recovery | Guarantee |
-| --- | --- | --- | --- | --- |
-| Duplicate save/click | Exact semantic comparison | Existing item/result | Continue | No duplicate revision for identical action |
-| Competing window write | Expected revision mismatch | Visible conflict | Reload latest and retry user intent | No silent overwrite |
-| Crash during publication | No-clobber revision protocol | Latest prior revision loads | Retry | Prior state readable |
-| Missing event | Authoritative re-resolution | Missing badge; Apply blocked | Reimport/locate replacement explicitly | No guessed rebinding |
-| Changed source/time hint | Identity comparison | Stale badge; Apply blocked | Review and save corrected evidence | Original reference retained |
-| Future schema | Version validation | Unsupported-version error | Upgrade software/export with compatible version | Fail closed |
-| Corrupt newest revision | Validation/read failure | Controlled error or prior readable revision according to policy | Restore from prior revision | No partial parse as truth |
-| Chat deleted/switched | Separate durable store | Investigation remains | Reopen from corpus | Chat lifecycle does not own evidence |
-| View application partly loads | Normal query errors | Visible Apply failure | Restore captured prior view | Prior logical state retained |
-| Model proposes unsupported action | Schema/eligibility validation | Proposal unavailable/invalid | Rephrase or use manual workflow | No hidden mutation |
-| Redaction empties human text | Post-redaction validation | Save error | Rewrite without secret | Secret not persisted |
+| Failure                           | Detection                     | User-visible state                                              | Recovery                                        | Guarantee                                  |
+| --------------------------------- | ----------------------------- | --------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------ |
+| Duplicate save/click              | Exact semantic comparison     | Existing item/result                                            | Continue                                        | No duplicate revision for identical action |
+| Competing window write            | Expected revision mismatch    | Visible conflict                                                | Reload latest and retry user intent             | No silent overwrite                        |
+| Crash during publication          | No-clobber revision protocol  | Latest prior revision loads                                     | Retry                                           | Prior state readable                       |
+| Missing event                     | Authoritative re-resolution   | Missing badge; Apply blocked                                    | Reimport/locate replacement explicitly          | No guessed rebinding                       |
+| Changed source/time hint          | Identity comparison           | Stale badge; Apply blocked                                      | Review and save corrected evidence              | Original reference retained                |
+| Future schema                     | Version validation            | Unsupported-version error                                       | Upgrade software/export with compatible version | Fail closed                                |
+| Corrupt newest revision           | Validation/read failure       | Controlled error or prior readable revision according to policy | Restore from prior revision                     | No partial parse as truth                  |
+| Chat deleted/switched             | Separate durable store        | Investigation remains                                           | Reopen from corpus                              | Chat lifecycle does not own evidence       |
+| View application partly loads     | Normal query errors           | Visible Apply failure                                           | Restore captured prior view                     | Prior logical state retained               |
+| Model proposes unsupported action | Schema/eligibility validation | Proposal unavailable/invalid                                    | Rephrase or use manual workflow                 | No hidden mutation                         |
+| Redaction empties human text      | Post-redaction validation     | Save error                                                      | Rewrite without secret                          | Secret not persisted                       |
 
 ## 9. Observability and auditability
 
@@ -394,16 +396,16 @@ wall of enterprise tabs.
 
 ## 12. Test recipe
 
-| Layer | Required proof |
-| --- | --- |
-| Contract/unit | Exact set canonicalization; no range widening; schema/version bounds; human provenance; view recipe validation; UTF-8 byte caps |
-| Store integration | Append-only revisions; expected-revision conflict; failed publication preserves prior; identical retry idempotent; restart/reopen |
-| Evidence integration | Verified/stale/missing references; source/time hint mismatch; bounded payload preview; legacy bookmark projection without rewrite |
-| View logic | Capture all lanes including hidden, Find/highlights, selection/focus/anchors; diff; explicit Apply; exact Restore |
-| Component UI | Contextual selection strip; dialogs; Escape/focus; rail mode preservation; duplicate prevention; stale Apply blocked; errors visible |
-| Linked chat | `log_nav` wrong-corpus/oversize/malformed rejected; valid proposal waits for click; ordinary chat cannot act on corpus |
-| Packaged/native | 25k and 100k corpora; restart; chat deletion; rail collapse; narrow/normal/wide; themes; long labels; competing windows |
-| Future proposals | Proposed never equals accepted; preview before accept; dismiss/supersede/resolve history; report excludes dismissed by default |
+| Layer                | Required proof                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Contract/unit        | Exact set canonicalization; no range widening; schema/version bounds; human provenance; view recipe validation; UTF-8 byte caps      |
+| Store integration    | Append-only revisions; expected-revision conflict; failed publication preserves prior; identical retry idempotent; restart/reopen    |
+| Evidence integration | Verified/stale/missing references; source/time hint mismatch; bounded payload preview; legacy bookmark projection without rewrite    |
+| View logic           | Capture all lanes including hidden, Find/highlights, selection/focus/anchors; diff; explicit Apply; exact Restore                    |
+| Component UI         | Contextual selection strip; dialogs; Escape/focus; rail mode preservation; duplicate prevention; stale Apply blocked; errors visible |
+| Linked chat          | `log_nav` wrong-corpus/oversize/malformed rejected; valid proposal waits for click; ordinary chat cannot act on corpus               |
+| Packaged/native      | 25k and 100k corpora; restart; chat deletion; rail collapse; narrow/normal/wide; themes; long labels; competing windows              |
+| Future proposals     | Proposed never equals accepted; preview before accept; dismiss/supersede/resolve history; report excludes dismissed by default       |
 
 Use deterministic source events and known stale-reference mutations. Native
 proof matters because focus, multi-window state, file persistence, and
@@ -436,16 +438,16 @@ responsive rails are not fully represented by DOM tests.
 
 ## 14. Shipped / partial / planned matrix
 
-| Slice | Status | What is true now | What is not claimed |
-| --- | --- | --- | --- |
-| Bookmarks | **Shipped** | Exact payload-free evidence and legacy ranges | Package-v1 export or full investigation UI |
-| Manual evidence/findings/notes | **Partial acceptance; production anchors on main** | Durable human workflow exists | #656 complete packaged matrix |
-| View recipes | **Partial** | Production path for Preview, explicit Apply, and Restore is on `main` | Complete #656 packaged acceptance; no pixel-perfect geometry claim |
-| Chat navigation proposals | **Shipped** | Bounded user-activated `log_nav` | Automatic navigation or accepted finding |
-| Model finding proposals | **Planned** | Design rules only | Typed proposal tool, lifecycle, ranking |
-| Finding walkthrough | **Planned** | Individual items can be opened | Guided ranked sequence |
-| Report assembly/export | **Planned** | Durable ingredients exist | #532 report workflow |
-| Multi-corpus investigation | **Planned/non-goal for current slice** | Document schema permits bounded links | Complete multi-corpus UI/semantics |
+| Slice                          | Status                                             | What is true now                                                      | What is not claimed                                                |
+| ------------------------------ | -------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Bookmarks                      | **Shipped**                                        | Exact payload-free evidence and legacy ranges                         | Package-v1 export or full investigation UI                         |
+| Manual evidence/findings/notes | **Partial acceptance; production anchors on main** | Durable human workflow exists                                         | #656 complete packaged matrix                                      |
+| View recipes                   | **Partial**                                        | Production path for Preview, explicit Apply, and Restore is on `main` | Complete #656 packaged acceptance; no pixel-perfect geometry claim |
+| Chat navigation proposals      | **Shipped**                                        | Bounded user-activated `log_nav`                                      | Automatic navigation or accepted finding                           |
+| Model finding proposals        | **Planned**                                        | Design rules only                                                     | Typed proposal tool, lifecycle, ranking                            |
+| Finding walkthrough            | **Planned**                                        | Individual items can be opened                                        | Guided ranked sequence                                             |
+| Report assembly/export         | **Planned**                                        | Durable ingredients exist                                             | #532 report workflow                                               |
+| Multi-corpus investigation     | **Planned/non-goal for current slice**             | Document schema permits bounded links                                 | Complete multi-corpus UI/semantics                                 |
 
 ## 15. Reimplementation notes
 

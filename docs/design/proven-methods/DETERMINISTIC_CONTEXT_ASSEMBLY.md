@@ -28,18 +28,18 @@ synthesis only after required deterministic steps succeed.
 
 ## 2. Status and evidence
 
-| Capability | Status | ContextDesk evidence | Residual |
-| --- | --- | --- | --- |
-| Hard model-context budget and deterministic compaction | **Shipped** | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs) `prepare_model_context` / `fit_model_context_to_budget` | Token estimation is character-based and provider-specific budgets still require good configuration |
-| Bounded source routing defaults | **Shipped** | [`router.rs`](../../../crates/cd-core/src/router.rs) `RouterBudget` | Ranking remains intentionally simple |
-| Ordinary chats do not inherit an ambient log corpus | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `run_agent_turn_with_sink` | Native acceptance should be repeated for each supported host |
-| Linked log chats require successful bounded log evidence | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `LogExplorerContext` and linked-turn loop | Provider must support native tools |
-| Tools-disabled profile fails honestly | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) capability gate | User must select/configure a tools-enabled profile for a real loop |
-| Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence` | Other source types have source-specific citation contracts |
-| Viewport snapshot is bounded and treated as data | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Snapshot is a hint, not authoritative event content |
-| Session file packs are scoped and bounded | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs) | Not the path for multi-million-line log corpora |
-| Slow-provider phase lifecycle and synthesis-only retry | **Partial** | Whole-turn bounded lifecycle ships | #649 |
-| Ranked multi-source context planner | **Partial** | Deterministic eligibility and simple ranking ship | Richer planning must not weaken host policy |
+| Capability                                                     | Status      | ContextDesk evidence                                                                                             | Residual                                                                                           |
+| -------------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Hard model-context budget and deterministic compaction         | **Shipped** | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs) `prepare_model_context` / `fit_model_context_to_budget` | Token estimation is character-based and provider-specific budgets still require good configuration |
+| Bounded source routing defaults                                | **Shipped** | [`router.rs`](../../../crates/cd-core/src/router.rs) `RouterBudget`                                              | Ranking remains intentionally simple                                                               |
+| Ordinary chats do not inherit an ambient log corpus            | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `run_agent_turn_with_sink`                                    | Native acceptance should be repeated for each supported host                                       |
+| Linked log chats require successful bounded log evidence       | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `LogExplorerContext` and linked-turn loop                     | Provider must support native tools                                                                 |
+| Tools-disabled profile fails honestly                          | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) capability gate                                         | User must select/configure a tools-enabled profile for a real loop                                 |
+| Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence`                             | Other source types have source-specific citation contracts                                         |
+| Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
+| Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
+| Slow-provider phase lifecycle and synthesis-only retry         | **Partial** | Whole-turn bounded lifecycle ships                                                                               | #649                                                                                               |
+| Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
 Issue status is descriptive, not proof by itself. The production paths and
 named tests in those files are the proof anchors.
@@ -65,34 +65,31 @@ The method has six gates:
    sources.
 
 ```mermaid
-sequenceDiagram
-    actor U as User
-    participant UI as Client UI
-    participant H as Trusted host
-    participant R as Deterministic retrievers
-    participant M as Model
+flowchart TB
+%% title: Governed context assembly and visible failure paths
+    U["User question"]
+    UI["Client turn<br/>explicit binding + bounded view hint"]
+    H["Trusted host<br/>classify scope + capabilities"]
+    X["Required capability unavailable"]
+    XU["Visible unavailable-tools state"]
+    G["Model grounding round<br/>constrained native Read tool"]
+    T["Trusted host validates + executes<br/>the native tool request"]
+    R["Deterministic retriever<br/>bounded + policy checked"]
+    E["Typed evidence<br/>identity + provenance + status"]
+    S["Trusted host builds<br/>tool-closed synthesis package"]
+    Y["Model synthesis round"]
+    D["Draft answer<br/>with evidence references"]
+    V["Host validates grounding<br/>and evidence identity"]
+    A["Answer<br/>citations + trail + limitations"]
+    F["Visible retrieval or grounding failure"]
 
-    U->>UI: Ask a question
-    UI->>H: Turn + explicit source binding + viewport hint
-    H->>H: Classify scope and eligible capabilities
-    alt Required capability unavailable
-        H-->>UI: Visible unavailable-tools state
-    else Eligible
-        H->>M: Minimal grounding prompt + one native Read tool
-        M->>H: Native tool call
-        H->>R: Bounded, policy-checked retrieval
-        R-->>H: Typed evidence + identity + provenance + status
-        opt User explicitly requested another source
-            H->>M: Next constrained Read tool
-            M->>H: Native tool call
-            H->>R: Bounded retrieval
-            R-->>H: Additional typed evidence or visible failure
-        end
-        H->>M: Tool-closed synthesis package
-        M-->>H: Draft answer with evidence references
-        H->>H: Validate grounding and evidence identity
-        H-->>UI: Answer, citations, trail, and limitations
-    end
+    U --> UI --> H
+    H --> X --> XU
+    H --> G --> T --> R
+    R --> E --> S --> Y --> D --> V --> A
+    T --> F
+    R --> F
+    V --> F
 ```
 
 ### Why staged retrieval helps smaller models
@@ -115,38 +112,38 @@ ContextDesk APIs.
 
 ### Turn scope
 
-| Field | Meaning | Rule |
-| --- | --- | --- |
-| `turn_id` | Stable identity for cancellation/audit | Unique within host |
-| `conversation_id` | Durable transcript identity | Does not imply source access |
-| `binding` | Ordinary or an explicit source/corpus identity | Absent means no ambient corpus inheritance |
-| `user_request` | User text | Data, never a permission grant |
-| `view_hint` | Current filters, lanes, selection, visible range | Bounded, untrusted hint |
-| `profile_capabilities` | Native tools, context size, provider behavior | Host-observed/configured, not model-asserted |
-| `deadline` / `cancel` | Turn lifecycle controls | Bounded and effective in every phase |
+| Field                  | Meaning                                          | Rule                                         |
+| ---------------------- | ------------------------------------------------ | -------------------------------------------- |
+| `turn_id`              | Stable identity for cancellation/audit           | Unique within host                           |
+| `conversation_id`      | Durable transcript identity                      | Does not imply source access                 |
+| `binding`              | Ordinary or an explicit source/corpus identity   | Absent means no ambient corpus inheritance   |
+| `user_request`         | User text                                        | Data, never a permission grant               |
+| `view_hint`            | Current filters, lanes, selection, visible range | Bounded, untrusted hint                      |
+| `profile_capabilities` | Native tools, context size, provider behavior    | Host-observed/configured, not model-asserted |
+| `deadline` / `cancel`  | Turn lifecycle controls                          | Bounded and effective in every phase         |
 
 ### Source policy
 
-| Field | Meaning |
-| --- | --- |
+| Field                  | Meaning                                                      |
+| ---------------------- | ------------------------------------------------------------ |
 | stable source identity | Corpus, workspace, memory scope, DB connection, or connector |
-| availability | Attached/configured/healthy state |
-| side-effect class | Read, SoftWrite, or HardWrite assigned by host |
-| permission state | Pre-authorized, first-use approval required, or unavailable |
-| result cap | Maximum records/chunks returned |
-| data policy | Redaction, egress, path/network allowlist, retention |
+| availability           | Attached/configured/healthy state                            |
+| side-effect class      | Read, SoftWrite, or HardWrite assigned by host               |
+| permission state       | Pre-authorized, first-use approval required, or unavailable  |
+| result cap             | Maximum records/chunks returned                              |
+| data policy            | Redaction, egress, path/network allowlist, retention         |
 
 ### Evidence item
 
-| Field | Meaning | Must not be inferred from |
-| --- | --- | --- |
-| `source_id` | Stable source identity | Display label alone |
-| `record_id` | Reopenable identity such as corpus+seq+source | Message text |
-| `content` | Bounded redacted observation | Model summary |
-| `provenance` | Retriever/tool and source | User or model assertion |
-| `quality` | Exact, inferred, mixed, order-only, stale, etc. | More reliable peer source |
-| `truncation` | Complete-within-contract or bounded excerpt | UI appearance |
-| `retrieved_at` | Operational observation time | Source event time |
+| Field          | Meaning                                         | Must not be inferred from |
+| -------------- | ----------------------------------------------- | ------------------------- |
+| `source_id`    | Stable source identity                          | Display label alone       |
+| `record_id`    | Reopenable identity such as corpus+seq+source   | Message text              |
+| `content`      | Bounded redacted observation                    | Model summary             |
+| `provenance`   | Retriever/tool and source                       | User or model assertion   |
+| `quality`      | Exact, inferred, mixed, order-only, stale, etc. | More reliable peer source |
+| `truncation`   | Complete-within-contract or bounded excerpt     | UI appearance             |
+| `retrieved_at` | Operational observation time                    | Source event time         |
 
 ### Synthesis package
 
@@ -193,20 +190,15 @@ It excludes:
 
 ```mermaid
 flowchart TB
-    subgraph Untrusted
-        U["User/model text"]
-        D["Retrieved documents/log fields"]
-        P["Remote provider"]
-    end
-    subgraph Trusted["Trusted core / host"]
-        S["Scope and capability policy"]
-        T["Tool execution and bounds"]
-        V["Evidence identity validation"]
-        W["Write permission authority"]
-    end
-    subgraph Presentation
-        C["Client UI"]
-    end
+%% title: Context assembly trust and authority boundaries
+    U["UNTRUSTED<br/>User/model text"]
+    D["UNTRUSTED<br/>Retrieved documents/log fields"]
+    P["UNTRUSTED<br/>Remote provider"]
+    S["TRUSTED HOST<br/>Scope + capability policy"]
+    T["TRUSTED HOST<br/>Tool execution + bounds"]
+    V["TRUSTED HOST<br/>Evidence identity validation"]
+    W["TRUSTED HOST<br/>Explicit write approval authority"]
+    C["PRESENTATION<br/>Client UI"]
 
     U --> S
     S --> T
@@ -215,7 +207,7 @@ flowchart TB
     P --> V
     V --> C
     C --> W
-    W -. "explicit approval only" .-> T
+    W -.-> T
 ```
 
 ## 6. Algorithm detail
@@ -286,18 +278,18 @@ Once required retrieval succeeds:
 ContextDesk defaults illustrate the method; they are product settings, not
 universal recommendations:
 
-| Dimension | Current default/cap | Anchor | Overflow behavior |
-| --- | ---: | --- | --- |
-| Sources considered per turn | 3 default, sanitized to 1–16 | [`router.rs`](../../../crates/cd-core/src/router.rs) | Rank and take bounded set |
-| Tool rounds | 12 default, sanitized to 1–32 | [`router.rs`](../../../crates/cd-core/src/router.rs) | Terminal bounded completion/error |
-| Results per source | 8 default, sanitized to 1–50 | [`router.rs`](../../../crates/cd-core/src/router.rs) | Retriever result cap |
-| Whole-turn deadline | 120,000 ms default, 500–600,000 ms allowed | [`router.rs`](../../../crates/cd-core/src/router.rs) | Visible timeout; #649 residual after evidence |
-| Model-facing context | 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs) | Pair-safe compaction then deterministic truncation or fail |
-| View selection identities | 64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate |
-| View bookmark summaries | 24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate |
-| Session context files | 200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs) | Reject over cap |
-| Session context bytes | 50 MiB total; 10 MiB/file default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs) | Reject before publication |
-| Ambient memory | about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs) | Score/echo filter and stop |
+| Dimension                   |                        Current default/cap | Anchor                                                                        | Overflow behavior                                          |
+| --------------------------- | -----------------------------------------: | ----------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Sources considered per turn |               3 default, sanitized to 1–16 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Rank and take bounded set                                  |
+| Tool rounds                 |              12 default, sanitized to 1–32 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Terminal bounded completion/error                          |
+| Results per source          |               8 default, sanitized to 1–50 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Retriever result cap                                       |
+| Whole-turn deadline         | 120,000 ms default, 500–600,000 ms allowed | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Visible timeout; #649 residual after evidence              |
+| Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
+| View selection identities   |                                         64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate                                |
+| View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
+| Session context files       |                                200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject over cap                                            |
+| Session context bytes       |          50 MiB total; 10 MiB/file default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject before publication                                  |
+| Ambient memory              |      about 1,500 chars and at most 5 items | [`ambient.rs`](../../../crates/cd-core/src/memory/ambient.rs)                 | Score/echo filter and stop                                 |
 
 Character limits are approximate model-token controls. An implementation with
 provider tokenizers should still keep deterministic byte/character safety caps
@@ -305,18 +297,18 @@ at trust boundaries.
 
 ## 8. Failure and recovery
 
-| Failure | Detection | Presentation | Recovery | Guarantee |
-| --- | --- | --- | --- | --- |
-| Profile reports native tools disabled | Capability check before provider call | “Tools unavailable” with selected profile context | Select/configure a tools-enabled profile | No fake grounding |
-| Model narrates a tool call | No native call/result event | Withhold provisional prose; bounded retry/nudge | Retry native tool decision or fail visibly | Narration never becomes evidence |
-| Required log search returns no evidence | Structured result count/identity empty | Honest no-evidence state | Refine query/filter | No invented event |
-| Requested source unavailable | Eligibility computation | Name unavailable source class without secrets | Configure/authorize source | Remaining answer discloses gap |
-| Context cannot fit | Deterministic budget helper | `context_too_long` | New chat/remove history/increase supported budget | Stored transcript not silently rewritten |
-| Timeout before retrieval | Deadline | Visible timeout | Retry | No success claim |
-| Timeout after retrieval | Current whole-turn deadline | Visible failure, but richer preserved-evidence recovery is incomplete | #649 planned synthesis-only retry | Do not claim retry is complete |
-| Cancellation | Per-turn cancel flag | Cancelled terminal state | Start another turn | Cancellation is session-specific |
-| Malicious retrieved instructions | Untrusted wrapper and system policy | Usually not surfaced as instructions | Continue with data-only interpretation | No permission elevation |
-| Citation mismatch | Host validation against structured identities | Reject/downgrade answer | Correct synthesis retry | Rendered text cannot forge identity |
+| Failure                                 | Detection                                     | Presentation                                                          | Recovery                                          | Guarantee                                |
+| --------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------- |
+| Profile reports native tools disabled   | Capability check before provider call         | “Tools unavailable” with selected profile context                     | Select/configure a tools-enabled profile          | No fake grounding                        |
+| Model narrates a tool call              | No native call/result event                   | Withhold provisional prose; bounded retry/nudge                       | Retry native tool decision or fail visibly        | Narration never becomes evidence         |
+| Required log search returns no evidence | Structured result count/identity empty        | Honest no-evidence state                                              | Refine query/filter                               | No invented event                        |
+| Requested source unavailable            | Eligibility computation                       | Name unavailable source class without secrets                         | Configure/authorize source                        | Remaining answer discloses gap           |
+| Context cannot fit                      | Deterministic budget helper                   | `context_too_long`                                                    | New chat/remove history/increase supported budget | Stored transcript not silently rewritten |
+| Timeout before retrieval                | Deadline                                      | Visible timeout                                                       | Retry                                             | No success claim                         |
+| Timeout after retrieval                 | Current whole-turn deadline                   | Visible failure, but richer preserved-evidence recovery is incomplete | #649 planned synthesis-only retry                 | Do not claim retry is complete           |
+| Cancellation                            | Per-turn cancel flag                          | Cancelled terminal state                                              | Start another turn                                | Cancellation is session-specific         |
+| Malicious retrieved instructions        | Untrusted wrapper and system policy           | Usually not surfaced as instructions                                  | Continue with data-only interpretation            | No permission elevation                  |
+| Citation mismatch                       | Host validation against structured identities | Reject/downgrade answer                                               | Correct synthesis retry                           | Rendered text cannot forge identity      |
 
 ## 9. Observability
 
@@ -372,15 +364,15 @@ synthesis step.
 
 ## 12. Test recipe
 
-| Layer | Required proof |
-| --- | --- |
-| Contract/unit | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters |
+| Layer            | Required proof                                                                                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Contract/unit    | Source ranking and caps; context fitting; capability matrix; binding serialization; untrusted wrapper cannot forge delimiters                                                                    |
 | Core integration | Linked turn requires successful log tool; ordinary turn excludes log tools; requested workspace search is staged; tools-disabled linked turn fails before provider; structured identity required |
-| Adversarial | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions |
-| Host/session | Link persists on linked chat only; active session context pack is isolated; cancellation targets exact session |
-| Component UI | First question can create linked chat; Return/Shift+Return/IME; model selector; errors remain visible; autoscroll/unread semantics |
-| Packaged/native | Tools-enabled provider performs a general zero-prep log question; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
-| Slow provider | Cold start, retrieval success then synthesis timeout, cancellation, and synthesis-only recovery after #649 ships |
+| Adversarial      | Model prints call-shaped JSON; wrapper metadata appears in output; user asks to reveal evaluator truth; malicious tool text asks for permissions                                                 |
+| Host/session     | Link persists on linked chat only; active session context pack is isolated; cancellation targets exact session                                                                                   |
+| Component UI     | First question can create linked chat; Return/Shift+Return/IME; model selector; errors remain visible; autoscroll/unread semantics                                                               |
+| Packaged/native  | Tools-enabled provider performs a general zero-prep log question; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen                    |
+| Slow provider    | Cold start, retrieval success then synthesis timeout, cancellation, and synthesis-only recovery after #649 ships                                                                                 |
 
 Evaluator fixtures must store expected findings outside every imported corpus,
 workspace root, memory store, session pack, and skill directory. The test should
@@ -412,15 +404,15 @@ assert the sentinel is absent from model-facing messages.
 
 ## 14. Shipped / partial / planned matrix
 
-| Slice | Status | What is true now | What is not claimed |
-| --- | --- | --- | --- |
-| Ordinary chat isolation | **Shipped** | No ambient log-tool inheritance | No claim that every future source is automatically isolated without tests |
-| Linked log grounding | **Shipped** | Required bounded log result and evidence identity | No success under tools-disabled profile |
-| Cross-source read | **Partial** | Requested governed reads can be offered after log grounding | No unrestricted autonomous source crawl |
-| Small-model staging | **Shipped** | Constrained first log search and tool-closed synthesis path | No guarantee every small model follows native tools |
-| Slow provider lifecycle | **Partial** | Bounded deadline and Stop exist | #649 phase-aware evidence preservation/retry |
-| Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in | Rich finding proposal/approval lifecycle remains #646 |
-| Evaluator-truth exclusion | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof |
+| Slice                       | Status      | What is true now                                                           | What is not claimed                                                       |
+| --------------------------- | ----------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Ordinary chat isolation     | **Shipped** | No ambient log-tool inheritance                                            | No claim that every future source is automatically isolated without tests |
+| Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
+| Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
+| Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
+| Slow provider lifecycle     | **Partial** | Bounded deadline and Stop exist                                            | #649 phase-aware evidence preservation/retry                              |
+| Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
+| Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 
 ## 15. Reimplementation notes
 

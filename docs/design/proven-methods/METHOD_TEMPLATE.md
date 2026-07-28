@@ -23,9 +23,9 @@ State the engineering and user problem in observable terms.
 Use the handbook legend: **Shipped**, **Partial**, **Local integration**,
 **Accepted design**, or **Planned**.
 
-| Capability | Status | Evidence | Residual |
-| --- | --- | --- | --- |
-| Example | Partial | Relative production path and named test | Issue number and literal missing behavior |
+| Capability | Status  | Evidence                                | Residual                                  |
+| ---------- | ------- | --------------------------------------- | ----------------------------------------- |
+| Example    | Partial | Relative production path and named test | Issue number and literal missing behavior |
 
 Rules:
 
@@ -46,6 +46,7 @@ Explain the method without ContextDesk names first.
 
 ```mermaid
 flowchart LR
+%% title: Validated input through bounded processing
     I["Validated input"] --> P["Bounded process"]
     P --> O["Typed output"]
     P --> F["Visible failure"]
@@ -57,15 +58,15 @@ Describe conceptual portable contracts before product-specific DTOs.
 
 ### Inputs
 
-| Field/concept | Type or shape | Required | Validation |
-| --- | --- | :---: | --- |
-| Stable identity | String or compound key | yes | Scope-bound; no path traversal or guessing |
+| Field/concept   | Type or shape          | Required | Validation                                 |
+| --------------- | ---------------------- | :------: | ------------------------------------------ |
+| Stable identity | String or compound key |   yes    | Scope-bound; no path traversal or guessing |
 
 ### Outputs
 
-| Field/concept | Meaning | Bounded by | Provenance |
-| --- | --- | --- | --- |
-| Result | Inspectable output | Explicit count/byte/time cap | Named source and method |
+| Field/concept | Meaning            | Bounded by                   | Provenance              |
+| ------------- | ------------------ | ---------------------------- | ----------------------- |
+| Result        | Inspectable output | Explicit count/byte/time cap | Named source and method |
 
 State:
 
@@ -106,9 +107,9 @@ for documentation convenience.
 
 Document hard caps and expected complexity.
 
-| Dimension | Bound | Enforcement point | Overflow behavior |
-| --- | ---: | --- | --- |
-| Items | N | Trusted core/host | Reject, clamp, or truncate with explicit status |
+| Dimension | Bound | Enforcement point | Overflow behavior                               |
+| --------- | ----: | ----------------- | ----------------------------------------------- |
+| Items     |     N | Trusted core/host | Reject, clamp, or truncate with explicit status |
 
 Separate:
 
@@ -121,9 +122,9 @@ Never convert a benchmark into a universal latency claim.
 
 ## 8. Failure and recovery
 
-| Failure | Detection | User-visible state | Recovery | Data guarantee |
-| --- | --- | --- | --- | --- |
-| Example | Explicit error/status | Honest message | Retry/restore | Prior good state remains |
+| Failure | Detection             | User-visible state | Recovery      | Data guarantee           |
+| ------- | --------------------- | ------------------ | ------------- | ------------------------ |
+| Example | Explicit error/status | Honest message     | Retry/restore | Prior good state remains |
 
 Cover cancellation, partial completion, stale data, schema mismatch,
 concurrency, unsupported capabilities, timeout, and restart where applicable.
@@ -170,14 +171,14 @@ Required operating information must not be hover-only.
 
 ## 12. Test matrix
 
-| Layer | Happy path | Boundary/adversarial path | Evidence |
-| --- | --- | --- | --- |
-| Contract/unit | | | Named test/fixture |
-| Core integration | | | |
-| Host/IPC | | | |
-| Component/UI | | | |
-| Packaged/native | | | |
-| Scale/benchmark | | | |
+| Layer            | Happy path | Boundary/adversarial path | Evidence           |
+| ---------------- | ---------- | ------------------------- | ------------------ |
+| Contract/unit    |            |                           | Named test/fixture |
+| Core integration |            |                           |                    |
+| Host/IPC         |            |                           |                    |
+| Component/UI     |            |                           |                    |
+| Packaged/native  |            |                           |                    |
+| Scale/benchmark  |            |                           |                    |
 
 Use deterministic fixtures with known truth. Include malformed, missing,
 mixed-quality, Unicode, redaction, cancellation, and restart cases as relevant.
@@ -198,8 +199,8 @@ than fragile line numbers.
 ## 14. Shipped / partial / planned matrix
 
 | Slice | Status | What is true now | What is not claimed |
-| --- | --- | --- | --- |
-| | | | |
+| ----- | ------ | ---------------- | ------------------- |
+|       |        |                  |                     |
 
 ## 15. Reimplementation notes
 
@@ -222,6 +223,8 @@ implying committed scope.
 - [ ] Problem and non-goals are explicit.
 - [ ] Every meaningful capability has a status and evidence.
 - [ ] Reusable method is separate from ContextDesk anchors.
+- [ ] Every Mermaid diagram has a specific `%% title:`, uses the bundled safe
+      subset, and is accurately explained by adjacent prose.
 - [ ] Inputs, outputs, identity, version, units, and missing-value semantics are defined.
 - [ ] Invariants and trust boundaries are testable.
 - [ ] Algorithm is detailed enough for independent implementation.

@@ -35,15 +35,45 @@ Do not add manually synchronized HTML chapters. If a future renderer cannot
 represent a diagram or table, improve the generation pipeline or the Markdown
 source.
 
+## Handbook maintenance contract
+
+The handbook is an engineering claim surface, not promotional copy. Maintain it
+under these rules:
+
+1. **Canonical source:** edit only this Markdown family for handbook content.
+   Generated HTML, SVG, screenshots, and packaged views are presentations, not
+   independent sources.
+2. **Diagram identity:** every Mermaid block has a specific `%% title:` that
+   states the relationship being shown. Adjacent prose must explain its scope
+   and any shipped, partial, local, accepted, or planned boundary.
+3. **Renderer fidelity:** authored diagrams use only syntax faithfully supported
+   by the bundled renderer. Unsupported semantics must fail visibly; do not let
+   a decorative approximation imply relationships the source does not express.
+4. **Theme and nonvisual access:** generated diagrams use application theme
+   tokens and retain a semantic text equivalent plus inspectable Mermaid source.
+   Required operating information cannot depend on color, animation, or hover.
+5. **Claim synchronization:** when a production contract, trust boundary,
+   status, or residual changes, update the affected prose, status table,
+   diagram, production anchor, and issue reference in the same change.
+6. **Review and proof:** reviewers compare every diagram node and edge with its
+   adjacent prose and cited production anchors. Run the handbook structural
+   check, claims check, Markdown formatter, and link/diff checks before
+   promotion.
+
+If a useful relationship exceeds the current safe Mermaid subset, simplify the
+diagram without losing the contract or improve the renderer in a separately
+reviewed production change. Never encode additional behavior in a diagram that
+the canonical prose does not claim.
+
 ## Status legend
 
-| Status | Meaning | Evidence required |
-| --- | --- | --- |
-| **Shipped** | Present on current `main` through a real production path | Production anchor plus automated or packaged-path proof |
-| **Partial** | A useful slice ships, but named acceptance criteria or lifecycle work remains | Shipped anchors plus explicit residual issue |
-| **Local integration** | Implemented or verified on an unmerged integration branch only | Branch/commit evidence; never described as available on `main` |
-| **Accepted design** | A reviewed contract constrains implementation, but it is not itself shipped behavior | Canonical design or ADR link |
-| **Planned** | Intended behavior with no complete production path | Open issue/design; no shipped claim |
+| Status                | Meaning                                                                              | Evidence required                                              |
+| --------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| **Shipped**           | Present on current `main` through a real production path                             | Production anchor plus automated or packaged-path proof        |
+| **Partial**           | A useful slice ships, but named acceptance criteria or lifecycle work remains        | Shipped anchors plus explicit residual issue                   |
+| **Local integration** | Implemented or verified on an unmerged integration branch only                       | Branch/commit evidence; never described as available on `main` |
+| **Accepted design**   | A reviewed contract constrains implementation, but it is not itself shipped behavior | Canonical design or ADR link                                   |
+| **Planned**           | Intended behavior with no complete production path                                   | Open issue/design; no shipped claim                            |
 
 Status is scoped to the exact row. A chapter can contain shipped, partial, and
 planned elements at the same time. “Tests exist” does not upgrade a local or
@@ -53,6 +83,7 @@ planned method to shipped.
 
 ```mermaid
 flowchart LR
+%% title: Evidence-to-investigation method map
     A["Raw sources<br/>logs · files · memory · DB · connectors · skills"]
     B["Deterministic eligibility<br/>scope · capability · permission"]
     C["Bounded retrieval<br/>filter · rank · cap · redact"]
@@ -69,12 +100,12 @@ flowchart LR
     F --> H
 ```
 
-| Method | Primary question | Current status | Chapter |
-| --- | --- | --- | --- |
-| Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model? | **Partial**: strong linked-log and ordinary-chat isolation ships; phase-aware evidence-preserving retries remain #649 | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
-| Log evidence pipeline | How do raw records become honest, searchable, scalable evidence? | **Partial**: batch pipeline ships; full timestamp provenance, timezone/skew policy, and durable noise rules remain #670/#671 | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md) |
-| Investigation loop | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md) |
-| Future method documentation | How should another process be documented and challenged? | **Local integration** until this handbook is merged | [Method chapter template](proven-methods/METHOD_TEMPLATE.md) |
+| Method                         | Primary question                                                                       | Current status                                                                                                                      | Chapter                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model?                          | **Partial**: strong linked-log and ordinary-chat isolation ships; phase-aware evidence-preserving retries remain #649               | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
+| Log evidence pipeline          | How do raw records become honest, searchable, scalable evidence?                       | **Partial**: batch pipeline ships; full timestamp provenance, timezone/skew policy, and durable noise rules remain #670/#671        | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md)                   |
+| Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
+| Future method documentation    | How should another process be documented and challenged?                               | **Local integration** until this handbook is merged                                                                                 | [Method chapter template](proven-methods/METHOD_TEMPLATE.md)                       |
 
 ## From-scratch staged implementation path
 
@@ -202,9 +233,8 @@ This first version intentionally leaves several chapters for follow-up:
 - provider lifecycle, cancellation, and evidence-preserving retry after #649;
 - timestamp policy after the remaining #670 work ships;
 - report/export and proposal lifecycle after #646/#532; and
-- a repository-enforced handbook link/status check. This documentation-only
-  sidecar was not authorized to modify scripts, so its relative-link validation
-  is local proof until a focused follow-up adds a gate.
+- future chapters and diagrams for the remaining methods as their contracts and
+  production evidence become stable enough to document without speculation.
 
 Those gaps do not change the status of the three methods documented here. They
 are the next candidates for the template, not behavior to imply in advance.
