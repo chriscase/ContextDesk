@@ -111,6 +111,10 @@ vi.mock("../../lib/host", () => ({
       },
     ],
   })),
+  hostLogQueryEventOriginal: vi.fn(async () => ({
+    state: "unavailable",
+    reason: "Original representation unavailable for this corpus",
+  })),
   hostLogSearchEvents: vi.fn(async () => []),
   hostLogSearchEventsAdvanced: vi.fn(async () => ({
     hits: [],
@@ -367,6 +371,10 @@ describe("LogExplorer shell", () => {
       timeQuality: "wall",
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
+    vi.mocked(host.hostLogQueryEventOriginal).mockResolvedValue({
+      state: "unavailable",
+      reason: "Original representation unavailable for this corpus",
+    });
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(null);
     vi.mocked(host.hostListChatModels).mockResolvedValue([
@@ -788,10 +796,204 @@ describe("LogExplorer shell", () => {
     const metadata = within(inspector).getByTestId("detail-metadata");
     expect(metadata.textContent).toContain("api.log");
     expect(metadata.textContent).toContain("seq 1");
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
     fireEvent.click(within(inspector).getByTestId("detail-close"));
     await waitFor(() =>
       expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
     );
+  });
+
+  it("lazily reveals and copies the authoritative redacted original with fidelity notices", async () => {
+    const load = deferred<host.EventOriginalRepresentationDto>();
+    vi.mocked(host.hostLogQueryEventOriginal).mockReturnValue(load.promise);
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    const representation = within(inspector).getByRole("group", {
+      name: "Event 1 representation",
+    });
+    const formatted = within(representation).getByRole("button", {
+      name: "Formatted",
+    });
+    const original = within(representation).getByRole("button", {
+      name: "Original (redacted)",
+    });
+    expect(formatted.getAttribute("aria-pressed")).toBe("true");
+    expect(original.getAttribute("aria-pressed")).toBe("false");
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
+
+    fireEvent.click(original);
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledWith("c1", 1);
+    expect(
+      within(inspector).getByText("Loading Original (redacted)…"),
+    ).toBeTruthy();
+    expect(
+      (within(inspector).getByTestId("detail-copy") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      load.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: '{"message":"auth failure","unknown":"kept"}',
+        sourceByteCount: 75_000,
+        redactedCharCount: 70_000,
+        storedCharCount: 65_536,
+        truncated: true,
+        encodingNormalized: true,
+        redactionApplied: true,
+      });
+      await load.promise;
+    });
+
+    const notices = within(inspector).getByTestId("detail-original-notices");
+    expect(notices.textContent).toContain("after secret redaction");
+    expect(notices.textContent).toContain("65,536 stored characters");
+    expect(notices.textContent).toContain("suffix is unavailable");
+    expect(notices.textContent).toContain("Invalid UTF-8");
+    expect(notices.textContent).toContain("Sensitive value patterns");
+    expect(
+      within(inspector).getByLabelText(
+        "Stored Original (redacted) record for event 1",
+      ).textContent,
+    ).toBe('{"message":"auth failure","unknown":"kept"}');
+    expect(
+      within(inspector)
+        .getByTestId("detail-copy")
+        .getAttribute("aria-label"),
+    ).toBe("Copy stored Original (redacted) record 1");
+
+    fireEvent.click(within(inspector).getByTestId("detail-copy"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        '{"message":"auth failure","unknown":"kept"}',
+      ),
+    );
+
+    fireEvent.click(formatted);
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 1")
+        .textContent,
+    ).toBe("auth failure");
+    fireEvent.click(within(inspector).getByTestId("detail-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1]?.[0]).toContain("\terror\tapi.log\tauth failure");
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows honest unavailable and retryable error states without inventing original text", async () => {
+    vi.mocked(host.hostLogQueryEventOriginal)
+      .mockRejectedValueOnce(new Error("event store unavailable"))
+      .mockResolvedValueOnce({
+        state: "unavailable",
+        reason: "Original representation unavailable for this corpus",
+      });
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    fireEvent.click(screen.getByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+
+    expect(
+      await within(inspector).findByText(
+        /Could not load Original.*event store unavailable/,
+      ),
+    ).toBeTruthy();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry" }));
+    expect(
+      (
+        await within(inspector).findByTestId("detail-original-unavailable")
+      ).textContent,
+    ).toBe("Original representation unavailable for this corpus");
+    expect(
+      (within(inspector).getByTestId("detail-copy") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      within(inspector).queryByTestId("detail-original-message"),
+    ).toBeNull();
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores stale original responses after switching events or closing the inspector", async () => {
+    const first = deferred<host.EventOriginalRepresentationDto>();
+    const second = deferred<host.EventOriginalRepresentationDto>();
+    vi.mocked(host.hostLogQueryEventOriginal).mockImplementation(
+      (_corpusId, seq) => (seq === 1 ? first.promise : second.promise),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    fireEvent.click(screen.getByText(/auth failure/));
+    let inspector = await screen.findByTestId("log-explorer-detail");
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+
+    fireEvent.click(screen.getByText(/job ok/));
+    inspector = await screen.findByTestId("log-explorer-detail");
+    expect(inspector.getAttribute("aria-label")).toContain("sequence 2");
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 2")
+        .textContent,
+    ).toBe("job ok");
+    await act(async () => {
+      first.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: "stale event one",
+        sourceByteCount: 15,
+        redactedCharCount: 15,
+        storedCharCount: 15,
+        truncated: false,
+        encodingNormalized: false,
+        redactionApplied: false,
+      });
+      await first.promise;
+    });
+    expect(screen.queryByText("stale event one")).toBeNull();
+
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+    fireEvent.click(within(inspector).getByTestId("detail-close"));
+    await act(async () => {
+      second.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: "stale event two",
+        sourceByteCount: 15,
+        redactedCharCount: 15,
+        storedCharCount: 15,
+        truncated: false,
+        encodingNormalized: false,
+        redactionApplied: false,
+      });
+      await second.promise;
+    });
+    expect(screen.queryByTestId("log-explorer-detail")).toBeNull();
+    expect(screen.queryByText("stale event two")).toBeNull();
+    expect(host.hostLogQueryEventOriginal).toHaveBeenNthCalledWith(1, "c1", 1);
+    expect(host.hostLogQueryEventOriginal).toHaveBeenNthCalledWith(2, "c1", 2);
   });
 
   it("scopes synchronized resizable headings to every visible lane", async () => {

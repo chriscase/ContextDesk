@@ -5176,6 +5176,83 @@ fn log_query_events(
     cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum LogEventOriginalDto {
+    Available {
+        label: String,
+        text: String,
+        #[serde(rename = "sourceByteCount")]
+        source_byte_count: u64,
+        #[serde(rename = "redactedCharCount")]
+        redacted_char_count: u64,
+        #[serde(rename = "storedCharCount")]
+        stored_char_count: u64,
+        truncated: bool,
+        #[serde(rename = "encodingNormalized")]
+        encoding_normalized: bool,
+        #[serde(rename = "redactionApplied")]
+        redaction_applied: bool,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl From<cd_core::log_analysis::query::EventOriginalRepresentation> for LogEventOriginalDto {
+    fn from(value: cd_core::log_analysis::query::EventOriginalRepresentation) -> Self {
+        use cd_core::log_analysis::query::EventOriginalRepresentation;
+        match value {
+            EventOriginalRepresentation::Available {
+                label,
+                text,
+                source_byte_count,
+                redacted_char_count,
+                stored_char_count,
+                truncated,
+                encoding_normalized,
+                redaction_applied,
+            } => Self::Available {
+                label,
+                text,
+                source_byte_count,
+                redacted_char_count,
+                stored_char_count,
+                truncated,
+                encoding_normalized,
+                redaction_applied,
+            },
+            EventOriginalRepresentation::Unavailable { reason } => Self::Unavailable { reason },
+        }
+    }
+}
+
+fn query_log_event_original_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    seq: u64,
+) -> Result<LogEventOriginalDto, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query::query_event_original(&corpus, seq)
+        .map(LogEventOriginalDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Explicit, read-only fetch for the inspector's Original (redacted) view.
+///
+/// This remains separate from ordinary Explorer pages, search, evidence, and
+/// linked-chat DTOs so source records never enter those paths automatically.
+#[tauri::command]
+fn log_query_event_original(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    seq: u64,
+) -> Result<LogEventOriginalDto, String> {
+    let cache = log_cache_dir(&state)?;
+    query_log_event_original_at(&cache, &corpus_id, seq)
+}
+
 /// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
 #[tauri::command]
 fn log_timeline_summary(
@@ -6636,6 +6713,7 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_query_event_original,
             log_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
@@ -6687,6 +6765,88 @@ pub fn run() {
 
 #[cfg(test)]
 mod s3_backup_host_tests;
+
+#[cfg(test)]
+mod log_original_host_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_original_query_maps_fidelity_metadata_and_missing_events() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::write(
+            logs.join("event.jsonl"),
+            br#"{"timestamp":"2026-07-28T12:00:00Z","level":"ERROR","message":"failure","unknown":"kept","token":"ghp_example_invalid_secret_marker_1234567890"}
+"#,
+        )
+        .expect("fixture");
+        let cache = root.path().join("cache");
+        let report = cd_core::log_analysis::ingest_path(&cache, &logs, "original", None, "none")
+            .expect("ingest");
+
+        let original = query_log_event_original_at(&cache, &report.corpus_id, 0).expect("original");
+        let LogEventOriginalDto::Available {
+            label,
+            text,
+            source_byte_count,
+            redacted_char_count,
+            stored_char_count,
+            truncated,
+            encoding_normalized,
+            redaction_applied,
+        } = original
+        else {
+            panic!("newly ingested event should have an original representation");
+        };
+        assert_eq!(label, "Original (redacted)");
+        assert!(text.contains(r#""unknown":"kept""#));
+        assert!(!text.contains("ghp_example_invalid_secret_marker_1234567890"));
+        assert!(source_byte_count > 0);
+        assert_eq!(stored_char_count, text.chars().count() as u64);
+        assert!(redacted_char_count >= stored_char_count);
+        assert!(!truncated);
+        assert!(!encoding_normalized);
+        assert!(redaction_applied);
+
+        let error =
+            query_log_event_original_at(&cache, &report.corpus_id, 99).expect_err("missing event");
+        assert!(error.contains("event seq 99 not found"), "{error}");
+    }
+
+    #[test]
+    fn original_ipc_is_registered_and_ordinary_pages_remain_separate() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("log_query_event_original,"),
+            "explicit command must be registered"
+        );
+        let page_start = src
+            .find("fn log_query_events(")
+            .expect("ordinary page command");
+        let original_start = src
+            .find("enum LogEventOriginalDto")
+            .expect("separate original DTO");
+        let page_src = &src[page_start..original_start];
+        assert!(
+            !page_src.contains("query_event_original"),
+            "ordinary event pages must never fetch original records"
+        );
+        let original_command_start = src
+            .find("fn log_query_event_original(")
+            .expect("original command");
+        let timeline_start = src[original_command_start..]
+            .find("fn log_timeline_summary(")
+            .map(|offset| original_command_start + offset)
+            .expect("original command boundary");
+        let original_command = &src[original_command_start..timeline_start];
+        assert!(original_command.contains("query_log_event_original_at"));
+        assert!(
+            !original_command.contains("ensure_host("),
+            "local read-only record lookup must not construct the agent host"
+        );
+    }
+}
 
 #[cfg(test)]
 mod help_host_tests {

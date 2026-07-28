@@ -29,11 +29,13 @@ import {
   hostLogListBookmarks,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
+  hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
   hostSetActiveLogCorpus,
   type EventPageDto,
+  type EventOriginalRepresentationDto,
   type SearchMatchMode,
   type EventQueryDto,
   type ExplorerEventDto,
@@ -730,6 +732,36 @@ export function LogExplorer({ corpusId }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
   const [detail, setDetail] = useState<ExplorerEventDto | null>(null);
+  const [detailRepresentation, setDetailRepresentation] = useState<
+    "formatted" | "original"
+  >("formatted");
+  const [detailOriginal, setDetailOriginal] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "loaded"; result: EventOriginalRepresentationDto }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+  const detailOriginalRequestRef = useRef(0);
+  const detailSeqRef = useRef<number | null>(null);
+  const detailRepresentationRef = useRef<"formatted" | "original">(
+    "formatted",
+  );
+  const showDetail = useCallback((event: ExplorerEventDto) => {
+    detailOriginalRequestRef.current += 1;
+    detailSeqRef.current = event.seq;
+    detailRepresentationRef.current = "formatted";
+    setDetailRepresentation("formatted");
+    setDetailOriginal({ status: "idle" });
+    setDetail(event);
+  }, []);
+  const clearDetail = useCallback(() => {
+    detailOriginalRequestRef.current += 1;
+    detailSeqRef.current = null;
+    detailRepresentationRef.current = "formatted";
+    setDetailRepresentation("formatted");
+    setDetailOriginal({ status: "idle" });
+    setDetail(null);
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
@@ -1731,7 +1763,7 @@ export function LogExplorer({ corpusId }: Props) {
         setBookmarkFocusTarget({ laneId, seq });
       }
       if (nb.target && opts?.selectTarget !== false) {
-        setDetail(nb.target);
+        showDetail(nb.target);
         setSelected(new Set([seq]));
       }
     }
@@ -2125,7 +2157,7 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const onRowClick = (e: ExplorerEventDto, multi: boolean) => {
-    setDetail(e);
+    showDetail(e);
     setSelected((prev) => {
       const next = new Set(multi ? prev : []);
       if (next.has(e.seq)) next.delete(e.seq);
@@ -2635,8 +2667,8 @@ export function LogExplorer({ corpusId }: Props) {
       }
       return next;
     });
-    setDetail((d) => (d && !resident.has(d.seq) ? null : d));
-  }, [laneEvents]);
+    if (detail && !resident.has(detail.seq)) clearDetail();
+  }, [clearDetail, detail, laneEvents]);
 
   /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
   const activateBookmark = async (b: LogBookmarkDto) => {
@@ -2712,7 +2744,7 @@ export function LogExplorer({ corpusId }: Props) {
           setFocusLaneId(matchingLane.id);
           setLaneScrollSeq((m) => ({ ...m, [matchingLane.id]: seq }));
           setBookmarkFocusTarget({ laneId: matchingLane.id, seq });
-          setDetail(residentTarget);
+          showDetail(residentTarget);
           setSelected(new Set([seq]));
           setBookmarkRevealState("visible");
           setStatus(`Bookmark visible: ${b.label}`);
@@ -2847,7 +2879,7 @@ export function LogExplorer({ corpusId }: Props) {
     setFindPartial(false);
     setSelected(new Set());
     setHighlight(new Set());
-    setDetail(null);
+    clearDetail();
     setFilters(nextFilters);
     setFilterDraft(nextFilters.keyword ?? "");
     setLanes(
@@ -3536,7 +3568,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const closeDetail = () => {
     const seq = detail?.seq;
-    setDetail(null);
+    clearDetail();
     if (seq != null) {
       queueMicrotask(() => {
         const row = rootRef.current?.querySelector<HTMLElement>(
@@ -3544,6 +3576,88 @@ export function LogExplorer({ corpusId }: Props) {
         );
         row?.focus();
       });
+    }
+  };
+
+  const selectDetailRepresentation = async (
+    representation: "formatted" | "original",
+  ) => {
+    if (!detail) return;
+    detailRepresentationRef.current = representation;
+    setDetailRepresentation(representation);
+    if (representation === "formatted") {
+      if (detailOriginal.status === "loading") {
+        detailOriginalRequestRef.current += 1;
+        setDetailOriginal({ status: "idle" });
+      }
+      return;
+    }
+    if (
+      detailOriginal.status === "loaded" ||
+      detailOriginal.status === "loading"
+    ) {
+      return;
+    }
+
+    const seq = detail.seq;
+    const request = detailOriginalRequestRef.current + 1;
+    detailOriginalRequestRef.current = request;
+    setDetailOriginal({ status: "loading" });
+    try {
+      const result = await hostLogQueryEventOriginal(corpusId, seq);
+      if (
+        detailOriginalRequestRef.current !== request ||
+        detailSeqRef.current !== seq ||
+        detailRepresentationRef.current !== "original"
+      ) {
+        return;
+      }
+      setDetailOriginal({ status: "loaded", result });
+    } catch (originalError) {
+      if (
+        detailOriginalRequestRef.current !== request ||
+        detailSeqRef.current !== seq ||
+        detailRepresentationRef.current !== "original"
+      ) {
+        return;
+      }
+      setDetailOriginal({
+        status: "error",
+        message:
+          originalError instanceof Error
+            ? originalError.message
+            : String(originalError),
+      });
+    }
+  };
+
+  const copyDetailRepresentation = async () => {
+    if (!detail || !navigator.clipboard?.writeText) {
+      setStatus("Clipboard unavailable");
+      return;
+    }
+    const original =
+      detailOriginal.status === "loaded" ? detailOriginal.result : null;
+    const text =
+      detailRepresentation === "original"
+        ? original?.state === "available"
+          ? original.text
+          : null
+        : `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`;
+    if (text == null) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus(
+        detailRepresentation === "original"
+          ? "Copied stored Original (redacted) record"
+          : "Copied complete formatted event",
+      );
+    } catch (copyError) {
+      setStatus(
+        `Could not copy event: ${
+          copyError instanceof Error ? copyError.message : String(copyError)
+        }`,
+      );
     }
   };
 
@@ -5155,17 +5269,45 @@ export function LogExplorer({ corpusId }: Props) {
               />
               <div className="log-explorer__detail-toolbar">
                 <strong>Event inspector · seq {detail.seq}</strong>
+                <div
+                  className="log-explorer__detail-representations"
+                  role="group"
+                  aria-label={`Event ${detail.seq} representation`}
+                >
+                  <button
+                    type="button"
+                    className="log-explorer__detail-representation"
+                    aria-pressed={detailRepresentation === "formatted"}
+                    onClick={() => void selectDetailRepresentation("formatted")}
+                  >
+                    Formatted
+                  </button>
+                  <button
+                    type="button"
+                    className="log-explorer__detail-representation"
+                    aria-pressed={detailRepresentation === "original"}
+                    onClick={() => void selectDetailRepresentation("original")}
+                  >
+                    Original (redacted)
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-copy"
-                  aria-label={`Copy complete redacted event ${detail.seq}`}
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(
-                      `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`,
-                    );
-                    setStatus("Copied event to clipboard");
-                  }}
+                  aria-label={
+                    detailRepresentation === "original"
+                      ? `Copy stored Original (redacted) record ${detail.seq}`
+                      : `Copy complete formatted event ${detail.seq}`
+                  }
+                  disabled={
+                    detailRepresentation === "original" &&
+                    !(
+                      detailOriginal.status === "loaded" &&
+                      detailOriginal.result.state === "available"
+                    )
+                  }
+                  onClick={() => void copyDetailRepresentation()}
                 >
                   Copy
                 </button>
@@ -5178,54 +5320,147 @@ export function LogExplorer({ corpusId }: Props) {
                   Close inspector
                 </button>
               </div>
-              <dl
-                className="log-explorer__detail-metadata"
-                data-testid="detail-metadata"
-              >
-                <div>
-                  <dt>Event</dt>
-                  <dd>seq {detail.seq}</dd>
+              {detailRepresentation === "formatted" ? (
+                <>
+                  <dl
+                    className="log-explorer__detail-metadata"
+                    data-testid="detail-metadata"
+                  >
+                    <div>
+                      <dt>Event</dt>
+                      <dd>seq {detail.seq}</dd>
+                    </div>
+                    <div>
+                      <dt>Time</dt>
+                      <dd>
+                        {formatCanonicalUtc(detail.ts)} ·{" "}
+                        {timeQualityLabel(detail.timeQuality)} · UTC
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Source</dt>
+                      <dd>{detail.source}</dd>
+                    </div>
+                    <div>
+                      <dt>Level</dt>
+                      <dd className={levelClass(detail.level)}>
+                        {detail.level}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Service</dt>
+                      <dd>{detail.service ?? "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Host</dt>
+                      <dd>{detail.host ?? "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Template</dt>
+                      <dd>{detail.templateId}</dd>
+                    </div>
+                    <div>
+                      <dt>Trace</dt>
+                      <dd>{detail.traceId ?? "—"}</dd>
+                    </div>
+                  </dl>
+                  <pre
+                    className="log-explorer__detail-message"
+                    data-testid="detail-message"
+                    tabIndex={0}
+                    aria-label={`Complete redacted message for event ${detail.seq}`}
+                  >
+                    {detail.message}
+                  </pre>
+                </>
+              ) : (
+                <div
+                  className="log-explorer__detail-original"
+                  data-testid="detail-original"
+                  aria-live="polite"
+                >
+                  {detailOriginal.status === "loading" ? (
+                    <p className="log-explorer__detail-state" role="status">
+                      Loading Original (redacted)…
+                    </p>
+                  ) : detailOriginal.status === "error" ? (
+                    <div
+                      className="log-explorer__detail-state log-explorer__detail-state--error"
+                      role="alert"
+                    >
+                      <span>
+                        Could not load Original (redacted):{" "}
+                        {detailOriginal.message}
+                      </span>
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        onClick={() =>
+                          void selectDetailRepresentation("original")
+                        }
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : detailOriginal.status === "loaded" &&
+                    detailOriginal.result.state === "unavailable" ? (
+                    <p
+                      className="log-explorer__detail-state"
+                      data-testid="detail-original-unavailable"
+                    >
+                      {detailOriginal.result.reason}
+                    </p>
+                  ) : detailOriginal.status === "loaded" &&
+                    detailOriginal.result.state === "available" ? (
+                    <>
+                      <div
+                        className="log-explorer__detail-notices"
+                        data-testid="detail-original-notices"
+                      >
+                        <p>
+                          This is the stored source record after secret
+                          redaction and documented encoding or line-ending
+                          normalization. Unredacted source bytes are not shown.
+                        </p>
+                        <p>
+                          {detailOriginal.result.storedCharCount.toLocaleString()}{" "}
+                          stored characters from{" "}
+                          {detailOriginal.result.redactedCharCount.toLocaleString()}{" "}
+                          redacted characters ·{" "}
+                          {detailOriginal.result.sourceByteCount.toLocaleString()}{" "}
+                          source bytes.
+                        </p>
+                        {detailOriginal.result.redactionApplied ? (
+                          <p role="note">
+                            Sensitive value patterns were replaced during
+                            ingest.
+                          </p>
+                        ) : null}
+                        {detailOriginal.result.truncated ? (
+                          <p role="note">
+                            This record exceeded the storage bound; its suffix
+                            is unavailable.
+                          </p>
+                        ) : null}
+                        {detailOriginal.result.encodingNormalized ? (
+                          <p role="note">
+                            Invalid UTF-8 was normalized with replacement
+                            characters during ingest.
+                          </p>
+                        ) : null}
+                      </div>
+                      <pre
+                        className="log-explorer__detail-message log-explorer__detail-message--original"
+                        data-testid="detail-original-message"
+                        tabIndex={0}
+                        aria-label={`Stored Original (redacted) record for event ${detail.seq}`}
+                      >
+                        {detailOriginal.result.text}
+                      </pre>
+                    </>
+                  ) : null}
                 </div>
-                <div>
-                  <dt>Time</dt>
-                  <dd>
-                    {formatCanonicalUtc(detail.ts)} ·{" "}
-                    {timeQualityLabel(detail.timeQuality)} · UTC
-                  </dd>
-                </div>
-                <div>
-                  <dt>Source</dt>
-                  <dd>{detail.source}</dd>
-                </div>
-                <div>
-                  <dt>Level</dt>
-                  <dd className={levelClass(detail.level)}>{detail.level}</dd>
-                </div>
-                <div>
-                  <dt>Service</dt>
-                  <dd>{detail.service ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>Host</dt>
-                  <dd>{detail.host ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>Template</dt>
-                  <dd>{detail.templateId}</dd>
-                </div>
-                <div>
-                  <dt>Trace</dt>
-                  <dd>{detail.traceId ?? "—"}</dd>
-                </div>
-              </dl>
-              <pre
-                className="log-explorer__detail-message"
-                data-testid="detail-message"
-                tabIndex={0}
-                aria-label={`Complete redacted message for event ${detail.seq}`}
-              >
-                {detail.message}
-              </pre>
+              )}
               {(nextCursor != null ||
                 Object.values(laneCursors).some((c) => c.afterSeq != null)) && (
                 <button

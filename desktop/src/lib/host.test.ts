@@ -1,10 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  hostLogQueryEventOriginal,
   modelSelectionKey,
   normalizeProviderKind,
   parseModelSelectionKey,
   profileIdForKind,
 } from "./host";
+
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+
+beforeEach(() => {
+  invokeMock.mockReset();
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ =
+    {};
+});
 
 describe("profileIdForKind", () => {
   it("maps known kinds to stable keychain profile ids", () => {
@@ -69,5 +82,41 @@ describe("modelSelectionKey / parseModelSelectionKey", () => {
       providerId: null,
       modelId: "mistral",
     });
+  });
+});
+
+describe("hostLogQueryEventOriginal", () => {
+  it("uses a separate per-event IPC request with no ordinary page arguments", async () => {
+    invokeMock.mockResolvedValue({
+      state: "available",
+      label: "Original (redacted)",
+      text: "source",
+      sourceByteCount: 6,
+      redactedCharCount: 6,
+      storedCharCount: 6,
+      truncated: false,
+      encodingNormalized: false,
+      redactionApplied: false,
+    });
+
+    await expect(hostLogQueryEventOriginal("corpus-1", 42)).resolves.toMatchObject(
+      {
+        state: "available",
+        text: "source",
+      },
+    );
+    expect(invokeMock).toHaveBeenCalledWith("log_query_event_original", {
+      corpusId: "corpus-1",
+      seq: 42,
+    });
+  });
+
+  it("refuses to imply an original representation outside the desktop host", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+    await expect(hostLogQueryEventOriginal("corpus-1", 42)).rejects.toThrow(
+      "requires the desktop app",
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

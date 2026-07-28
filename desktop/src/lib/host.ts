@@ -1820,6 +1820,23 @@ export type ExplorerEventDto = {
   source: string;
 };
 
+export type EventOriginalRepresentationDto =
+  | {
+      state: "available";
+      label: "Original (redacted)" | string;
+      text: string;
+      sourceByteCount: number;
+      redactedCharCount: number;
+      storedCharCount: number;
+      truncated: boolean;
+      encodingNormalized: boolean;
+      redactionApplied: boolean;
+    }
+  | {
+      state: "unavailable";
+      reason: string;
+    };
+
 export type EventQueryDto = {
   timeFrom?: number | null;
   timeTo?: number | null;
@@ -2083,6 +2100,24 @@ export async function hostLogQueryEvents(
     };
   }
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
+}
+
+/**
+ * Fetch the separately stored authoritative redacted source for one event.
+ * This is intentionally not part of ordinary event pages and must be called
+ * only from an explicit inspector action.
+ */
+export async function hostLogQueryEventOriginal(
+  corpusId: string,
+  seq: number,
+): Promise<EventOriginalRepresentationDto> {
+  if (!isTauri()) {
+    throw new Error("Original event representation requires the desktop app");
+  }
+  return invoke<EventOriginalRepresentationDto>("log_query_event_original", {
+    corpusId,
+    seq,
+  });
 }
 
 /** Fixed-size, filter-aware overview used only when the Explorer navigator opens. */
