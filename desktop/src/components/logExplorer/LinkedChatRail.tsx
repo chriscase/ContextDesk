@@ -550,11 +550,14 @@ export function LinkedChatRail({
       }
       await refreshChats();
       const usedTools = (assistant.tools?.length ?? 0) > 0;
+      const endedWithError = events.some((event) => event.kind === "error");
       setStatusByChat((m) => ({
         ...m,
-        [sessionId!]: usedTools
-          ? "Linked investigation completed with governed evidence tools"
-          : "Linked chat response saved",
+        [sessionId!]: endedWithError
+          ? "Linked investigation stopped before completion; review the visible error and retry"
+          : usedTools
+            ? "Linked investigation completed with governed evidence tools"
+            : "Linked chat response saved",
       }));
     } catch (e) {
       setErrorByChat((m) => ({ ...m, [sessionId!]: String(e) }));

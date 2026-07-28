@@ -649,7 +649,9 @@ describe("LinkedChatRail", () => {
     const assistant = await screen.findByTestId("linked-chat-msg-assistant");
     expect(assistant.textContent).toContain(unavailable);
     expect(screen.queryByText(/I'll use .*log tool/i)).toBeNull();
-    await screen.findByText("Linked chat response saved");
+    await screen.findByText(
+      "Linked investigation stopped before completion; review the visible error and retry",
+    );
     await waitFor(() =>
       expect(
         stored.messages.some(
@@ -736,6 +738,93 @@ describe("LinkedChatRail", () => {
     ).toBeTruthy();
     await screen.findByText("Linked chat response saved");
     expect(host.agentTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not report success when a governed-tool turn reaches its deadline", async () => {
+    let stored = sessionDto("s-tool-deadline", "Logs · fixture");
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: stored.messages.at(-1)?.content ?? "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.agentTurn).mockImplementationOnce(
+      async (_id, _text, _fl, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "tool",
+            payload: {
+              id: "search-1",
+              name: "search_logs",
+              summary: "1 matching log event",
+              ok: true,
+            },
+          },
+          {
+            kind: "error",
+            payload: {
+              code: "budget_time",
+              message:
+                "This turn reached its 60000 ms deadline while waiting for the provider.",
+            },
+          },
+          {
+            kind: "turn_completed",
+            payload: { reason: "budget_time" },
+          },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Investigate the exact log identity" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain(
+      "Linked investigation stopped before completion",
+    );
+    expect(status.textContent).not.toContain("completed with governed");
+    expect(screen.getByTestId("linked-chat-msg-assistant").textContent).toContain(
+      "This turn reached its 60000 ms deadline",
+    );
+    expect(screen.getByText("search_logs")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
+    ).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "Retry with one precise search" },
+    });
+    expect(
+      (screen.getByTestId("send-linked-chat") as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
   it("jump-to-latest restores follow mode after deliberate upward scroll", async () => {
