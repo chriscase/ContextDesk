@@ -2116,7 +2116,8 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_templates\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_templates\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                q.query.as_deref().unwrap_or("").replace(['\r', '\n'], " "),
                 hits.len(),
                 self.max_results_per_source
             ),
@@ -5939,6 +5940,33 @@ mod tests {
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
         host.set_max_results_per_source(3);
+
+        let search = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({"query": "connection refused"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(search.ok, "{}", search.summary);
+        assert!(
+            search.detail_raw.contains("query: connection refused"),
+            "{}",
+            search.detail_raw
+        );
+        assert!(search.detail_raw.contains("seq="), "{}", search.detail_raw);
+        assert!(
+            search.detail_raw.contains("source=app.log"),
+            "{}",
+            search.detail_raw
+        );
+        assert!(
+            search.detail_raw.contains("timestamp=")
+                && search.detail_raw.contains("time_quality=wall"),
+            "{}",
+            search.detail_raw
+        );
 
         // No corpus arg — must use host active default.
         let r = host
