@@ -103,8 +103,13 @@
 }
 
 .operational-metric-track__reading {
+  min-width: 0;
+  max-width: min(24rem, 60%);
+  overflow: hidden;
   font-family: var(--font-mono, monospace);
   text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .operational-metric-track__plot {
@@ -141,11 +146,11 @@
 .operational-metric-track__hover-reading {
   position: absolute;
   z-index: 2;
-  color: color-mix(in srgb, var(--metric-text) 82%, var(--metric-muted));
-  background: color-mix(in srgb, var(--metric-surface-subtle) 88%, transparent);
+  color: var(--metric-text);
+  background: color-mix(in srgb, var(--metric-surface-subtle) 94%, transparent);
   border-radius: 0.2rem;
   font-family: var(--font-mono, monospace);
-  font-size: 0.56rem;
+  font-size: 0.62rem;
   line-height: 1.2;
   pointer-events: none;
 }
@@ -352,7 +357,6 @@
   .operational-metric-tracks__header
   output,
 .operational-metric-tracks--density-compact .operational-metric-tracks__axis,
-.operational-metric-tracks--density-compact .operational-metric-track__reading,
 .operational-metric-tracks--density-compact
   .operational-metric-track__details
   > span {
