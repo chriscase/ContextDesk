@@ -1,5 +1,7 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
+mod handbook;
+
 use cd_core::branding::Branding;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::config::{
@@ -30,6 +32,7 @@ use cd_core::workspace_backup::{
     BackupPlanSummary, BackupProgress, BackupProgressObserver, BackupProgressPhase,
     BackupRunStatus, BackupRunSummary,
 };
+use handbook::{HandbookIndex, HandbookLink, HandbookManifest, HandbookPage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -150,6 +153,8 @@ struct AppState {
     index_status: Arc<Mutex<cd_core::index::IndexStatus>>,
     /// Validated, bundled product Help. This never points at a workspace root.
     help: Mutex<Option<Arc<HelpIndex>>>,
+    /// Read-only engineering docs. Deliberately separate from Help and ToolHost.
+    handbook: Mutex<Option<Arc<HandbookIndex>>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -5909,6 +5914,50 @@ async fn open_log_explorer(
     Ok(label)
 }
 
+fn handbook_webview_url(app: &tauri::AppHandle) -> Result<tauri::WebviewUrl, String> {
+    let query = "window=engineering-handbook";
+    if tauri::is_dev() {
+        if let Some(dev) = app.config().build.dev_url.as_ref() {
+            let base = dev.as_str().trim_end_matches('/');
+            return format!("{base}/?{query}")
+                .parse()
+                .map(tauri::WebviewUrl::External)
+                .map_err(|error| format!("engineering handbook dev url: {error}"));
+        }
+    }
+    Ok(tauri::WebviewUrl::App(format!("index.html?{query}").into()))
+}
+
+/// Open or focus the single read-only engineering handbook window.
+#[tauri::command]
+async fn open_engineering_handbook(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // Refuse to create a blank shell when packaging omitted the handbook.
+    handbook_index(&state)?;
+    const LABEL: &str = "engineering-handbook";
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(LABEL.into());
+    }
+    let url = handbook_webview_url(&app)?;
+    tauri::WebviewWindowBuilder::new(&app, LABEL, url)
+        .title("ContextDesk · Engineering handbook")
+        .inner_size(1180.0, 820.0)
+        .min_inner_size(760.0, 560.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
+        .build()
+        .map_err(|error| format!("open engineering handbook window: {error}"))?;
+    Ok(LABEL.into())
+}
+
 /// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -6493,6 +6542,22 @@ fn load_bundled_help(app: &tauri::App) -> Option<Arc<HelpIndex>> {
         .find_map(|root| HelpIndex::load(root).ok().map(Arc::new))
 }
 
+fn load_bundled_handbook(app: &tauri::App) -> Option<Arc<HandbookIndex>> {
+    use tauri::Manager;
+
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("handbook"));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    }
+    candidates
+        .into_iter()
+        .find_map(|root| HandbookIndex::load(root).ok().map(Arc::new))
+}
+
 fn help_index(state: &AppState) -> Result<Arc<HelpIndex>, String> {
     state
         .help
@@ -6500,6 +6565,15 @@ fn help_index(state: &AppState) -> Result<Arc<HelpIndex>, String> {
         .map_err(|_| "Bundled Help is temporarily unavailable.".to_string())?
         .clone()
         .ok_or_else(|| "Bundled Help is unavailable in this installation.".to_string())
+}
+
+fn handbook_index(state: &AppState) -> Result<Arc<HandbookIndex>, String> {
+    state
+        .handbook
+        .lock()
+        .map_err(|_| "Engineering handbook is temporarily unavailable.".to_string())?
+        .clone()
+        .ok_or_else(|| "Engineering handbook is unavailable in this installation.".to_string())
 }
 
 #[tauri::command]
@@ -6538,6 +6612,25 @@ fn get_help_asset(
         data_url: format!("data:{mime};base64,{encoded}"),
         mime,
     })
+}
+
+#[tauri::command]
+fn get_handbook_manifest(state: State<'_, AppState>) -> Result<HandbookManifest, String> {
+    Ok(handbook_index(&state)?.manifest())
+}
+
+#[tauri::command]
+fn get_handbook_page(state: State<'_, AppState>, id: String) -> Result<HandbookPage, String> {
+    handbook_index(&state)?.page(&id)
+}
+
+#[tauri::command]
+fn resolve_handbook_link(
+    state: State<'_, AppState>,
+    from_page_id: String,
+    target: String,
+) -> Result<HandbookLink, String> {
+    handbook_index(&state)?.resolve_link(&from_page_id, &target)
 }
 
 fn base64_standard(input: &[u8]) -> String {
@@ -6598,6 +6691,7 @@ pub fn run() {
             ..Default::default()
         })),
         help: Mutex::new(None),
+        handbook: Mutex::new(None),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -6615,7 +6709,12 @@ pub fn run() {
             if help.is_none() {
                 tracing::warn!("bundled Help corpus unavailable");
             }
+            let handbook = load_bundled_handbook(app);
+            if handbook.is_none() {
+                tracing::warn!("bundled engineering handbook unavailable");
+            }
             *app.state::<AppState>().help.lock().expect("help") = help.clone();
+            *app.state::<AppState>().handbook.lock().expect("handbook") = handbook;
             if let Ok(mut host) = app.state::<AppState>().host.lock() {
                 if let Some(host) = host.as_mut() {
                     host.set_help_index(help);
@@ -6630,6 +6729,10 @@ pub fn run() {
             get_help_page,
             search_help_pages,
             get_help_asset,
+            get_handbook_manifest,
+            get_handbook_page,
+            resolve_handbook_link,
+            open_engineering_handbook,
             session_context_list,
             session_context_import_path,
             session_context_import_bytes,
@@ -6913,6 +7016,46 @@ mod help_host_tests {
                 .map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline")
         );
+        assert!(
+            index.page("PROVEN_METHODS").is_err(),
+            "bundling the engineering handbook must not widen user Help retrieval"
+        );
+    }
+
+    #[test]
+    fn handbook_packaging_and_window_lifecycle_are_explicit_and_isolated() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config");
+        assert_eq!(
+            config["bundle"]["resources"]["../../docs/design"],
+            serde_json::json!("handbook/docs/design")
+        );
+        assert_eq!(
+            config["bundle"]["resources"]["../../AGENTS.md"],
+            serde_json::json!("handbook/AGENTS.md")
+        );
+
+        let source = include_str!("lib.rs");
+        let open_start = source
+            .find("async fn open_engineering_handbook(")
+            .expect("open command");
+        let open_end = source[open_start..]
+            .find("/// Harvest row DTO")
+            .map(|offset| open_start + offset)
+            .expect("open command boundary");
+        let command = &source[open_start..open_end];
+        assert!(command.contains("get_webview_window(LABEL)"));
+        assert!(command.contains("window.set_focus()"));
+        assert!(command.contains("handbook_index(&state)?"));
+        assert!(!command.contains("ensure_host("));
+        for registration in [
+            "get_handbook_manifest,",
+            "get_handbook_page,",
+            "resolve_handbook_link,",
+            "open_engineering_handbook,",
+        ] {
+            assert!(source.contains(registration), "{registration}");
+        }
     }
 }
 

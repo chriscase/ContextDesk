@@ -25,10 +25,11 @@ uses the status legend below.
 ## Presentation and source-of-truth policy
 
 The handbook remains reviewable Markdown in the repository. GitHub renders its
-tables, links, and Mermaid diagrams as a rich HTML presentation without a
-second hand-maintained copy. A generated static documentation site may be added
-later, but it must be produced from these Markdown files and must not become an
-independent source of claims.
+tables, links, and Mermaid diagrams as a rich HTML presentation. ContextDesk
+also bundles these exact Markdown files in a separate read-only engineering
+handbook window; the application does not maintain a second prose copy. A
+generated static documentation site may be added later, but it must be produced
+from these Markdown files and must not become an independent source of claims.
 
 Do not add manually synchronized HTML chapters. If a future renderer cannot
 represent a diagram or table, improve the generation pipeline or the Markdown

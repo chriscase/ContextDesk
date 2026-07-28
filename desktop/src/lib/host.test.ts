@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  hostGetHandbookPage,
+  hostOpenEngineeringHandbook,
+  hostResolveHandbookLink,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
   modelSelectionKey,
@@ -155,5 +158,42 @@ describe("hostLogQueryEventOriginal", () => {
       "requires the desktop app",
     );
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("engineering handbook host boundary (#683)", () => {
+  it("opens one host-owned window and reads or resolves only through host commands", async () => {
+    invokeMock
+      .mockResolvedValueOnce("engineering-handbook")
+      .mockResolvedValueOnce({
+        id: "docs/design/PROVEN_METHODS.md",
+        title: "Proven methods handbook",
+        body: "# Proven methods handbook",
+      })
+      .mockResolvedValueOnce({
+        kind: "internal",
+        pageId: "docs/design/LOG_EXPLORER.md",
+      });
+
+    await expect(hostOpenEngineeringHandbook()).resolves.toBe(
+      "engineering-handbook",
+    );
+    await hostGetHandbookPage("docs/design/PROVEN_METHODS.md");
+    await hostResolveHandbookLink(
+      "docs/design/PROVEN_METHODS.md",
+      "LOG_EXPLORER.md",
+    );
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["open_engineering_handbook", undefined],
+      ["get_handbook_page", { id: "docs/design/PROVEN_METHODS.md" }],
+      [
+        "resolve_handbook_link",
+        {
+          fromPageId: "docs/design/PROVEN_METHODS.md",
+          target: "LOG_EXPLORER.md",
+        },
+      ],
+    ]);
   });
 });

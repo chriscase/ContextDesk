@@ -35,7 +35,17 @@
     "createUpdaterArtifacts": true,
     "targets": "all",
     "resources": {
-      "../../docs/help": "help"
+      "../../docs/help": "help",
+      "../../AGENTS.md": "handbook/AGENTS.md",
+      "../../docs/design": "handbook/docs/design",
+      "../../docs/adr": "handbook/docs/adr",
+      "../../docs/ARCHITECTURE.md": "handbook/docs/ARCHITECTURE.md",
+      "../../docs/CLAIMS.md": "handbook/docs/CLAIMS.md",
+      "../../docs/THREAT_MODEL.md": "handbook/docs/THREAT_MODEL.md",
+      "../../docs/PROTOCOL.md": "handbook/docs/PROTOCOL.md",
+      "../../docs/AGENT_WORKFLOW.md": "handbook/docs/AGENT_WORKFLOW.md",
+      "../../docs/ISSUE_HONESTY.md": "handbook/docs/ISSUE_HONESTY.md",
+      "../../docs/CLOSE_PROOF.md": "handbook/docs/CLOSE_PROOF.md"
     },
     "icon": [
       "icons/32x32.png",

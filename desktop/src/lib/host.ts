@@ -156,6 +156,64 @@ export async function hostGetHelpAsset(
   return invoke<HelpAssetDto>("get_help_asset", { pageId, path });
 }
 
+/** Developer-facing handbook. Kept outside the user Help/search/tool index. */
+export type HandbookChapterDto = {
+  id: string;
+  title: string;
+};
+
+export type HandbookManifestDto = {
+  title: string;
+  audience: string;
+  chapters: HandbookChapterDto[];
+};
+
+export type HandbookPageDto = {
+  id: string;
+  title: string;
+  body: string;
+};
+
+export type HandbookLinkDto =
+  | { kind: "internal"; pageId: string; anchor?: string | null }
+  | { kind: "external"; url: string };
+
+export async function hostOpenEngineeringHandbook(): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<string>("open_engineering_handbook");
+}
+
+export async function hostGetHandbookManifest(): Promise<HandbookManifestDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookManifestDto>("get_handbook_manifest");
+}
+
+export async function hostGetHandbookPage(
+  id: string,
+): Promise<HandbookPageDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookPageDto>("get_handbook_page", { id });
+}
+
+export async function hostResolveHandbookLink(
+  fromPageId: string,
+  target: string,
+): Promise<HandbookLinkDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookLinkDto>("resolve_handbook_link", {
+    fromPageId,
+    target,
+  });
+}
+
 /** Session-scoped context pack entry (#341). */
 export type SessionContextEntryDto = {
   rel_path: string;

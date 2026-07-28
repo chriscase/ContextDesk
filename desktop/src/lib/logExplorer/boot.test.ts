@@ -3,10 +3,7 @@ import { parseExplorerBoot } from "./boot";
 
 describe("parseExplorerBoot", () => {
   it("reads query window=log-explorer&corpus=", () => {
-    const b = parseExplorerBoot(
-      "?window=log-explorer&corpus=abc-123",
-      "",
-    );
+    const b = parseExplorerBoot("?window=log-explorer&corpus=abc-123", "");
     expect(b).toEqual({ mode: "explorer", corpusId: "abc-123" });
   });
 
@@ -18,5 +15,11 @@ describe("parseExplorerBoot", () => {
   it("defaults to app for main window", () => {
     expect(parseExplorerBoot("", "")).toEqual({ mode: "app" });
     expect(parseExplorerBoot("?foo=1", "")).toEqual({ mode: "app" });
+  });
+
+  it("boots the isolated engineering handbook window", () => {
+    expect(parseExplorerBoot("?window=engineering-handbook", "")).toEqual({
+      mode: "handbook",
+    });
   });
 });
