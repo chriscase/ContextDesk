@@ -1351,6 +1351,27 @@ impl ToolHost {
                 "tool `{name}` is unavailable in the read-only linked-log fallback"
             )));
         }
+        // Reject malformed writes before asking the user to approve an action
+        // that cannot succeed. The agent loop turns this error into bounded tool
+        // feedback so the model can correct its arguments or continue without
+        // the optional write (#691).
+        if granted_request_id.is_none() && name == names::SAVE_MEMORY {
+            if self.durable_memory_enabled && self.durable_memory.is_some() {
+                let _ = crate::memory::write_op_from_save_args(arguments)?;
+            } else {
+                let body = arguments
+                    .get("body_markdown")
+                    .or_else(|| arguments.get("content"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if body.is_empty() {
+                    return Err(CoreError::Message(
+                        "save_memory requires body_markdown or content".into(),
+                    ));
+                }
+            }
+        }
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
 
@@ -1420,7 +1441,9 @@ impl ToolHost {
                     phase: ToolPhase::Finished,
                     summary: "awaiting permission".into(),
                     detail: None,
-                    ok: Some(false),
+                    // Pending is neutral: no write ran and the user has not
+                    // approved or denied it yet (#691).
+                    ok: None,
                 });
                 self.audit_log(name, side, &target, "pending", "permission required", 0);
                 return Ok(ToolResult {
@@ -5153,6 +5176,16 @@ mod tests {
         let (dir, mut host) = host_with_docs();
         let args = json!({"title": "arch", "body_markdown": "We use JWT."});
         let r = host.execute("save_memory", &args, None).await.unwrap();
+        assert!(r.events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    summary,
+                    ok: None,
+                    ..
+                } if summary == "awaiting permission"
+            )
+        }));
         let rid = r
             .events
             .iter()
@@ -5177,6 +5210,32 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::Tool { ok: Some(true), .. })));
         assert!(dir.path().join(".contextdesk/memory/arch.md").exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_save_memory_is_rejected_before_permission() {
+        let (dir, mut host) = host_with_docs();
+        for arguments in [
+            json!({"title": "empty proposal"}),
+            json!({"content": " \n\t"}),
+            json!({"body_markdown": "  "}),
+        ] {
+            let error = host
+                .execute("save_memory", &arguments, None)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("requires body_markdown or content"));
+        }
+        assert!(
+            host.pending.is_empty(),
+            "an impossible write must not create an approvable request"
+        );
+        assert!(!dir
+            .path()
+            .join(".contextdesk/memory/empty-proposal.md")
+            .exists());
     }
 
     #[tokio::test]

@@ -961,7 +961,43 @@ pub async fn grant_and_execute(
     } else {
         name
     };
-    let result = host.execute(tool_name, args, rid).await?;
+    let result = match host.execute(tool_name, args, rid).await {
+        Ok(result) => result,
+        Err(error) => {
+            // A stale or otherwise invalid pending request must not escape the
+            // approval boundary as a raw host-command failure. Keep the failure
+            // in-thread, make the lack of a confirmed write explicit, and
+            // retain bounded model-visible feedback for a later correction
+            // (#691).
+            let raw_error = crate::redact::scrub_secrets(&error.to_string());
+            let bounded_error = crate::text::truncate_bytes(&raw_error, 512);
+            let user_message = if tool_name == crate::tools::names::SAVE_MEMORY {
+                "Memory draft was incomplete; nothing was written."
+            } else {
+                "The approved tool action did not complete; no successful write was confirmed."
+            };
+            let detail = format!("{user_message}\nReason: {bounded_error}");
+            let model_detail =
+                crate::injection::wrap_untrusted(&format!("tool:{tool_name}"), &detail);
+            if let Some(h) = history {
+                append_grant_tool_outcome(h, tool_name, args, &model_detail);
+            }
+            return Ok(vec![
+                StreamEvent::Tool {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: tool_name.into(),
+                    phase: crate::events::ToolPhase::Finished,
+                    summary: format!("{tool_name} did not complete"),
+                    detail: Some(detail),
+                    ok: Some(false),
+                },
+                StreamEvent::Error {
+                    code: "approved_tool_failed".into(),
+                    message: user_message.into(),
+                },
+            ]);
+        }
+    };
     if let Some(h) = history {
         append_grant_tool_outcome(h, tool_name, args, &result.detail_for_model);
     }
@@ -1166,6 +1202,68 @@ mod tests {
             })
             .collect();
         assert!(text.contains("save") || text.contains("JWT"), "text={text}");
+    }
+
+    #[tokio::test]
+    async fn invalid_approved_memory_draft_stays_in_thread_and_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("invalid-grant", vec![dir.path().to_path_buf()]);
+        let mut host = build_host(ws, None).unwrap();
+        let valid_draft = serde_json::json!({
+            "title": "notes",
+            "body_markdown": "A complete draft."
+        });
+        let pending = host
+            .execute("save_memory", &valid_draft, None)
+            .await
+            .unwrap();
+        let rid = pending
+            .events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::PermissionRequired { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .expect("valid draft should request permission");
+
+        let mut history = Vec::new();
+        let events = grant_and_execute(
+            &mut host,
+            &rid,
+            PermissionDecision::AllowOnce,
+            None,
+            "save_memory",
+            &serde_json::json!({"title": "different invalid draft"}),
+            Some(&mut history),
+        )
+        .await
+        .expect("approval-path validation failure should be returned as events");
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    name,
+                    ok: Some(false),
+                    ..
+                } if name == "save_memory"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Error { code, message }
+                    if code == "approved_tool_failed"
+                        && message.contains("nothing was written")
+            )
+        }));
+        assert_eq!(history.len(), 2);
+        assert!(history[1].content.contains("nothing was written"));
+        assert!(!dir
+            .path()
+            .join(".contextdesk/memory/different-invalid-draft.md")
+            .exists());
+        assert!(!dir.path().join(".contextdesk/memory/notes.md").exists());
     }
 
     #[tokio::test]

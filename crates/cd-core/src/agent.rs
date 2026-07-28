@@ -1629,10 +1629,56 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
         });
 
         for tc in tool_calls {
-            let args: Value = serde_json::from_str(&tc.function.arguments)
-                .unwrap_or_else(|_| serde_json::json!({}));
             let resolved_tool_name = host.resolve_execute_name(&tc.function.name);
             trail.push(format!("tool:{resolved_tool_name}"));
+            let args: Value = match serde_json::from_str(&tc.function.arguments) {
+                Ok(Value::Object(values)) => Value::Object(values),
+                Ok(_) => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let detail = format!(
+                        "Tool `{resolved_tool_name}` received invalid arguments: expected a JSON \
+                         object. Reissue the tool call with a complete JSON object; do not claim \
+                         the tool ran."
+                    );
+                    out.push(StreamEvent::Tool {
+                        id,
+                        name: resolved_tool_name.clone(),
+                        phase: crate::events::ToolPhase::Finished,
+                        summary: format!("{resolved_tool_name} rejected invalid arguments"),
+                        detail: Some(detail.clone()),
+                        ok: Some(false),
+                    });
+                    history.push(ChatMessage {
+                        role: Role::Tool,
+                        content: wrap_untrusted(&format!("tool:{resolved_tool_name}"), &detail),
+                        tool_call_id: Some(tc.id),
+                        tool_calls: None,
+                    });
+                    continue;
+                }
+                Err(_) => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let detail = format!(
+                        "Tool `{resolved_tool_name}` received malformed JSON arguments. Reissue \
+                         the tool call with one complete JSON object; do not claim the tool ran."
+                    );
+                    out.push(StreamEvent::Tool {
+                        id,
+                        name: resolved_tool_name.clone(),
+                        phase: crate::events::ToolPhase::Finished,
+                        summary: format!("{resolved_tool_name} rejected malformed arguments"),
+                        detail: Some(detail.clone()),
+                        ok: Some(false),
+                    });
+                    history.push(ChatMessage {
+                        role: Role::Tool,
+                        content: wrap_untrusted(&format!("tool:{resolved_tool_name}"), &detail),
+                        tool_call_id: Some(tc.id),
+                        tool_calls: None,
+                    });
+                    continue;
+                }
+            };
 
             // Linked turns fail closed on anything outside the exact read-only
             // specs offered to the model. This allows governed cross-source
@@ -3590,6 +3636,133 @@ mod tests {
             })
             .collect();
         assert!(text.contains("payments"));
+    }
+
+    #[tokio::test]
+    async fn malformed_optional_memory_write_does_not_kill_the_chat_turn() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("malformed-memory", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let malformed = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "bad-memory".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "save_memory".into(),
+                    arguments: r#"{"title":"Remember this story""#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let answer = ChatCompletion {
+            content: "Here is the story you requested.".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        };
+        let backend = ScriptedBackend::new(vec![malformed, answer]);
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "Write me a short story.",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .expect("malformed optional tool call should be recoverable");
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::Tool {
+                    name,
+                    detail: Some(detail),
+                    ok: Some(false),
+                    ..
+                } if name == "save_memory" && detail.contains("malformed JSON")
+            )
+        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::PermissionRequired { .. })));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::TextDelta { text } if text.contains("story you requested")
+            )
+        }));
+        assert!(!dir.path().join(".contextdesk/memory").exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_memory_write_can_be_corrected_before_permission() {
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("corrected-memory", vec![dir.path().to_path_buf()]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+
+        let malformed = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "bad-memory".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "save_memory".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let corrected = ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "good-memory".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "save_memory".into(),
+                    arguments:
+                        r#"{"title":"Story preference","body_markdown":"Prefers short stories."}"#
+                            .into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        };
+        let backend = ScriptedBackend::new(vec![malformed, corrected]);
+        let mut history = Vec::new();
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "Remember that I prefer short stories.",
+            &mut history,
+            &AgentOptions::default(),
+        )
+        .await
+        .expect("corrected write should reach the normal permission boundary");
+
+        let permission_arguments = events.iter().find_map(|event| match event {
+            StreamEvent::PermissionRequired {
+                tool_name,
+                arguments,
+                ..
+            } if tool_name == "save_memory" => Some(arguments),
+            _ => None,
+        });
+        assert_eq!(
+            permission_arguments
+                .and_then(|args| args.get("body_markdown"))
+                .and_then(|value| value.as_str()),
+            Some("Prefers short stories.")
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::TurnCompleted { reason } if reason == "awaiting_permission"
+            )
+        }));
+        assert!(!dir.path().join(".contextdesk/memory").exists());
     }
 
     #[tokio::test]
