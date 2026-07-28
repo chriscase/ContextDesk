@@ -2080,19 +2080,27 @@ impl ToolHost {
             query: args
                 .get("query")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             level: args
                 .get("level")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             service: args
                 .get("service")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             trace_id: args
                 .get("trace_id")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             semantic: args
                 .get("semantic")
                 .and_then(|v| v.as_bool())
@@ -5944,7 +5952,12 @@ mod tests {
         let search = host
             .execute(
                 crate::log_analysis::SEARCH_LOGS,
-                &json!({"query": "connection refused"}),
+                &json!({
+                    "query": "connection refused",
+                    "level": " ",
+                    "service": "",
+                    "trace_id": "\t"
+                }),
                 None,
             )
             .await
