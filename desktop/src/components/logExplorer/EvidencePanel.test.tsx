@@ -40,6 +40,7 @@ const finding: FindingItemView = {
   title: "Retries amplify the database timeout",
   whyItMatters: "The retry storm increases queue pressure.",
   evidenceIds: [evidence.id],
+  viewRecipe: null,
   provenanceLabel: "Authored manually",
 };
 
@@ -146,7 +147,7 @@ describe("EvidencePanel", () => {
     ).toBe(true);
   });
 
-  it("filters a unified investigation record and opens cited material details", () => {
+  it("filters a unified investigation record and opens cited material details", async () => {
     const preview = vi.fn();
     const activateBookmark = vi.fn();
     render(
@@ -167,16 +168,32 @@ describe("EvidencePanel", () => {
     );
 
     expect(
-      (screen.getByLabelText(
-        "Show investigation material",
-      ) as HTMLSelectElement).value,
+      (
+        screen.getByLabelText(
+          "Show investigation material",
+        ) as HTMLSelectElement
+      ).value,
     ).toBe("all");
-    fireEvent.click(screen.getByTestId("finding-item-finding-1"));
+    const findingCard = screen.getByTestId("finding-item-finding-1");
+    fireEvent.click(findingCard);
     const detail = screen.getByTestId("finding-detail-finding-1");
     expect(detail.textContent).toContain("Inference · accepted");
     expect(detail.textContent).toContain(finding.whyItMatters);
+    const detailBack = within(detail).getByRole("button", { name: "Back" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(detailBack));
+    fireEvent.click(detailBack);
+    const restoredFindingCard = screen.getByTestId(
+      "finding-item-finding-1",
+    );
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(restoredFindingCard),
+    );
+    fireEvent.click(restoredFindingCard);
     fireEvent.click(
-      within(detail).getByRole("button", { name: /Checkout timeout cluster/ }),
+      within(screen.getByTestId("finding-detail-finding-1")).getByRole(
+        "button",
+        { name: /Checkout timeout cluster/ },
+      ),
     );
     expect(preview).toHaveBeenCalledWith(evidence);
 
@@ -209,7 +226,28 @@ describe("EvidencePanel", () => {
     expect(activateBookmark).toHaveBeenCalledWith(legacyBookmark);
   });
 
-  it("keeps the shared rail mode selector explicit and screen-reader labeled", () => {
+  it("explains an empty material filter instead of leaving a blank rail", () => {
+    render(
+      <EvidencePanel
+        modeControl={modeControl()}
+        items={[evidence]}
+        preview={null}
+        busy={false}
+        error={null}
+        onPreview={() => undefined}
+        onReveal={() => undefined}
+        onClearPreview={() => undefined}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Show investigation material"), {
+      target: { value: "findings" },
+    });
+    expect(screen.getByText("No findings saved yet")).toBeTruthy();
+    expect(screen.getByText(/Choose All material/)).toBeTruthy();
+  });
+
+  it("keeps the shared rail mode selector explicit and keyboard navigable", async () => {
     const change = vi.fn();
     render(
       <InvestigationModeControl
@@ -225,9 +263,16 @@ describe("EvidencePanel", () => {
         name: /Investigation workspace view: Investigation, 3 items/,
       }),
     );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Chat.*2/ }),
+    const investigationOption = screen.getByRole("menuitemradio", {
+      name: /Investigation.*3/,
+    });
+    const chatOption = screen.getByRole("menuitemradio", { name: /Chat.*2/ });
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(investigationOption),
     );
+    fireEvent.keyDown(investigationOption, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(chatOption);
+    fireEvent.click(chatOption);
     expect(change).toHaveBeenCalledWith("chat");
   });
 

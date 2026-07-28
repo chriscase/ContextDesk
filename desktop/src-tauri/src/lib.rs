@@ -5495,6 +5495,7 @@ struct LogAddInvestigationFindingArgs {
     title: String,
     why_it_matters: String,
     event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+    view_recipe: Option<cd_core::investigations::FindingViewRecipe>,
 }
 
 /// Atomically save exact selected identities and a human-authored finding.
@@ -5528,6 +5529,7 @@ fn log_add_investigation_finding(
                 title: args.title,
                 why_it_matters: args.why_it_matters,
                 event_refs: args.event_refs,
+                view_recipe: args.view_recipe,
             },
         )
         .map_err(|e| e.to_string())
@@ -5680,6 +5682,22 @@ fn log_preview_investigation_evidence(
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     investigation_store(&state)?
         .preview_evidence(&investigation_id, &evidence_id, &corpus)
+        .map_err(|e| e.to_string())
+}
+
+/// Revalidate a finding's payload-free view recipe without mutating Explorer state.
+#[tauri::command]
+fn log_preview_investigation_finding_view(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    finding_id: String,
+) -> Result<cd_core::investigations::FindingViewRecipeResolution, String> {
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .resolve_finding_view_recipe(&investigation_id, &finding_id, &corpus)
         .map_err(|e| e.to_string())
 }
 
@@ -6633,6 +6651,7 @@ pub fn run() {
             log_edit_investigation_finding,
             log_edit_investigation_note,
             log_preview_investigation_evidence,
+            log_preview_investigation_finding_view,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,

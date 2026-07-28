@@ -15,14 +15,23 @@ export function InvestigationAddMenu({
     queueMicrotask(() =>
       menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(),
     );
-    const onPointerDown = (event: MouseEvent) => {
+    const onOutsideClick = (event: MouseEvent) => {
       const target = event.target as Node;
       if (
         !menuRef.current?.contains(target) &&
         !triggerRef.current?.contains(target)
       ) {
         onDismiss();
-        queueMicrotask(() => triggerRef.current?.focus());
+        window.setTimeout(() => {
+          const active = document.activeElement;
+          const reachedOutsideDestination =
+            active instanceof HTMLElement &&
+            active !== document.body &&
+            active !== document.documentElement &&
+            active !== triggerRef.current &&
+            !menuRef.current?.contains(active);
+          if (!reachedOutsideDestination) triggerRef.current?.focus();
+        }, 0);
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -31,10 +40,13 @@ export function InvestigationAddMenu({
       onDismiss();
       queueMicrotask(() => triggerRef.current?.focus());
     };
-    document.addEventListener("mousedown", onPointerDown);
+    // Native WebKit applies the click target's default focus after mousedown.
+    // Dismiss on click so blank-space focus restoration cannot be overwritten
+    // later in the same pointer sequence.
+    document.addEventListener("click", onOutsideClick);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("click", onOutsideClick);
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [onDismiss, triggerRef]);

@@ -1,10 +1,9 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import type { ExplorerEventDto, LogBookmarkEventRefDto } from "../../lib/host";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import type {
+  ExplorerEventDto,
+  InvestigationViewRecipeDto,
+  LogBookmarkEventRefDto,
+} from "../../lib/host";
 import { IconChevronDown, IconChevronRight } from "../icons";
 
 export type InvestigationRailMode = "investigation" | "chat";
@@ -32,7 +31,16 @@ export type FindingItemView = {
   title: string;
   whyItMatters: string;
   evidenceIds: string[];
+  viewRecipe: InvestigationViewRecipeDto | null;
   provenanceLabel: string;
+};
+
+export type FindingViewPreviewView = {
+  findingId: string;
+  recipe: InvestigationViewRecipeDto;
+  changes: string[];
+  missingCount: number;
+  staleCount: number;
 };
 
 export type NoteItemView = {
@@ -54,12 +62,7 @@ export type BookmarkItemView = {
   evidenceStatus: "legacy_range" | "verified" | "missing" | "stale";
 };
 
-type MaterialFilter =
-  | "all"
-  | "findings"
-  | "evidence"
-  | "notes"
-  | "bookmarks";
+type MaterialFilter = "all" | "findings" | "evidence" | "notes" | "bookmarks";
 type MaterialDetail =
   | { type: "finding"; id: string }
   | { type: "note"; id: string }
@@ -102,8 +105,26 @@ export function InvestigationModeControl({
 
   useEffect(() => {
     if (!open) return;
+    queueMicrotask(() =>
+      rootRef.current
+        ?.querySelector<HTMLButtonElement>(
+          '.log-explorer__investigation-mode-option[aria-checked="true"]',
+        )
+        ?.focus(),
+    );
     const onPointerDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target)) return;
+      const focusableTarget =
+        target instanceof Element
+          ? target.closest(
+              "button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+            )
+          : null;
+      setOpen(false);
+      if (!focusableTarget) {
+        window.setTimeout(() => triggerRef.current?.focus(), 0);
+      }
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -159,6 +180,30 @@ export function InvestigationModeControl({
                   ? " log-explorer__investigation-mode-option--active"
                   : ""
               }`}
+              onKeyDown={(event) => {
+                if (
+                  !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
+                ) {
+                  return;
+                }
+                event.preventDefault();
+                const choices = [
+                  ...rootRef.current!.querySelectorAll<HTMLButtonElement>(
+                    ".log-explorer__investigation-mode-option",
+                  ),
+                ];
+                const index = choices.indexOf(event.currentTarget);
+                const next =
+                  event.key === "Home"
+                    ? 0
+                    : event.key === "End"
+                      ? choices.length - 1
+                      : (index +
+                          (event.key === "ArrowDown" ? 1 : -1) +
+                          choices.length) %
+                        choices.length;
+                choices[next]?.focus();
+              }}
               onClick={() => {
                 onChange(option.mode);
                 setOpen(false);
@@ -207,17 +252,22 @@ export function EvidencePanel({
   notes = [],
   bookmarks = [],
   preview,
+  viewPreview,
   busy,
   error,
+  visible = true,
   compactLayout = false,
   collapsed = false,
   desktopGridColumn,
   onPreview,
   onReveal,
+  onPreviewFindingView,
+  onApplyFindingView,
   onEditFinding,
   onEditNote,
   onActivateBookmark,
   onClearPreview,
+  onClearViewPreview,
   onToggleCollapsed,
   onRequestClose,
 }: {
@@ -227,20 +277,22 @@ export function EvidencePanel({
   notes?: NoteItemView[];
   bookmarks?: BookmarkItemView[];
   preview: EvidencePreviewView | null;
+  viewPreview?: FindingViewPreviewView | null;
   busy: boolean;
   error: string | null;
+  visible?: boolean;
   compactLayout?: boolean;
   collapsed?: boolean;
   desktopGridColumn?: number;
   onPreview: (item: EvidenceItemView) => void;
   onReveal: (item: EvidenceItemView) => void;
-  onEditFinding?: (
-    item: FindingItemView,
-    trigger: HTMLButtonElement,
-  ) => void;
+  onPreviewFindingView?: (item: FindingItemView) => void;
+  onApplyFindingView?: (preview: FindingViewPreviewView) => void;
+  onEditFinding?: (item: FindingItemView, trigger: HTMLButtonElement) => void;
   onEditNote?: (item: NoteItemView, trigger: HTMLButtonElement) => void;
   onActivateBookmark?: (item: BookmarkItemView) => void;
   onClearPreview: () => void;
+  onClearViewPreview?: () => void;
   onToggleCollapsed?: () => void;
   onRequestClose?: () => void;
 }) {
@@ -248,6 +300,9 @@ export function EvidencePanel({
   const [detail, setDetail] = useState<MaterialDetail | null>(null);
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
+  const detailBackRef = useRef<HTMLButtonElement>(null);
+  const detailOriginSelectorRef = useRef<string | null>(null);
+  const previewReturnDetailRef = useRef<MaterialDetail | null>(null);
   const previousCollapsedRef = useRef(collapsed);
   const activePreviewItem = preview
     ? (items.find((item) => item.id === preview.evidenceId) ?? null)
@@ -266,24 +321,63 @@ export function EvidencePanel({
       : null;
   const materialCount =
     items.length + findings.length + notes.length + bookmarks.length;
+  const visibleMaterialCount =
+    filter === "all"
+      ? materialCount
+      : filter === "findings"
+        ? findings.length
+        : filter === "evidence"
+          ? items.length
+          : filter === "notes"
+            ? notes.length
+            : bookmarks.length;
+
+  const openDetail = (next: MaterialDetail) => {
+    detailOriginSelectorRef.current =
+      next.type === "finding"
+        ? `[data-testid="finding-item-${next.id}"]`
+        : next.type === "note"
+          ? `[data-testid="note-item-${next.id}"]`
+          : `[data-testid="investigation-bookmark-${next.id}"]`;
+    setDetail(next);
+  };
+
+  const closeDetail = () => {
+    setDetail(null);
+    onClearViewPreview?.();
+    queueMicrotask(() => {
+      if (!detailOriginSelectorRef.current) return;
+      document
+        .querySelector<HTMLElement>(detailOriginSelectorRef.current)
+        ?.focus();
+    });
+  };
 
   useEffect(() => {
     const previous = previousCollapsedRef.current;
     previousCollapsedRef.current = collapsed;
-    if (compactLayout || previous === collapsed) return;
+    if (!visible || compactLayout || previous === collapsed) return;
     queueMicrotask(() => {
       if (collapsed) reopenRef.current?.focus();
       else collapseToggleRef.current?.focus();
     });
-  }, [collapsed, compactLayout]);
+  }, [collapsed, compactLayout, visible]);
+
+  useEffect(() => {
+    if (!visible || (!detail && !activePreviewItem)) return;
+    queueMicrotask(() => detailBackRef.current?.focus());
+  }, [activePreviewItem, detail, visible]);
 
   if (collapsed && !compactLayout) {
     return (
       <aside
         id="log-explorer-investigation-panel"
-        className="log-explorer__evidence log-explorer__chat log-explorer__chat--rail log-explorer__chat--collapsed"
+        className={`log-explorer__evidence log-explorer__chat log-explorer__chat--rail log-explorer__chat--collapsed${
+          visible ? "" : " log-explorer__chat--mode-hidden"
+        }`}
         data-testid="log-explorer-evidence"
         data-collapsed="true"
+        hidden={!visible}
         aria-label="Investigation rail collapsed"
         style={
           desktopGridColumn == null
@@ -320,8 +414,9 @@ export function EvidencePanel({
       id="log-explorer-investigation-panel"
       className={`log-explorer__evidence log-explorer__chat log-explorer__chat--rail${
         compactLayout ? " log-explorer__chat--compact-layout" : ""
-      }`}
+      }${visible ? "" : " log-explorer__chat--mode-hidden"}`}
       data-testid="log-explorer-evidence"
+      hidden={!visible}
       style={
         desktopGridColumn == null
           ? undefined
@@ -374,7 +469,10 @@ export function EvidencePanel({
         </div>
       ) : null}
 
-      {!activePreviewItem && !activeFinding && !activeNote && !activeBookmark ? (
+      {!activePreviewItem &&
+      !activeFinding &&
+      !activeNote &&
+      !activeBookmark ? (
         <label className="log-explorer__material-filter">
           <span className="sr-only">Show investigation material</span>
           <select
@@ -409,9 +507,25 @@ export function EvidencePanel({
               </div>
             </div>
             <button
+              ref={detailBackRef}
               type="button"
               className="log-explorer__btn"
-              onClick={onClearPreview}
+              onClick={() => {
+                onClearPreview();
+                if (previewReturnDetailRef.current) {
+                  setDetail(previewReturnDetailRef.current);
+                  previewReturnDetailRef.current = null;
+                  return;
+                }
+                queueMicrotask(() => {
+                  if (!detailOriginSelectorRef.current) return;
+                  document
+                    .querySelector<HTMLElement>(
+                      detailOriginSelectorRef.current,
+                    )
+                    ?.focus();
+                });
+              }}
             >
               Back
             </button>
@@ -474,9 +588,10 @@ export function EvidencePanel({
               </div>
             </div>
             <button
+              ref={detailBackRef}
               type="button"
               className="log-explorer__btn"
-              onClick={() => setDetail(null)}
+              onClick={closeDetail}
             >
               Back
             </button>
@@ -503,6 +618,8 @@ export function EvidencePanel({
                     className="log-explorer__citation"
                     disabled={busy}
                     onClick={() => {
+                      detailOriginSelectorRef.current = null;
+                      previewReturnDetailRef.current = detail;
                       setDetail(null);
                       onPreview(cited);
                     }}
@@ -524,6 +641,81 @@ export function EvidencePanel({
           <div className="log-explorer__evidence-provenance">
             {activeFinding.provenanceLabel}
           </div>
+          {activeFinding.viewRecipe && onPreviewFindingView ? (
+            <div className="log-explorer__finding-view">
+              <div className="log-explorer__material-section-label">
+                Saved Explorer view
+              </div>
+              {viewPreview?.findingId === activeFinding.id ? (
+                <div
+                  className="log-explorer__finding-view-preview"
+                  data-testid={`finding-view-preview-${activeFinding.id}`}
+                >
+                  <div className="log-explorer__chat-header-meta">
+                    Preview only · current Explorer unchanged
+                  </div>
+                  <ul>
+                    {viewPreview.changes.map((change) => (
+                      <li key={change}>{change}</li>
+                    ))}
+                  </ul>
+                  {viewPreview.missingCount > 0 ||
+                  viewPreview.staleCount > 0 ? (
+                    <div
+                      className="log-explorer__evidence-warning"
+                      role="status"
+                    >
+                      Apply blocked ·{" "}
+                      {viewPreview.missingCount > 0
+                        ? `${viewPreview.missingCount} missing reference${
+                            viewPreview.missingCount === 1 ? "" : "s"
+                          }`
+                        : null}
+                      {viewPreview.missingCount > 0 &&
+                      viewPreview.staleCount > 0
+                        ? " · "
+                        : null}
+                      {viewPreview.staleCount > 0
+                        ? `${viewPreview.staleCount} changed reference${
+                            viewPreview.staleCount === 1 ? "" : "s"
+                          }`
+                        : null}
+                    </div>
+                  ) : null}
+                  <div className="log-explorer__evidence-card-actions">
+                    <button
+                      type="button"
+                      className="log-explorer__btn log-explorer__btn--active"
+                      disabled={
+                        busy ||
+                        viewPreview.missingCount > 0 ||
+                        viewPreview.staleCount > 0
+                      }
+                      onClick={() => onApplyFindingView?.(viewPreview)}
+                    >
+                      Apply saved view
+                    </button>
+                    <button
+                      type="button"
+                      className="log-explorer__btn"
+                      onClick={onClearViewPreview}
+                    >
+                      Dismiss preview
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  disabled={busy}
+                  onClick={() => onPreviewFindingView(activeFinding)}
+                >
+                  Preview saved view
+                </button>
+              )}
+            </div>
+          ) : null}
           {onEditFinding ? (
             <button
               type="button"
@@ -551,9 +743,10 @@ export function EvidencePanel({
               </div>
             </div>
             <button
+              ref={detailBackRef}
               type="button"
               className="log-explorer__btn"
-              onClick={() => setDetail(null)}
+              onClick={closeDetail}
             >
               Back
             </button>
@@ -573,6 +766,8 @@ export function EvidencePanel({
                     className="log-explorer__citation"
                     disabled={busy}
                     onClick={() => {
+                      detailOriginSelectorRef.current = null;
+                      previewReturnDetailRef.current = detail;
                       setDetail(null);
                       onPreview(cited);
                     }}
@@ -623,9 +818,10 @@ export function EvidencePanel({
               </div>
             </div>
             <button
+              ref={detailBackRef}
               type="button"
               className="log-explorer__btn"
-              onClick={() => setDetail(null)}
+              onClick={closeDetail}
             >
               Back
             </button>
@@ -680,6 +876,16 @@ export function EvidencePanel({
                 write a cited note. Saved material stays linked to this corpus.
               </p>
             </div>
+          ) : visibleMaterialCount === 0 ? (
+            <div className="log-explorer__evidence-empty">
+              <div className="log-explorer__evidence-empty-title">
+                No {filter} saved yet
+              </div>
+              <p>
+                Choose All material to browse the rest of this investigation
+                record.
+              </p>
+            </div>
           ) : (
             <>
               {(filter === "all" || filter === "findings") &&
@@ -689,7 +895,9 @@ export function EvidencePanel({
                     type="button"
                     className="log-explorer__evidence-card log-explorer__material-card"
                     data-testid={`finding-item-${item.id}`}
-                    onClick={() => setDetail({ type: "finding", id: item.id })}
+                    onClick={() =>
+                      openDetail({ type: "finding", id: item.id })
+                    }
                   >
                     <div className="log-explorer__evidence-card-heading">
                       <div>
@@ -709,6 +917,10 @@ export function EvidencePanel({
                     <div className="log-explorer__chat-header-meta">
                       {item.evidenceIds.length} evidence{" "}
                       {item.evidenceIds.length === 1 ? "citation" : "citations"}
+                      {item.viewRecipe ? " · saved view" : ""}
+                    </div>
+                    <div className="log-explorer__material-card-excerpt">
+                      {item.whyItMatters}
                     </div>
                   </button>
                 ))}
@@ -745,7 +957,11 @@ export function EvidencePanel({
                         type="button"
                         className="log-explorer__btn"
                         disabled={busy}
-                        onClick={() => onPreview(item)}
+                        onClick={() => {
+                          detailOriginSelectorRef.current = `[data-testid="evidence-item-${item.id}"] button`;
+                          previewReturnDetailRef.current = null;
+                          onPreview(item);
+                        }}
                       >
                         Preview
                       </button>
@@ -772,7 +988,7 @@ export function EvidencePanel({
                     type="button"
                     className="log-explorer__evidence-card log-explorer__material-card"
                     data-testid={`note-item-${item.id}`}
-                    onClick={() => setDetail({ type: "note", id: item.id })}
+                    onClick={() => openDetail({ type: "note", id: item.id })}
                   >
                     <div className="log-explorer__material-kicker">
                       Cited note
@@ -797,7 +1013,7 @@ export function EvidencePanel({
                     className="log-explorer__evidence-card log-explorer__material-card"
                     data-testid={`investigation-bookmark-${item.id}`}
                     onClick={() =>
-                      setDetail({ type: "bookmark", id: item.id })
+                      openDetail({ type: "bookmark", id: item.id })
                     }
                   >
                     <div className="log-explorer__evidence-card-heading">

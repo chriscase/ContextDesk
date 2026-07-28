@@ -36,8 +36,7 @@
 .log-explorer__mark {
   align-items: center;
   background: color-mix(in srgb, var(--accent, #5b9fd4) 13%, transparent);
-  border: 1px solid
-    color-mix(in srgb, var(--accent, #5b9fd4) 42%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #5b9fd4) 42%, transparent);
   border-radius: 7px;
   color: var(--accent, #5b9fd4);
   display: inline-flex;
@@ -204,17 +203,12 @@
 }
 
 .log-explorer__picker-option[aria-checked="true"] {
-  border-color: color-mix(
-    in srgb,
-    var(--accent, #5b9fd4) 35%,
-    transparent
-  );
+  border-color: color-mix(in srgb, var(--accent, #5b9fd4) 35%, transparent);
 }
 
 .log-explorer__picker-option:focus-visible {
   border-color: var(--accent, #5b9fd4);
-  outline: 2px solid
-    color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent);
   outline-offset: -1px;
 }
 
@@ -583,7 +577,8 @@
 
 .log-explorer__investigation-mode-trigger:focus-visible,
 .log-explorer__investigation-mode-option:focus-visible {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent);
   outline: none;
 }
 
@@ -910,6 +905,37 @@
   flex: 1 1 auto;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.log-explorer__finding-view {
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 5%, transparent);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 8px;
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.15rem;
+  padding: 0.55rem;
+}
+
+.log-explorer__finding-view-preview {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.log-explorer__finding-view-preview ul {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0 0 0 1.1rem;
+}
+
+.log-explorer__finding-view-preview li {
+  color: var(--fg-primary, #e8eaed);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  padding-left: 0.1rem;
 }
 
 .log-explorer__evidence-preview-list {

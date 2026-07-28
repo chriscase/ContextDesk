@@ -28,6 +28,7 @@ import {
   hostLogLoadActiveInvestigation,
   hostLogListBookmarks,
   hostLogPreviewInvestigationEvidence,
+  hostLogPreviewInvestigationFindingView,
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
@@ -40,6 +41,7 @@ import {
   type LogBookmarkEventRefDto,
   type LogCorpusSummaryDto,
   type LogFacetsDto,
+  type InvestigationViewRecipeDto,
   type ResolvedInvestigationDocumentDto,
   type TimeQuality,
 } from "../../lib/host";
@@ -90,11 +92,7 @@ import {
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
-import {
-  IconChevronDown,
-  IconChevronLeft,
-  IconLogExplorer,
-} from "../icons";
+import { IconChevronDown, IconChevronLeft, IconLogExplorer } from "../icons";
 import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
@@ -111,6 +109,7 @@ import {
   type EvidenceItemView,
   type EvidencePreviewView,
   type FindingItemView,
+  type FindingViewPreviewView,
   type InvestigationRailMode,
   type NoteItemView,
 } from "./EvidencePanel";
@@ -127,6 +126,11 @@ import {
   VirtualizedEventList,
   type LineMode,
 } from "./VirtualizedEventList";
+import {
+  captureInvestigationView,
+  describeInvestigationViewDiff,
+  eventRef as investigationEventRef,
+} from "../../lib/logExplorer/investigationView";
 import {
   applyThemeToDocument,
   subscribeThemeChanges,
@@ -227,9 +231,7 @@ function ToolbarPicker<T extends string>({
     };
   }, [close, open]);
 
-  const moveOptionFocus = (
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) => {
+  const moveOptionFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (
       event.key !== "ArrowDown" &&
       event.key !== "ArrowUp" &&
@@ -476,7 +478,10 @@ function TimeLinkVisual({ mode }: { mode: TimeLinkMode }) {
       ) : null}
       {mode === "align_time" ? (
         <>
-          <path d="M23 4v23M54 4v23" className="log-explorer__time-link-cursor" />
+          <path
+            d="M23 4v23M54 4v23"
+            className="log-explorer__time-link-cursor"
+          />
           <circle cx="23" cy="9" r="2.5" />
           <circle cx="23" cy="23" r="2.5" />
           <circle cx="54" cy="9" r="2.5" />
@@ -646,6 +651,7 @@ function investigationFindingViews(
     title: item.title,
     whyItMatters: item.whyItMatters,
     evidenceIds: item.evidenceIds,
+    viewRecipe: item.viewRecipe ?? null,
     provenanceLabel: "Authored manually",
   }));
 }
@@ -769,6 +775,8 @@ export function LogExplorer({ corpusId }: Props) {
   );
   const [evidencePreview, setEvidencePreview] =
     useState<EvidencePreviewView | null>(null);
+  const [findingViewPreview, setFindingViewPreview] =
+    useState<FindingViewPreviewView | null>(null);
   const [saveEvidenceOpen, setSaveEvidenceOpen] = useState(false);
   const [investigationAddMenuOpen, setInvestigationAddMenuOpen] =
     useState(false);
@@ -805,6 +813,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [findMatchSources, setFindMatchSources] = useState<
     Record<number, string>
   >({});
+  const [findMatchRefs, setFindMatchRefs] = useState<
+    Record<number, LogBookmarkEventRefDto>
+  >({});
   const [findExcerpts, setFindExcerpts] = useState<Record<number, string>>({});
   const [findIndex, setFindIndex] = useState(0);
   const [findTotal, setFindTotal] = useState(0);
@@ -814,11 +825,15 @@ export function LogExplorer({ corpusId }: Props) {
   const [findPageStart, setFindPageStart] = useState<FindCursor | null>(null);
   const [findHistory, setFindHistory] = useState<FindPageHistory[]>([]);
   const [findActiveQuery, setFindActiveQuery] = useState<string | null>(null);
-  /** Prior filters/lanes saved while a bookmark temporary reveal is active (#531). */
-  const [revealRestore, setRevealRestore] = useState<{
-    filters: ExplorerFilters;
-    lanes: LaneConfig[];
-    laneCount: number;
+  /** Complete prior logical state while a temporary reveal is active (#531/#656). */
+  const [revealRestore, setRevealRestore] =
+    useState<InvestigationViewRecipeDto | null>(null);
+  const [laneViewportAnchors, setLaneViewportAnchors] = useState<
+    Record<string, LogBookmarkEventRefDto>
+  >({});
+  const [pendingViewApply, setPendingViewApply] = useState<{
+    recipe: InvestigationViewRecipeDto;
+    status: string;
   } | null>(null);
   const [bookmarkRevealState, setBookmarkRevealState] = useState<
     "idle" | "visible" | "revealed" | "missing"
@@ -1060,15 +1075,15 @@ export function LogExplorer({ corpusId }: Props) {
     } else if (narrowChatOpen) {
       queueMicrotask(() => {
         const root = rootRef.current;
-        (
-          root?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]') ??
-          root?.querySelector<HTMLElement>(
-            '.log-explorer__investigation-mode-option[aria-pressed="true"]',
-          )
+        (investigationMode === "investigation"
+          ? root?.querySelector<HTMLElement>(
+              '[aria-label="Close Investigation drawer"]',
+            )
+          : root?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]')
         )?.focus();
       });
     }
-  }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
+  }, [breakpoint, investigationMode, narrowChatOpen, narrowFiltersOpen]);
 
   useEffect(() => {
     const previous = previousFiltersCollapsedRef.current;
@@ -1626,9 +1641,12 @@ export function LogExplorer({ corpusId }: Props) {
       laneId?: string;
       sources?: string[];
       focusRow?: boolean;
+      viewFilters?: ExplorerFilters;
+      selectTarget?: boolean;
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
-    const base = opts?.clearFilters ? emptyFilters() : filters;
+    const base =
+      opts?.viewFilters ?? (opts?.clearFilters ? emptyFilters() : filters);
     const sourceFilter =
       opts?.sources != null
         ? composeLaneSources(opts.sources, base.sources)
@@ -1657,7 +1675,7 @@ export function LogExplorer({ corpusId }: Props) {
       if (opts?.focusRow) {
         setBookmarkFocusTarget({ laneId, seq });
       }
-      if (nb.target) {
+      if (nb.target && opts?.selectTarget !== false) {
         setDetail(nb.target);
         setSelected(new Set([seq]));
       }
@@ -1726,6 +1744,7 @@ export function LogExplorer({ corpusId }: Props) {
     setFindActiveQuery(null);
     setFindMatches([]);
     setFindMatchSources({});
+    setFindMatchRefs({});
     setFindExcerpts({});
     setFindIndex(0);
     setFindTotal(0);
@@ -1745,8 +1764,17 @@ export function LogExplorer({ corpusId }: Props) {
     history: FindPageHistory[],
     target: "first" | "last",
     scopedFilters: ExplorerFilters,
+    definition?: {
+      query: string;
+      matchMode: SearchMatchMode;
+      caseSensitive: boolean;
+      semantic: boolean;
+    },
   ) => {
-    const q = findDraft.trim();
+    const q = (definition?.query ?? findDraft).trim();
+    const matchMode = definition?.matchMode ?? findMatchMode;
+    const caseSensitive = definition?.caseSensitive ?? findCaseSensitive;
+    const semantic = definition?.semantic ?? findUseSemantic;
     if (!q) {
       clearFindResults("Find cleared");
       return;
@@ -1768,9 +1796,9 @@ export function LogExplorer({ corpusId }: Props) {
       const result = await hostLogSearchEventsAdvanced(corpusId, {
         requestId: backendRequestId,
         query: q,
-        semantic: findUseSemantic && findMatchMode === "literal",
-        matchMode: findMatchMode,
-        caseSensitive: findCaseSensitive,
+        semantic: semantic && matchMode === "literal",
+        matchMode,
+        caseSensitive,
         // Only one bounded result page is retained in the webview.
         k: FIND_PAGE_SIZE,
         // Compose Find with every active Filter predicate, including keyword.
@@ -1791,6 +1819,14 @@ export function LogExplorer({ corpusId }: Props) {
       setFindMatchSources(
         Object.fromEntries(
           hits.map((hit) => [hit.event.seq, hit.event.source]),
+        ),
+      );
+      setFindMatchRefs(
+        Object.fromEntries(
+          hits.map((hit) => [
+            hit.event.seq,
+            investigationEventRef(corpusId, hit.event),
+          ]),
         ),
       );
       setFindExcerpts(
@@ -1820,7 +1856,7 @@ export function LogExplorer({ corpusId }: Props) {
       if (seqs.length > 0) {
         findContextStatus = await focusFindMatch(hits[index]!.event);
       }
-      const modeLabel = findMatchMode === "regex" ? "regex" : "literal";
+      const modeLabel = matchMode === "regex" ? "regex" : "literal";
       const extra = [
         result.partial && result.nextCursor == null ? "partial/capped" : null,
         result.diagnostic,
@@ -2102,6 +2138,58 @@ export function LogExplorer({ corpusId }: Props) {
     return { seqs, eventRefs };
   };
 
+  const captureCurrentInvestigationView =
+    (): InvestigationViewRecipeDto | null => {
+      const refsBySeq = new Map<number, LogBookmarkEventRefDto>();
+      for (const event of Object.values(laneEvents).flat()) {
+        refsBySeq.set(event.seq, investigationEventRef(corpusId, event));
+      }
+      for (const eventRef of Object.values(findMatchRefs)) {
+        refsBySeq.set(eventRef.seq, eventRef);
+      }
+      for (const eventRef of [
+        ...(investigation?.document.evidence ?? []).flatMap(
+          (item) => item.eventRefs,
+        ),
+        ...bookmarks.flatMap((item) => item.eventRefs ?? []),
+      ]) {
+        refsBySeq.set(eventRef.seq, eventRef);
+      }
+      const exactRefs = (seqs: Iterable<number>) => {
+        const ordered = [...seqs].sort((a, b) => a - b);
+        const refs = ordered.flatMap((seq) => {
+          const eventRef = refsBySeq.get(seq);
+          return eventRef ? [{ ...eventRef }] : [];
+        });
+        return refs.length === ordered.length ? refs : null;
+      };
+      const selectionRefs = exactRefs(selected);
+      const highlightRefs = exactRefs(highlight);
+      if (!selectionRefs || !highlightRefs) return null;
+      const focusedEvent = detail
+        ? investigationEventRef(corpusId, detail)
+        : null;
+      return captureInvestigationView({
+        filters,
+        lanes,
+        visibleLaneCount: laneCount,
+        linkMode,
+        focusedLaneId: focusLaneId,
+        focusedEvent,
+        selection: selectionRefs,
+        highlights: highlightRefs,
+        find: findActiveQuery
+          ? {
+              query: findActiveQuery,
+              matchMode: findMatchMode,
+              caseSensitive: findCaseSensitive,
+              semantic: findUseSemantic,
+            }
+          : null,
+        viewportAnchors: laneViewportAnchors,
+      });
+    };
+
   const bookmarkSelection = async () => {
     const selection = selectedEvidenceRefs();
     if (!selection) {
@@ -2118,7 +2206,8 @@ export function LogExplorer({ corpusId }: Props) {
     const contiguous = seqs.every(
       (seq, index) => index === 0 || seq === seqs[index - 1]! + 1,
     );
-    const oneSource = new Set(eventRefs.map((event) => event.source)).size === 1;
+    const oneSource =
+      new Set(eventRefs.map((event) => event.source)).size === 1;
     const exactKey = (refs: typeof eventRefs) =>
       refs
         .map(
@@ -2261,6 +2350,14 @@ export function LogExplorer({ corpusId }: Props) {
       setCreateInvestigationItem(null);
       return;
     }
+    const viewRecipe =
+      draft.type === "finding" ? captureCurrentInvestigationView() : null;
+    if (draft.type === "finding" && !viewRecipe) {
+      setInvestigationError(
+        "This view includes an identity that is no longer authoritative. Rerun Find or reselect the visible evidence before saving the finding.",
+      );
+      return;
+    }
     const priorFindingCount = investigation?.document.findings?.length ?? 0;
     const priorNoteCount = investigation?.document.notes?.length ?? 0;
     investigationLoadRequestRef.current += 1;
@@ -2279,6 +2376,7 @@ export function LogExplorer({ corpusId }: Props) {
               ...common,
               kind: draft.kind,
               whyItMatters: draft.body,
+              viewRecipe,
             })
           : await hostLogAddInvestigationNote(corpusId, {
               ...common,
@@ -2334,17 +2432,14 @@ export function LogExplorer({ corpusId }: Props) {
     setEditInvestigationItem({ type: "note", item });
   };
 
-  const saveEditedInvestigationItem = async (
-    draft: InvestigationItemDraft,
-  ) => {
+  const saveEditedInvestigationItem = async (draft: InvestigationItemDraft) => {
     if (!investigation || !editInvestigationItem) return;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
     try {
       const updated =
-        draft.type === "finding" &&
-        editInvestigationItem.type === "finding"
+        draft.type === "finding" && editInvestigationItem.type === "finding"
           ? await hostLogEditInvestigationFinding(corpusId, {
               investigationId: investigation.document.id,
               expectedRevision: investigation.document.revision,
@@ -2589,14 +2684,15 @@ export function LogExplorer({ corpusId }: Props) {
       // Hidden by filters or absent from current lane composition: preserve
       // the complete prior view and explicitly create a temporary reveal.
       if (!revealRestore) {
-        setRevealRestore({
-          filters: { ...filters },
-          lanes: lanes.map((lane) => ({
-            ...lane,
-            sources: [...lane.sources],
-          })),
-          laneCount,
-        });
+        const priorView = captureCurrentInvestigationView();
+        if (!priorView) {
+          setBookmarkRevealState("missing");
+          setStatus(
+            "The current view contains an identity that can no longer be restored exactly. Rerun Find or clear the stale highlight before revealing this bookmark.",
+          );
+          return;
+        }
+        setRevealRestore(priorView);
       }
       const openFilters = emptyFilters();
       let revealLanes = lanes;
@@ -2652,17 +2748,265 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
+  const recipeFilters = (
+    recipe: InvestigationViewRecipeDto,
+  ): ExplorerFilters => ({
+    levels: [...recipe.filters.levels],
+    sources: [...recipe.filters.sources],
+    services: [...recipe.filters.services],
+    hosts: [...recipe.filters.hosts],
+    timeFrom: recipe.filters.timeFrom,
+    timeTo: recipe.filters.timeTo,
+    seqFrom: recipe.filters.seqFrom,
+    seqTo: recipe.filters.seqTo,
+    templateId: recipe.filters.templateId,
+    traceId: recipe.filters.traceId,
+    keyword: recipe.filters.keyword,
+  });
+
+  const scheduleInvestigationViewApply = (
+    recipe: InvestigationViewRecipeDto,
+    status: string,
+  ) => {
+    const nextFilters = recipeFilters(recipe);
+    findRequestRef.current += 1;
+    findActiveRef.current = false;
+    const activeFindRequest = activeFindRequestRef.current;
+    activeFindRequestRef.current = null;
+    if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
+    setFindSearching(false);
+    setFindCancelling(false);
+    suppressNextFindRefreshRef.current = true;
+    setFindActiveQuery(null);
+    setFindMatches([]);
+    setFindMatchSources({});
+    setFindMatchRefs({});
+    setFindExcerpts({});
+    setFindIndex(0);
+    setFindTotal(0);
+    setFindTotalExact(false);
+    setFindBase(0);
+    setFindNextCursor(null);
+    setFindPageStart(null);
+    setFindHistory([]);
+    setFindPartial(false);
+    setSelected(new Set());
+    setHighlight(new Set());
+    setDetail(null);
+    setFilters(nextFilters);
+    setFilterDraft(nextFilters.keyword ?? "");
+    setLanes(
+      recipe.lanes.map((lane) => ({
+        id: lane.id,
+        label: lane.label,
+        sources: [...lane.sources],
+      })),
+    );
+    setPreferredLaneCount(recipe.visibleLaneCount);
+    setLaneCount(Math.min(recipe.visibleLaneCount, maxLaneCount));
+    setLinkMode(recipe.linkMode);
+    saveLinkMode(corpusId, recipe.linkMode);
+    setFocusLaneId(recipe.focusedLaneId);
+    setLaneEvents({});
+    setLaneTimeStates({});
+    setLaneViewportAnchors(
+      Object.fromEntries(
+        recipe.viewportAnchors.map((anchor) => [
+          anchor.laneId,
+          { ...anchor.eventRef },
+        ]),
+      ),
+    );
+    setFindDraft(recipe.find?.query ?? "");
+    setFindMatchMode(recipe.find?.matchMode ?? "literal");
+    setFindCaseSensitive(recipe.find?.caseSensitive ?? false);
+    setFindUseSemantic(recipe.find?.semantic ?? false);
+    setPendingViewApply({ recipe, status });
+    setStatus(`${status} · positioning…`);
+  };
+
+  useEffect(() => {
+    if (!pendingViewApply || busy) return;
+    const visibleLanes = pendingViewApply.recipe.lanes.slice(
+      0,
+      Math.min(pendingViewApply.recipe.visibleLaneCount, maxLaneCount),
+    );
+    if (
+      visibleLanes.some((lane) => {
+        const state = laneTimeStates[lane.id];
+        return (
+          !state ||
+          (state.status !== "loaded" &&
+            state.status !== "empty" &&
+            state.status !== "error")
+        );
+      })
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const applyPosition = async () => {
+      const { recipe, status } = pendingViewApply;
+      const nextFilters = recipeFilters(recipe);
+      for (const anchor of recipe.viewportAnchors) {
+        const lane = visibleLanes.find(
+          (candidate) => candidate.id === anchor.laneId,
+        );
+        if (!lane) continue;
+        await seekToSeq(anchor.eventRef.seq, {
+          laneId: lane.id,
+          sources: lane.sources,
+          viewFilters: nextFilters,
+          selectTarget: false,
+        });
+        if (cancelled) return;
+      }
+      if (recipe.find) {
+        await requestFindPage(null, 0, [], "first", nextFilters, {
+          query: recipe.find.query,
+          matchMode: recipe.find.matchMode,
+          caseSensitive: recipe.find.caseSensitive,
+          semantic: recipe.find.semantic,
+        });
+        if (cancelled) return;
+      }
+      if (recipe.focusedEvent) {
+        const lane =
+          visibleLanes.find(
+            (candidate) => candidate.id === recipe.focusedLaneId,
+          ) ?? visibleLanes[0];
+        if (lane) {
+          await seekToSeq(recipe.focusedEvent.seq, {
+            laneId: lane.id,
+            sources: lane.sources,
+            viewFilters: nextFilters,
+            focusRow: true,
+          });
+          if (cancelled) return;
+        }
+      }
+      const anchorScroll = Object.fromEntries(
+        recipe.viewportAnchors.flatMap((anchor) =>
+          visibleLanes.some((lane) => lane.id === anchor.laneId)
+            ? [[anchor.laneId, anchor.eventRef.seq]]
+            : [],
+        ),
+      );
+      setLaneScrollSeq((current) => ({ ...current, ...anchorScroll }));
+      if (recipe.focusedEvent && recipe.focusedLaneId) {
+        setLaneScrollSeq((current) => ({
+          ...current,
+          [recipe.focusedLaneId!]: recipe.focusedEvent!.seq,
+        }));
+      }
+      setSelected(new Set(recipe.selection.map((eventRef) => eventRef.seq)));
+      setHighlight(new Set(recipe.highlights.map((eventRef) => eventRef.seq)));
+      setFocusLaneId(recipe.focusedLaneId);
+      setPendingViewApply(null);
+      setStatus(status);
+    };
+    void applyPosition().catch((applyError) => {
+      if (cancelled) return;
+      setPendingViewApply(null);
+      setInvestigationError(
+        `Saved view could not be applied: ${String(applyError)}`,
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Positioning helpers intentionally use the state snapshot that scheduled
+    // this apply; function identity changes must not restart host navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, laneTimeStates, maxLaneCount, pendingViewApply]);
+
   const restorePriorView = () => {
     if (revealRestore) {
       autoStatusLockRef.current = "bookmark-restore";
       suppressSelectionClearStatusRef.current = true;
-      setFilters(revealRestore.filters);
-      setFilterDraft(revealRestore.filters.keyword ?? "");
-      setLanes(revealRestore.lanes);
-      setLaneCount(revealRestore.laneCount);
+      scheduleInvestigationViewApply(
+        revealRestore,
+        "Restored prior Explorer view",
+      );
       setRevealRestore(null);
       setBookmarkRevealState("idle");
-      setStatus("Restored prior Explorer view");
+    }
+  };
+
+  const previewInvestigationFindingView = async (item: FindingItemView) => {
+    if (!investigation || !item.viewRecipe) return;
+    const current = captureCurrentInvestigationView();
+    if (!current) {
+      setInvestigationError(
+        "The current Explorer view includes an identity that cannot be compared exactly. Rerun Find or clear the stale highlight first.",
+      );
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const preview = await hostLogPreviewInvestigationFindingView(
+        corpusId,
+        investigation.document.id,
+        item.id,
+      );
+      setFindingViewPreview({
+        findingId: item.id,
+        recipe: preview.recipe,
+        changes: describeInvestigationViewDiff(current, preview.recipe),
+        missingCount: preview.missingCount,
+        staleCount: preview.staleCount,
+      });
+      setStatus("Previewed saved Explorer view · current view unchanged");
+    } catch (previewError) {
+      setInvestigationError(String(previewError));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const applyInvestigationFindingView = async (
+    preview: FindingViewPreviewView,
+  ) => {
+    if (!investigation) return;
+    const priorView = captureCurrentInvestigationView();
+    if (!priorView) {
+      setInvestigationError(
+        "The current Explorer view cannot be restored exactly. Rerun Find or clear the stale highlight before applying this saved view.",
+      );
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const fresh = await hostLogPreviewInvestigationFindingView(
+        corpusId,
+        investigation.document.id,
+        preview.findingId,
+      );
+      if (fresh.missingCount > 0 || fresh.staleCount > 0) {
+        setFindingViewPreview({
+          findingId: preview.findingId,
+          recipe: fresh.recipe,
+          changes: preview.changes,
+          missingCount: fresh.missingCount,
+          staleCount: fresh.staleCount,
+        });
+        setInvestigationError(
+          "Apply blocked because the saved view no longer resolves to exact authoritative event identities.",
+        );
+        return;
+      }
+      setRevealRestore(priorView);
+      setFindingViewPreview(null);
+      scheduleInvestigationViewApply(
+        fresh.recipe,
+        "Applied saved Explorer view · Restore prior view is available",
+      );
+    } catch (applyError) {
+      setInvestigationError(String(applyError));
+    } finally {
+      setInvestigationBusy(false);
     }
   };
 
@@ -2745,7 +3089,9 @@ export function LogExplorer({ corpusId }: Props) {
       }
       const eventRefs = current.item.eventRefs;
       if (eventRefs.length === 0) {
-        throw new Error("Authoritative evidence preview returned no identities");
+        throw new Error(
+          "Authoritative evidence preview returned no identities",
+        );
       }
       const seqs = eventRefs.map((eventRef) => eventRef.seq);
       await activateBookmark({
@@ -3686,586 +4032,606 @@ export function LogExplorer({ corpusId }: Props) {
                 </header>
               )}
               <div className="log-explorer__section-title">
-            Find{" "}
-            <HelpTip
-              label="Find vs Filter"
-              title="Find vs Filter"
-              content={HELP_FIND_VS_FILTER}
-            />
-              </div>
-          <input
-            ref={findInputRef}
-            className="log-explorer__search"
-            placeholder={
-              findMatchMode === "regex"
-                ? "Regex (linear-time, bounded)…"
-                : "Find in corpus (keeps surrounding rows)…"
-            }
-            value={findDraft}
-            onChange={(e) => {
-              const next = e.target.value;
-              setFindDraft(next);
-              if (findActiveQuery != null && next.trim() !== findActiveQuery) {
-                clearFindResults("Find term changed — press Find to apply");
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void runFind();
-            }}
-            aria-label="Find in logs"
-            data-testid="log-explorer-find"
-          />
-          <div className="log-explorer__find-actions">
-            <button
-              type="button"
-              className="log-explorer__btn"
-              data-testid="log-explorer-find-run"
-              onClick={() => void runFind()}
-            >
-              Find
-            </button>
-            {findSearching ? (
-              <button
-                type="button"
-                className="log-explorer__btn"
-                data-testid="log-explorer-find-cancel"
-                disabled={findCancelling}
-                onClick={() => void cancelFind()}
-              >
-                {findCancelling ? "Cancelling…" : "Cancel"}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="log-explorer__btn"
-              data-testid="log-explorer-find-prev"
-              disabled={
-                findHistory.length === 0 &&
-                (findMatches.length === 0 || findIndex === 0)
-              }
-              onClick={() => void findStep(-1)}
-            >
-              Prev
-            </button>
-            <button
-              type="button"
-              className="log-explorer__btn"
-              data-testid="log-explorer-find-next"
-              disabled={
-                !findNextCursor &&
-                (findMatches.length === 0 ||
-                  findIndex === findMatches.length - 1)
-              }
-              onClick={() => void findStep(1)}
-            >
-              Next
-            </button>
-            <button
-              type="button"
-              className={`log-explorer__btn ${advancedOpen ? "log-explorer__btn--active" : ""}`}
-              data-testid="log-explorer-advanced-toggle"
-              aria-expanded={advancedOpen}
-              onClick={() => setAdvancedOpen((o) => !o)}
-            >
-              Advanced
-            </button>
-          </div>
-          {advancedOpen ? (
-            <div
-              className="log-explorer__advanced-search"
-              data-testid="log-explorer-advanced-search"
-              role="group"
-              aria-label="Advanced search options"
-            >
-              <p className="log-explorer__chat-preview">
-                Explicit controls — no hidden query grammar. Regex uses a
-                linear-time engine with pattern-length, result, and scan caps.
-              </p>
-              <label className="log-explorer__facet-row">
-                <input
-                  type="radio"
-                  name="find-mode"
-                  checked={findMatchMode === "literal"}
-                  onChange={() => {
-                    setFindMatchMode("literal");
-                    if (findActiveRef.current) {
-                      clearFindResults(
-                        "Find mode changed — press Find to apply",
-                      );
-                    }
-                  }}
-                  data-testid="find-mode-literal"
+                Find{" "}
+                <HelpTip
+                  label="Find vs Filter"
+                  title="Find vs Filter"
+                  content={HELP_FIND_VS_FILTER}
                 />
-                Literal text
-              </label>
-              <label className="log-explorer__facet-row">
-                <input
-                  type="radio"
-                  name="find-mode"
-                  checked={findMatchMode === "regex"}
-                  onChange={() => {
-                    setFindMatchMode("regex");
-                    if (findActiveRef.current) {
-                      clearFindResults(
-                        "Find mode changed — press Find to apply",
-                      );
-                    }
-                  }}
-                  data-testid="find-mode-regex"
-                />
-                Regex (bounded)
-              </label>
-              <label className="log-explorer__facet-row">
-                <input
-                  type="checkbox"
-                  checked={findCaseSensitive}
-                  onChange={(e) => {
-                    setFindCaseSensitive(e.target.checked);
-                    if (findActiveRef.current) {
-                      clearFindResults(
-                        "Case option changed — press Find to apply",
-                      );
-                    }
-                  }}
-                  data-testid="find-case-sensitive"
-                />
-                Case sensitive
-              </label>
-              <label className="log-explorer__facet-row">
-                <input
-                  type="checkbox"
-                  checked={findUseSemantic}
-                  disabled={!semanticAvailable || findMatchMode === "regex"}
-                  onChange={(e) => {
-                    setFindUseSemantic(e.target.checked);
-                    if (findActiveRef.current) {
-                      clearFindResults(
-                        "Semantic option changed — press Find to apply",
-                      );
-                    }
-                  }}
-                  data-testid="find-semantic"
-                />
-                Template semantic
-                {!semanticAvailable ? " (unavailable)" : ""}
-              </label>
-              <div className="log-explorer__structured-grid">
-                <label>
-                  Trace ID (exact)
-                  <input
-                    className="log-explorer__search"
-                    value={traceDraft}
-                    onChange={(event) => setTraceDraft(event.target.value)}
-                    aria-label="Trace ID filter"
-                    placeholder="trace-…"
-                  />
-                </label>
-                <label>
-                  Template ID
-                  <input
-                    className="log-explorer__search"
-                    value={templateDraft}
-                    inputMode="numeric"
-                    onChange={(event) => setTemplateDraft(event.target.value)}
-                    aria-label="Template ID filter"
-                    placeholder="42"
-                  />
-                </label>
-                <label>
-                  UTC start (inclusive)
-                  <input
-                    className="log-explorer__search"
-                    value={timeFromDraft}
-                    disabled={(facets?.timeQuality ?? timeQuality) !== "wall"}
-                    onChange={(event) => setTimeFromDraft(event.target.value)}
-                    aria-label="UTC start filter"
-                    placeholder="2026-07-27T12:00:00Z"
-                  />
-                </label>
-                <label>
-                  UTC end (exclusive)
-                  <input
-                    className="log-explorer__search"
-                    value={timeToDraft}
-                    disabled={(facets?.timeQuality ?? timeQuality) !== "wall"}
-                    onChange={(event) => setTimeToDraft(event.target.value)}
-                    aria-label="UTC end filter"
-                    placeholder="2026-07-27T13:00:00Z"
-                  />
-                </label>
-                <label>
-                  Sequence start
-                  <input
-                    className="log-explorer__search"
-                    value={seqFromDraft}
-                    inputMode="numeric"
-                    onChange={(event) => setSeqFromDraft(event.target.value)}
-                    aria-label="Sequence start filter"
-                    placeholder="0"
-                  />
-                </label>
-                <label>
-                  Sequence end
-                  <input
-                    className="log-explorer__search"
-                    value={seqToDraft}
-                    inputMode="numeric"
-                    onChange={(event) => setSeqToDraft(event.target.value)}
-                    aria-label="Sequence end filter"
-                    placeholder="999"
-                  />
-                </label>
               </div>
-              {(facets?.timeQuality ?? timeQuality) !== "wall" ? (
-                <p className="log-explorer__chat-preview" role="note">
-                  Exact UTC range is unavailable for mixed or order-only data.
-                  Use the stable sequence range instead.
-                </p>
-              ) : null}
-              <button
-                type="button"
-                className="log-explorer__btn"
-                data-testid="apply-structured-filters"
-                onClick={applyStructuredFilters}
-              >
-                Apply structured filters
-              </button>
-              <p className="log-explorer__chat-preview">
-                All fields combine with AND. Multiple values within Level,
-                Source, Service, or Host combine with OR. Every active scope
-                intersects both Find and Filter.
-              </p>
-            </div>
-          ) : null}
-          {findTotal > 0 ? (
-            <div
-              className="log-explorer__chat-preview"
-              data-testid="log-explorer-find-count"
-            >
-              Match {findBase + findIndex + 1} of{" "}
-              {findTotalExact ? findTotal : `${findTotal}+`}
-              {findPartial && !findNextCursor ? " (partial)" : ""}
-              {" · "}
-              {findMatches.length} result identities resident
-            </div>
-          ) : null}
-
-          <div className="log-explorer__section-title">Filter</div>
-          <input
-            className="log-explorer__search"
-            placeholder="Filter keyword (reduces rows)…"
-            value={filterDraft}
-            onChange={(e) => setFilterDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") applyFilterKeyword();
-            }}
-            aria-label="Filter logs"
-            data-testid="log-explorer-filter"
-          />
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="log-explorer-filter-apply"
-            onClick={() => applyFilterKeyword()}
-          >
-            Apply filter
-          </button>
-          {activeFilterCount > 0 && (
-            <div
-              className="log-explorer__active-facets"
-              data-testid="log-explorer-active-facets"
-            >
-              {filters.keyword ? (
-                <button
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() => {
-                    setFilterDraft("");
-                    setFilters((f) => ({ ...f, keyword: null }));
-                  }}
-                >
-                  keyword:{filters.keyword} ×
-                </button>
-              ) : null}
-              {filters.levels.map((lvl) => (
-                <button
-                  key={lvl}
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() => toggleLevel(lvl)}
-                >
-                  level:{lvl} ×
-                </button>
-              ))}
-              {filters.sources.map((src) => (
-                <button
-                  key={src}
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() => toggleSource(src)}
-                >
-                  source:{src} ×
-                </button>
-              ))}
-              {filters.services.map((service) => (
-                <button
-                  key={service}
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() => toggleService(service)}
-                >
-                  service:{service} ×
-                </button>
-              ))}
-              {filters.hosts.map((host) => (
-                <button
-                  key={host}
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() => toggleHost(host)}
-                >
-                  host:{host} ×
-                </button>
-              ))}
-              {filters.templateId != null ? (
-                <button
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() =>
-                    setFilters((current) => ({
-                      ...current,
-                      templateId: null,
-                    }))
+              <input
+                ref={findInputRef}
+                className="log-explorer__search"
+                placeholder={
+                  findMatchMode === "regex"
+                    ? "Regex (linear-time, bounded)…"
+                    : "Find in corpus (keeps surrounding rows)…"
+                }
+                value={findDraft}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setFindDraft(next);
+                  if (
+                    findActiveQuery != null &&
+                    next.trim() !== findActiveQuery
+                  ) {
+                    clearFindResults("Find term changed — press Find to apply");
                   }
-                >
-                  template:{filters.templateId} ×
-                </button>
-              ) : null}
-              {filters.traceId ? (
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void runFind();
+                }}
+                aria-label="Find in logs"
+                data-testid="log-explorer-find"
+              />
+              <div className="log-explorer__find-actions">
                 <button
                   type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() =>
-                    setFilters((current) => ({ ...current, traceId: null }))
-                  }
+                  className="log-explorer__btn"
+                  data-testid="log-explorer-find-run"
+                  onClick={() => void runFind()}
                 >
-                  trace:{filters.traceId} ×
+                  Find
                 </button>
-              ) : null}
-              {filters.timeFrom != null || filters.timeTo != null ? (
-                <button
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() =>
-                    setFilters((current) => ({
-                      ...current,
-                      timeFrom: null,
-                      timeTo: null,
-                    }))
-                  }
-                >
-                  UTC range ×
-                </button>
-              ) : null}
-              {filters.seqFrom != null || filters.seqTo != null ? (
-                <button
-                  type="button"
-                  className="log-explorer__nav-chip"
-                  onClick={() =>
-                    setFilters((current) => ({
-                      ...current,
-                      seqFrom: null,
-                      seqTo: null,
-                    }))
-                  }
-                >
-                  seq:{filters.seqFrom ?? "start"}–{filters.seqTo ?? "end"} ×
-                </button>
-              ) : null}
-            </div>
-          )}
-          {activeFilterCount > 0 ? (
-            <button
-              type="button"
-              className="log-explorer__btn"
-              data-testid="clear-all-filters"
-              onClick={clearAllFilters}
-            >
-              Clear all filters
-            </button>
-          ) : null}
-          <p className="log-explorer__chat-preview" role="note">
-            Find highlights without removing rows. Filter reduces the table and
-            intersects every active structured scope.
-            {semanticAvailable
-              ? " Template-semantic ranking is available for advanced search."
-              : " Keyword-only corpus · re-analyze for semantic."}
-          </p>
-          <div
-            className="log-explorer__chat-preview"
-            data-testid="log-explorer-count-truth"
-          >
-            {/* #534: label totals separately — never use max-per-lane as global. */}
-            <HelpTip
-              label="Corpus, matched, and resident counts"
-              title="Corpus, matched, and resident counts"
-              content={HELP_COUNTS}
-            />{" "}
-            Corpus {(corpusTotal || summary?.eventCount || 0).toLocaleString()}{" "}
-            ·{" "}
-            {laneCount === 1
-              ? `matched ${totalMatched.toLocaleString()} · `
-              : "matched per lane below · "}
-            resident rows{" "}
-            {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
-            {laneCount > 1
-              ? ` · ${laneCount} lanes (per-lane counts in headers)`
-              : ""}
-          </div>
-
-          <div className="log-explorer__section-title">Levels</div>
-          <div className="log-explorer__facet">
-            {Object.entries(facets?.levels ?? {})
-              .sort((a, b) => b[1] - a[1])
-              .map(([lvl, count]) => (
-                <label key={lvl} className="log-explorer__facet-row">
-                  <input
-                    type="checkbox"
-                    checked={filters.levels.includes(lvl)}
-                    onChange={() => toggleLevel(lvl)}
-                  />
-                  <span className={levelClass(lvl)}>{lvl}</span>
-                  <span className="count">{count}</span>
-                </label>
-              ))}
-          </div>
-
-          <div className="log-explorer__section-title">Sources</div>
-          <div className="log-explorer__facet">
-            {Object.entries(facets?.sources ?? {})
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 40)
-              .map(([src, count]) => (
-                <label key={src} className="log-explorer__facet-row">
-                  <input
-                    type="checkbox"
-                    checked={filters.sources.includes(src)}
-                    onChange={() => toggleSource(src)}
-                  />
-                  <span title={src}>{src}</span>
-                  <span className="count">{count}</span>
-                </label>
-              ))}
-          </div>
-
-          {Object.keys(facets?.services ?? {}).length > 0 ? (
-            <>
-              <div className="log-explorer__section-title">Services</div>
-              <div className="log-explorer__facet">
-                {Object.entries(facets?.services ?? {})
-                  .sort((a, b) => b[1] - a[1])
-                  .slice(0, 40)
-                  .map(([service, count]) => (
-                    <label key={service} className="log-explorer__facet-row">
-                      <input
-                        type="checkbox"
-                        checked={filters.services.includes(service)}
-                        onChange={() => toggleService(service)}
-                      />
-                      <span title={service}>{service}</span>
-                      <span className="count">{count}</span>
-                    </label>
-                  ))}
-              </div>
-            </>
-          ) : null}
-
-          {Object.keys(facets?.hosts ?? {}).length > 0 ? (
-            <>
-              <div className="log-explorer__section-title">Hosts</div>
-              <div className="log-explorer__facet">
-                {Object.entries(facets?.hosts ?? {})
-                  .sort((a, b) => b[1] - a[1])
-                  .slice(0, 40)
-                  .map(([host, count]) => (
-                    <label key={host} className="log-explorer__facet-row">
-                      <input
-                        type="checkbox"
-                        checked={filters.hosts.includes(host)}
-                        onChange={() => toggleHost(host)}
-                      />
-                      <span title={host}>{host}</span>
-                      <span className="count">{count}</span>
-                    </label>
-                  ))}
-              </div>
-            </>
-          ) : null}
-
-          <div className="log-explorer__section-title">Bookmarks</div>
-          <div
-            className="log-explorer__bookmarks"
-            data-testid="log-explorer-bookmarks"
-          >
-            {revealRestore ? (
-              <button
-                type="button"
-                className="log-explorer__btn log-explorer__btn--active"
-                data-testid="bookmark-restore-view"
-                onClick={restorePriorView}
-              >
-                Restore prior view
-                {bookmarkRevealState === "revealed" ? " (temp reveal)" : ""}
-              </button>
-            ) : null}
-            {bookmarkRevealState === "missing" ? (
-              <div
-                className="log-explorer__chat-preview"
-                data-testid="bookmark-missing"
-              >
-                Bookmark target missing or unavailable
-              </div>
-            ) : null}
-            {bookmarks.length === 0 ? (
-              <div className="log-explorer__chat-preview">
-                None yet — select rows + B
-              </div>
-            ) : (
-              bookmarks.map((b) => (
-                <div key={b.id} className="log-explorer__bm-item">
+                {findSearching ? (
                   <button
                     type="button"
                     className="log-explorer__btn"
-                    data-testid={`bookmark-activate-${b.id}`}
-                    onClick={() => void activateBookmark(b)}
+                    data-testid="log-explorer-find-cancel"
+                    disabled={findCancelling}
+                    onClick={() => void cancelFind()}
                   >
-                    {b.label}
+                    {findCancelling ? "Cancelling…" : "Cancel"}
                   </button>
-                  {b.evidenceStatus === "missing" ||
-                  b.evidenceStatus === "stale" ? (
-                    <span
-                      className="log-explorer__chat-preview"
-                      data-testid={`bookmark-evidence-status-${b.id}`}
-                    >
-                      {b.evidenceStatus === "missing" ? "Missing" : "Stale"}
-                    </span>
+                ) : null}
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="log-explorer-find-prev"
+                  disabled={
+                    findHistory.length === 0 &&
+                    (findMatches.length === 0 || findIndex === 0)
+                  }
+                  onClick={() => void findStep(-1)}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="log-explorer-find-next"
+                  disabled={
+                    !findNextCursor &&
+                    (findMatches.length === 0 ||
+                      findIndex === findMatches.length - 1)
+                  }
+                  onClick={() => void findStep(1)}
+                >
+                  Next
+                </button>
+                <button
+                  type="button"
+                  className={`log-explorer__btn ${advancedOpen ? "log-explorer__btn--active" : ""}`}
+                  data-testid="log-explorer-advanced-toggle"
+                  aria-expanded={advancedOpen}
+                  onClick={() => setAdvancedOpen((o) => !o)}
+                >
+                  Advanced
+                </button>
+              </div>
+              {advancedOpen ? (
+                <div
+                  className="log-explorer__advanced-search"
+                  data-testid="log-explorer-advanced-search"
+                  role="group"
+                  aria-label="Advanced search options"
+                >
+                  <p className="log-explorer__chat-preview">
+                    Explicit controls — no hidden query grammar. Regex uses a
+                    linear-time engine with pattern-length, result, and scan
+                    caps.
+                  </p>
+                  <label className="log-explorer__facet-row">
+                    <input
+                      type="radio"
+                      name="find-mode"
+                      checked={findMatchMode === "literal"}
+                      onChange={() => {
+                        setFindMatchMode("literal");
+                        if (findActiveRef.current) {
+                          clearFindResults(
+                            "Find mode changed — press Find to apply",
+                          );
+                        }
+                      }}
+                      data-testid="find-mode-literal"
+                    />
+                    Literal text
+                  </label>
+                  <label className="log-explorer__facet-row">
+                    <input
+                      type="radio"
+                      name="find-mode"
+                      checked={findMatchMode === "regex"}
+                      onChange={() => {
+                        setFindMatchMode("regex");
+                        if (findActiveRef.current) {
+                          clearFindResults(
+                            "Find mode changed — press Find to apply",
+                          );
+                        }
+                      }}
+                      data-testid="find-mode-regex"
+                    />
+                    Regex (bounded)
+                  </label>
+                  <label className="log-explorer__facet-row">
+                    <input
+                      type="checkbox"
+                      checked={findCaseSensitive}
+                      onChange={(e) => {
+                        setFindCaseSensitive(e.target.checked);
+                        if (findActiveRef.current) {
+                          clearFindResults(
+                            "Case option changed — press Find to apply",
+                          );
+                        }
+                      }}
+                      data-testid="find-case-sensitive"
+                    />
+                    Case sensitive
+                  </label>
+                  <label className="log-explorer__facet-row">
+                    <input
+                      type="checkbox"
+                      checked={findUseSemantic}
+                      disabled={!semanticAvailable || findMatchMode === "regex"}
+                      onChange={(e) => {
+                        setFindUseSemantic(e.target.checked);
+                        if (findActiveRef.current) {
+                          clearFindResults(
+                            "Semantic option changed — press Find to apply",
+                          );
+                        }
+                      }}
+                      data-testid="find-semantic"
+                    />
+                    Template semantic
+                    {!semanticAvailable ? " (unavailable)" : ""}
+                  </label>
+                  <div className="log-explorer__structured-grid">
+                    <label>
+                      Trace ID (exact)
+                      <input
+                        className="log-explorer__search"
+                        value={traceDraft}
+                        onChange={(event) => setTraceDraft(event.target.value)}
+                        aria-label="Trace ID filter"
+                        placeholder="trace-…"
+                      />
+                    </label>
+                    <label>
+                      Template ID
+                      <input
+                        className="log-explorer__search"
+                        value={templateDraft}
+                        inputMode="numeric"
+                        onChange={(event) =>
+                          setTemplateDraft(event.target.value)
+                        }
+                        aria-label="Template ID filter"
+                        placeholder="42"
+                      />
+                    </label>
+                    <label>
+                      UTC start (inclusive)
+                      <input
+                        className="log-explorer__search"
+                        value={timeFromDraft}
+                        disabled={
+                          (facets?.timeQuality ?? timeQuality) !== "wall"
+                        }
+                        onChange={(event) =>
+                          setTimeFromDraft(event.target.value)
+                        }
+                        aria-label="UTC start filter"
+                        placeholder="2026-07-27T12:00:00Z"
+                      />
+                    </label>
+                    <label>
+                      UTC end (exclusive)
+                      <input
+                        className="log-explorer__search"
+                        value={timeToDraft}
+                        disabled={
+                          (facets?.timeQuality ?? timeQuality) !== "wall"
+                        }
+                        onChange={(event) => setTimeToDraft(event.target.value)}
+                        aria-label="UTC end filter"
+                        placeholder="2026-07-27T13:00:00Z"
+                      />
+                    </label>
+                    <label>
+                      Sequence start
+                      <input
+                        className="log-explorer__search"
+                        value={seqFromDraft}
+                        inputMode="numeric"
+                        onChange={(event) =>
+                          setSeqFromDraft(event.target.value)
+                        }
+                        aria-label="Sequence start filter"
+                        placeholder="0"
+                      />
+                    </label>
+                    <label>
+                      Sequence end
+                      <input
+                        className="log-explorer__search"
+                        value={seqToDraft}
+                        inputMode="numeric"
+                        onChange={(event) => setSeqToDraft(event.target.value)}
+                        aria-label="Sequence end filter"
+                        placeholder="999"
+                      />
+                    </label>
+                  </div>
+                  {(facets?.timeQuality ?? timeQuality) !== "wall" ? (
+                    <p className="log-explorer__chat-preview" role="note">
+                      Exact UTC range is unavailable for mixed or order-only
+                      data. Use the stable sequence range instead.
+                    </p>
                   ) : null}
                   <button
                     type="button"
                     className="log-explorer__btn"
-                    aria-label={`Delete bookmark ${b.label}`}
-                    onClick={() =>
-                      void hostLogDeleteBookmark(corpusId, b.id).then(() =>
-                        setBookmarks((all) => all.filter((x) => x.id !== b.id)),
-                      )
-                    }
+                    data-testid="apply-structured-filters"
+                    onClick={applyStructuredFilters}
                   >
-                    ×
+                    Apply structured filters
                   </button>
+                  <p className="log-explorer__chat-preview">
+                    All fields combine with AND. Multiple values within Level,
+                    Source, Service, or Host combine with OR. Every active scope
+                    intersects both Find and Filter.
+                  </p>
                 </div>
-              ))
-            )}
-          </div>
+              ) : null}
+              {findTotal > 0 ? (
+                <div
+                  className="log-explorer__chat-preview"
+                  data-testid="log-explorer-find-count"
+                >
+                  Match {findBase + findIndex + 1} of{" "}
+                  {findTotalExact ? findTotal : `${findTotal}+`}
+                  {findPartial && !findNextCursor ? " (partial)" : ""}
+                  {" · "}
+                  {findMatches.length} result identities resident
+                </div>
+              ) : null}
+
+              <div className="log-explorer__section-title">Filter</div>
+              <input
+                className="log-explorer__search"
+                placeholder="Filter keyword (reduces rows)…"
+                value={filterDraft}
+                onChange={(e) => setFilterDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyFilterKeyword();
+                }}
+                aria-label="Filter logs"
+                data-testid="log-explorer-filter"
+              />
+              <button
+                type="button"
+                className="log-explorer__btn"
+                data-testid="log-explorer-filter-apply"
+                onClick={() => applyFilterKeyword()}
+              >
+                Apply filter
+              </button>
+              {activeFilterCount > 0 && (
+                <div
+                  className="log-explorer__active-facets"
+                  data-testid="log-explorer-active-facets"
+                >
+                  {filters.keyword ? (
+                    <button
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() => {
+                        setFilterDraft("");
+                        setFilters((f) => ({ ...f, keyword: null }));
+                      }}
+                    >
+                      keyword:{filters.keyword} ×
+                    </button>
+                  ) : null}
+                  {filters.levels.map((lvl) => (
+                    <button
+                      key={lvl}
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() => toggleLevel(lvl)}
+                    >
+                      level:{lvl} ×
+                    </button>
+                  ))}
+                  {filters.sources.map((src) => (
+                    <button
+                      key={src}
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() => toggleSource(src)}
+                    >
+                      source:{src} ×
+                    </button>
+                  ))}
+                  {filters.services.map((service) => (
+                    <button
+                      key={service}
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() => toggleService(service)}
+                    >
+                      service:{service} ×
+                    </button>
+                  ))}
+                  {filters.hosts.map((host) => (
+                    <button
+                      key={host}
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() => toggleHost(host)}
+                    >
+                      host:{host} ×
+                    </button>
+                  ))}
+                  {filters.templateId != null ? (
+                    <button
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() =>
+                        setFilters((current) => ({
+                          ...current,
+                          templateId: null,
+                        }))
+                      }
+                    >
+                      template:{filters.templateId} ×
+                    </button>
+                  ) : null}
+                  {filters.traceId ? (
+                    <button
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() =>
+                        setFilters((current) => ({ ...current, traceId: null }))
+                      }
+                    >
+                      trace:{filters.traceId} ×
+                    </button>
+                  ) : null}
+                  {filters.timeFrom != null || filters.timeTo != null ? (
+                    <button
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() =>
+                        setFilters((current) => ({
+                          ...current,
+                          timeFrom: null,
+                          timeTo: null,
+                        }))
+                      }
+                    >
+                      UTC range ×
+                    </button>
+                  ) : null}
+                  {filters.seqFrom != null || filters.seqTo != null ? (
+                    <button
+                      type="button"
+                      className="log-explorer__nav-chip"
+                      onClick={() =>
+                        setFilters((current) => ({
+                          ...current,
+                          seqFrom: null,
+                          seqTo: null,
+                        }))
+                      }
+                    >
+                      seq:{filters.seqFrom ?? "start"}–{filters.seqTo ?? "end"}{" "}
+                      ×
+                    </button>
+                  ) : null}
+                </div>
+              )}
+              {activeFilterCount > 0 ? (
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  data-testid="clear-all-filters"
+                  onClick={clearAllFilters}
+                >
+                  Clear all filters
+                </button>
+              ) : null}
+              <p className="log-explorer__chat-preview" role="note">
+                Find highlights without removing rows. Filter reduces the table
+                and intersects every active structured scope.
+                {semanticAvailable
+                  ? " Template-semantic ranking is available for advanced search."
+                  : " Keyword-only corpus · re-analyze for semantic."}
+              </p>
+              <div
+                className="log-explorer__chat-preview"
+                data-testid="log-explorer-count-truth"
+              >
+                {/* #534: label totals separately — never use max-per-lane as global. */}
+                <HelpTip
+                  label="Corpus, matched, and resident counts"
+                  title="Corpus, matched, and resident counts"
+                  content={HELP_COUNTS}
+                />{" "}
+                Corpus{" "}
+                {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·{" "}
+                {laneCount === 1
+                  ? `matched ${totalMatched.toLocaleString()} · `
+                  : "matched per lane below · "}
+                resident rows{" "}
+                {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
+                {laneCount > 1
+                  ? ` · ${laneCount} lanes (per-lane counts in headers)`
+                  : ""}
+              </div>
+
+              <div className="log-explorer__section-title">Levels</div>
+              <div className="log-explorer__facet">
+                {Object.entries(facets?.levels ?? {})
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([lvl, count]) => (
+                    <label key={lvl} className="log-explorer__facet-row">
+                      <input
+                        type="checkbox"
+                        checked={filters.levels.includes(lvl)}
+                        onChange={() => toggleLevel(lvl)}
+                      />
+                      <span className={levelClass(lvl)}>{lvl}</span>
+                      <span className="count">{count}</span>
+                    </label>
+                  ))}
+              </div>
+
+              <div className="log-explorer__section-title">Sources</div>
+              <div className="log-explorer__facet">
+                {Object.entries(facets?.sources ?? {})
+                  .sort((a, b) => b[1] - a[1])
+                  .slice(0, 40)
+                  .map(([src, count]) => (
+                    <label key={src} className="log-explorer__facet-row">
+                      <input
+                        type="checkbox"
+                        checked={filters.sources.includes(src)}
+                        onChange={() => toggleSource(src)}
+                      />
+                      <span title={src}>{src}</span>
+                      <span className="count">{count}</span>
+                    </label>
+                  ))}
+              </div>
+
+              {Object.keys(facets?.services ?? {}).length > 0 ? (
+                <>
+                  <div className="log-explorer__section-title">Services</div>
+                  <div className="log-explorer__facet">
+                    {Object.entries(facets?.services ?? {})
+                      .sort((a, b) => b[1] - a[1])
+                      .slice(0, 40)
+                      .map(([service, count]) => (
+                        <label
+                          key={service}
+                          className="log-explorer__facet-row"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={filters.services.includes(service)}
+                            onChange={() => toggleService(service)}
+                          />
+                          <span title={service}>{service}</span>
+                          <span className="count">{count}</span>
+                        </label>
+                      ))}
+                  </div>
+                </>
+              ) : null}
+
+              {Object.keys(facets?.hosts ?? {}).length > 0 ? (
+                <>
+                  <div className="log-explorer__section-title">Hosts</div>
+                  <div className="log-explorer__facet">
+                    {Object.entries(facets?.hosts ?? {})
+                      .sort((a, b) => b[1] - a[1])
+                      .slice(0, 40)
+                      .map(([host, count]) => (
+                        <label key={host} className="log-explorer__facet-row">
+                          <input
+                            type="checkbox"
+                            checked={filters.hosts.includes(host)}
+                            onChange={() => toggleHost(host)}
+                          />
+                          <span title={host}>{host}</span>
+                          <span className="count">{count}</span>
+                        </label>
+                      ))}
+                  </div>
+                </>
+              ) : null}
+
+              <div className="log-explorer__section-title">Bookmarks</div>
+              <div
+                className="log-explorer__bookmarks"
+                data-testid="log-explorer-bookmarks"
+              >
+                {revealRestore ? (
+                  <button
+                    type="button"
+                    className="log-explorer__btn log-explorer__btn--active"
+                    data-testid="bookmark-restore-view"
+                    onClick={restorePriorView}
+                  >
+                    Restore prior view
+                    {bookmarkRevealState === "revealed" ? " (temp reveal)" : ""}
+                  </button>
+                ) : null}
+                {bookmarkRevealState === "missing" ? (
+                  <div
+                    className="log-explorer__chat-preview"
+                    data-testid="bookmark-missing"
+                  >
+                    Bookmark target missing or unavailable
+                  </div>
+                ) : null}
+                {bookmarks.length === 0 ? (
+                  <div className="log-explorer__chat-preview">
+                    None yet — select rows + B
+                  </div>
+                ) : (
+                  bookmarks.map((b) => (
+                    <div key={b.id} className="log-explorer__bm-item">
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        data-testid={`bookmark-activate-${b.id}`}
+                        onClick={() => void activateBookmark(b)}
+                      >
+                        {b.label}
+                      </button>
+                      {b.evidenceStatus === "missing" ||
+                      b.evidenceStatus === "stale" ? (
+                        <span
+                          className="log-explorer__chat-preview"
+                          data-testid={`bookmark-evidence-status-${b.id}`}
+                        >
+                          {b.evidenceStatus === "missing" ? "Missing" : "Stale"}
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        aria-label={`Delete bookmark ${b.label}`}
+                        onClick={() =>
+                          void hostLogDeleteBookmark(corpusId, b.id).then(() =>
+                            setBookmarks((all) =>
+                              all.filter((x) => x.id !== b.id),
+                            ),
+                          )
+                        }
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
             </>
           )}
         </aside>
@@ -4324,9 +4690,7 @@ export function LogExplorer({ corpusId }: Props) {
                     className="log-explorer__btn"
                     aria-haspopup="menu"
                     aria-expanded={investigationAddMenuOpen}
-                    onClick={() =>
-                      setInvestigationAddMenuOpen((open) => !open)
-                    }
+                    onClick={() => setInvestigationAddMenuOpen((open) => !open)}
                   >
                     Add…
                   </button>
@@ -4587,6 +4951,19 @@ export function LogExplorer({ corpusId }: Props) {
                       )
                     }
                     onRowClick={onRowClick}
+                    onViewportAnchor={(event) => {
+                      const anchor = investigationEventRef(corpusId, event);
+                      setLaneViewportAnchors((current) => {
+                        const previous = current[lane.id];
+                        return previous &&
+                          previous.seq === anchor.seq &&
+                          previous.source === anchor.source &&
+                          previous.timestampHint === anchor.timestampHint &&
+                          previous.timeQualityHint === anchor.timeQualityHint
+                          ? current
+                          : { ...current, [lane.id]: anchor };
+                      });
+                    }}
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}
                   />
@@ -4597,9 +4974,8 @@ export function LogExplorer({ corpusId }: Props) {
                       data-testid={`lane-page-error-${lane.id}`}
                     >
                       <span>
-                        Could not load{" "}
-                        {paging.failedDirection ?? "adjacent"} events:{" "}
-                        {paging.error}
+                        Could not load {paging.failedDirection ?? "adjacent"}{" "}
+                        events: {paging.error}
                       </span>
                       <button
                         type="button"
@@ -4793,39 +5169,44 @@ export function LogExplorer({ corpusId }: Props) {
             queueMicrotask(() => narrowChatToggleRef.current?.focus());
           }}
         />
-        {investigationMode === "investigation" ? (
-          <EvidencePanel
-            modeControl={investigationModeControl}
-            items={evidenceItems}
-            findings={findingItems}
-            notes={noteItems}
-            bookmarks={bookmarkItems}
-            preview={evidencePreview}
-            busy={investigationBusy}
-            error={investigationError}
-            compactLayout={breakpoint === "narrow"}
-            collapsed={breakpoint !== "narrow" && chatCollapsed}
-            desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
-            onPreview={(item) => void previewInvestigationEvidence(item)}
-            onReveal={(item) => void revealInvestigationEvidence(item)}
-            onEditFinding={openEditFinding}
-            onEditNote={openEditNote}
-            onActivateBookmark={(item) => {
-              const bookmark = bookmarks.find(
-                (candidate) => candidate.id === item.id,
-              );
-              if (bookmark) void activateBookmark(bookmark);
-            }}
-            onClearPreview={() => setEvidencePreview(null)}
-            onToggleCollapsed={() =>
-              setChatCollapsed((collapsed) => !collapsed)
-            }
-            onRequestClose={() => {
-              setNarrowChatOpen(false);
-              queueMicrotask(() => narrowChatToggleRef.current?.focus());
-            }}
-          />
-        ) : null}
+        <EvidencePanel
+          visible={investigationMode === "investigation"}
+          modeControl={investigationModeControl}
+          items={evidenceItems}
+          findings={findingItems}
+          notes={noteItems}
+          bookmarks={bookmarkItems}
+          preview={evidencePreview}
+          viewPreview={findingViewPreview}
+          busy={investigationBusy}
+          error={investigationError}
+          compactLayout={breakpoint === "narrow"}
+          collapsed={breakpoint !== "narrow" && chatCollapsed}
+          desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
+          onPreview={(item) => void previewInvestigationEvidence(item)}
+          onReveal={(item) => void revealInvestigationEvidence(item)}
+          onPreviewFindingView={(item) =>
+            void previewInvestigationFindingView(item)
+          }
+          onApplyFindingView={(preview) =>
+            void applyInvestigationFindingView(preview)
+          }
+          onEditFinding={openEditFinding}
+          onEditNote={openEditNote}
+          onActivateBookmark={(item) => {
+            const bookmark = bookmarks.find(
+              (candidate) => candidate.id === item.id,
+            );
+            if (bookmark) void activateBookmark(bookmark);
+          }}
+          onClearPreview={() => setEvidencePreview(null)}
+          onClearViewPreview={() => setFindingViewPreview(null)}
+          onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
+          onRequestClose={() => {
+            setNarrowChatOpen(false);
+            queueMicrotask(() => narrowChatToggleRef.current?.focus());
+          }}
+        />
       </div>
 
       {saveEvidenceOpen ? (

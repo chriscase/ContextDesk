@@ -15,6 +15,7 @@ function renderMenu() {
         onChoose={onChoose}
         onDismiss={onDismiss}
       />
+      <div data-testid="outside-blank">Blank space</div>
       <button>Outside</button>
     </div>,
   );
@@ -41,7 +42,7 @@ describe("InvestigationAddMenu", () => {
     expect(onChoose).toHaveBeenCalledWith("note");
   });
 
-  it("dismisses on Escape and outside click, restoring focus to Add", async () => {
+  it("restores Add focus for Escape and blank-space dismissal", async () => {
     const { triggerRef, onDismiss } = renderMenu();
     const finding = screen.getByRole("menuitem", {
       name: /Create finding/,
@@ -55,10 +56,24 @@ describe("InvestigationAddMenu", () => {
     );
 
     finding.focus();
-    fireEvent.mouseDown(screen.getByRole("button", { name: "Outside" }));
+    fireEvent.click(screen.getByTestId("outside-blank"));
     expect(onDismiss).toHaveBeenCalledTimes(2);
     await vi.waitFor(() =>
       expect(document.activeElement).toBe(triggerRef.current),
     );
+  });
+
+  it("does not steal focus from an outside interactive destination", async () => {
+    const { onDismiss } = renderMenu();
+    const finding = screen.getByRole("menuitem", {
+      name: /Create finding/,
+    });
+    await vi.waitFor(() => expect(document.activeElement).toBe(finding));
+    const outside = screen.getByRole("button", { name: "Outside" });
+    outside.focus();
+    fireEvent.click(outside);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(document.activeElement).toBe(outside);
   });
 });

@@ -210,12 +210,17 @@ export async function hostSessionContextRemove(
   await invoke<void>("session_context_remove", { sessionId, relPath });
 }
 
-export async function hostSessionContextPurge(sessionId: string): Promise<void> {
+export async function hostSessionContextPurge(
+  sessionId: string,
+): Promise<void> {
   if (!isTauri()) return;
   await invoke<void>("session_context_purge", { sessionId });
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function invoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);
 }
@@ -398,7 +403,9 @@ export async function hostProposeConfluencePublish(args: {
   });
 }
 
-export async function hostCheckOllama(baseUrl: string): Promise<boolean | null> {
+export async function hostCheckOllama(
+  baseUrl: string,
+): Promise<boolean | null> {
   if (!isTauri()) return null;
   return invoke<boolean>("check_ollama", { baseUrl });
 }
@@ -439,7 +446,12 @@ export type S3BackupSettingsDto = {
 };
 
 export type S3BackupProgressDto = {
-  phase: "planning" | "awaiting_confirmation" | "uploaded" | "skipped" | "manifest_published";
+  phase:
+    | "planning"
+    | "awaiting_confirmation"
+    | "uploaded"
+    | "skipped"
+    | "manifest_published";
   completed_files: number;
   total_files: number;
   completed_bytes: number;
@@ -504,7 +516,8 @@ export async function hostSaveS3BackupSettings(
 export async function hostRunS3WorkspaceBackup(
   dryRun: boolean,
 ): Promise<S3BackupRunSummaryDto> {
-  if (!isTauri()) throw new Error("S3 workspace backup requires the desktop app");
+  if (!isTauri())
+    throw new Error("S3 workspace backup requires the desktop app");
   return invoke<S3BackupRunSummaryDto>("run_s3_workspace_backup", { dryRun });
 }
 
@@ -643,12 +656,17 @@ export async function hostEnsureDefaultWorkspace(): Promise<DefaultWorkspaceDto 
   return invoke<DefaultWorkspaceDto>("ensure_default_workspace");
 }
 
-export async function hostSaveSecret(profileId: string, secret: string): Promise<void> {
+export async function hostSaveSecret(
+  profileId: string,
+  secret: string,
+): Promise<void> {
   if (!isTauri()) return;
   await invoke("set_provider_secret", { profileId, secret });
 }
 
-export async function hostProviderHasSecret(profileId: string): Promise<boolean | null> {
+export async function hostProviderHasSecret(
+  profileId: string,
+): Promise<boolean | null> {
   if (!isTauri()) return null;
   return invoke<boolean>("provider_has_secret", { profileId });
 }
@@ -682,11 +700,23 @@ export async function hostListLocalCandidates(): Promise<LocalCandidateDto[]> {
 export async function hostProbeUrl(
   baseUrl: string,
   allowPrivate = false,
-): Promise<{ ok: boolean; effective_base: string; candidates: string[]; error?: string | null }> {
+): Promise<{
+  ok: boolean;
+  effective_base: string;
+  candidates: string[];
+  error?: string | null;
+}> {
   if (!isTauri()) {
-    return { ok: false, effective_base: baseUrl, candidates: [], error: "Requires Tauri host" };
+    return {
+      ok: false,
+      effective_base: baseUrl,
+      candidates: [],
+      error: "Requires Tauri host",
+    };
   }
-  return invoke("probe_url", { req: { base_url: baseUrl, allow_private: allowPrivate } });
+  return invoke("probe_url", {
+    req: { base_url: baseUrl, allow_private: allowPrivate },
+  });
 }
 
 export type ProviderDto = {
@@ -735,7 +765,10 @@ export async function hostSetSkillEnabled(
   enabled: boolean,
 ): Promise<SetSkillEnabledResult> {
   if (!isTauri()) throw new Error("Skill enable requires Tauri host");
-  return invoke<SetSkillEnabledResult>("set_skill_enabled_cmd", { id, enabled });
+  return invoke<SetSkillEnabledResult>("set_skill_enabled_cmd", {
+    id,
+    enabled,
+  });
 }
 
 /** SoftWrite path: returns permission_required events until grant + re-execute. */
@@ -798,9 +831,15 @@ export function normalizeProviderKind(
 ): "ollama" | "openai_compatible" | "anthropic" | "xai_grok_build" | "none" {
   const k = kind.trim().toLowerCase().replace(/-/g, "_");
   if (k === "ollama") return "ollama";
-  if (k === "openai_compatible" || k === "openaicompatible") return "openai_compatible";
+  if (k === "openai_compatible" || k === "openaicompatible")
+    return "openai_compatible";
   if (k === "anthropic") return "anthropic";
-  if (k === "xai_grok_build" || k === "xaigrokbuild" || k === "grok" || k === "xai") {
+  if (
+    k === "xai_grok_build" ||
+    k === "xaigrokbuild" ||
+    k === "grok" ||
+    k === "xai"
+  ) {
     return "xai_grok_build";
   }
   return "none";
@@ -1009,7 +1048,9 @@ export async function hostGetDefaultChatModel(): Promise<string | null> {
   return invoke<string>("get_default_chat_model");
 }
 
-export async function hostSetDefaultChatModel(model: string): Promise<string | null> {
+export async function hostSetDefaultChatModel(
+  model: string,
+): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("set_default_chat_model", { model });
 }
@@ -1040,7 +1081,9 @@ export async function hostListChatSessions(): Promise<SessionMetaDto[]> {
   return invoke<SessionMetaDto[]>("list_chat_sessions");
 }
 
-export async function hostLoadChatSession(id: string): Promise<ChatSessionDto | null> {
+export async function hostLoadChatSession(
+  id: string,
+): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
   return invoke<ChatSessionDto>("load_chat_session", { id });
 }
@@ -1119,13 +1162,17 @@ export async function hostSearchChatSessions(
 }
 
 /** Brief title via active model (heuristic fallback if model down). */
-export async function hostSuggestChatTitle(prompt: string): Promise<string | null> {
+export async function hostSuggestChatTitle(
+  prompt: string,
+): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("suggest_chat_title", { prompt });
 }
 
 /** LLM-retitle a saved session (no-op if user renamed / title_locked). */
-export async function hostRetitleChatSession(id: string): Promise<ChatSessionDto | null> {
+export async function hostRetitleChatSession(
+  id: string,
+): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
   return invoke<ChatSessionDto>("retitle_chat_session", { id });
 }
@@ -1464,7 +1511,9 @@ export async function hostGetHybridRetrieval(): Promise<boolean | null> {
   return invoke<boolean>("get_hybrid_retrieval");
 }
 
-export async function hostSetHybridRetrieval(enabled: boolean): Promise<boolean> {
+export async function hostSetHybridRetrieval(
+  enabled: boolean,
+): Promise<boolean> {
   if (!isTauri()) {
     throw new Error("Hybrid retrieval requires Tauri host");
   }
@@ -1595,7 +1644,9 @@ export type LogSearchHitDto = {
   exemplars: string[];
 };
 
-export async function hostListLogCorpora(): Promise<LogCorpusSummaryDto[] | null> {
+export async function hostListLogCorpora(): Promise<
+  LogCorpusSummaryDto[] | null
+> {
   if (!isTauri()) return [];
   return invoke<LogCorpusSummaryDto[]>("list_log_corpora");
 }
@@ -1605,7 +1656,10 @@ export async function hostIngestLogPath(
   name?: string,
 ): Promise<LogIngestReportDto> {
   if (!isTauri()) throw new Error("Log ingest requires Tauri host");
-  return invoke<LogIngestReportDto>("ingest_log_path", { path, name: name ?? null });
+  return invoke<LogIngestReportDto>("ingest_log_path", {
+    path,
+    name: name ?? null,
+  });
 }
 
 /** Request cancel of SoftWrite log ingest (#498). */
@@ -1897,11 +1951,54 @@ export type InvestigationEvidenceItemDto = {
 };
 
 export type InvestigationFindingKind =
-  | "observation"
-  | "inference"
-  | "hypothesis";
+  "observation" | "inference" | "hypothesis";
 
 export type InvestigationFindingLifecycle = "accepted" | "resolved";
+
+export type InvestigationViewFilterDto = {
+  levels: string[];
+  sources: string[];
+  services: string[];
+  hosts: string[];
+  timeFrom: number | null;
+  timeTo: number | null;
+  seqFrom: number | null;
+  seqTo: number | null;
+  templateId: number | null;
+  traceId: string | null;
+  keyword: string | null;
+};
+
+export type InvestigationViewLaneDto = {
+  id: string;
+  label: string;
+  sources: string[];
+};
+
+export type InvestigationViewFindDto = {
+  query: string;
+  matchMode: "literal" | "regex";
+  caseSensitive: boolean;
+  semantic: boolean;
+};
+
+export type InvestigationViewAnchorDto = {
+  laneId: string;
+  eventRef: LogBookmarkEventRefDto;
+};
+
+export type InvestigationViewRecipeDto = {
+  filters: InvestigationViewFilterDto;
+  lanes: InvestigationViewLaneDto[];
+  visibleLaneCount: number;
+  linkMode: "independent" | "follow_cursor" | "align_time";
+  focusedLaneId: string | null;
+  focusedEvent: LogBookmarkEventRefDto | null;
+  selection: LogBookmarkEventRefDto[];
+  highlights: LogBookmarkEventRefDto[];
+  find: InvestigationViewFindDto | null;
+  viewportAnchors: InvestigationViewAnchorDto[];
+};
 
 export type InvestigationFindingItemDto = {
   id: string;
@@ -1910,6 +2007,7 @@ export type InvestigationFindingItemDto = {
   title: string;
   whyItMatters: string;
   evidenceIds: string[];
+  viewRecipe?: InvestigationViewRecipeDto | null;
   provenance: "human";
   createdAt: number;
   updatedAt: number;
@@ -1961,6 +2059,15 @@ export type InvestigationEvidencePreviewDto = {
   revision: number;
   item: InvestigationEvidenceItemDto;
   references: InvestigationEvidenceReferenceDto[];
+};
+
+export type InvestigationFindingViewPreviewDto = {
+  investigationId: string;
+  revision: number;
+  findingId: string;
+  recipe: InvestigationViewRecipeDto;
+  missingCount: number;
+  staleCount: number;
 };
 
 export async function hostLogQueryEvents(
@@ -2204,6 +2311,7 @@ export async function hostLogAddInvestigationFinding(
     title: string;
     whyItMatters: string;
     eventRefs: LogBookmarkEventRefDto[];
+    viewRecipe?: InvestigationViewRecipeDto | null;
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation findings require Tauri host");
@@ -2218,6 +2326,7 @@ export async function hostLogAddInvestigationFinding(
         title: args.title,
         whyItMatters: args.whyItMatters,
         eventRefs: args.eventRefs,
+        viewRecipe: args.viewRecipe ?? null,
       },
     },
   );
@@ -2235,17 +2344,20 @@ export async function hostLogAddInvestigationNote(
   },
 ): Promise<ResolvedInvestigationDocumentDto> {
   if (!isTauri()) throw new Error("Investigation notes require Tauri host");
-  return invoke<ResolvedInvestigationDocumentDto>("log_add_investigation_note", {
-    args: {
-      corpusId,
-      investigationId: args.investigationId ?? null,
-      expectedRevision: args.expectedRevision ?? null,
-      title: args.title,
-      body: args.body,
-      eventRefs: args.eventRefs,
-      findingIds: args.findingIds ?? [],
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_add_investigation_note",
+    {
+      args: {
+        corpusId,
+        investigationId: args.investigationId ?? null,
+        expectedRevision: args.expectedRevision ?? null,
+        title: args.title,
+        body: args.body,
+        eventRefs: args.eventRefs,
+        findingIds: args.findingIds ?? [],
+      },
     },
-  });
+  );
 }
 
 export async function hostLogEditInvestigationFinding(
@@ -2306,11 +2418,27 @@ export async function hostLogPreviewInvestigationEvidence(
   );
 }
 
+export async function hostLogPreviewInvestigationFindingView(
+  corpusId: string,
+  investigationId: string,
+  findingId: string,
+): Promise<InvestigationFindingViewPreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation view preview requires Tauri host");
+  }
+  return invoke<InvestigationFindingViewPreviewDto>(
+    "log_preview_investigation_finding_view",
+    { corpusId, investigationId, findingId },
+  );
+}
+
 export async function hostListChatSessionsForCorpus(
   corpusId: string,
 ): Promise<SessionMetaDto[]> {
   if (!isTauri()) return [];
-  return invoke<SessionMetaDto[]>("list_chat_sessions_for_corpus", { corpusId });
+  return invoke<SessionMetaDto[]>("list_chat_sessions_for_corpus", {
+    corpusId,
+  });
 }
 
 export async function hostSetChatLinkedCorpus(
