@@ -740,9 +740,16 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
     const input = screen.getByTestId("log-explorer-find");
+    expect(input.getAttribute("placeholder")).toBe("Find logs…");
+    expect(input.getAttribute("aria-label")).toBe("Find in logs");
     expect(document.activeElement).not.toBe(input);
     fireEvent.keyDown(root, { key: "f", metaKey: true });
     expect(document.activeElement).toBe(input);
+
+    fireEvent.click(screen.getByRole("button", { name: "Help: Find vs Filter" }));
+    expect(
+      screen.getByText(/Find highlights matches and steps next\/previous/),
+    ).toBeTruthy();
   });
 
   it("resizes every event column by keyboard/pointer and supports auto-fit/reset", async () => {

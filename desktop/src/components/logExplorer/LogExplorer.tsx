@@ -4256,8 +4256,8 @@ export function LogExplorer({ corpusId }: Props) {
                 className="log-explorer__search"
                 placeholder={
                   findMatchMode === "regex"
-                    ? "Regex (linear-time, bounded)…"
-                    : "Find in corpus (keeps surrounding rows)…"
+                    ? "Regex…"
+                    : "Find logs…"
                 }
                 value={findDraft}
                 onChange={(e) => {
