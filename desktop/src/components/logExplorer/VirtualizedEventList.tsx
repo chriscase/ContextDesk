@@ -205,6 +205,8 @@ export function VirtualizedEventList({
   }, [displayRows]);
   const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
+  const onHorizontalScrollRef = useRef(onHorizontalScroll);
+  onHorizontalScrollRef.current = onHorizontalScroll;
   const onNearBottomRef = useRef(onNearBottom);
   onNearBottomRef.current = onNearBottom;
   const [scrollTop, setScrollTop] = useState(0);
@@ -269,6 +271,17 @@ export function VirtualizedEventList({
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
     if (el) setViewportH(el.clientHeight || 400);
   }, []);
+
+  useLayoutEffect(() => {
+    onHorizontalScrollRef.current?.(parentRef.current?.scrollLeft ?? 0);
+    return () => onHorizontalScrollRef.current?.(0);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (displayRows.length === 0) {
+      onHorizontalScrollRef.current?.(0);
+    }
+  }, [displayRows.length]);
 
   const previousLayout = useRef<{
     keys: string[];

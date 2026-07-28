@@ -116,6 +116,49 @@ describe("VirtualizedEventList", () => {
     expect((list as HTMLDivElement).scrollTop).toBe(84);
   });
 
+  it("resets its reported horizontal position when empty or unmounted", () => {
+    const onHorizontalScroll = vi.fn();
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+      onHorizontalScroll,
+    };
+    const { rerender, unmount } = render(
+      <VirtualizedEventList {...props} events={makeEvents(2)} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollLeft", {
+      configurable: true,
+      writable: true,
+      value: 48,
+    });
+    fireEvent.scroll(list);
+    expect(onHorizontalScroll).toHaveBeenLastCalledWith(48);
+
+    rerender(<VirtualizedEventList {...props} events={[]} />);
+    expect(onHorizontalScroll).toHaveBeenLastCalledWith(0);
+
+    rerender(<VirtualizedEventList {...props} events={makeEvents(2)} />);
+    expect(onHorizontalScroll).toHaveBeenLastCalledWith(0);
+
+    Object.defineProperty(
+      screen.getByTestId("virtualized-event-list"),
+      "scrollLeft",
+      {
+        configurable: true,
+        writable: true,
+        value: 24,
+      },
+    );
+    fireEvent.scroll(screen.getByTestId("virtualized-event-list"));
+    expect(onHorizontalScroll).toHaveBeenLastCalledWith(24);
+    unmount();
+    expect(onHorizontalScroll).toHaveBeenLastCalledWith(0);
+  });
+
   it("focuses an explicit mounted seek target once without stealing focus later", () => {
     const props = {
       timeQuality: "wall" as const,

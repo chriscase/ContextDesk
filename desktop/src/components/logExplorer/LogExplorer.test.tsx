@@ -773,6 +773,15 @@ describe("LogExplorer shell", () => {
       screen.getByRole("row", { name: "All sources column headings" }).style
         .transform,
     ).toBe("translateX(-0px)");
+
+    chooseLaneCount(1);
+    chooseLaneCount(2);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("row", { name: "Lane 2 column headings" }).style
+          .transform,
+      ).toBe("translateX(-0px)"),
+    );
   });
 
   it("keeps compact rail controls, event rows, and timestamps keyboard focusable", async () => {
