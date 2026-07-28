@@ -33,13 +33,91 @@ use cd_core::workspace_backup::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const S3_ACCESS_KEY_REF: &str = "s3/default/access_key";
 const S3_SECRET_KEY_REF: &str = "s3/default/secret_key";
 const S3_SESSION_TOKEN_REF: &str = "s3/default/session_token";
+const AGENT_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct HostInitFlightState {
+    running: bool,
+    waiters: usize,
+    last_result: Option<Result<(), String>>,
+}
+
+#[derive(Default)]
+struct HostInitFlight {
+    state: Mutex<HostInitFlightState>,
+    changed: Condvar,
+}
+
+impl HostInitFlight {
+    fn run<F>(&self, initialize: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut initialize = Some(initialize);
+        let mut state = self.state.lock().expect("host init flight");
+        loop {
+            if state.running {
+                state.waiters += 1;
+                self.changed.notify_all();
+                while state.running {
+                    state = self.changed.wait(state).expect("host init flight");
+                }
+                let result = state
+                    .last_result
+                    .clone()
+                    .unwrap_or_else(|| Err("host initialization ended without a result".into()));
+                state.waiters -= 1;
+                if state.waiters == 0 {
+                    self.changed.notify_all();
+                }
+                return result;
+            }
+            if state.waiters > 0 {
+                state = self.changed.wait(state).expect("host init flight");
+                continue;
+            }
+
+            state.running = true;
+            drop(state);
+            let result = initialize
+                .take()
+                .expect("host initializer must run at most once")();
+            state = self.state.lock().expect("host init flight");
+            state.running = false;
+            state.last_result = Some(result.clone());
+            self.changed.notify_all();
+            return result;
+        }
+    }
+
+    #[cfg(test)]
+    fn wait_for_waiters(&self, expected: usize, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let mut state = self.state.lock().expect("host init flight");
+        while state.waiters < expected {
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                return false;
+            };
+            let (next, status) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .expect("host init flight");
+            state = next;
+            if status.timed_out() && state.waiters < expected {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 struct AppState {
     branding: Branding,
@@ -52,6 +130,9 @@ struct AppState {
     /// Live tool host (rebuilt when workspace changes). Arc so the index
     /// watcher callback can reindex without holding AppState.
     host: Arc<Mutex<Option<ToolHost>>>,
+    /// Coordinates startup warmup and on-demand construction so only one
+    /// blocking host rebuild can be active at a time.
+    host_init: HostInitFlight,
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
@@ -136,6 +217,10 @@ fn log_embed_backend_snapshot_nonblocking(
 }
 
 fn ensure_host(state: &AppState) -> Result<(), String> {
+    state.host_init.run(|| ensure_host_inner(state))
+}
+
+fn ensure_host_inner(state: &AppState) -> Result<(), String> {
     let cfg = state.config.lock().expect("config").clone();
     let ws = workspace_from_cfg(&cfg).ok_or_else(|| "no workspace configured".to_string())?;
     if ws.roots.is_empty() {
@@ -157,6 +242,75 @@ fn ensure_host(state: &AppState) -> Result<(), String> {
     }
     drop(host_guard);
     rebuild_host(state, cfg, ws)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostReadinessFailure {
+    Timeout,
+    Initialization,
+    Worker,
+}
+
+impl HostReadinessFailure {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Timeout => "host_readiness_timeout",
+            Self::Initialization => "host_initialization_failed",
+            Self::Worker => "host_initialization_worker_failed",
+        }
+    }
+
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Timeout => {
+                "Workspace tools are still starting. This turn stopped before contacting the \
+                 provider. Check that ContextDesk can access the configured workspace, then retry."
+            }
+            Self::Initialization => {
+                "Workspace tools could not start. This turn stopped before contacting the \
+                 provider. Check the configured workspace and its permissions, then retry."
+            }
+            Self::Worker => {
+                "Workspace tools stopped unexpectedly while starting. This turn did not contact \
+                 the provider. Retry, and check the application logs if the problem continues."
+            }
+        }
+    }
+}
+
+async fn wait_for_host_readiness<F>(
+    timeout: Duration,
+    initialize: F,
+) -> Result<(), HostReadinessFailure>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    match tokio::time::timeout(timeout, tauri::async_runtime::spawn_blocking(initialize)).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(error = %error, "workspace host initialization failed");
+            Err(HostReadinessFailure::Initialization)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "workspace host initialization worker failed");
+            Err(HostReadinessFailure::Worker)
+        }
+        Err(_) => Err(HostReadinessFailure::Timeout),
+    }
+}
+
+fn host_readiness_terminal_events(
+    failure: &HostReadinessFailure,
+) -> [cd_core::events::StreamEvent; 2] {
+    [
+        cd_core::events::StreamEvent::Error {
+            code: failure.code().into(),
+            message: failure.message().into(),
+        },
+        cd_core::events::StreamEvent::TurnCompleted {
+            reason: "host_not_ready".into(),
+        },
+    ]
 }
 
 struct BackgroundIndexBuild {
@@ -2883,7 +3037,18 @@ async fn agent_turn(
         }
     }
 
-    ensure_host(&state)?;
+    let app = window.app_handle().clone();
+    if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
+        let state = app.state::<AppState>();
+        ensure_host(&state)
+    })
+    .await
+    {
+        for event in host_readiness_terminal_events(&failure) {
+            let _ = on_event.send(cd_core::research::event_to_dto(&event));
+        }
+        return Ok(());
+    }
 
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
@@ -5617,6 +5782,7 @@ pub fn run() {
         audit_log,
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),
+        host_init: HostInitFlight::default(),
         active_log_corpus: Mutex::new(None),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
@@ -5838,13 +6004,17 @@ mod help_host_tests {
 #[cfg(test)]
 mod startup_host_tests {
     use super::{
-        build_and_install_background_index, log_search_cancel_key, normalize_log_corpus_id,
-        BackgroundIndexBuild,
+        build_and_install_background_index, host_readiness_terminal_events, log_search_cancel_key,
+        normalize_log_corpus_id, wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight,
+        HostReadinessFailure,
     };
+    use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
     use cd_core::tool_host::ToolHost;
     use cd_core::workspace::Workspace;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn packaged_startup_warms_host_after_window_setup_not_before() {
@@ -5883,12 +6053,156 @@ mod startup_host_tests {
             .find("linked_tools_unavailable_events")
             .expect("linked tools-disabled guard");
         let host = turn_src
-            .find("ensure_host(&state)?")
-            .expect("host construction");
+            .find("wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT")
+            .expect("bounded host readiness wait");
 
         assert!(
             guard < host,
             "provider-free linked refusal must not wait for workspace host/index warmup"
+        );
+    }
+
+    #[test]
+    fn concurrent_startup_and_turn_share_one_host_initialization_flight() {
+        let flight = Arc::new(HostInitFlight::default());
+        let init_started = Arc::new(Barrier::new(2));
+        let release_init = Arc::new(Barrier::new(2));
+        let init_calls = Arc::new(AtomicUsize::new(0));
+
+        let startup_flight = Arc::clone(&flight);
+        let startup_started = Arc::clone(&init_started);
+        let startup_release = Arc::clone(&release_init);
+        let startup_calls = Arc::clone(&init_calls);
+        let startup = std::thread::spawn(move || {
+            startup_flight.run(|| {
+                startup_calls.fetch_add(1, Ordering::SeqCst);
+                startup_started.wait();
+                startup_release.wait();
+                Ok(())
+            })
+        });
+
+        init_started.wait();
+        let turn_flight = Arc::clone(&flight);
+        let turn_calls = Arc::clone(&init_calls);
+        let turn = std::thread::spawn(move || {
+            turn_flight.run(|| {
+                turn_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        assert!(
+            flight.wait_for_waiters(1, Duration::from_secs(1)),
+            "turn should join the startup initialization flight"
+        );
+        assert_eq!(init_calls.load(Ordering::SeqCst), 1);
+        release_init.wait();
+
+        startup
+            .join()
+            .expect("startup thread")
+            .expect("startup init");
+        turn.join().expect("turn thread").expect("turn init");
+        assert_eq!(
+            init_calls.load(Ordering::SeqCst),
+            1,
+            "the waiting turn must reuse the startup result"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_timeout_is_terminal_provider_free_and_retry_recovers() {
+        let flight = Arc::new(HostInitFlight::default());
+        let init_started = Arc::new(Barrier::new(2));
+        let release_init = Arc::new(Barrier::new(2));
+        let init_calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+
+        let blocked_flight = Arc::clone(&flight);
+        let blocked_started = Arc::clone(&init_started);
+        let blocked_release = Arc::clone(&release_init);
+        let blocked_calls = Arc::clone(&init_calls);
+        let first_turn = tokio::spawn(async move {
+            wait_for_host_readiness(Duration::from_millis(50), move || {
+                blocked_flight.run(|| {
+                    blocked_calls.fetch_add(1, Ordering::SeqCst);
+                    blocked_started.wait();
+                    blocked_release.wait();
+                    Ok(())
+                })
+            })
+            .await
+        });
+
+        let started_wait = Arc::clone(&init_started);
+        tokio::task::spawn_blocking(move || started_wait.wait())
+            .await
+            .expect("initialization start barrier");
+        let first_result = first_turn.await.expect("first turn task");
+        if first_result.is_ok() {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(first_result, Err(HostReadinessFailure::Timeout));
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            0,
+            "a host-readiness timeout must not reach the provider"
+        );
+
+        let events = host_readiness_terminal_events(&HostReadinessFailure::Timeout);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Error { code, message }
+                if code == "host_readiness_timeout"
+                    && message.contains("before contacting the provider")
+                    && message.contains("retry")
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::TurnCompleted { reason } if reason == "host_not_ready"
+        ));
+
+        let retry_flight = Arc::clone(&flight);
+        let retry_calls = Arc::clone(&init_calls);
+        let retry = tokio::spawn(async move {
+            wait_for_host_readiness(Duration::from_secs(1), move || {
+                retry_flight.run(|| {
+                    retry_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .await
+        });
+
+        let waiter_flight = Arc::clone(&flight);
+        assert!(
+            tokio::task::spawn_blocking(move || {
+                waiter_flight.wait_for_waiters(1, Duration::from_secs(1))
+            })
+            .await
+            .expect("retry waiter observation"),
+            "retry should wait on the still-running initialization flight"
+        );
+        let release_wait = Arc::clone(&release_init);
+        tokio::task::spawn_blocking(move || release_wait.wait())
+            .await
+            .expect("initialization release barrier");
+
+        let retry_result = retry.await.expect("retry task");
+        if retry_result.is_ok() {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(retry_result, Ok(()));
+        assert_eq!(
+            init_calls.load(Ordering::SeqCst),
+            1,
+            "retry must reuse the initialization that became ready"
+        );
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            1,
+            "provider work may resume only after host readiness succeeds"
         );
     }
 
