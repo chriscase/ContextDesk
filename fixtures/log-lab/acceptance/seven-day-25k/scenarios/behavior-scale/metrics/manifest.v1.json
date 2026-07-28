@@ -20,5 +20,5 @@
     }
   ],
   "safety": "Entirely synthetic. This directory is not part of the log import root.",
-  "productStatus": "Fixture and standalone renderer only; metric import and persistence are not yet shipped."
+  "productStatus": "Fixture, bounded session import, and standalone renderer are shipped; durable attachment and persistence remain residual."
 }

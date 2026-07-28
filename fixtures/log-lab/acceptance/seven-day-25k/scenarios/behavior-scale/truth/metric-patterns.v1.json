@@ -6,22 +6,22 @@
   "metricData": "../metrics/operational-metrics-patterns.v1.json",
   "expectedPatterns": [
     {
-      "timestamp": 1736167500,
+      "timestamp": 1735846200,
       "kind": "isolated_cpu_spike",
       "description": "CPU rises while heap and clients remain near their own baselines."
     },
     {
-      "timestamp": 1736171100,
+      "timestamp": 1735997400,
       "kind": "isolated_heap_spike",
       "description": "Heap rises while CPU and clients remain near their own baselines."
     },
     {
-      "timestamp": 1736173800,
+      "timestamp": 1736110800,
       "kind": "isolated_client_spike",
       "description": "Client count rises while CPU and heap remain near their own baselines."
     },
     {
-      "timestamp": 1736176500,
+      "timestamp": 1736224200,
       "kind": "overlapping_spike",
       "description": "CPU, heap, and clients rise together while retaining separate native-unit scales."
     }

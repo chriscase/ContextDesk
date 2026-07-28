@@ -153,6 +153,22 @@ fn pinned_seven_day_root() -> PathBuf {
     fixture_root().join("acceptance/seven-day-25k")
 }
 
+const SEVEN_DAY_METRIC_JSON: [&str; 5] = [
+    "scenarios/behavior-scale/metrics/manifest.v1.json",
+    "scenarios/behavior-scale/metrics/operational-metrics-patterns.v1.json",
+    "scenarios/behavior-scale/metrics/operational-metrics.v1.json",
+    "scenarios/behavior-scale/truth/metric-correlations.v1.json",
+    "scenarios/behavior-scale/truth/metric-patterns.v1.json",
+];
+
+fn generated_seven_day_byte_hashes(root: &Path) -> BTreeMap<String, String> {
+    let mut hashes = tree_hashes(root).unwrap();
+    for path in SEVEN_DAY_METRIC_JSON {
+        hashes.remove(path);
+    }
+    hashes
+}
+
 #[derive(Debug)]
 struct BehaviorRow {
     source: String,
@@ -754,17 +770,27 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
     let summary = generate_behavior(&generated_root, &controls).unwrap();
 
     assert_eq!(summary.events, 25_000);
-    assert_eq!(summary.files, 11);
-    assert_eq!(summary.bytes, 4_209_626);
+    assert_eq!(summary.files, 16);
+    assert_eq!(summary.bytes, 4_227_271);
     assert_eq!(
         summary.tree_sha256,
-        "d5908dbe2b41d925d49066e397d3bfdecaa0168c1340ea6de8d5c79603ddaea1"
+        "2b6173f31036bc2a70fd365effa0c5a02db8644fd8e71642de49fe11e64c2bc4"
     );
     assert_eq!(
-        tree_hashes(&generated_root).unwrap(),
-        tree_hashes(&pinned_root).unwrap(),
-        "checked-in seven-day acceptance corpus drifted from the deterministic generator"
+        generated_seven_day_byte_hashes(&generated_root),
+        generated_seven_day_byte_hashes(&pinned_root),
+        "checked-in seven-day logs or primary truth drifted from the deterministic generator"
     );
+    for path in SEVEN_DAY_METRIC_JSON {
+        let generated_json: Value =
+            serde_json::from_slice(&fs::read(generated_root.join(path)).unwrap()).unwrap();
+        let pinned_json: Value =
+            serde_json::from_slice(&fs::read(pinned_root.join(path)).unwrap()).unwrap();
+        assert_eq!(
+            generated_json, pinned_json,
+            "checked-in seven-day metric fixture drifted semantically: {path}"
+        );
+    }
 
     let manifest = load_behavior_manifest(&pinned_root).unwrap();
     assert_eq!(manifest["scenario_version"], 2);

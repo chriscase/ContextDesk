@@ -259,7 +259,7 @@ Pinned identity:
 | Time span | 2025-01-01 12:00:00Z–2025-01-08 12:00:00Z (exactly 7 days) |
 | Time quality | Wall clock |
 | Levels | 24,165 INFO · 460 DEBUG · 256 WARN · 119 ERROR |
-| Generated tree SHA-256 | `d5908dbe2b41d925d49066e397d3bfdecaa0168c1340ea6de8d5c79603ddaea1` |
+| Generated tree SHA-256 | `2b6173f31036bc2a70fd365effa0c5a02db8644fd8e71642de49fe11e64c2bc4` |
 
 Long-term golden checks:
 
@@ -281,8 +281,9 @@ Long-term golden checks:
 The truth manifest additionally records all source counts and hashes, the
 same-second 40-event burst, the exact 90-second skew/late-arrival window,
 rotations, long-line counts, expected lane gaps, and canonical queries. Tests
-regenerate the default profile and compare every checked-in byte, so fixture
-or generator drift fails offline.
+regenerate the default profile, compare every generated log and primary-truth
+byte, and compare the JSON meaning of the metric and evaluator fixtures. This
+keeps log identity exact while allowing harmless JSON formatting changes.
 
 ## Import and investigate
 
