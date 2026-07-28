@@ -89,7 +89,7 @@ Check each box only when true for **this** sample and build.
 - [ ] Chat/tools (if used) cite checkable evidence more often than they invent
 - [ ] No secrets or private data left in notes, screenshots, or tickets
 
-**Go** if the checklist is mostly true and remaining gaps are documented.  
+**Go** if the checklist is mostly true and remaining gaps are documented.
 **No-go** if import is untrustworthy, provenance is wrong, or AI routinely
 fabricates evidence you cannot correct from the UI.
 

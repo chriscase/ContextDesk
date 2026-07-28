@@ -1406,11 +1406,17 @@ fn company_original_fidelity_truth(files: &[ImportFile]) -> Value {
                 },
                 {
                     "event_id": "fid-crlf-0",
-                    "properties": ["CRLF line ending fidelity for first line"]
+                    "properties": [
+                        "first record content imported from a CRLF source",
+                        "per-event Original does not claim record-separator bytes"
+                    ]
                 },
                 {
                     "event_id": "fid-crlf-1",
-                    "properties": ["CRLF line ending fidelity for second line"]
+                    "properties": [
+                        "second record content imported from a CRLF source",
+                        "per-event Original does not claim record-separator bytes"
+                    ]
                 },
                 {
                     "event_id": "fid-long-line",
