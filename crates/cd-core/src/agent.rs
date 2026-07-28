@@ -248,29 +248,29 @@ fn linked_workspace_search_requested(user_text: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn linked_broader_read_requested(user_text: &str) -> bool {
+fn linked_broader_source_requests(user_text: &str) -> [bool; 4] {
     let lower = user_text.to_ascii_lowercase();
     [
-        "durable memory",
-        " memory",
-        "database",
-        " sql",
-        "connector",
-        "confluence",
-        "web search",
-        "internet",
+        ["durable memory", "memory note", "remembered context"]
+            .iter()
+            .any(|needle| lower.contains(needle)),
+        [
+            "incident database",
+            "database connector",
+            "query the database",
+            " sqlite",
+            " postgres",
+            " sql ",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle)),
+        ["connector", "confluence"]
+            .iter()
+            .any(|needle| lower.contains(needle)),
+        ["web search", "internet"]
+            .iter()
+            .any(|needle| lower.contains(needle)),
     ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-/// Whether a linked-log request explicitly needs the full workspace host.
-///
-/// Pure log questions can safely run against a turn-local read-only log host
-/// while optional workspace/memory startup is delayed. Requests naming those
-/// broader sources must remain provider-free until the governed host is ready.
-pub fn linked_request_requires_workspace_host(user_text: &str) -> bool {
-    linked_workspace_search_requested(user_text) || linked_broader_read_requested(user_text)
 }
 
 fn linked_workspace_evidence_required(user_text: &str, specs: &[ToolSpec]) -> bool {
@@ -278,6 +278,73 @@ fn linked_workspace_evidence_required(user_text: &str, specs: &[ToolSpec]) -> bo
         && specs
             .iter()
             .any(|tool| tool.name == crate::tools::names::SEARCH_KB)
+}
+
+fn linked_unavailable_requested_sources(user_text: &str, specs: &[ToolSpec]) -> Vec<&'static str> {
+    let mut unavailable = Vec::new();
+    if linked_workspace_search_requested(user_text)
+        && !specs
+            .iter()
+            .any(|tool| tool.name == crate::tools::names::SEARCH_KB)
+    {
+        unavailable.push("workspace files/runbooks");
+    }
+    let [memory, database, connectors, web] = linked_broader_source_requests(user_text);
+    if memory
+        && !specs
+            .iter()
+            .any(|tool| tool.name == crate::tools::names::RECALL_MEMORY)
+    {
+        unavailable.push("durable memory");
+    }
+    if database
+        && !specs
+            .iter()
+            .any(|tool| tool.name.starts_with("sql_query__"))
+    {
+        unavailable.push("database connectors");
+    }
+    if connectors
+        && !specs.iter().any(|tool| {
+            tool.name.starts_with("mcp__")
+                || tool.name.starts_with("sql_query__")
+                || tool.name.starts_with("http_request__")
+                || tool.name.starts_with("confluence_")
+        })
+    {
+        unavailable.push("configured connectors");
+    }
+    if web
+        && !specs
+            .iter()
+            .any(|tool| tool.name == crate::tools::names::WEB_SEARCH)
+    {
+        unavailable.push("web research");
+    }
+    unavailable
+}
+
+fn linked_available_broader_read_requested(user_text: &str, specs: &[ToolSpec]) -> bool {
+    let [memory, database, connectors, web] = linked_broader_source_requests(user_text);
+    (memory
+        && specs
+            .iter()
+            .any(|tool| tool.name == crate::tools::names::RECALL_MEMORY))
+        || (database
+            && specs
+                .iter()
+                .any(|tool| tool.name.starts_with("sql_query__")))
+        || (connectors
+            && specs.iter().any(|tool| {
+                tool.name.starts_with("mcp__")
+                    || tool.name.starts_with("sql_query__")
+                    || tool.name.starts_with("http_request__")
+                    || tool.name.starts_with("confluence_")
+            }))
+        || (web
+            && specs
+                .iter()
+                .any(|tool| tool.name == crate::tools::names::WEB_SEARCH))
 }
 
 /// Heuristic: assistant text that defers work instead of answering from evidence.
@@ -708,7 +775,13 @@ pub async fn run_agent_turn_with_sink(
     };
     let linked_workspace_search_required =
         linked_turn && linked_workspace_evidence_required(user_text, &specs);
-    let linked_broader_reads_required = linked_turn && linked_broader_read_requested(user_text);
+    let linked_broader_reads_required =
+        linked_turn && linked_available_broader_read_requested(user_text, &specs);
+    let linked_unavailable_sources = if linked_turn {
+        linked_unavailable_requested_sources(user_text, &specs)
+    } else {
+        Vec::new()
+    };
     let linked_workspace_specs = if linked_workspace_search_required {
         specs
             .iter()
@@ -735,16 +808,13 @@ pub async fn run_agent_turn_with_sink(
     if let Some(context) = opts.log_explorer_context.as_ref() {
         system_content.push_str(&context.system_hint());
     }
-    if linked_turn
-        && host.log_only_tool_surface()
-        && linked_request_requires_workspace_host(user_text)
-    {
-        system_content.push_str(
-            "\nLIMITED CONTEXT: workspace files, durable memory, databases, and connectors are \
-             unavailable for this turn. Investigate the linked logs with the offered read-only \
-             log tools, clearly disclose the unavailable requested sources, and make no claims \
-             about evidence you could not retrieve.\n",
-        );
+    if !linked_unavailable_sources.is_empty() {
+        system_content.push_str(&format!(
+            "\nLIMITED CONTEXT: these requested sources are unavailable for this turn: {}. \
+             Investigate the linked logs with the offered read-only log tools, clearly disclose \
+             each unavailable source, and make no claims about evidence you could not retrieve.\n",
+            linked_unavailable_sources.join(", ")
+        ));
     }
 
     if history.is_empty() {
@@ -792,6 +862,12 @@ pub async fn run_agent_turn_with_sink(
         trail.push("linked_log_required_cross_source_reads".into());
         if host.log_only_tool_surface() {
             trail.push("linked_log_only_fallback".into());
+        }
+        if !linked_unavailable_sources.is_empty() {
+            trail.push(format!(
+                "linked_unavailable_requested_sources:{}",
+                linked_unavailable_sources.join(",")
+            ));
         }
         if !linked_grounding_specs.is_empty() {
             trail.push("linked_grounding_surface:search_logs".into());
@@ -1868,21 +1944,21 @@ mod tests {
         assert!(!linked_workspace_search_requested(
             "Show the error spike and identify the likely service."
         ));
-        assert!(linked_broader_read_requested(
+        assert!(linked_broader_source_requests(
             "Cross-check durable memory and the incident database."
-        ));
-        assert!(!linked_broader_read_requested(
+        )
+        .into_iter()
+        .any(|requested| requested));
+        assert!(!linked_broader_source_requests(
             "Cross-check the linked logs against the workspace runbook."
-        ));
-        assert!(linked_request_requires_workspace_host(
-            "Cross-check the linked logs against durable memory."
-        ));
-        assert!(linked_request_requires_workspace_host(
-            "Compare this with our workspace runbook."
-        ));
-        assert!(!linked_request_requires_workspace_host(
-            "Show the most important problem in these logs."
-        ));
+        )
+        .into_iter()
+        .any(|requested| requested));
+        assert!(
+            !linked_broader_source_requests("Show database timeout errors in these logs.")
+                .into_iter()
+                .any(|requested| requested)
+        );
         let log_only = crate::log_analysis::log_tool_specs()
             .into_iter()
             .filter(|tool| tool.side_effect == ToolSideEffect::Read)
@@ -1897,6 +1973,21 @@ mod tests {
         assert!(linked_workspace_evidence_required(
             "Compare these logs with the workspace runbook.",
             &crate::tools::mvp_tool_specs()
+        ));
+        assert_eq!(
+            linked_unavailable_requested_sources(
+                "Compare these logs with the workspace runbook, durable memory, and incident database.",
+                &log_only
+            ),
+            vec![
+                "workspace files/runbooks",
+                "durable memory",
+                "database connectors"
+            ]
+        );
+        assert!(!linked_available_broader_read_requested(
+            "Check durable memory and the incident database.",
+            &log_only
         ));
     }
 
@@ -2058,7 +2149,7 @@ mod tests {
                 finish_reason: "stop".into(),
             },
             ChatCompletion {
-                content: "The worker pool exhausted while handling job-7f3a (seq=1 source=worker.log event_id=worker-loop)."
+                content: "Durable memory was unavailable for this turn. The logs show the worker pool exhausted while handling job-7f3a (seq=1 source=worker.log event_id=worker-loop)."
                     .into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
@@ -2067,11 +2158,12 @@ mod tests {
         let context =
             LogExplorerTurnContext::new("log-explorer-window", &report.corpus_id, "All sources")
                 .unwrap();
+        let mut history = Vec::new();
         let events = run_agent_turn(
             &backend,
             &mut host,
-            "What is the most important problem?",
-            &mut Vec::new(),
+            "What is the most important problem? Cross-check durable memory.",
+            &mut history,
             &AgentOptions {
                 session_id: "linked-wrapper-session".into(),
                 log_explorer_context: Some(context),
@@ -2093,6 +2185,20 @@ mod tests {
         assert!(answer.contains("event_id=worker-loop"), "{answer}");
         assert!(!answer.contains("UNTRUSTED_DATA"), "{answer}");
         assert!(!answer.contains("untrusted external data"), "{answer}");
+        assert!(
+            answer.contains("Durable memory was unavailable"),
+            "{answer}"
+        );
+        let system = history
+            .iter()
+            .find(|message| message.role == Role::System)
+            .map(|message| message.content.as_str())
+            .unwrap_or("");
+        assert!(
+            system.contains("requested sources are unavailable")
+                && system.contains("durable memory"),
+            "{system}"
+        );
         let trail = events
             .iter()
             .filter_map(|event| match event {

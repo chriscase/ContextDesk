@@ -133,6 +133,8 @@ struct AppState {
     /// Coordinates startup warmup and on-demand construction so only one
     /// blocking host rebuild can be active at a time.
     host_init: HostInitFlight,
+    /// Invalidates optional background attachments when the host is rebuilt.
+    host_generation: Arc<std::sync::atomic::AtomicU64>,
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
@@ -373,7 +375,16 @@ fn take_ready_linked_host<F>(
 where
     F: FnOnce() -> Result<ToolHost, String>,
 {
-    let ready = shared.try_lock().ok().and_then(|mut guard| guard.take());
+    let ready = shared.try_lock().ok().and_then(|mut guard| {
+        let log_ready = guard.as_ref().is_some_and(|host| {
+            host.log_analysis_enabled()
+                && host
+                    .specs_for_model()
+                    .iter()
+                    .any(|tool| tool.name == cd_core::log_analysis::SEARCH_LOGS)
+        });
+        log_ready.then(|| guard.take()).flatten()
+    });
     match ready {
         Some(host) => Ok((host, false)),
         None => fallback().map(|host| (host, true)),
@@ -479,7 +490,6 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_prepared_durable_memory(
     live: &mut ToolHost,
     prepared: &ToolHost,
@@ -499,6 +509,7 @@ fn install_prepared_durable_memory(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_durable_memory_warmup(
     host_arc: Arc<Mutex<Option<ToolHost>>>,
     workspace: Workspace,
@@ -507,6 +518,8 @@ fn spawn_durable_memory_warmup(
     memory_config: cd_core::memory::MemoryConfig,
     embed_backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
     embed_model: String,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    expected_generation: u64,
 ) {
     if !memory_config.durable_memory_enabled {
         return;
@@ -515,24 +528,48 @@ fn spawn_durable_memory_warmup(
     let _ = std::thread::Builder::new()
         .name("cd-memory-warmup".into())
         .spawn(move || {
-            // Prepare against an isolated host. Protected-folder stalls remain
-            // confined to this optional worker and cannot hold HostInitFlight
-            // or the live ToolHost mutex.
-            let mut prepared =
-                ToolHost::new(workspace, cd_core::index::KeywordIndex::new(), audit_log);
-            prepared.set_embed_backend_with_model(embed_backend, &embed_model);
-            if let Err(error) = cd_core::memory::attach_durable_memory_to_host(
-                &mut prepared,
-                &branding,
-                &memory_config,
-            ) {
-                tracing::warn!(error = %error, "durable memory warmup failed; core host remains ready");
-                return;
-            }
+            let mut retry_delay = Duration::from_secs(5);
+            let prepared = loop {
+                if generation.load(std::sync::atomic::Ordering::SeqCst) != expected_generation {
+                    return;
+                }
+                // Prepare against an isolated host. Protected-folder stalls
+                // remain confined to this optional worker and cannot hold
+                // HostInitFlight or the live ToolHost mutex.
+                let mut candidate = ToolHost::new(
+                    workspace.clone(),
+                    cd_core::index::KeywordIndex::new(),
+                    audit_log.clone(),
+                );
+                candidate.set_embed_backend_with_model(embed_backend.clone(), &embed_model);
+                match cd_core::memory::attach_durable_memory_to_host(
+                    &mut candidate,
+                    &branding,
+                    &memory_config,
+                ) {
+                    Ok(()) => break candidate,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            retry_secs = retry_delay.as_secs(),
+                            "durable memory warmup failed; core host remains ready and memory will retry"
+                        );
+                        std::thread::sleep(retry_delay);
+                        retry_delay =
+                            std::cmp::min(retry_delay.saturating_mul(2), Duration::from_secs(60));
+                    }
+                }
+            };
             // A live agent turn may temporarily own the shared host. Wait only
             // in this optional installer; never delay startup or a turn.
-            for _ in 0..1_200 {
+            loop {
+                if generation.load(std::sync::atomic::Ordering::SeqCst) != expected_generation {
+                    return;
+                }
                 if let Ok(mut guard) = host_arc.try_lock() {
+                    if generation.load(std::sync::atomic::Ordering::SeqCst) != expected_generation {
+                        return;
+                    }
                     if let Some(host) = guard.as_mut() {
                         if install_prepared_durable_memory(
                             host,
@@ -550,13 +587,14 @@ fn spawn_durable_memory_warmup(
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            tracing::warn!(
-                "durable memory prepared but live host stayed unavailable; retry on next rebuild"
-            );
         });
 }
 
 fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
+    let host_generation = state
+        .host_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .saturating_add(1);
     // Stop previous watcher before replacing the host (#116).
     if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
         prev.stop();
@@ -615,6 +653,8 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
         cfg.memory.clone(),
         memory_embed_backend,
         memory_embed_model,
+        Arc::clone(&state.host_generation),
+        host_generation,
     );
 
     // Background full/incremental refresh off the UI / turn critical path
@@ -6089,6 +6129,7 @@ pub fn run() {
         histories: Mutex::new(HashMap::new()),
         host: Arc::new(Mutex::new(None)),
         host_init: HostInitFlight::default(),
+        host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
@@ -6469,17 +6510,47 @@ mod startup_host_tests {
     fn linked_log_selection_recovers_to_an_already_ready_full_host() {
         let workspace = Workspace::new("ready", vec![std::env::temp_dir()]);
         let expected_id = workspace.id.clone();
-        let shared = Arc::new(Mutex::new(Some(ToolHost::new(
-            workspace,
-            KeywordIndex::new(),
-            None,
-        ))));
+        let mut ready = ToolHost::new(workspace, KeywordIndex::new(), None);
+        ready.set_log_analysis(true, Some(std::env::temp_dir()));
+        let shared = Arc::new(Mutex::new(Some(ready)));
         let (host, used_fallback) = take_ready_linked_host(&shared, || {
             panic!("ready host should be taken without constructing fallback")
         })
         .expect("ready host");
         assert!(!used_fallback);
         assert_eq!(host.workspace.id, expected_id);
+    }
+
+    #[test]
+    fn linked_log_selection_rejects_a_host_without_log_tools() {
+        let workspace = Workspace::new("not-log-ready", vec![std::env::temp_dir()]);
+        let expected_id = workspace.id.clone();
+        let shared = Arc::new(Mutex::new(Some(ToolHost::new(
+            workspace,
+            KeywordIndex::new(),
+            None,
+        ))));
+        let (fallback, used_fallback) = take_ready_linked_host(&shared, || {
+            let mut host = ToolHost::new(
+                Workspace::new("fallback", Vec::new()),
+                KeywordIndex::new(),
+                None,
+            );
+            host.set_log_analysis(true, Some(std::env::temp_dir()));
+            Ok(host)
+        })
+        .expect("fallback");
+        assert!(used_fallback);
+        assert!(fallback.log_analysis_enabled());
+        assert_eq!(
+            shared
+                .lock()
+                .expect("shared")
+                .as_ref()
+                .map(|host| host.workspace.id.as_str()),
+            Some(expected_id.as_str()),
+            "non-log host must remain available for ordinary workspace turns"
+        );
     }
 
     #[test]
