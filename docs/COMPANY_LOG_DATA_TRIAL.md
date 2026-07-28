@@ -15,18 +15,29 @@ company-data session.
 
 ## Before you start
 
-1. **Copy a small, approved sample.** Work from a dedicated copy of logs, not
+1. **Record the promoted build.** Use the packaged build produced from current
+   `main` and record its commit SHA.
+2. **Copy a small, approved sample.** Work from a dedicated copy of logs, not
    production storage. Prefer one incident window or one service directory.
-2. **Scope tightly.** A few files and a few thousand events is enough for a
-   first trial. Larger corpora can wait until the small sample looks useful.
-3. **Handle secrets per company policy.** Remove, mask, or replace credentials,
+3. **Scope tightly.** Start with roughly 2–10 files and 1,000–25,000 events.
+   Larger corpora can wait until the small sample looks useful.
+4. **Handle secrets per company policy.** Remove, mask, or replace credentials,
    tokens, customer identifiers, and private hostnames **before** import when
-   policy requires it. Do not paste secrets into chat, screenshots, or issues.
-4. **Write down assumptions** (a sticky note is fine):
+   policy requires it. Built-in redaction reduces risk; it is not a guarantee.
+   Do not paste secrets into chat, screenshots, or issues.
+5. **Approve storage and model egress.** ContextDesk stores the imported corpus,
+   linked-chat history, and durable Investigation records locally. A remote
+   model provider can receive the prompt, bounded chat history, and bounded
+   redacted tool evidence. Use a loopback local-model profile when evidence
+   must not leave the machine.
+6. **Write down expected controls** (a sticky note is fine):
    - source formats you expect (JSON, logfmt, syslog, plain, mixed);
    - timezone or offset you believe the sources use;
    - approximate incident start/end in wall time;
-   - which hosts/services matter for the story.
+   - which hosts/services matter for the story;
+   - expected file/event counts;
+   - one known incident token, one ordinary event, and one token known to be
+     absent.
 
 ## Import
 
@@ -35,11 +46,16 @@ company-data session.
    analyze. Do **not** select a parent that also holds evaluator notes, truth
    files, or private side documents.
 3. After import finishes, record:
-   - file count and event count (or “unknown / partial”);
-   - any failed, excluded, binary, or empty files;
+   - discovered/imported file and event counts (or “unknown / partial”);
+   - any failed, excluded, or ignored files;
+   - Source and Corpus sizes;
+   - Analysis mode (Keyword-only, Deferred, Partial, or Complete);
+   - any **Partial corpus** explanation;
    - time-quality labels if shown (wall / order-only / mixed).
-4. If counts look wrong, stop and fix the sample or import root before drawing
-   product conclusions.
+4. If counts look wrong or an omission is unexplained, stop and fix the sample
+   or import root before drawing product conclusions. Keyword-only analysis is
+   still usable; local re-analysis is optional when semantic template search is
+   needed.
 
 ## Exercise the product
 
@@ -51,18 +67,30 @@ Work through each row. Mark pass / fail / skip and a one-line note.
 | Filter                    | Filter by level, service, or source if available                   | Results match what you can verify in the raw files                                         |
 | Lanes / sources           | Open more than one source                                          | You can tell which file a line came from; basename collisions do not merge unrelated hosts |
 | Timeline                  | Scroll/seek around the incident window                             | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
-| Bookmarks / investigation | Save 2–3 important events                                          | You can reopen them later in the same session                                              |
-| Linked chat               | Ask a narrow question with tools enabled if your build supports it | Answers that cite events can be checked against the source lines                           |
+| Bookmarks / investigation | Save 2–3 exact events and one finding; close and reopen Explorer    | Saved evidence resolves to the same events or visibly reports stale/missing identities     |
+| Linked chat               | Ask a narrow question using a model marked “linked tools available” | A real log tool runs and every cited `seq` and `source` resolves to the claimed evidence    |
 
 ## AI and evidence
 
-- Record the **provider/model** you used and whether **tools** were enabled.
+- Record the **provider/model** you used and whether the selected model says
+  **linked tools available**.
+- A model marked **linked tools unavailable** is expected to stop before
+  contacting the provider. It cannot pass a grounded linked-chat trial.
 - Treat every AI conclusion as a **hypothesis** until you open the cited source
   lines (or confirm the claim is unsupported).
 - Prefer questions like “which events mention `req-…`?” over “what caused the
   outage?” until retrieval looks trustworthy.
 - If the model invents timestamps, hosts, or stack frames that are not in the
   logs, note that as a failure—even if the prose sounds confident.
+- Navigation proposals must remain inert until you choose to apply them.
+- Open an ordinary main-screen chat and ask about the corpus. It must not
+  silently inherit Log Explorer context.
+
+A useful first linked-chat prompt is:
+
+> Without assuming a cause, identify the three most suspicious patterns in
+> these logs. For each, distinguish observation from inference, cite the exact
+> `seq` and `source`, and suggest a safe view I can open.
 
 ## What to capture (safe)
 
@@ -87,13 +115,27 @@ Check each box only when true for **this** sample and build.
 - [ ] At least one known incident token is findable
 - [ ] Source provenance is clear enough to trust multi-file stories
 - [ ] Time display does not over-claim when timestamps are missing or mixed
-- [ ] Bookmarks (or equivalent) preserve important events in-session
-- [ ] Chat/tools (if used) cite checkable evidence more often than they invent
+- [ ] Bookmarks and Investigation material survive close/reopen and resolve
+      exact evidence
+- [ ] A tools-enabled linked chat visibly uses a bounded log tool and every
+      material citation resolves correctly
+- [ ] An ordinary chat does not silently inherit the corpus
 - [ ] No secrets or private data left in notes, screenshots, or tickets
 
-**Go** if the checklist is mostly true and remaining gaps are documented.
-**No-go** if import is untrustworthy, provenance is wrong, or AI routinely
-fabricates evidence you cannot correct from the UI.
+**Go** only when every applicable trust and privacy item above passes.
+
+**No-go** if there is an unexplained import mismatch or omission, wrong source
+provenance, unredacted sensitive content, fabricated timestamp/alignment
+certainty, a linked-chat conclusion without successful log-tool evidence, a
+citation that resolves to the wrong event, or important evidence that cannot be
+recovered after reopening.
+
+Cosmetic friction, Keyword-only analysis, or a documented unsupported format
+can be a conditional-go item when the demo avoids overclaiming it.
+
+Discarding a corpus does not guarantee removal of separately persisted
+Investigation records or linked-chat history. Use an approved disposable VM or
+OS profile when policy requires a guaranteed clean environment.
 
 ## Results table (copy per trial)
 
@@ -118,6 +160,19 @@ fabricates evidence you cannot correct from the UI.
 | Performance notes                     |                            |
 | Go / no-go                            |                            |
 | Follow-ups (issue ids, if any)        |                            |
+
+## Known trial boundaries
+
+- #671: filters are temporary; durable, auditable noise-suppression rules are
+  not yet shipped.
+- #690: each corpus is analyzed independently; cross-corpus learned application
+  baselines are not yet shipped.
+- #670: per-source timezone/year/DST configuration, subsecond provenance, and
+  clock-skew correction remain incomplete.
+- Tools-disabled profiles cannot perform a linked log investigation. Their
+  honest refusal is expected behavior.
+- Portable package v1 does not include corpus bookmarks, while durable
+  Investigation records are persisted separately from the corpus.
 
 ## Related synthetic fixtures
 
