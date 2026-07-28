@@ -133,6 +133,7 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationFinding: vi.fn(),
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
+  hostLogPreviewInvestigationFindingView: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
   agentTurn: vi.fn(async () => []),
@@ -244,10 +245,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function scrollLaneToEdge(
-  edge: "older" | "newer",
-  laneIndex = 0,
-): HTMLElement {
+function scrollLaneToEdge(edge: "older" | "newer", laneIndex = 0): HTMLElement {
   const list = screen.getAllByTestId("virtualized-event-list")[laneIndex]!;
   Object.defineProperties(list, {
     clientHeight: { configurable: true, value: 400 },
@@ -262,11 +260,7 @@ function scrollLaneToEdge(
   return list;
 }
 
-function bookmark(
-  id: string,
-  label: string,
-  seq: number,
-): host.LogBookmarkDto {
+function bookmark(id: string, label: string, seq: number): host.LogBookmarkDto {
   return {
     id,
     label,
@@ -618,9 +612,7 @@ describe("LogExplorer shell", () => {
     });
     expect((twoL as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(twoL);
-    await waitFor(() =>
-      expect(root.getAttribute("data-lane-count")).toBe("2"),
-    );
+    await waitFor(() => expect(root.getAttribute("data-lane-count")).toBe("2"));
 
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = await screen.findByTestId("lane-editor");
@@ -663,9 +655,7 @@ describe("LogExplorer shell", () => {
     expect((fourL as HTMLButtonElement).disabled).toBe(false);
     fourL.focus();
     fireEvent.click(fourL);
-    await waitFor(() =>
-      expect(root.getAttribute("data-lane-count")).toBe("4"),
-    );
+    await waitFor(() => expect(root.getAttribute("data-lane-count")).toBe("4"));
     await waitFor(() => expect(document.activeElement).toBe(lanePicker));
   });
 
@@ -1005,9 +995,9 @@ describe("LogExplorer shell", () => {
     expect(decoyRow?.classList.contains("log-explorer__row--selected")).toBe(
       false,
     );
-    expect(
-      decoyRow?.classList.contains("log-explorer__row--highlight"),
-    ).toBe(false);
+    expect(decoyRow?.classList.contains("log-explorer__row--highlight")).toBe(
+      false,
+    );
     expect(screen.getByTestId("detail-metadata").textContent).toContain(
       "team-b/api.log",
     );
@@ -1090,9 +1080,7 @@ describe("LogExplorer shell", () => {
     {
       name: "level",
       apply: () => {
-        const errorFacet = within(
-          screen.getByTestId("log-explorer-filters"),
-        )
+        const errorFacet = within(screen.getByTestId("log-explorer-filters"))
           .getByText("error")
           .closest("label");
         fireEvent.click(within(errorFacet!).getByRole("checkbox"));
@@ -1251,9 +1239,7 @@ describe("LogExplorer shell", () => {
     first.unmount();
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByTestId("bookmark-activate-bm-reloaded"),
-    );
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-reloaded"));
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toContain(
         "Bookmark visible: persisted evidence",
@@ -1267,9 +1253,9 @@ describe("LogExplorer shell", () => {
     expect(targetRow?.classList.contains("log-explorer__row--selected")).toBe(
       true,
     );
-    expect(
-      targetRow?.classList.contains("log-explorer__row--highlight"),
-    ).toBe(true);
+    expect(targetRow?.classList.contains("log-explorer__row--highlight")).toBe(
+      true,
+    );
   });
 
   it("temporarily reveals a source-hidden bookmark and restores the exact prior view", async () => {
@@ -1411,10 +1397,7 @@ describe("LogExplorer shell", () => {
         const hidden =
           target.seq === bookmarkTarget.seq &&
           (query.filter?.levels ?? []).includes("error");
-        return eventNeighborhood(
-          target,
-          hidden ? "hidden_by_filter" : "found",
-        );
+        return eventNeighborhood(target, hidden ? "hidden_by_filter" : "found");
       },
     );
 
@@ -1469,9 +1452,11 @@ describe("LogExplorer shell", () => {
       expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(3),
     );
     expect(
-      (screen.getByRole("checkbox", {
-        name: /error 3/i,
-      }) as HTMLInputElement).checked,
+      (
+        screen.getByRole("checkbox", {
+          name: /error 3/i,
+        }) as HTMLInputElement
+      ).checked,
     ).toBe(true);
     expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
   });
@@ -1561,15 +1546,16 @@ describe("LogExplorer shell", () => {
       events,
       totalMatched: events.length,
     });
-    const eventRefs: host.LogBookmarkEventRefDto[] = [events[0]!, events[2]!].map(
-      (event) => ({
-        corpusId: "c1",
-        seq: event.seq,
-        source: event.source,
-        timestampHint: event.ts,
-        timeQualityHint: event.timeQuality,
-      }),
-    );
+    const eventRefs: host.LogBookmarkEventRefDto[] = [
+      events[0]!,
+      events[2]!,
+    ].map((event) => ({
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    }));
     vi.mocked(host.hostLogAddBookmark).mockResolvedValue({
       id: "bm-exact",
       label: "2 selected events",
@@ -1601,9 +1587,9 @@ describe("LogExplorer shell", () => {
       }),
     );
     expect(
-      vi.mocked(host.hostLogAddBookmark).mock.calls[0]![1].eventRefs?.map(
-        (eventRef) => eventRef.seq,
-      ),
+      vi
+        .mocked(host.hostLogAddBookmark)
+        .mock.calls[0]![1].eventRefs?.map((eventRef) => eventRef.seq),
     ).toEqual([10, 12]);
 
     fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
@@ -1833,9 +1819,7 @@ describe("LogExplorer shell", () => {
     const view = render(<LogExplorer corpusId="c1" />);
     fireEvent.click(await screen.findByText("auth failure"));
     fireEvent.click(screen.getByRole("button", { name: "Add…" }));
-    fireEvent.click(
-      screen.getByRole("menuitem", { name: /Create finding/ }),
-    );
+    fireEvent.click(screen.getByRole("menuitem", { name: /Create finding/ }));
     const findingDialog = await screen.findByRole("dialog", {
       name: "Create finding",
     });
@@ -1860,6 +1844,12 @@ describe("LogExplorer shell", () => {
         title: finding.title,
         whyItMatters: finding.whyItMatters,
         eventRefs: [eventRef],
+        viewRecipe: expect.objectContaining({
+          visibleLaneCount: 1,
+          linkMode: "independent",
+          selection: [eventRef],
+          focusedEvent: eventRef,
+        }),
       }),
     );
     const panel = await screen.findByTestId("log-explorer-evidence");
@@ -1937,6 +1927,258 @@ describe("LogExplorer shell", () => {
       await screen.findByTestId(`finding-item-${finding.id}`),
     ).toBeTruthy();
     expect(screen.getByTestId(`note-item-${note.id}`)).toBeTruthy();
+  });
+
+  it("previews a finding view without mutation, applies it explicitly, and restores the exact prior view", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: ["error"],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [eventRef],
+      highlights: [eventRef],
+      find: null,
+      viewportAnchors: [{ laneId: "lane-0", eventRef }],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000021",
+      kind: "observation",
+      lifecycle: "accepted",
+      title: "Checkout failure view",
+      whyItMatters: "The first failure anchors the retry sequence.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000020",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    const preview = {
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      recipe,
+      missingCount: 0,
+      staleCount: 0,
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue(
+      preview,
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(event),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Investigation workspace view: Chat/,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
+    );
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+
+    const initialQueryCount = vi.mocked(host.hostLogQueryEvents).mock.calls
+      .length;
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain(
+      "Preview only · current Explorer unchanged",
+    );
+    expect(viewPreview.textContent).toContain(
+      "Filters: All logs → levels error",
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(initialQueryCount);
+
+    fireEvent.click(
+      within(viewPreview).getByRole("button", {
+        name: "Apply saved view",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Applied saved Explorer view",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /error/i,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(true),
+    );
+    const selectedRow = document.querySelector<HTMLElement>(
+      `[data-seq="${event.seq}"]`,
+    );
+    await waitFor(() =>
+      expect(
+        selectedRow?.classList.contains("log-explorer__row--selected"),
+      ).toBe(true),
+    );
+    expect(
+      selectedRow?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
+    expect(host.hostLogPreviewInvestigationFindingView).toHaveBeenCalledTimes(
+      2,
+    );
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "Restored prior Explorer view",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("checkbox", {
+            name: /error/i,
+          }) as HTMLInputElement
+        ).checked,
+      ).toBe(false),
+    );
+  });
+
+  it("blocks a finding view when its exact references are stale", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const recipe: host.InvestigationViewRecipeDto = {
+      filters: {
+        levels: [],
+        sources: [],
+        services: [],
+        hosts: [],
+        timeFrom: null,
+        timeTo: null,
+        seqFrom: null,
+        seqTo: null,
+        templateId: null,
+        traceId: null,
+        keyword: null,
+      },
+      lanes: [{ id: "lane-0", label: "All sources", sources: [] }],
+      visibleLaneCount: 1,
+      linkMode: "independent",
+      focusedLaneId: "lane-0",
+      focusedEvent: eventRef,
+      selection: [],
+      highlights: [],
+      find: null,
+      viewportAnchors: [],
+    };
+    const finding: host.InvestigationFindingItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000023",
+      kind: "hypothesis",
+      lifecycle: "accepted",
+      title: "Potentially stale view",
+      whyItMatters: "Changed source identity must fail closed.",
+      evidenceIds: [],
+      viewRecipe: recipe,
+      provenance: "human",
+      createdAt: 3,
+      updatedAt: 3,
+    };
+    const loaded: host.ResolvedInvestigationDocumentDto = {
+      document: {
+        schemaVersion: 3,
+        id: "019fa8d0-0000-7000-8000-000000000022",
+        revision: 3,
+        title: "Investigation · fixture",
+        status: "active",
+        corpusLinks: [{ corpusId: "c1" }],
+        evidence: [],
+        findings: [finding],
+        notes: [],
+        createdAt: 1,
+        updatedAt: 3,
+      },
+      evidence: [],
+    };
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationFindingView).mockResolvedValue({
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      findingId: finding.id,
+      recipe,
+      missingCount: 0,
+      staleCount: 1,
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Investigation workspace view: Chat/,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
+    );
+    fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
+    fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
+
+    const viewPreview = await screen.findByTestId(
+      `finding-view-preview-${finding.id}`,
+    );
+    expect(viewPreview.textContent).toContain("Apply blocked");
+    expect(
+      (
+        within(viewPreview).getByRole("button", {
+          name: "Apply saved view",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
   });
 
   it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {
@@ -2017,8 +2259,7 @@ describe("LogExplorer shell", () => {
       createdAt: 2,
       updatedAt: 2,
     };
-    const staleLoad =
-      deferred<host.ResolvedInvestigationDocumentDto | null>();
+    const staleLoad = deferred<host.ResolvedInvestigationDocumentDto | null>();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockReturnValue(
       staleLoad.promise,
     );
@@ -4090,27 +4331,25 @@ describe("LogExplorer shell", () => {
       seq: 21,
       message: "untrusted partial cancelled result",
     };
-    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(
-      async () => {
-        searchCalls += 1;
-        if (searchCalls === 2) return cancelledSearch.promise;
-        return {
-          hits: [
-            {
-              event: keptEvent,
-              score: 1,
-              matchKind: "keyword",
-              templateId: keptEvent.templateId,
-            },
-          ],
-          nextCursor: null,
-          nextTs: null,
-          totalMatched: 1,
-          partial: false,
-          scanned: 1,
-        };
-      },
-    );
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      searchCalls += 1;
+      if (searchCalls === 2) return cancelledSearch.promise;
+      return {
+        hits: [
+          {
+            event: keptEvent,
+            score: 1,
+            matchKind: "keyword",
+            templateId: keptEvent.templateId,
+          },
+        ],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 1,
+        partial: false,
+        scanned: 1,
+      };
+    });
 
     render(<LogExplorer corpusId="c1" />);
     const find = screen.getByTestId("log-explorer-find");

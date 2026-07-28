@@ -56,6 +56,8 @@ type Props = {
   /** Shared scroll coordinate for aligned lanes. */
   linkedScrollTop?: number;
   onLinkedScrollTop?: (scrollTop: number) => void;
+  /** First visible authoritative event used as a logical, durable view anchor. */
+  onViewportAnchor?: (event: ExplorerEventDto) => void;
   /** Keep the lane-local column heading aligned with horizontal row scroll. */
   onHorizontalScroll?: (scrollLeft: number) => void;
   scrollToSeq?: number | null;
@@ -93,12 +95,14 @@ export function eventRowHeight(
       : previewLines;
   const lines = Math.min(
     maxLines,
-    displayedMessage.split(/\r?\n/).reduce(
-      (total, line) =>
-        total +
-        Math.max(1, Math.ceil(line.length / APPROX_PREVIEW_CHARS_PER_LINE)),
-      0,
-    ),
+    displayedMessage
+      .split(/\r?\n/)
+      .reduce(
+        (total, line) =>
+          total +
+          Math.max(1, Math.ceil(line.length / APPROX_PREVIEW_CHARS_PER_LINE)),
+        0,
+      ),
   );
   if (lines <= 1) return compactH;
   return Math.max(
@@ -134,6 +138,7 @@ export function VirtualizedEventList({
   alignedRows,
   linkedScrollTop,
   onLinkedScrollTop,
+  onViewportAnchor,
   onHorizontalScroll,
   scrollToSeq,
   focusToSeq,
@@ -226,11 +231,29 @@ export function VirtualizedEventList({
     return { heights, offsets, totalH: acc };
   }, [displayRows]);
 
+  const lastViewportAnchorSeq = useRef<number | null>(null);
+  const reportViewportAnchor = useCallback(
+    (nextScrollTop: number) => {
+      if (!onViewportAnchor) return;
+      const index = offsets.findIndex(
+        (offset, rowIndex) =>
+          offset + (heights[rowIndex] ?? compactH) > nextScrollTop,
+      );
+      if (index < 0) return;
+      const event = displayRows[index]?.event;
+      if (!event || event.seq === lastViewportAnchorSeq.current) return;
+      lastViewportAnchorSeq.current = event.seq;
+      onViewportAnchor(event);
+    },
+    [compactH, displayRows, heights, offsets, onViewportAnchor],
+  );
+
   const onScroll = useCallback(
     (e: UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget;
       setScrollTop(el.scrollTop);
       setViewportH(el.clientHeight);
+      reportViewportAnchor(el.scrollTop);
       onLinkedScrollTop?.(el.scrollTop);
       onHorizontalScroll?.(el.scrollLeft);
       const now = Date.now();
@@ -251,8 +274,13 @@ export function VirtualizedEventList({
       onNearBottom,
       onNearTop,
       edgeRowH,
+      reportViewportAnchor,
     ],
   );
+
+  useEffect(() => {
+    reportViewportAnchor(parentRef.current?.scrollTop ?? 0);
+  }, [reportViewportAnchor]);
 
   useEffect(() => {
     const el = parentRef.current;

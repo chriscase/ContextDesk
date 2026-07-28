@@ -194,11 +194,17 @@ rewriting them:
   remain verified, and reuses bookmark reveal/restore navigation.
 - Missing and changed identities remain listed honestly. Future document
   schemas fail closed.
+- Human-authored Observation, Inference, and Hypothesis records and cited notes
+  persist with exact evidence and optimistic revision checks.
+- A finding may carry a payload-free Explorer view recipe covering filters, all
+  lane memberships, visible lane count, time linking, Find/highlights,
+  selection, focus, and per-lane logical viewport anchors. Preview is
+  non-mutating; Apply revalidates every exact reference at the trusted host and
+  offers one-step restoration of the prior logical view.
 
 This foundation intentionally does not claim the remaining Investigation
-workflow: manual Observation/Inference/Hypothesis records, cited notes,
-complete proposed-view recipes, full logical viewport restoration, model
-finding proposals, or report assembly.
+workflow: model or detector proposals, ranked review, full proposal lifecycle
+history, finding walkthroughs, or report assembly.
 
 ## 7. Search / filter matrix
 

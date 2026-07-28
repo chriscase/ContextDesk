@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use uuid::{Uuid, Version};
 
 /// Investigation document schema understood by this build.
-pub const INVESTIGATION_SCHEMA_VERSION: u32 = 2;
+pub const INVESTIGATION_SCHEMA_VERSION: u32 = 3;
 const MIN_INVESTIGATION_SCHEMA_VERSION: u32 = 1;
 /// Maximum durable investigation documents under one store root.
 pub const MAX_INVESTIGATION_DOCUMENTS: usize = 256;
@@ -50,6 +50,12 @@ pub const MAX_INVESTIGATION_CORPUS_LINKS: usize = 16;
 
 const MAX_CORPUS_ID_BYTES: usize = 128;
 const MAX_SOURCE_IDENTITY_BYTES: usize = 1_024;
+const MAX_FINDING_VIEW_LANES: usize = 4;
+const MAX_FINDING_VIEW_FILTER_VALUES: usize = 256;
+const MAX_FINDING_VIEW_LANE_ID_BYTES: usize = 128;
+const MAX_FINDING_VIEW_LANE_LABEL_BYTES: usize = 256;
+const MAX_FINDING_VIEW_VALUE_BYTES: usize = 1_024;
+const MAX_FINDING_VIEW_FIND_QUERY_BYTES: usize = 4_096;
 const MAX_INVESTIGATION_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STORE_DIRECTORY_ENTRIES: usize = MAX_INVESTIGATION_DOCUMENTS + 128;
 const MAX_INVESTIGATION_DIRECTORY_ENTRIES: usize = MAX_INVESTIGATION_REVISIONS as usize + 128;
@@ -111,6 +117,146 @@ pub enum FindingLifecycle {
     Resolved,
 }
 
+/// Structured filters captured in a durable finding view recipe.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindingViewFilters {
+    /// Exact log levels (OR); empty means any level.
+    #[serde(default)]
+    pub levels: Vec<String>,
+    /// Relative source identities (OR); empty means any source.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Service identities (OR); empty means any service.
+    #[serde(default)]
+    pub services: Vec<String>,
+    /// Host identities (OR); empty means any host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// Inclusive timestamp/order lower bound.
+    pub time_from: Option<i64>,
+    /// Exclusive timestamp/order upper bound.
+    pub time_to: Option<i64>,
+    /// Inclusive stable event-sequence lower bound.
+    pub seq_from: Option<u64>,
+    /// Inclusive stable event-sequence upper bound.
+    pub seq_to: Option<u64>,
+    /// Optional exact template identifier.
+    pub template_id: Option<u64>,
+    /// Optional exact trace identifier.
+    pub trace_id: Option<String>,
+    /// Optional case-insensitive message keyword filter.
+    pub keyword: Option<String>,
+}
+
+/// One durable lane definition in a finding view recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindingViewLane {
+    /// Stable recipe-local lane identifier.
+    pub id: String,
+    /// Human-facing lane label.
+    pub label: String,
+    /// Relative source identities assigned to the lane.
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// Time-link behavior captured by a finding view recipe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingViewTimeLinkMode {
+    /// Lanes move independently.
+    Independent,
+    /// Other lanes follow the focused lane cursor.
+    FollowCursor,
+    /// Lanes align events at the same timestamp.
+    AlignTime,
+}
+
+/// Find matching strategy captured by a finding view recipe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingViewFindMatchMode {
+    /// Treat the query as literal text.
+    Literal,
+    /// Treat the query as a regular expression.
+    Regex,
+}
+
+/// Optional Find definition captured by a finding view recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindingViewFind {
+    /// Bounded query text.
+    pub query: String,
+    /// Literal or regular-expression matching.
+    pub match_mode: FindingViewFindMatchMode,
+    /// Whether text matching is case-sensitive.
+    pub case_sensitive: bool,
+    /// Whether template-semantic expansion was requested.
+    pub semantic: bool,
+}
+
+/// One lane's exact viewport anchor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindingViewViewportAnchor {
+    /// Recipe-local lane identifier.
+    pub lane_id: String,
+    /// Exact payload-free event identity at the lane viewport.
+    pub event_ref: BookmarkEventRef,
+}
+
+/// Durable, payload-free Explorer view state attached to a finding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindingViewRecipe {
+    /// Structured global filters.
+    pub filters: FindingViewFilters,
+    /// All configured lane definitions, including currently hidden lanes.
+    pub lanes: Vec<FindingViewLane>,
+    /// Number of lanes currently visible.
+    pub visible_lane_count: usize,
+    /// Current lane time-link behavior.
+    #[serde(rename = "linkMode")]
+    pub time_link_mode: FindingViewTimeLinkMode,
+    /// Optional focused recipe-local lane identifier.
+    pub focused_lane_id: Option<String>,
+    /// Optional exact focused event identity.
+    pub focused_event: Option<BookmarkEventRef>,
+    /// Exact selected event identities.
+    #[serde(default)]
+    pub selection: Vec<BookmarkEventRef>,
+    /// Exact resident Find-highlight identities.
+    #[serde(default)]
+    pub highlights: Vec<BookmarkEventRef>,
+    /// Optional Find definition.
+    pub find: Option<FindingViewFind>,
+    /// At most one exact viewport anchor per configured lane.
+    #[serde(default)]
+    pub viewport_anchors: Vec<FindingViewViewportAnchor>,
+}
+
+/// Preview/apply-time resolution of a durable finding view recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingViewRecipeResolution {
+    /// Investigation that owns the finding.
+    pub investigation_id: String,
+    /// Revision from which the recipe was loaded.
+    pub revision: u64,
+    /// Finding that owns the recipe.
+    pub finding_id: String,
+    /// Original durable, payload-free recipe.
+    #[serde(rename = "recipe")]
+    pub view_recipe: FindingViewRecipe,
+    /// Number of saved reference occurrences no longer present in the corpus.
+    pub missing_count: usize,
+    /// Number of saved reference occurrences whose identity hints are stale.
+    pub stale_count: usize,
+}
+
 /// A durable exact-event evidence item.
 ///
 /// Only identity hints are persisted. Payloads are resolved transiently from
@@ -151,6 +297,9 @@ pub struct FindingItem {
     pub why_it_matters: String,
     /// Explicit durable evidence identifiers supporting this finding.
     pub evidence_ids: Vec<String>,
+    /// Optional durable Explorer view recipe for preview/apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_recipe: Option<FindingViewRecipe>,
     /// Explicit human-only authorship provenance.
     pub provenance: HumanProvenance,
     /// Creation time as Unix seconds.
@@ -194,6 +343,9 @@ pub struct AddFindingInput {
     pub why_it_matters: String,
     /// Exact selected event identities to validate and cite.
     pub event_refs: Vec<BookmarkEventRef>,
+    /// Optional full Explorer view recipe to validate and persist.
+    #[serde(default)]
+    pub view_recipe: Option<FindingViewRecipe>,
 }
 
 /// Input for one atomic human note mutation.
@@ -607,6 +759,10 @@ impl InvestigationStore {
         let mut document = self.load_document(investigation_id)?;
         ensure_active_single_corpus(&document, corpus)?;
         let event_refs = canonicalize_exact_event_refs(corpus, input.event_refs)?;
+        let view_recipe = input
+            .view_recipe
+            .map(|recipe| canonicalize_finding_view_recipe(recipe, corpus))
+            .transpose()?;
 
         if finding_for_exact_set(
             &document,
@@ -615,6 +771,7 @@ impl InvestigationStore {
             kind,
             &title,
             &why_it_matters,
+            view_recipe.as_ref(),
         )
         .is_some()
         {
@@ -643,6 +800,7 @@ impl InvestigationStore {
             title: title.clone(),
             why_it_matters: why_it_matters.clone(),
             evidence_ids: vec![evidence_id],
+            view_recipe: view_recipe.clone(),
             provenance: HumanProvenance::Human,
             created_at: now,
             updated_at: now,
@@ -661,6 +819,7 @@ impl InvestigationStore {
                     kind,
                     &title,
                     &why_it_matters,
+                    view_recipe.as_ref(),
                 )
                 .is_some()
                 {
@@ -958,6 +1117,60 @@ impl InvestigationStore {
         })
     }
 
+    /// Revalidate a finding's durable view recipe without resolving event payloads.
+    ///
+    /// Missing and stale reference occurrences are counted honestly while the
+    /// original recipe remains unchanged for a caller-controlled preview/apply
+    /// decision. Findings without a saved recipe fail closed.
+    pub fn resolve_finding_view_recipe(
+        &self,
+        investigation_id: &str,
+        finding_id: &str,
+        corpus: &LogCorpus,
+    ) -> CoreResult<FindingViewRecipeResolution> {
+        validate_uuid_v7("finding id", finding_id)?;
+        let document = self.load_document(investigation_id)?;
+        ensure_corpus_link(&document, corpus.id())?;
+        let finding = document
+            .findings
+            .iter()
+            .find(|finding| finding.id == finding_id)
+            .ok_or_else(|| {
+                CoreError::Message(format!(
+                    "finding {finding_id} not found in investigation {investigation_id}"
+                ))
+            })?;
+        let recipe = finding.view_recipe.clone().ok_or_else(|| {
+            CoreError::Message(format!("finding {finding_id} has no saved view recipe"))
+        })?;
+        let references = finding_view_recipe_references(&recipe);
+        let seqs = references
+            .iter()
+            .map(|event_ref| event_ref.seq)
+            .collect::<Vec<_>>();
+        let actual_by_seq = fetch_events_by_seqs(corpus, &seqs)?
+            .into_iter()
+            .map(|event| (event.seq, event))
+            .collect::<HashMap<_, _>>();
+        let mut missing_count = 0usize;
+        let mut stale_count = 0usize;
+        for event_ref in references {
+            match exact_reference_status(event_ref, corpus.id(), &actual_by_seq) {
+                EvidenceReferenceStatus::Missing => missing_count += 1,
+                EvidenceReferenceStatus::Stale => stale_count += 1,
+                EvidenceReferenceStatus::Verified => {}
+            }
+        }
+        Ok(FindingViewRecipeResolution {
+            investigation_id: document.id,
+            revision: document.revision,
+            finding_id: finding_id.to_string(),
+            view_recipe: recipe,
+            missing_count,
+            stale_count,
+        })
+    }
+
     fn ensure_root(&self) -> CoreResult<()> {
         std::fs::create_dir_all(&self.root).map_err(|error| {
             CoreError::Message(format!("create investigation store root: {error}"))
@@ -1144,8 +1357,18 @@ fn validate_source_identity(source: &str) -> CoreResult<()> {
             "evidence source must contain 1..={MAX_SOURCE_IDENTITY_BYTES} UTF-8 bytes"
         )));
     }
+    let bytes = source.as_bytes();
+    let windows_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    let portable_traversal = source.split(['/', '\\']).any(|component| component == "..");
     let path = Path::new(source);
     if path.is_absolute()
+        || source.starts_with('/')
+        || source.starts_with('\\')
+        || windows_absolute
+        || portable_traversal
         || path.components().any(|component| {
             matches!(
                 component,
@@ -1156,6 +1379,438 @@ fn validate_source_identity(source: &str) -> CoreResult<()> {
         return Err(CoreError::Message(
             "evidence source must be a relative source identity".into(),
         ));
+    }
+    Ok(())
+}
+
+fn sanitize_finding_view_string(kind: &str, value: String, max_bytes: usize) -> CoreResult<String> {
+    let redaction = redact_candidate(&value);
+    if redaction.blocked {
+        return Err(CoreError::Message(
+            redaction
+                .block_reason
+                .unwrap_or_else(|| format!("{kind} appears credential-dominant")),
+        ));
+    }
+    let sanitized = redaction.text.trim().to_string();
+    if sanitized.is_empty()
+        || sanitized.len() > max_bytes
+        || sanitized.chars().any(char::is_control)
+    {
+        return Err(CoreError::Message(format!(
+            "{kind} must contain 1..={max_bytes} safe UTF-8 bytes after redaction"
+        )));
+    }
+    Ok(sanitized)
+}
+
+fn canonicalize_finding_view_values(
+    kind: &str,
+    values: Vec<String>,
+    source_identities: bool,
+) -> CoreResult<Vec<String>> {
+    if values.len() > MAX_FINDING_VIEW_FILTER_VALUES {
+        return Err(CoreError::Message(format!(
+            "{kind} exceeds {MAX_FINDING_VIEW_FILTER_VALUES} values"
+        )));
+    }
+    let mut canonical = Vec::with_capacity(values.len());
+    for value in values {
+        if source_identities {
+            validate_source_identity(&value)?;
+        }
+        let value = sanitize_finding_view_string(kind, value, MAX_FINDING_VIEW_VALUE_BYTES)?;
+        if source_identities {
+            validate_source_identity(&value)?;
+        }
+        canonical.push(value);
+    }
+    canonical.sort();
+    canonical.dedup();
+    Ok(canonical)
+}
+
+fn canonicalize_optional_finding_view_string(
+    kind: &str,
+    value: Option<String>,
+    max_bytes: usize,
+) -> CoreResult<Option<String>> {
+    value
+        .map(|value| sanitize_finding_view_string(kind, value, max_bytes))
+        .transpose()
+}
+
+fn canonicalize_finding_view_refs(
+    refs: Vec<BookmarkEventRef>,
+    corpus: &LogCorpus,
+    kind: &str,
+) -> CoreResult<Vec<BookmarkEventRef>> {
+    if refs.len() > MAX_BOOKMARK_EVENT_REFS {
+        return Err(CoreError::Message(format!(
+            "{kind} exceeds {MAX_BOOKMARK_EVENT_REFS} exact event references"
+        )));
+    }
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    canonicalize_exact_event_refs(corpus, refs)
+}
+
+fn canonicalize_optional_finding_view_ref(
+    event_ref: Option<BookmarkEventRef>,
+    corpus: &LogCorpus,
+) -> CoreResult<Option<BookmarkEventRef>> {
+    event_ref
+        .map(|event_ref| {
+            canonicalize_exact_event_refs(corpus, vec![event_ref]).map(|mut refs| refs.remove(0))
+        })
+        .transpose()
+}
+
+fn canonicalize_finding_view_recipe(
+    mut recipe: FindingViewRecipe,
+    corpus: &LogCorpus,
+) -> CoreResult<FindingViewRecipe> {
+    recipe.filters.levels =
+        canonicalize_finding_view_values("finding view levels", recipe.filters.levels, false)?;
+    recipe.filters.sources =
+        canonicalize_finding_view_values("finding view sources", recipe.filters.sources, true)?;
+    recipe.filters.services =
+        canonicalize_finding_view_values("finding view services", recipe.filters.services, false)?;
+    recipe.filters.hosts =
+        canonicalize_finding_view_values("finding view hosts", recipe.filters.hosts, false)?;
+    recipe.filters.trace_id = canonicalize_optional_finding_view_string(
+        "finding view trace id",
+        recipe.filters.trace_id,
+        MAX_FINDING_VIEW_VALUE_BYTES,
+    )?;
+    recipe.filters.keyword = canonicalize_optional_finding_view_string(
+        "finding view keyword",
+        recipe.filters.keyword,
+        MAX_FINDING_VIEW_VALUE_BYTES,
+    )?;
+    if recipe
+        .filters
+        .time_from
+        .zip(recipe.filters.time_to)
+        .is_some_and(|(from, to)| from >= to)
+    {
+        return Err(CoreError::Message(
+            "finding view timeFrom must precede timeTo".into(),
+        ));
+    }
+    if recipe
+        .filters
+        .seq_from
+        .zip(recipe.filters.seq_to)
+        .is_some_and(|(from, to)| from > to)
+    {
+        return Err(CoreError::Message(
+            "finding view seqFrom must not exceed seqTo".into(),
+        ));
+    }
+    if recipe.lanes.is_empty() || recipe.lanes.len() > MAX_FINDING_VIEW_LANES {
+        return Err(CoreError::Message(format!(
+            "finding view must contain 1..={MAX_FINDING_VIEW_LANES} lanes"
+        )));
+    }
+    let mut lane_ids = HashSet::new();
+    for lane in &mut recipe.lanes {
+        lane.id = sanitize_finding_view_string(
+            "finding view lane id",
+            std::mem::take(&mut lane.id),
+            MAX_FINDING_VIEW_LANE_ID_BYTES,
+        )?;
+        if !lane_ids.insert(lane.id.clone()) {
+            return Err(CoreError::Message(format!(
+                "finding view repeats lane id {}",
+                lane.id
+            )));
+        }
+        lane.label = sanitize_finding_view_string(
+            "finding view lane label",
+            std::mem::take(&mut lane.label),
+            MAX_FINDING_VIEW_LANE_LABEL_BYTES,
+        )?;
+        lane.sources = canonicalize_finding_view_values(
+            "finding view lane sources",
+            std::mem::take(&mut lane.sources),
+            true,
+        )?;
+    }
+    if recipe.visible_lane_count == 0 || recipe.visible_lane_count > recipe.lanes.len() {
+        return Err(CoreError::Message(format!(
+            "finding view visibleLaneCount must be within 1..={}",
+            recipe.lanes.len()
+        )));
+    }
+    recipe.focused_lane_id = canonicalize_optional_finding_view_string(
+        "finding view focused lane id",
+        recipe.focused_lane_id,
+        MAX_FINDING_VIEW_LANE_ID_BYTES,
+    )?;
+    if recipe
+        .focused_lane_id
+        .as_ref()
+        .is_some_and(|lane_id| !lane_ids.contains(lane_id))
+    {
+        return Err(CoreError::Message(
+            "finding view focused lane does not exist".into(),
+        ));
+    }
+    recipe.focused_event = canonicalize_optional_finding_view_ref(recipe.focused_event, corpus)?;
+    recipe.selection =
+        canonicalize_finding_view_refs(recipe.selection, corpus, "finding view selection")?;
+    recipe.highlights =
+        canonicalize_finding_view_refs(recipe.highlights, corpus, "finding view highlights")?;
+    if let Some(find) = &mut recipe.find {
+        find.query = sanitize_finding_view_string(
+            "finding view Find query",
+            std::mem::take(&mut find.query),
+            MAX_FINDING_VIEW_FIND_QUERY_BYTES,
+        )?;
+    }
+    if recipe.viewport_anchors.len() > recipe.lanes.len() {
+        return Err(CoreError::Message(
+            "finding view has more viewport anchors than lanes".into(),
+        ));
+    }
+    let lane_order = recipe
+        .lanes
+        .iter()
+        .enumerate()
+        .map(|(index, lane)| (lane.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut anchor_lanes = HashSet::new();
+    for anchor in &mut recipe.viewport_anchors {
+        anchor.lane_id = sanitize_finding_view_string(
+            "finding view anchor lane id",
+            std::mem::take(&mut anchor.lane_id),
+            MAX_FINDING_VIEW_LANE_ID_BYTES,
+        )?;
+        if !lane_ids.contains(&anchor.lane_id) {
+            return Err(CoreError::Message(
+                "finding view viewport anchor lane does not exist".into(),
+            ));
+        }
+        if !anchor_lanes.insert(anchor.lane_id.clone()) {
+            return Err(CoreError::Message(format!(
+                "finding view repeats viewport anchor for lane {}",
+                anchor.lane_id
+            )));
+        }
+        anchor.event_ref =
+            canonicalize_exact_event_refs(corpus, vec![anchor.event_ref.clone()])?.remove(0);
+    }
+    recipe
+        .viewport_anchors
+        .sort_by_key(|anchor| lane_order[&anchor.lane_id]);
+    Ok(recipe)
+}
+
+fn finding_view_recipe_references(recipe: &FindingViewRecipe) -> Vec<&BookmarkEventRef> {
+    recipe
+        .focused_event
+        .iter()
+        .chain(recipe.selection.iter())
+        .chain(recipe.highlights.iter())
+        .chain(
+            recipe
+                .viewport_anchors
+                .iter()
+                .map(|anchor| &anchor.event_ref),
+        )
+        .collect()
+}
+
+fn validate_stored_finding_view_recipe(
+    recipe: &FindingViewRecipe,
+    linked_corpora: &HashSet<&str>,
+) -> CoreResult<()> {
+    if recipe.lanes.is_empty() || recipe.lanes.len() > MAX_FINDING_VIEW_LANES {
+        return Err(CoreError::Message(format!(
+            "finding view must contain 1..={MAX_FINDING_VIEW_LANES} lanes"
+        )));
+    }
+    if recipe.visible_lane_count == 0 || recipe.visible_lane_count > recipe.lanes.len() {
+        return Err(CoreError::Message(
+            "finding view visibleLaneCount is invalid".into(),
+        ));
+    }
+    if recipe.selection.len() > MAX_BOOKMARK_EVENT_REFS
+        || recipe.highlights.len() > MAX_BOOKMARK_EVENT_REFS
+    {
+        return Err(CoreError::Message(format!(
+            "finding view selection/highlights exceed {MAX_BOOKMARK_EVENT_REFS} references"
+        )));
+    }
+    let mut lane_ids = HashSet::new();
+    for lane in &recipe.lanes {
+        validate_stored_finding_view_string(
+            "finding view lane id",
+            &lane.id,
+            MAX_FINDING_VIEW_LANE_ID_BYTES,
+        )?;
+        validate_stored_finding_view_string(
+            "finding view lane label",
+            &lane.label,
+            MAX_FINDING_VIEW_LANE_LABEL_BYTES,
+        )?;
+        if !lane_ids.insert(lane.id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "finding view repeats lane id {}",
+                lane.id
+            )));
+        }
+        validate_stored_finding_view_values("finding view lane sources", &lane.sources, true)?;
+    }
+    validate_stored_finding_view_values("finding view levels", &recipe.filters.levels, false)?;
+    validate_stored_finding_view_values("finding view sources", &recipe.filters.sources, true)?;
+    validate_stored_finding_view_values("finding view services", &recipe.filters.services, false)?;
+    validate_stored_finding_view_values("finding view hosts", &recipe.filters.hosts, false)?;
+    if let Some(trace_id) = recipe.filters.trace_id.as_deref() {
+        validate_stored_finding_view_string(
+            "finding view trace id",
+            trace_id,
+            MAX_FINDING_VIEW_VALUE_BYTES,
+        )?;
+    }
+    if let Some(keyword) = recipe.filters.keyword.as_deref() {
+        validate_stored_finding_view_string(
+            "finding view keyword",
+            keyword,
+            MAX_FINDING_VIEW_VALUE_BYTES,
+        )?;
+    }
+    if recipe
+        .filters
+        .time_from
+        .zip(recipe.filters.time_to)
+        .is_some_and(|(from, to)| from >= to)
+        || recipe
+            .filters
+            .seq_from
+            .zip(recipe.filters.seq_to)
+            .is_some_and(|(from, to)| from > to)
+    {
+        return Err(CoreError::Message(
+            "finding view filter bounds are invalid".into(),
+        ));
+    }
+    if recipe
+        .focused_lane_id
+        .as_deref()
+        .is_some_and(|lane_id| !lane_ids.contains(lane_id))
+    {
+        return Err(CoreError::Message(
+            "finding view focused lane does not exist".into(),
+        ));
+    }
+    if let Some(focused_lane_id) = recipe.focused_lane_id.as_deref() {
+        validate_stored_finding_view_string(
+            "finding view focused lane id",
+            focused_lane_id,
+            MAX_FINDING_VIEW_LANE_ID_BYTES,
+        )?;
+    }
+    if let Some(find) = &recipe.find {
+        validate_stored_finding_view_string(
+            "finding view Find query",
+            &find.query,
+            MAX_FINDING_VIEW_FIND_QUERY_BYTES,
+        )?;
+    }
+    if recipe.viewport_anchors.len() > recipe.lanes.len() {
+        return Err(CoreError::Message(
+            "finding view has more viewport anchors than lanes".into(),
+        ));
+    }
+    let mut anchor_lanes = HashSet::new();
+    let lane_order = recipe
+        .lanes
+        .iter()
+        .enumerate()
+        .map(|(index, lane)| (lane.id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut previous_anchor_index = None;
+    for anchor in &recipe.viewport_anchors {
+        if !lane_ids.contains(anchor.lane_id.as_str()) {
+            return Err(CoreError::Message(
+                "finding view viewport anchor lane does not exist".into(),
+            ));
+        }
+        if !anchor_lanes.insert(anchor.lane_id.as_str()) {
+            return Err(CoreError::Message(format!(
+                "finding view repeats viewport anchor for lane {}",
+                anchor.lane_id
+            )));
+        }
+        let anchor_index = lane_order[anchor.lane_id.as_str()];
+        if previous_anchor_index.is_some_and(|previous| previous >= anchor_index) {
+            return Err(CoreError::Message(
+                "finding view viewport anchors are not in lane order".into(),
+            ));
+        }
+        previous_anchor_index = Some(anchor_index);
+    }
+    for refs in [&recipe.selection, &recipe.highlights] {
+        let mut previous_seq = None;
+        for event_ref in refs {
+            if previous_seq.is_some_and(|previous| previous >= event_ref.seq) {
+                return Err(CoreError::Message(
+                    "finding view exact reference list is not canonical".into(),
+                ));
+            }
+            previous_seq = Some(event_ref.seq);
+        }
+    }
+    for event_ref in finding_view_recipe_references(recipe) {
+        if !linked_corpora.contains(event_ref.corpus_id.as_str()) {
+            return Err(CoreError::Message(
+                "finding view reference belongs to an unlinked corpus".into(),
+            ));
+        }
+        validate_source_identity(&event_ref.source)?;
+    }
+    Ok(())
+}
+
+fn validate_stored_finding_view_string(
+    kind: &str,
+    value: &str,
+    max_bytes: usize,
+) -> CoreResult<()> {
+    let canonical = sanitize_finding_view_string(kind, value.to_string(), max_bytes)?;
+    if canonical != value {
+        return Err(CoreError::Message(format!(
+            "{kind} is not in canonical redacted form"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_finding_view_values(
+    kind: &str,
+    values: &[String],
+    source_identities: bool,
+) -> CoreResult<()> {
+    if values.len() > MAX_FINDING_VIEW_FILTER_VALUES {
+        return Err(CoreError::Message(format!(
+            "{kind} exceeds {MAX_FINDING_VIEW_FILTER_VALUES} values"
+        )));
+    }
+    let mut previous = None;
+    for value in values {
+        if source_identities {
+            validate_source_identity(value)?;
+        }
+        validate_stored_finding_view_string(kind, value, MAX_FINDING_VIEW_VALUE_BYTES)?;
+        if previous.is_some_and(|previous: &str| previous >= value.as_str()) {
+            return Err(CoreError::Message(format!(
+                "{kind} is not canonical and strictly ordered"
+            )));
+        }
+        previous = Some(value.as_str());
     }
     Ok(())
 }
@@ -1200,6 +1855,7 @@ fn finding_for_exact_set<'a>(
     kind: FindingKind,
     title: &str,
     why_it_matters: &str,
+    view_recipe: Option<&FindingViewRecipe>,
 ) -> Option<&'a FindingItem> {
     let evidence_id = exact_evidence_for_set(document, corpus_id, event_refs)?
         .id
@@ -1209,6 +1865,7 @@ fn finding_for_exact_set<'a>(
             && finding.title == title
             && finding.why_it_matters == why_it_matters
             && finding.evidence_ids.as_slice() == [evidence_id]
+            && finding.view_recipe.as_ref() == view_recipe
     })
 }
 
@@ -1369,6 +2026,16 @@ fn validate_document(
             "investigation schema version 1 cannot contain findings or notes".into(),
         ));
     }
+    if document.schema_version < 3
+        && document
+            .findings
+            .iter()
+            .any(|finding| finding.view_recipe.is_some())
+    {
+        return Err(CoreError::Message(
+            "investigation schema versions 1 and 2 cannot contain finding view recipes".into(),
+        ));
+    }
     validate_uuid_v7("investigation id", &document.id)?;
     if expected_id.is_some_and(|expected| expected != document.id) {
         return Err(CoreError::Message(
@@ -1498,6 +2165,9 @@ fn validate_document(
             )));
         }
         validate_citation_ids("finding evidence", &finding.evidence_ids, &evidence_ids)?;
+        if let Some(recipe) = &finding.view_recipe {
+            validate_stored_finding_view_recipe(recipe, &linked_corpora)?;
+        }
     }
 
     if document.notes.len() > MAX_INVESTIGATION_NOTES {
@@ -1640,18 +2310,7 @@ fn resolve_references_from_map(
         .cloned()
         .map(|event_ref| {
             let event = actual_by_seq.get(&event_ref.seq).cloned();
-            let status = match event.as_ref() {
-                None => EvidenceReferenceStatus::Missing,
-                Some(actual)
-                    if event_ref.corpus_id != corpus_id
-                        || actual.source != event_ref.source
-                        || actual.ts != event_ref.timestamp_hint
-                        || actual.time_quality != event_ref.time_quality_hint =>
-                {
-                    EvidenceReferenceStatus::Stale
-                }
-                Some(_) => EvidenceReferenceStatus::Verified,
-            };
+            let status = exact_reference_status(&event_ref, corpus_id, actual_by_seq);
             EvidenceReferenceResolution {
                 event_ref,
                 status,
@@ -1659,6 +2318,25 @@ fn resolve_references_from_map(
             }
         })
         .collect()
+}
+
+fn exact_reference_status(
+    event_ref: &BookmarkEventRef,
+    corpus_id: &str,
+    actual_by_seq: &HashMap<u64, ExplorerEvent>,
+) -> EvidenceReferenceStatus {
+    match actual_by_seq.get(&event_ref.seq) {
+        None => EvidenceReferenceStatus::Missing,
+        Some(actual)
+            if event_ref.corpus_id != corpus_id
+                || actual.source != event_ref.source
+                || actual.ts != event_ref.timestamp_hint
+                || actual.time_quality != event_ref.time_quality_hint =>
+        {
+            EvidenceReferenceStatus::Stale
+        }
+        Some(_) => EvidenceReferenceStatus::Verified,
+    }
 }
 
 fn revision_filename(revision: u64) -> String {
@@ -1904,6 +2582,59 @@ mod tests {
             title: "Failure boundary".into(),
             why_it_matters: "The selected events bracket the incident.".into(),
             event_refs: selected_refs(corpus),
+            view_recipe: None,
+        }
+    }
+
+    fn finding_view_recipe(corpus: &LogCorpus) -> FindingViewRecipe {
+        FindingViewRecipe {
+            filters: FindingViewFilters {
+                levels: vec!["warn".into(), "error".into(), "error".into()],
+                sources: vec!["worker/worker.log".into(), "api/app.log".into()],
+                services: vec!["worker".into(), "api".into()],
+                hosts: vec!["host-b".into(), "host-a".into()],
+                time_from: Some(1_700_000_000),
+                time_to: Some(1_700_000_100),
+                seq_from: Some(10),
+                seq_to: Some(12),
+                template_id: Some(1),
+                trace_id: Some("trace-incident".into()),
+                keyword: Some("failure boundary".into()),
+            },
+            lanes: vec![
+                FindingViewLane {
+                    id: "lane-api".into(),
+                    label: "API".into(),
+                    sources: vec!["api/app.log".into()],
+                },
+                FindingViewLane {
+                    id: "lane-worker".into(),
+                    label: "Worker".into(),
+                    sources: vec!["worker/worker.log".into()],
+                },
+            ],
+            visible_lane_count: 2,
+            time_link_mode: FindingViewTimeLinkMode::AlignTime,
+            focused_lane_id: Some("lane-api".into()),
+            focused_event: Some(event_ref(corpus, 10, "api/app.log", 1_700_000_010)),
+            selection: selected_refs(corpus),
+            highlights: vec![event_ref(corpus, 12, "worker/worker.log", 1_700_000_012)],
+            find: Some(FindingViewFind {
+                query: "failure|warning".into(),
+                match_mode: FindingViewFindMatchMode::Regex,
+                case_sensitive: false,
+                semantic: false,
+            }),
+            viewport_anchors: vec![
+                FindingViewViewportAnchor {
+                    lane_id: "lane-worker".into(),
+                    event_ref: event_ref(corpus, 12, "worker/worker.log", 1_700_000_012),
+                },
+                FindingViewViewportAnchor {
+                    lane_id: "lane-api".into(),
+                    event_ref: event_ref(corpus, 10, "api/app.log", 1_700_000_010),
+                },
+            ],
         }
     }
 
@@ -1917,7 +2648,7 @@ mod tests {
     }
 
     #[test]
-    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v2() {
+    fn investigation_v1_loads_without_rewrite_and_first_mutation_upgrades_to_v3() {
         let cache = tempfile::tempdir().unwrap();
         let durable = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&cache);
@@ -1945,9 +2676,48 @@ mod tests {
         let upgraded = store
             .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
             .unwrap();
-        assert_eq!(upgraded.document.schema_version, 2);
+        assert_eq!(upgraded.document.schema_version, 3);
         assert_eq!(upgraded.document.revision, 2);
         assert!(revision_path.exists());
+    }
+
+    #[test]
+    fn investigation_v2_loads_without_rewrite_and_first_recipe_mutation_upgrades_to_v3() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Version two investigation", &corpus).unwrap();
+        let with_legacy_finding = store
+            .add_human_finding(&document.id, 1, &corpus, finding_input(&corpus))
+            .unwrap();
+        let revision_path = durable.path().join(&document.id).join(revision_filename(2));
+        let mut legacy = serde_json::to_value(&with_legacy_finding.document).unwrap();
+        legacy["schemaVersion"] = serde_json::json!(2);
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&revision_path, &legacy_bytes).unwrap();
+
+        let loaded = store.load(&document.id, &corpus).unwrap();
+        assert_eq!(loaded.document.schema_version, 2);
+        assert_eq!(loaded.document.findings.len(), 1);
+        assert!(loaded.document.findings[0].view_recipe.is_none());
+        assert_eq!(std::fs::read(&revision_path).unwrap(), legacy_bytes);
+        assert!(!durable
+            .path()
+            .join(&document.id)
+            .join(revision_filename(3))
+            .exists());
+
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let upgraded = store
+            .add_human_finding(&document.id, 2, &corpus, input)
+            .unwrap();
+        assert_eq!(upgraded.document.schema_version, 3);
+        assert_eq!(upgraded.document.revision, 3);
+        assert_eq!(upgraded.document.findings.len(), 2);
+        assert!(upgraded.document.findings[1].view_recipe.is_some());
+        assert_eq!(std::fs::read(&revision_path).unwrap(), legacy_bytes);
     }
 
     #[test]
@@ -2024,6 +2794,198 @@ mod tests {
         assert_eq!(retry_note.document.revision, first_note.document.revision);
         assert_eq!(retry_note.document.notes.len(), 1);
         assert_eq!(retry_note.document.evidence.len(), 1);
+    }
+
+    #[test]
+    fn investigation_finding_view_recipe_roundtrips_and_is_part_of_idempotence() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Durable view", &corpus).unwrap();
+        let mut input = finding_input(&corpus);
+        let requested_recipe = finding_view_recipe(&corpus);
+        input.view_recipe = Some(requested_recipe.clone());
+
+        let first = store
+            .add_human_finding(&document.id, 1, &corpus, input.clone())
+            .unwrap();
+        let saved = first.document.findings[0].view_recipe.as_ref().unwrap();
+        assert_eq!(saved.filters.levels, vec!["error", "warn"]);
+        assert_eq!(saved.selection[0].seq, 10);
+        assert_eq!(saved.viewport_anchors[0].lane_id, "lane-api");
+        assert_eq!(saved.viewport_anchors[1].lane_id, "lane-worker");
+
+        let retry = store
+            .add_human_finding(&document.id, 1, &corpus, input)
+            .unwrap();
+        assert_eq!(retry.document.revision, first.document.revision);
+        assert_eq!(retry.document.findings.len(), 1);
+
+        let mut different = finding_input(&corpus);
+        let mut different_recipe = requested_recipe;
+        different_recipe.time_link_mode = FindingViewTimeLinkMode::FollowCursor;
+        different.view_recipe = Some(different_recipe);
+        let second = store
+            .add_human_finding(&document.id, first.document.revision, &corpus, different)
+            .unwrap();
+        assert_eq!(second.document.findings.len(), 2);
+        assert_eq!(second.document.revision, first.document.revision + 1);
+
+        let reopened = store.load(&document.id, &corpus).unwrap();
+        let json = serde_json::to_string(&reopened.document).unwrap();
+        assert!(json.contains("\"viewRecipe\""));
+        assert!(json.contains("\"linkMode\":\"align_time\""));
+        assert!(!json.contains("\"timeLinkMode\""));
+        assert!(!json.contains(PAYLOAD_SENTINEL));
+        assert!(!json.contains("\"message\""));
+        assert_eq!(
+            reopened.document.findings[0].view_recipe.as_ref(),
+            first.document.findings[0].view_recipe.as_ref()
+        );
+    }
+
+    #[test]
+    fn investigation_finding_view_recipe_rejects_unsafe_shapes_refs_and_secrets() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Adversarial recipes", &corpus).unwrap();
+
+        let reject = |recipe: FindingViewRecipe| {
+            let mut input = finding_input(&corpus);
+            input.view_recipe = Some(recipe);
+            store
+                .add_human_finding(&document.id, 1, &corpus, input)
+                .unwrap_err()
+                .to_string()
+        };
+
+        let mut too_many_lanes = finding_view_recipe(&corpus);
+        too_many_lanes
+            .lanes
+            .extend((3..=5).map(|index| FindingViewLane {
+                id: format!("lane-{index}"),
+                label: format!("Lane {index}"),
+                sources: Vec::new(),
+            }));
+        assert!(reject(too_many_lanes).contains("1..=4 lanes"));
+
+        let mut duplicate_lane = finding_view_recipe(&corpus);
+        duplicate_lane.lanes[1].id = duplicate_lane.lanes[0].id.clone();
+        assert!(reject(duplicate_lane).contains("repeats lane id"));
+
+        let mut missing_focus = finding_view_recipe(&corpus);
+        missing_focus.focused_lane_id = Some("missing-lane".into());
+        assert!(reject(missing_focus).contains("focused lane does not exist"));
+
+        let mut duplicate_anchor = finding_view_recipe(&corpus);
+        duplicate_anchor.viewport_anchors[1].lane_id = "lane-worker".into();
+        assert!(reject(duplicate_anchor).contains("repeats viewport anchor"));
+
+        let mut oversized_selection = finding_view_recipe(&corpus);
+        oversized_selection.selection =
+            vec![event_ref(&corpus, 10, "api/app.log", 1_700_000_010); MAX_BOOKMARK_EVENT_REFS + 1];
+        assert!(reject(oversized_selection).contains("selection exceeds"));
+
+        let mut missing_ref = finding_view_recipe(&corpus);
+        missing_ref.focused_event = Some(event_ref(&corpus, 99, "api/app.log", 1_700_000_099));
+        assert!(reject(missing_ref).contains("missing from corpus"));
+
+        let mut stale_ref = finding_view_recipe(&corpus);
+        stale_ref.highlights = vec![event_ref(&corpus, 10, "changed.log", 1_700_000_010)];
+        assert!(reject(stale_ref).contains("no longer matches"));
+
+        let mut absolute_source = finding_view_recipe(&corpus);
+        absolute_source.filters.sources = vec!["/var/log/private.log".into()];
+        assert!(reject(absolute_source).contains("relative source identity"));
+
+        let mut traversal_source = finding_view_recipe(&corpus);
+        traversal_source.lanes[0].sources = vec!["../private.log".into()];
+        assert!(reject(traversal_source).contains("relative source identity"));
+
+        let mut portable_absolute_source = finding_view_recipe(&corpus);
+        portable_absolute_source.filters.sources = vec![r"C:\logs\private.log".into()];
+        assert!(reject(portable_absolute_source).contains("relative source identity"));
+
+        let mut portable_traversal_source = finding_view_recipe(&corpus);
+        portable_traversal_source.lanes[0].sources = vec![r"..\private.log".into()];
+        assert!(reject(portable_traversal_source).contains("relative source identity"));
+
+        let secret = ["sk-proj-", "abcdefghijklmnopqrstuvwxyz012345"].concat();
+        let mut secret_keyword = finding_view_recipe(&corpus);
+        secret_keyword.filters.keyword = Some(secret.clone());
+        assert!(reject(secret_keyword).contains("credential"));
+
+        let mut secret_find = finding_view_recipe(&corpus);
+        secret_find.find.as_mut().unwrap().query = secret;
+        assert!(reject(secret_find).contains("credential"));
+
+        let mut reversed_time = finding_view_recipe(&corpus);
+        reversed_time.filters.time_from = Some(10);
+        reversed_time.filters.time_to = Some(10);
+        assert!(reject(reversed_time).contains("timeFrom"));
+
+        let mut unknown_payload = serde_json::to_value(finding_view_recipe(&corpus)).unwrap();
+        unknown_payload["message"] = serde_json::json!("payload must not deserialize");
+        assert!(serde_json::from_value::<FindingViewRecipe>(unknown_payload)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
+
+        assert_eq!(
+            store.load(&document.id, &corpus).unwrap().document.revision,
+            1
+        );
+    }
+
+    #[test]
+    fn investigation_finding_view_preview_counts_stale_and_missing_without_payload() {
+        let cache = tempfile::tempdir().unwrap();
+        let durable = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&cache);
+        let store = InvestigationStore::new(durable.path());
+        let document = store.create("Recipe resolution", &corpus).unwrap();
+        let mut input = finding_input(&corpus);
+        input.view_recipe = Some(finding_view_recipe(&corpus));
+        let added = store
+            .add_human_finding(&document.id, 1, &corpus, input)
+            .unwrap();
+        let finding_id = added.document.findings[0].id.clone();
+        let durable_recipe = added.document.findings[0]
+            .view_recipe
+            .clone()
+            .expect("recipe was saved");
+
+        corpus
+            .with_connection(|connection| {
+                connection
+                    .execute("UPDATE events SET source = 'moved.log' WHERE seq = 10", [])
+                    .map_err(|error| CoreError::Message(format!("test update: {error}")))?;
+                connection
+                    .execute("DELETE FROM events WHERE seq = 12", [])
+                    .map_err(|error| CoreError::Message(format!("test delete: {error}")))?;
+                Ok(())
+            })
+            .unwrap();
+
+        let resolved = store
+            .resolve_finding_view_recipe(&document.id, &finding_id, &corpus)
+            .unwrap();
+        assert_eq!(resolved.stale_count, 3);
+        assert_eq!(resolved.missing_count, 3);
+        assert_eq!(resolved.view_recipe, durable_recipe);
+        let json = serde_json::to_string(&resolved).unwrap();
+        assert!(json.contains("\"recipe\""));
+        assert!(!json.contains("\"viewRecipe\""));
+        assert!(!json.contains(PAYLOAD_SENTINEL));
+        assert!(!json.contains("\"event\""));
+        assert!(!json.contains("\"message\""));
+        assert_eq!(
+            store.load(&document.id, &corpus).unwrap().document.revision,
+            added.document.revision
+        );
     }
 
     #[test]
@@ -2562,6 +3524,7 @@ mod tests {
                         "The owner should rotate {secret} after confirming the boundary."
                     ),
                     event_refs: selected_refs(&corpus),
+                    view_recipe: None,
                 },
             )
             .unwrap();
@@ -2722,6 +3685,7 @@ mod tests {
                     title: "Archived write".into(),
                     why_it_matters: "Archived investigations must reject this.".into(),
                     event_refs: selected_refs(&corpus),
+                    view_recipe: None,
                 },
             )
             .unwrap_err()

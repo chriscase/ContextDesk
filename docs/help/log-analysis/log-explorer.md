@@ -147,9 +147,11 @@ event references and human provenance outside the disposable corpus cache.
 It does not depend on a chat and is not removed when chats are switched,
 archived, or deleted.
 
-Use the **Investigation** selector in the right rail to move between **Evidence**
-and **Chat**. Evidence cards report event/source counts and current identity
-health:
+Use the **Investigation** selector in the right rail to move between the durable
+record and **Chat**. The record keeps findings, exact evidence, cited notes, and
+bookmarks together. Filtering that record never discards items, and switching
+to Chat preserves the Investigation browsing position. Evidence cards report
+event/source counts and current identity health:
 
 - **Verified** means corpus, sequence, relative source, timestamp, and time
   quality still match.
@@ -163,9 +165,17 @@ evidence. A reveal reuses the bookmark navigation contract, including
 **Restore prior view** when filters or lane composition must be temporarily
 broadened.
 
-This is the durable evidence foundation. Human findings, cited notes, richer
-finding lifecycles, and report assembly are still distinct follow-on
-investigation features; the Evidence rail does not claim they exist yet.
+**Add…** creates a human-authored Observation, Inference, Hypothesis, or cited
+note from the selected exact identities. Findings also save the complete
+logical Explorer view: active filters, all lane memberships, visible lane
+count, time-link mode, Find definition and exact highlights, selection, focus,
+and per-lane position anchors. **Preview saved view** describes the proposed
+changes without moving the Explorer. **Apply saved view** performs a fresh
+trusted-host identity check, fails closed for missing or changed references,
+and exposes **Restore prior view** for one-step return.
+
+Richer proposal review, ranking, revision history, and report assembly remain
+distinct follow-on investigation features.
 
 ## Agent context
 
