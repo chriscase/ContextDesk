@@ -207,6 +207,7 @@ function MetricTrack({
         currentPoint.timestamp,
       )}`;
   const cursorX = scaleTimestamp(cursor, bounds);
+  const gaps = series.gaps ?? [];
 
   const timestampFromPointer = (
     event: PointerEvent<HTMLDivElement>,
@@ -303,7 +304,7 @@ function MetricTrack({
               series.gaps?.length === 1 ? "" : "s"
             }.`}
           </desc>
-          {(series.gaps ?? []).map((gap) => {
+          {gaps.map((gap) => {
             const x = scaleTimestamp(gap.from, bounds);
             const width =
               scaleTimestamp(gap.to, bounds) - scaleTimestamp(gap.from, bounds);
@@ -316,7 +317,13 @@ function MetricTrack({
                 y={0}
                 width={Math.max(0.3, width)}
                 height={VIEWBOX_SIZE}
-              />
+              >
+                <title>
+                  Missing data from {formatTimestamp(gap.from)} to{" "}
+                  {formatTimestamp(gap.to)}
+                  {gap.reason ? `. ${gap.reason}` : ""}
+                </title>
+              </rect>
             );
           })}
           {selection ? (
@@ -385,15 +392,35 @@ function MetricTrack({
             {formatValue(threshold.value, series.unit)} ({threshold.severity})
           </span>
         ))}
-        {(series.gaps ?? []).map((gap) => (
-          <span
-            key={`${gap.from}-${gap.to}`}
-            className="operational-metric-track__gap-label"
-          >
-            Missing {formatTimestamp(gap.from)}–{formatTimestamp(gap.to)}
-            {gap.reason ? ` · ${gap.reason}` : ""}
-          </span>
-        ))}
+        {gaps.length > 0 ? (
+          <details className="operational-metric-track__gaps">
+            <summary>
+              {gaps.length} data gap{gaps.length === 1 ? "" : "s"}
+            </summary>
+            <div
+              className="operational-metric-track__gap-popover"
+              role="note"
+              aria-label={`${series.name} missing intervals`}
+            >
+              <strong>Missing intervals</strong>
+              <ul>
+                {gaps.map((gap) => (
+                  <li key={`${gap.from}-${gap.to}`}>
+                    <time dateTime={new Date(gap.from * 1_000).toISOString()}>
+                      {formatTimestamp(gap.from)}
+                    </time>
+                    {" – "}
+                    <time dateTime={new Date(gap.to * 1_000).toISOString()}>
+                      {formatTimestamp(gap.to)}
+                    </time>
+                    {gap.reason ? <span>{gap.reason}</span> : null}
+                  </li>
+                ))}
+              </ul>
+              <p>The line stays broken; missing samples are not interpolated.</p>
+            </div>
+          </details>
+        ) : null}
       </footer>
     </section>
   );

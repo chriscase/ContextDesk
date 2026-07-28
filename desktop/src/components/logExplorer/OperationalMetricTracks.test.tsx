@@ -206,11 +206,24 @@ describe("OperationalMetricTracks", () => {
     );
   });
 
-  it("renders explicit gaps as broken lines with textual, non-color detail", () => {
+  it("renders explicit gaps as broken lines with compact expandable detail", () => {
     render(<OperationalMetricTracks document={patternFixture} />);
 
     expect(screen.getAllByTestId(/operational-metric-gap-/)).toHaveLength(3);
-    expect(screen.getAllByText(/one missing .* sample/)).toHaveLength(3);
+    const summaries = screen.getAllByText("1 data gap");
+    expect(summaries).toHaveLength(3);
+    expect(
+      summaries.every(
+        (summary) => summary.closest("details")?.hasAttribute("open") === false,
+      ),
+    ).toBe(true);
+    fireEvent.click(summaries[0]!);
+    expect(screen.getByText("one missing CPU sample")).toBeTruthy();
+    expect(
+      screen.getAllByText(
+        "The line stays broken; missing samples are not interpolated.",
+      ),
+    ).toHaveLength(3);
     expect(
       screen.getAllByTestId(/operational-metric-segment-/).length,
     ).toBeGreaterThan(patternFixture.series.length);

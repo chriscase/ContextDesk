@@ -188,8 +188,59 @@
   margin-inline-end: var(--space-2, 8px);
 }
 
-.operational-metric-track__gap-label {
+.operational-metric-track__gaps {
+  position: relative;
   color: var(--metric-text);
+}
+
+.operational-metric-track__gaps summary {
+  padding: 0 0.35rem;
+  color: var(--metric-muted);
+  background: var(--metric-surface-subtle);
+  border: 1px solid var(--metric-border);
+  border-radius: 999px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.operational-metric-track__gaps summary::-webkit-details-marker {
+  display: none;
+}
+
+.operational-metric-track__gaps summary:focus-visible {
+  outline: 2px solid var(--metric-line);
+  outline-offset: 2px;
+}
+
+.operational-metric-track__gap-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.4rem);
+  z-index: 6;
+  width: min(24rem, 75vw);
+  padding: var(--space-2, 8px);
+  color: var(--metric-text);
+  background: var(--metric-surface);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius-md, 10px);
+  box-shadow: var(--shadow-lg, 0 12px 28px rgb(0 0 0 / 35%));
+}
+
+.operational-metric-track__gap-popover ul {
+  display: grid;
+  gap: var(--space-1, 4px);
+  margin: var(--space-1, 4px) 0;
+  padding-inline-start: 1.2rem;
+}
+
+.operational-metric-track__gap-popover li span {
+  display: block;
+  color: var(--metric-muted);
+}
+
+.operational-metric-track__gap-popover p {
+  margin: var(--space-1, 4px) 0 0;
+  color: var(--metric-muted);
 }
 
 .operational-metric-tracks--compact-side .operational-metric-tracks__header,
