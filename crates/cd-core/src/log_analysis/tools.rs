@@ -18,6 +18,12 @@ pub const ANOMALIES: &str = "anomalies_logs";
 /// Read trace tool name (#363).
 pub const TRACE: &str = "trace_logs";
 
+/// Largest reported-time window accepted by `search_logs`.
+///
+/// Seven days matches the largest deterministic checked-in Log Lab time-span
+/// fixture while keeping model-originated incident searches bounded.
+pub const MAX_SEARCH_LOG_TIME_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
+
 /// All Phase-1 + Phase-2 log tool names.
 pub const LOG_TOOL_NAMES: &[&str] = &[
     INGEST_LOGS,
@@ -63,13 +69,38 @@ fn corpus_param() -> serde_json::Value {
 pub fn search_logs_tool_spec() -> ToolSpec {
     ToolSpec {
         name: SEARCH_LOGS.into(),
-        description: "Search an ingested log corpus (structured + keyword; template-semantic only when that corpus has vectors). Cite template ids in conclusions. Omitting corpus uses the host active corpus.".into(),
+        description: format!(
+            "Search an ingested log corpus (structured + keyword; template-semantic only when \
+             that corpus has vectors). When a problem was reported at a known time, use \
+             time_from and time_to together for a deterministic bounded search around it; \
+             time_from is inclusive, time_to is exclusive, and the window may be at most \
+             {MAX_SEARCH_LOG_TIME_WINDOW_SECS} seconds (7 days). Reported wall-clock bounds are \
+             refused for order-only corpora rather than being compared with synthetic sequence \
+             values. Prefer this bounded search to reading the raw corpus. Cite template ids in \
+             conclusions. Omitting corpus uses the host active corpus."
+        ),
         side_effect: ToolSideEffect::Read,
         parameters: json!({
             "type": "object",
             "properties": {
                 "corpus": corpus_param(),
                 "query": { "type": "string" },
+                "time_from": {
+                    "type": "integer",
+                    "description": format!(
+                        "Inclusive start as a Unix timestamp in whole seconds. Must be supplied \
+                         with time_to; the pair may span at most \
+                         {MAX_SEARCH_LOG_TIME_WINDOW_SECS} seconds."
+                    )
+                },
+                "time_to": {
+                    "type": "integer",
+                    "description": format!(
+                        "Exclusive end as a Unix timestamp in whole seconds. Must be supplied \
+                         with time_from; the pair may span at most \
+                         {MAX_SEARCH_LOG_TIME_WINDOW_SECS} seconds."
+                    )
+                },
                 "level": { "type": "string" },
                 "service": { "type": "string" },
                 "trace_id": { "type": "string" },
@@ -188,4 +219,35 @@ pub fn log_tool_specs() -> Vec<ToolSpec> {
         anomalies_tool_spec(),
         trace_tool_spec(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_logs_schema_teaches_bounded_reported_time_semantics() {
+        let spec = search_logs_tool_spec();
+        let properties = spec.parameters["properties"]
+            .as_object()
+            .expect("search_logs properties");
+        let time_from = &properties["time_from"];
+        let time_to = &properties["time_to"];
+
+        assert_eq!(time_from["type"], "integer");
+        assert_eq!(time_to["type"], "integer");
+        assert!(time_from["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Inclusive start")));
+        assert!(time_to["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Exclusive end")));
+        assert!(spec.description.contains("problem was reported"));
+        assert!(spec.description.contains("deterministic bounded search"));
+        assert!(spec.description.contains("refused for order-only corpora"));
+        assert!(spec
+            .description
+            .contains(&MAX_SEARCH_LOG_TIME_WINDOW_SECS.to_string()));
+        assert_eq!(spec.parameters["required"], json!([]));
+    }
 }

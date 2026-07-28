@@ -213,6 +213,42 @@ const READ_SLICE_MAX_LINES: usize = 400;
 const READ_SLICE_MAX_LINE_BYTES: usize = 2_000;
 const READ_SLICE_MAX_OUTPUT_BYTES: usize = 24 * 1024;
 
+fn validated_search_log_time_bounds(args: &Value) -> CoreResult<(Option<i64>, Option<i64>)> {
+    let (Some(from_value), Some(to_value)) = (args.get("time_from"), args.get("time_to")) else {
+        if args.get("time_from").is_some() || args.get("time_to").is_some() {
+            return Err(CoreError::Message(
+                "search_logs time_from and time_to must be supplied together".into(),
+            ));
+        }
+        return Ok((None, None));
+    };
+
+    let parse_bound = |name: &str, value: &Value| {
+        value.as_i64().ok_or_else(|| {
+            CoreError::Message(format!(
+                "search_logs {name} must be an integer Unix timestamp within signed 64-bit range"
+            ))
+        })
+    };
+    let time_from = parse_bound("time_from", from_value)?;
+    let time_to = parse_bound("time_to", to_value)?;
+    if time_from >= time_to {
+        return Err(CoreError::Message(
+            "search_logs time_from must be less than time_to ([time_from, time_to))".into(),
+        ));
+    }
+    let span = time_to.checked_sub(time_from).ok_or_else(|| {
+        CoreError::Message("search_logs time range overflowed signed 64-bit seconds".into())
+    })?;
+    if span > crate::log_analysis::tools::MAX_SEARCH_LOG_TIME_WINDOW_SECS {
+        return Err(CoreError::Message(format!(
+            "search_logs time range may span at most {} seconds (7 days)",
+            crate::log_analysis::tools::MAX_SEARCH_LOG_TIME_WINDOW_SECS
+        )));
+    }
+    Ok((Some(time_from), Some(time_to)))
+}
+
 impl ToolHost {
     /// Create host.
     pub fn new(workspace: Workspace, index: KeywordIndex, audit: Option<AuditLog>) -> Self {
@@ -2154,12 +2190,22 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
+        let (time_from, time_to) = validated_search_log_time_bounds(args)?;
         let cache = self
             .log_cache_dir
             .as_ref()
             .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "search_logs")?;
         let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let time_quality = crate::log_analysis::corpus_time_quality(&corpus);
+        if time_from.is_some() && time_quality == crate::log_analysis::TimeQuality::OrderOnly {
+            return Err(CoreError::Message(
+                "search_logs reported-time bounds require wall-clock timestamps; this corpus is \
+                 order only (not calendar time), so use deterministic text/structured search and \
+                 event sequence identities instead"
+                    .into(),
+            ));
+        }
         let q = crate::log_analysis::SearchLogsQuery {
             query: args
                 .get("query")
@@ -2167,6 +2213,8 @@ impl ToolHost {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            time_from,
+            time_to,
             level: args
                 .get("level")
                 .and_then(|v| v.as_str())
@@ -2191,7 +2239,6 @@ impl ToolHost {
                 .unwrap_or(true),
             k: (args.get("k").and_then(|v| v.as_u64()).unwrap_or(8) as usize)
                 .min(self.max_results_per_source),
-            ..Default::default()
         };
         let hits =
             crate::log_analysis::search_logs(&corpus, &q, self.log_embed_backend().as_deref())?;
@@ -2213,7 +2260,14 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_templates\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_templates\ntime_quality: {}\ntime_from: {}\ntime_to: {}\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                time_quality.label(),
+                q.time_from
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".into()),
+                q.time_to
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "none".into()),
                 q.query.as_deref().unwrap_or("").replace(['\r', '\n'], " "),
                 hits.len(),
                 self.max_results_per_source
@@ -4334,6 +4388,74 @@ mod tests {
         assert!(sample.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
+    #[test]
+    fn search_logs_time_bounds_reject_untrusted_invalid_ranges() {
+        let invalid = [
+            (
+                json!({"time_from": 1}),
+                "time_from and time_to must be supplied together",
+            ),
+            (
+                json!({"time_to": 2}),
+                "time_from and time_to must be supplied together",
+            ),
+            (
+                json!({"time_from": "1", "time_to": 2}),
+                "time_from must be an integer",
+            ),
+            (
+                json!({"time_from": 1, "time_to": 1}),
+                "time_from must be less than time_to",
+            ),
+            (
+                json!({"time_from": 2, "time_to": 1}),
+                "time_from must be less than time_to",
+            ),
+            (
+                json!({"time_from": i64::MIN, "time_to": i64::MAX}),
+                "time range overflowed",
+            ),
+            (
+                json!({
+                    "time_from": 1_700_000_000,
+                    "time_to": 1_700_000_000
+                        + crate::log_analysis::tools::MAX_SEARCH_LOG_TIME_WINDOW_SECS
+                        + 1
+                }),
+                "may span at most 604800 seconds",
+            ),
+            (
+                json!({"time_from": 1, "time_to": u64::MAX}),
+                "time_to must be an integer",
+            ),
+        ];
+
+        for (arguments, expected) in invalid {
+            let error = validated_search_log_time_bounds(&arguments).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "arguments={arguments}; error={error}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_logs_time_bounds_accept_absent_and_exact_maximum_ranges() {
+        assert_eq!(
+            validated_search_log_time_bounds(&json!({})).unwrap(),
+            (None, None)
+        );
+        let time_from = i64::MAX - crate::log_analysis::tools::MAX_SEARCH_LOG_TIME_WINDOW_SECS;
+        assert_eq!(
+            validated_search_log_time_bounds(&json!({
+                "time_from": time_from,
+                "time_to": i64::MAX
+            }))
+            .unwrap(),
+            (Some(time_from), Some(i64::MAX))
+        );
+    }
+
     #[tokio::test]
     async fn help_tools_are_read_only_offline_and_emit_citations_and_trail() {
         let (_dir, mut host) = host_with_docs();
@@ -6160,6 +6282,114 @@ mod tests {
             "{:?}",
             search.log_evidence
         );
+
+        let boundary = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "time_from": 1_700_000_010,
+                    "time_to": 1_700_000_011,
+                    "semantic": false
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(boundary.ok, "{}", boundary.summary);
+        assert_eq!(
+            boundary
+                .log_evidence
+                .iter()
+                .map(|identity| identity.seq)
+                .collect::<Vec<_>>(),
+            vec![10],
+            "time_from must include seq 10 and time_to must exclude seq 11"
+        );
+
+        let ordered_a = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "query": "connection refused",
+                    "time_from": 1_700_000_010,
+                    "time_to": 1_700_000_013,
+                    "level": "error",
+                    "service": "api",
+                    "trace_id": "checkout-trace",
+                    "semantic": false
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let ordered_b = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "semantic": false,
+                    "trace_id": "checkout-trace",
+                    "service": "api",
+                    "level": "error",
+                    "time_to": 1_700_000_013,
+                    "time_from": 1_700_000_010,
+                    "query": "connection refused"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(ordered_a.ok && ordered_b.ok);
+        assert_eq!(ordered_a.log_evidence, ordered_b.log_evidence);
+        assert_eq!(
+            ordered_a
+                .log_evidence
+                .iter()
+                .map(|identity| identity.seq)
+                .collect::<Vec<_>>(),
+            vec![10, 11, 12],
+            "time bounds must compose with structured filters in any parameter order"
+        );
+        assert!(
+            ordered_a.detail_raw.contains("time_quality: wall clock")
+                && ordered_a.detail_raw.contains("time_from: 1700000010")
+                && ordered_a.detail_raw.contains("time_to: 1700000013"),
+            "{}",
+            ordered_a.detail_raw
+        );
+
+        let order_logs = dir.path().join("order-logs");
+        fs::create_dir_all(&order_logs).unwrap();
+        let mut order_file = fs::File::create(order_logs.join("legacy.log")).unwrap();
+        writeln!(order_file, "ERROR first failure without a timestamp").unwrap();
+        writeln!(order_file, "INFO retry without a timestamp").unwrap();
+        let order_report = crate::log_analysis::ingest_path(
+            &dir.path().join("cache"),
+            &order_logs,
+            "order",
+            None,
+            "none",
+        )
+        .unwrap();
+        host.set_active_log_corpus(Some(order_report.corpus_id));
+        let order_error = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "time_from": 1_700_000_000,
+                    "time_to": 1_700_000_060,
+                    "semantic": false
+                }),
+                None,
+            )
+            .await
+            .expect_err("wall-clock bounds must not filter synthetic order timestamps");
+        assert!(
+            order_error
+                .to_string()
+                .contains("order only (not calendar time)"),
+            "{order_error}"
+        );
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
 
         let forged_query = host
             .execute(
