@@ -1786,13 +1786,13 @@
   background: var(--bg-elevated, #121418);
   border: 1px solid var(--border-subtle, #2a2d33);
   border-radius: 9px;
-  bottom: calc(100% + 0.35rem);
   box-shadow: 0 14px 34px rgb(0 0 0 / 38%);
   display: grid;
   gap: 0.18rem;
   padding: 0.32rem;
   position: absolute;
   right: 0;
+  top: calc(100% + 0.35rem);
   width: min(18rem, calc(100vw - 2rem));
   z-index: 48;
 }

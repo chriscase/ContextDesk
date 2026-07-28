@@ -22,6 +22,7 @@ export function InvestigationAddMenu({
         !triggerRef.current?.contains(target)
       ) {
         onDismiss();
+        queueMicrotask(() => triggerRef.current?.focus());
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -42,14 +43,11 @@ export function InvestigationAddMenu({
     <div
       ref={menuRef}
       className="log-explorer__selection-add-menu"
+      data-placement="below"
       role="menu"
       aria-label="Add selected events to Investigation"
     >
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => onChoose("finding")}
-      >
+      <button type="button" role="menuitem" onClick={() => onChoose("finding")}>
         <span>Create finding</span>
         <span>Record an observation, inference, or hypothesis.</span>
       </button>
