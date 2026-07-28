@@ -41,7 +41,6 @@ import {
   type LaneEventRef,
 } from "../../lib/logExplorer/lanes";
 import {
-  aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
   formatCanonicalUtc,
@@ -157,6 +156,32 @@ function emptyEventPage(timeQuality: TimeQuality = "order_only"): EventPageDto {
     totalMatched: 0,
     timeQuality,
   };
+}
+
+/**
+ * Empty results do not erase the backend's known corpus/view time quality.
+ * Failed or still-loading lanes remain fail-closed because they provide no
+ * trustworthy quality claim at all.
+ */
+function aggregateViewTimeQuality(
+  laneIds: string[],
+  states: Record<string, LaneTimeState>,
+): TimeQuality {
+  if (laneIds.length === 0) return "order_only";
+  const qualities: TimeQuality[] = [];
+  for (const laneId of laneIds) {
+    const state = states[laneId];
+    if (
+      !state ||
+      state.status === "unloaded" ||
+      state.status === "error" ||
+      state.quality == null
+    ) {
+      return "order_only";
+    }
+    qualities.push(state.quality);
+  }
+  return leastReliableTimeQuality(qualities);
 }
 
 function effectiveLaneSources(
@@ -749,7 +774,6 @@ export function LogExplorer({ corpusId }: Props) {
     setLaneMatched(
       Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
     );
-    setTimeQuality("order_only");
     setGaps([]);
     try {
       if (laneCount <= 1) {
@@ -765,13 +789,13 @@ export function LogExplorer({ corpusId }: Props) {
         const laneState: LaneTimeState =
           page.events.length > 0
             ? { status: "loaded", quality: page.timeQuality }
-            : { status: "empty", quality: null };
+            : { status: "empty", quality: page.timeQuality };
         const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
         setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
-        setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
+        setTimeQuality(aggregateViewTimeQuality(["lane-0"], states));
         const seeded = seedFromPage(page);
         setLaneEvents({ "lane-0": seeded.events });
         setLaneCursors({
@@ -854,7 +878,7 @@ export function LogExplorer({ corpusId }: Props) {
           states[lane.id] =
             page.events.length > 0
               ? { status: "loaded", quality: page.timeQuality }
-              : { status: "empty", quality: null };
+              : { status: "empty", quality: page.timeQuality };
         }
         setLaneEvents(byLane);
         setLaneMatched(matchedByLane);
@@ -863,7 +887,7 @@ export function LogExplorer({ corpusId }: Props) {
         // No global unique matched total is derivable from overlapping lanes.
         setTotalMatched(0);
         setTimeQuality(
-          aggregateLaneTimeQuality(
+          aggregateViewTimeQuality(
             visibleLanes.map((lane) => lane.id),
             states,
           ),
@@ -991,7 +1015,11 @@ export function LogExplorer({ corpusId }: Props) {
       );
     });
     if (!settled) return;
+    const everyLaneHasEvents = visibleLaneIds.every(
+      (laneId) => laneTimeStates[laneId]?.status === "loaded",
+    );
     const invalid =
+      (linkMode !== "independent" && !everyLaneHasEvents) ||
       (linkMode === "align_time" && timeQuality !== "wall") ||
       (linkMode === "follow_cursor" && timeQuality === "order_only");
     if (invalid) {
@@ -1907,7 +1935,7 @@ export function LogExplorer({ corpusId }: Props) {
             } satisfies LaneTimeState,
           };
           setTimeQuality(
-            aggregateLaneTimeQuality(
+            aggregateViewTimeQuality(
               lanes.slice(0, laneCount).map((visible) => visible.id),
               next,
             ),
@@ -2104,6 +2132,9 @@ export function LogExplorer({ corpusId }: Props) {
     linkMode === "align_time"
       ? (alignedRowsByLane[lanes[0]?.id ?? ""]?.length ?? 0)
       : 0;
+  const visibleLanesHaveEvents = lanes
+    .slice(0, laneCount)
+    .every((lane) => laneTimeStates[lane.id]?.status === "loaded");
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
   const bpClass = `log-explorer--${breakpoint}`;
@@ -2227,6 +2258,15 @@ export function LogExplorer({ corpusId }: Props) {
                     : "Align lanes on a shared vertical time axis with explicit gap bands"
               }
               onClick={() => {
+                if (
+                  mode !== "independent" &&
+                  !visibleLanesHaveEvents
+                ) {
+                  setStatus(
+                    `${label} unavailable: every visible lane needs matching events`,
+                  );
+                  return;
+                }
                 if (mode === "align_time" && timeQuality !== "wall") {
                   setStatus(
                     `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
@@ -3246,7 +3286,7 @@ export function LogExplorer({ corpusId }: Props) {
                 laneTime.status === "loaded" && laneTime.quality != null
                   ? timeQualityLabel(laneTime.quality)
                   : laneTime.status === "empty"
-                    ? "time unavailable · empty"
+                    ? "time unavailable · no matching events"
                     : laneTime.status === "error"
                       ? "time unavailable · load failed"
                       : "time unavailable · loading";

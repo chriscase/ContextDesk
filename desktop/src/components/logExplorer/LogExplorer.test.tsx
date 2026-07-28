@@ -1586,6 +1586,144 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
   });
 
+  it("preserves wall-clock quality through an empty Find and Filter intersection, then restores Align", async () => {
+    const visible = defaultEventPage().events[0]!;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
+      hits: [
+        {
+          event: visible,
+          score: 1,
+          matchKind: "keyword",
+          templateId: visible.templateId,
+        },
+      ],
+      nextCursor: null,
+      nextTs: null,
+      totalMatched: 1,
+      partial: false,
+      scanned: 1,
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.keyword === "no-shared-result") {
+          return eventPage(query.sources?.[0] ?? "all.log", "wall", 0);
+        }
+        return eventPage(query?.sources?.[0] ?? "all.log", "wall");
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("align_time");
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "rare identity" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "no-shared-result" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-time-quality")).toBe("wall");
+      expect(root.getAttribute("data-link-mode")).toBe("independent");
+      expect(
+        document
+          .querySelector('[data-lane-id="lane-0"]')
+          ?.getAttribute("data-time-status"),
+      ).toBe("empty");
+    });
+    expect(
+      screen.getAllByText("time unavailable · no matching events"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).toContain("wall clock");
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).not.toContain("order only");
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("independent");
+    expect(
+      screen.getByText(
+        "Align unavailable: every visible lane needs matching events",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "keyword:no-shared-result ×" }),
+    );
+    await waitFor(() => {
+      expect(root.getAttribute("data-time-quality")).toBe("wall");
+      expect(
+        document
+          .querySelector('[data-lane-id="lane-0"]')
+          ?.getAttribute("data-time-status"),
+      ).toBe("loaded");
+    });
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("align_time");
+  });
+
+  it.each([
+    ["order_only", "order only (not calendar time)"],
+    ["mixed", "mixed time quality"],
+  ] as const)(
+    "retains known %s quality for an empty result and refuses Align",
+    async (quality, label) => {
+      vi.mocked(host.hostLogFacets).mockResolvedValue({
+        sources: { "api.log": 1 },
+        levels: { info: 1 },
+        services: {},
+        hosts: {},
+        timeQuality: quality,
+      });
+      vi.mocked(host.hostLogQueryEvents).mockResolvedValue(
+        eventPage("api.log", quality, 0),
+      );
+
+      render(<LogExplorer corpusId="c1" />);
+      const root = await screen.findByTestId("log-explorer");
+      await waitFor(() => {
+        expect(root.getAttribute("data-time-quality")).toBe(quality);
+        expect(
+          document
+            .querySelector('[data-lane-id="lane-0"]')
+            ?.getAttribute("data-time-status"),
+        ).toBe("empty");
+      });
+      expect(
+        screen.getByTestId("log-explorer-global-counts").textContent,
+      ).toContain(label);
+      expect(
+        screen.getByText("time unavailable · no matching events"),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByTestId("time-link-align_time"));
+      expect(root.getAttribute("data-link-mode")).toBe("independent");
+      expect(
+        screen.getByText(
+          "Align unavailable: every visible lane needs matching events",
+        ),
+      ).toBeTruthy();
+    },
+  );
+
   it("aligns wall-clock lanes on shared virtual rows with explicit empty cells and synchronized scroll", async () => {
     const makeEvent = (
       seq: number,
