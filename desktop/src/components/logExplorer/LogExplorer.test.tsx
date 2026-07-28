@@ -237,6 +237,10 @@ function eventNeighborhood(
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 3840,
+    });
     const store = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: (k: string) => store.get(k) ?? null,
@@ -340,6 +344,96 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-chat-collapsed")).toBe("false");
     expect(screen.getByTestId("splitter-chat")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
+  });
+
+  it("gates lane counts by usable evidence width and restores the preferred composed lanes", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1280,
+    });
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+        { id: "lane-2", label: "DB", sources: ["db.log"] },
+        { id: "lane-3", label: "Proxy", sources: ["proxy.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    await waitFor(() => {
+      expect(root.getAttribute("data-breakpoint")).toBe("normal");
+      expect(root.getAttribute("data-usable-evidence-width")).toBe("748");
+      expect(root.getAttribute("data-max-lane-count")).toBe("1");
+    });
+
+    const twoLUnavailable = screen.getByRole("button", { name: "2L" });
+    expect((twoLUnavailable as HTMLButtonElement).disabled).toBe(true);
+    expect(twoLUnavailable.title).toMatch(
+      /need 840px of usable evidence width; 748px available/,
+    );
+    expect(
+      (screen.getByRole("button", { name: "1L" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-usable-evidence-width")).toBe("1012");
+      expect(root.getAttribute("data-max-lane-count")).toBe("2");
+    });
+    const twoL = screen.getByRole("button", { name: "2L" });
+    expect((twoL as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(twoL);
+    await waitFor(() =>
+      expect(root.getAttribute("data-lane-count")).toBe("2"),
+    );
+
+    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    const editor = await screen.findByTestId("lane-editor");
+    expect(
+      (
+        within(
+          within(editor).getByRole("group", {
+            name: "Worker source membership",
+          }),
+        ).getByRole("checkbox", {
+          name: /worker\.log/i,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+
+    fireEvent.click(screen.getByTestId("expand-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-lane-count")).toBe("1");
+      expect(root.getAttribute("data-max-lane-count")).toBe("1");
+    });
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-lane-count")).toBe("2");
+      expect(root.getAttribute("data-max-lane-count")).toBe("2");
+    });
+
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 3840,
+    });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-max-lane-count")).toBe("4"),
+    );
+    const fourL = screen.getByRole("button", { name: "4L" });
+    expect((fourL as HTMLButtonElement).disabled).toBe(false);
+    fourL.focus();
+    fireEvent.keyDown(fourL, { key: "Enter" });
+    fireEvent.click(fourL);
+    await waitFor(() =>
+      expect(root.getAttribute("data-lane-count")).toBe("4"),
+    );
+    expect(document.activeElement).toBe(fourL);
   });
 
   it("focuses Find with the platform find shortcut", async () => {

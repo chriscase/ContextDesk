@@ -108,6 +108,12 @@ type Props = {
 };
 
 const FIND_PAGE_SIZE = 50;
+// Time + level + source + a useful message excerpt fit without reducing a
+// lane to timestamp/severity slivers. Availability is based on the central
+// evidence grid, after the live Filters/Chat rail widths and splitters.
+const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
+const SPLITTER_WIDTH_PX = 6;
+const COLLAPSED_CHAT_WIDTH_PX = 42;
 
 type FindCursor = {
   seq: number;
@@ -244,10 +250,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
   const [breakpoint, setBreakpoint] = useState<Breakpoint>("normal");
+  const [explorerWidth, setExplorerWidth] = useState(() => window.innerWidth);
   const [linkMode, setLinkMode] = useState<TimeLinkMode>(() =>
     loadLinkMode(corpusId),
   );
   const [laneCount, setLaneCount] = useState(1);
+  const [preferredLaneCount, setPreferredLaneCount] = useState(1);
   const [lanes, setLanes] = useState<LaneConfig[]>(() => {
     const saved = loadLanes(corpusId);
     return saved && saved.length > 0 ? saved : defaultLanes(1);
@@ -594,20 +602,60 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? window.innerWidth;
-      const bp = classifyBreakpoint(w);
+    const applyWidth = (width: number) => {
+      setExplorerWidth(width);
+      const bp = classifyBreakpoint(width);
       setBreakpoint(bp);
-      // #536: narrow is single-lane by contract.
+      // #536: narrow is a drawer-based, independent-time workspace.
       if (bp === "narrow") {
-        setLaneCount(1);
         setTimeLinkMode("independent");
       }
+    };
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? window.innerWidth;
+      applyWidth(w);
     });
+    const onWindowResize = () =>
+      applyWidth(el.clientWidth || window.innerWidth);
     ro.observe(el);
-    setBreakpoint(classifyBreakpoint(el.clientWidth || window.innerWidth));
-    return () => ro.disconnect();
+    applyWidth(el.clientWidth || window.innerWidth);
+    window.addEventListener("resize", onWindowResize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", onWindowResize);
+    };
   }, []);
+
+  const usableEvidenceWidth =
+    breakpoint === "narrow"
+      ? explorerWidth
+      : Math.max(
+          0,
+          explorerWidth -
+            filterW -
+            SPLITTER_WIDTH_PX -
+            (chatCollapsed
+              ? COLLAPSED_CHAT_WIDTH_PX
+              : SPLITTER_WIDTH_PX + chatW),
+        );
+  const maxLaneCount =
+    breakpoint === "narrow"
+      ? 1
+      : Math.max(
+          1,
+          Math.min(
+            4,
+            Math.floor(usableEvidenceWidth / MIN_EVIDENCE_LANE_WIDTH_PX),
+          ),
+        );
+
+  useEffect(() => {
+    const visibleCount = Math.min(preferredLaneCount, maxLaneCount);
+    setLaneCount((current) =>
+      current === visibleCount ? current : visibleCount,
+    );
+    if (visibleCount === 1) setLaneScrollSeq({});
+  }, [maxLaneCount, preferredLaneCount]);
 
   // Drag splitters
   useEffect(() => {
@@ -1988,7 +2036,8 @@ export function LogExplorer({ corpusId }: Props) {
   /** User-composed lanes: change count without inventing first-N source assignment (#486). */
   const configureLanes = (n: number) => {
     const count = clampLaneCount(n);
-    setLaneCount(count);
+    setPreferredLaneCount(count);
+    setLaneCount(Math.min(count, maxLaneCount));
     setLanes((prev) => {
       const next = resizeLaneList(prev, count);
       saveLanes(corpusId, next);
@@ -2115,6 +2164,8 @@ export function LogExplorer({ corpusId }: Props) {
       data-density={density}
       data-line-mode={lineMode}
       data-lane-count={laneCount}
+      data-max-lane-count={maxLaneCount}
+      data-usable-evidence-width={Math.floor(usableEvidenceWidth)}
       data-link-mode={linkMode}
       data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
@@ -2228,17 +2279,26 @@ export function LogExplorer({ corpusId }: Props) {
             {density}
           </button>
           {breakpoint !== "narrow" &&
-            [1, 2, 3, 4].map((n) => (
-              <button
-                key={n}
-                type="button"
-                className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
-                onClick={() => configureLanes(n)}
-                title={`${n} evidence lane${n > 1 ? "s" : ""}`}
-              >
-                {n}L
-              </button>
-            ))}
+            [1, 2, 3, 4].map((n) => {
+              const unavailable = n > maxLaneCount;
+              const requiredWidth = n * MIN_EVIDENCE_LANE_WIDTH_PX;
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
+                  disabled={unavailable}
+                  onClick={() => configureLanes(n)}
+                  title={
+                    unavailable
+                      ? `${n} evidence lanes need ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available`
+                      : `${n} evidence lane${n > 1 ? "s" : ""}`
+                  }
+                >
+                  {n}L
+                </button>
+              );
+            })}
           {(
             [
               ["compact", "1 line"],
