@@ -1,0 +1,4 @@
+<34>Jan  1 13:20:00 syslog-01.example billing-api: event_id=ts-yearless-syslog yearless classic syslog must not assume year or timezone
+{"host":"sched-01.example","level":"warn","message":"event_id=ts-dst-ambiguous local fall-back hour without offset","service":"scheduler","trace_id":"trace-company-ts-dst","ts":"2025-11-02T01:30:00"}
+{"host":"api-01.example","level":"error","message":"event_id=ts-malformed unusable timestamp string","service":"billing-api","trace_id":"trace-company-ts-bad","ts":"not-a-timestamp"}
+{"host":"api-01.example","level":"error","message":"event_id=ts-missing no timestamp field","service":"billing-api","trace_id":"trace-company-ts-missing"}

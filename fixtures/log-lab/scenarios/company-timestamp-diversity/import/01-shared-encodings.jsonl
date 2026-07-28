@@ -1,0 +1,7 @@
+{"host":"api-01.example","level":"info","message":"event_id=ts-rfc3339-utc shared-instant encoding=rfc3339-utc","service":"billing-api","trace_id":"trace-company-ts-shared","ts":"2025-01-01T13:20:00Z"}
+{"host":"api-01.example","level":"info","message":"event_id=ts-offset-plus shared-instant encoding=rfc3339-plus-one","service":"billing-api","trace_id":"trace-company-ts-shared","ts":"2025-01-01T14:20:00+01:00"}
+{"host":"api-02.example","level":"info","message":"event_id=ts-offset-minus shared-instant encoding=rfc3339-minus-five","service":"billing-api","trace_id":"trace-company-ts-shared","ts":"2025-01-01T08:20:00-05:00"}
+{"host":"api-01.example","level":"info","message":"event_id=ts-epoch-s shared-instant encoding=epoch-seconds","service":"billing-api","trace_id":"trace-company-ts-shared","ts":1735740000}
+{"host":"api-01.example","level":"info","message":"event_id=ts-epoch-ms shared-instant encoding=epoch-milliseconds","service":"billing-api","trace_id":"trace-company-ts-shared","ts":1735740000000}
+{"host":"api-01.example","level":"info","message":"event_id=ts-fractional shared-instant encoding=rfc3339-fractional","service":"billing-api","trace_id":"trace-company-ts-shared","ts":"2025-01-01T13:20:00.123Z"}
+{"host":"api-03.example","level":"warn","message":"event_id=ts-similar-local-only similar-local-display-only not-shared-instant","service":"billing-api","trace_id":"trace-company-ts-similar","ts":"2025-01-02T13:20:00"}

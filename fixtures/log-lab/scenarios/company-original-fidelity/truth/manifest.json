@@ -1,0 +1,194 @@
+{
+  "expected": {
+    "bytes": 1651,
+    "events": 8,
+    "files": 6,
+    "files_by_path": {
+      "formats/01-json-ordered.jsonl": {
+        "bytes": 610,
+        "events": 2,
+        "sha256": "c30419e176790c03f41713d1038442ce804c421dbaf9fd98245eb4cc775bccc5"
+      },
+      "formats/02-logfmt.log": {
+        "bytes": 176,
+        "events": 1,
+        "sha256": "be84f21194bc5ee0a3aa310b138fcb844dc861358b79d56fe82aedd0198eb852"
+      },
+      "formats/03-syslog.log": {
+        "bytes": 110,
+        "events": 1,
+        "sha256": "1561053d08d839e53554ce7d1dafead44e2dca02319c1322c2f42d7cd8ac627a"
+      },
+      "formats/04-crlf.log": {
+        "bytes": 139,
+        "events": 2,
+        "sha256": "5802565affa71066ae3ecf2014a4a8808023db15e98471398e711a62609fd7ff"
+      },
+      "formats/05-plain.log": {
+        "bytes": 90,
+        "events": 1,
+        "sha256": "2cb19e2dac32955852936d9408e4a1bf93ba66634307f3061eec49d812b34676"
+      },
+      "formats/06-long.log": {
+        "bytes": 526,
+        "events": 1,
+        "sha256": "316215e614c4935b271b0d8942bcd814a96ded3e21d025c21fa55b48992f09e7"
+      }
+    },
+    "severities": {
+      "info": 5,
+      "unknown": 1,
+      "warn": 2
+    },
+    "source_count": 6,
+    "sources": {
+      "formats/01-json-ordered.jsonl": 2,
+      "formats/02-logfmt.log": 1,
+      "formats/03-syslog.log": 1,
+      "formats/04-crlf.log": 2,
+      "formats/05-plain.log": 1,
+      "formats/06-long.log": 1
+    },
+    "time_quality": "mixed"
+  },
+  "generator_version": "contextdesk.log_lab.generator.v1",
+  "investigation": {
+    "canonical_queries": [
+      {
+        "kind": "literal",
+        "text": "event_id=fid-json-nested"
+      },
+      {
+        "kind": "literal",
+        "text": "event_id=fid-long-line"
+      },
+      {
+        "kind": "literal",
+        "text": "café"
+      }
+    ],
+    "formats": [
+      "json",
+      "logfmt",
+      "syslog",
+      "plain",
+      "crlf",
+      "long-line"
+    ],
+    "original_redacted_must_preserve": [
+      {
+        "event_id": "fid-json-nested",
+        "properties": [
+          "unknown field z_unknown",
+          "deliberate JSON key order as stored in the import line",
+          "nested cart items count",
+          "nested cart note punctuation and escaped quotes",
+          "nested region value",
+          "trace_id",
+          "service",
+          "host"
+        ]
+      },
+      {
+        "event_id": "fid-json-escape",
+        "properties": [
+          "escaped backslashes and quotes in message",
+          "extra_field unknown top-level key",
+          "unicode_note cafe lambda synthetic"
+        ]
+      },
+      {
+        "event_id": "fid-logfmt",
+        "properties": [
+          "escaped quotes inside msg",
+          "unknown_kv key",
+          "backslash path shape without becoming a real host path claim"
+        ]
+      },
+      {
+        "event_id": "fid-syslog",
+        "properties": [
+          "RFC5424-style framing",
+          "unicode cafe"
+        ]
+      },
+      {
+        "event_id": "fid-plain",
+        "properties": [
+          "punctuation",
+          "unicode cafe lambda"
+        ]
+      },
+      {
+        "event_id": "fid-crlf-0",
+        "properties": [
+          "CRLF line ending fidelity for first line"
+        ]
+      },
+      {
+        "event_id": "fid-crlf-1",
+        "properties": [
+          "CRLF line ending fidelity for second line"
+        ]
+      },
+      {
+        "event_id": "fid-long-line",
+        "properties": [
+          "full bounded long payload without truncation in Original redacted view"
+        ]
+      }
+    ],
+    "original_redacted_must_redact": [
+      {
+        "event_id": "fid-json-nested",
+        "field_hints": [
+          "synthetic_key"
+        ],
+        "values": [
+          "sk-LOG-LAB-INVALID-companyfidelity01"
+        ]
+      },
+      {
+        "event_id": "fid-crlf-1",
+        "field_hints": [
+          "bearer"
+        ],
+        "values": [
+          "LOG-LAB-INVALID-BEARER-companyfidelity01"
+        ]
+      }
+    ],
+    "product_gap_note": "Supports evaluation of future Original (redacted) fidelity (#673). Does not claim the Original view already ships.",
+    "raw_values_for_test_only": [
+      "sk-LOG-LAB-INVALID-companyfidelity01",
+      "LOG-LAB-INVALID-BEARER-companyfidelity01"
+    ],
+    "required_absence_surfaces": [
+      "persisted events",
+      "search results",
+      "Explorer rows and detail",
+      "Original (redacted) view",
+      "linked-chat context",
+      "errors",
+      "audit output",
+      "snapshots",
+      "exported packages"
+    ],
+    "safe_evidence": [
+      "event_id=fid-json-nested",
+      "event_id=fid-json-escape",
+      "event_id=fid-logfmt",
+      "event_id=fid-syslog",
+      "event_id=fid-plain",
+      "event_id=fid-crlf-0",
+      "event_id=fid-crlf-1",
+      "event_id=fid-long-line",
+      "trace-fid-json"
+    ]
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no third-party or production log material.",
+  "scenario_id": "company-original-fidelity",
+  "scenario_version": 1,
+  "schema_version": 1,
+  "seed": 52620260725
+}

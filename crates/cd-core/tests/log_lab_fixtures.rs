@@ -105,7 +105,7 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
 
     assert_eq!(first_summary, second_summary);
     assert_eq!(first_summary.profile, "small");
-    assert_eq!(first_summary.events, 63);
+    assert_eq!(first_summary.events, 100);
     assert_eq!(
         generated_subset_hashes(&first_root),
         generated_subset_hashes(&second_root)
@@ -123,6 +123,9 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
         "source-provenance",
         "importer-edge-cases",
         "redaction",
+        "company-timestamp-diversity",
+        "company-known-noise",
+        "company-original-fidelity",
     ] {
         let manifest = truth(scenario);
         assert_eq!(manifest["schema_version"], 1);
@@ -170,6 +173,132 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
         checkout["investigation"]["rubric"]["exact_prose_required"],
         false
     );
+
+    let company_ts = truth("company-timestamp-diversity");
+    assert_eq!(company_ts["expected"]["events"], 15);
+    assert_eq!(company_ts["expected"]["files"], 5);
+    assert_eq!(company_ts["expected"]["time_quality"], "mixed");
+    let shared = company_ts["investigation"]["shared_instant"]["event_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(shared.len(), 8);
+    assert!(shared.iter().any(|id| id == "ts-rfc3339-utc"));
+    assert!(shared.iter().any(|id| id == "ts-epoch-ms"));
+    assert!(shared.iter().any(|id| id == "ts-rfc5424"));
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["epoch_seconds"],
+        1_735_740_000
+    );
+    assert_eq!(
+        company_ts["investigation"]["known_skew"]["skew_seconds"],
+        -180
+    );
+    assert_eq!(
+        company_ts["investigation"]["late_arrival"]["event_id"],
+        "ts-late"
+    );
+    assert!(company_ts["investigation"]["unusable_timestamps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["event_id"] == "ts-malformed"));
+    assert!(company_ts["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#670"));
+
+    let company_noise = truth("company-known-noise");
+    assert_eq!(company_noise["expected"]["events"], 14);
+    assert_eq!(company_noise["expected"]["files"], 3);
+    assert_eq!(company_noise["investigation"]["safe_candidate_total"], 9);
+    let safe = company_noise["investigation"]["safe_suppression_candidates"]
+        .as_array()
+        .unwrap();
+    let safe_sum: u64 = safe
+        .iter()
+        .map(|row| row["expected_count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(safe_sum, 9);
+    for row in safe {
+        assert_eq!(
+            row["event_ids"].as_array().unwrap().len() as u64,
+            row["expected_count"].as_u64().unwrap()
+        );
+    }
+    let must_remain = company_noise["investigation"]["must_remain_visible"]
+        .as_array()
+        .unwrap();
+    assert!(must_remain
+        .iter()
+        .any(|row| row["event_id"] == "noise-important-reset"));
+    assert!(must_remain
+        .iter()
+        .any(|row| row["event_id"] == "noise-incident-error"));
+    let unsafe_preds = company_noise["investigation"]["unsafe_broad_predicates"]
+        .as_array()
+        .unwrap();
+    assert!(unsafe_preds
+        .iter()
+        .any(|row| { row["predicate"] == "level=error" && row["would_hide_count"] == 6 }));
+    assert!(company_noise["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#671"));
+
+    let company_fid = truth("company-original-fidelity");
+    assert_eq!(company_fid["expected"]["events"], 8);
+    assert_eq!(company_fid["expected"]["files"], 6);
+    let raw = company_fid["investigation"]["raw_values_for_test_only"]
+        .as_array()
+        .unwrap();
+    assert!(raw.iter().all(|value| {
+        value
+            .as_str()
+            .is_some_and(|text| text.contains("LOG-LAB-INVALID"))
+    }));
+    assert!(
+        company_fid["investigation"]["original_redacted_must_preserve"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 6
+    );
+    assert!(
+        company_fid["investigation"]["original_redacted_must_redact"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
+    );
+    assert!(company_fid["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#673"));
+
+    // Import roots must never ship truth manifests (chat-context isolation).
+    for scenario in [
+        "company-timestamp-diversity",
+        "company-known-noise",
+        "company-original-fidelity",
+    ] {
+        let import_root = fixture_root()
+            .join("scenarios")
+            .join(scenario)
+            .join("import");
+        assert!(import_root.is_dir());
+        for path in walkdir_files(&import_root) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            assert_ne!(name, "manifest.json");
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("product_gap_note"),
+                "truth-only fields leaked into import for {scenario}"
+            );
+        }
+    }
 
     eprintln!(
         "PASS compact files={} events={} bytes={} tree_sha256={}",

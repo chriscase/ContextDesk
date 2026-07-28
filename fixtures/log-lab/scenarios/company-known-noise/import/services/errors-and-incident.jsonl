@@ -1,0 +1,7 @@
+{"host":"health-01.example","level":"error","message":"event_id=noise-benign-reset-0 connection reset by peer during health probe target=192.0.2.10","service":"health-monitor","trace_id":"trace-noise-benign-0","ts":1735743620}
+{"host":"health-01.example","level":"error","message":"event_id=noise-benign-reset-1 connection reset by peer during health probe target=192.0.2.10","service":"health-monitor","trace_id":"trace-noise-benign-1","ts":1735743621}
+{"host":"pay-01.example","level":"error","message":"event_id=noise-important-reset connection reset by peer during payment settle request=req-noise-pay-7 amount_cents=4200","service":"payments-api","trace_id":"trace-noise-important","ts":1735743622}
+{"host":"cat-01.example","level":"error","message":"event_id=noise-catalog-error catalog lookup failed sku=SKU-NOISE-1","service":"catalog-api","trace_id":"trace-noise-catalog","ts":1735743630}
+ts=1735743631 level=error service=edge-proxy host=edge-02.example trace_id=trace-noise-edge msg="event_id=noise-edge-error upstream timeout path=/v1/checkout"
+{"host":"api-01.example","level":"error","message":"event_id=noise-incident-error payment authorization failed code=AUTH_DECLINED request=req-noise-incident-9","service":"checkout-api","trace_id":"trace-noise-incident","ts":1735743640}
+{"host":"api-01.example","level":"info","message":"event_id=noise-incident-context recovery path selected request=req-noise-incident-9","service":"checkout-api","trace_id":"trace-noise-incident","ts":1735743641}

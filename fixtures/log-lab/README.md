@@ -10,7 +10,7 @@ The generator also produces scale and **behavior-rich** profiles outside Git:
 
 | Profile | Purpose | Default size |
 | --- | --- | --- |
-| `small` | Checked-in mystery scenarios | ~63 events |
+| `small` | Checked-in mystery scenarios | ~100 events |
 | `medium` | Legacy regular 100k import/paging smoke | 100,000 / 4 sources |
 | `ui-medium` | Multi-day investigation corpus (#542) | 100,000 / 8 sources / 3 days |
 | `seven-day` | Sparse/burst lane + navigator corpus | 25,000 / 8 sources / 7 days |
@@ -30,8 +30,9 @@ history stays bounded.
 - All hosts use `.example`; any IP fixture must use the RFC 5737 documentation
   ranges.
 - Names, trace ids, request ids, jobs, credentials, and incidents are fictional.
-- Credential-shaped values exist only in the `redaction` scenario. They contain
-  the explicit `LOG-LAB-INVALID` marker and are not usable credentials.
+- Credential-shaped values exist only in the `redaction` and
+  `company-original-fidelity` scenarios. They contain the explicit
+  `LOG-LAB-INVALID` marker and are not usable credentials.
 - `truth/` is evaluator-only. Never select a scenario directory as the import
   root: select its `import/` child.
 - The generator safety check rejects home-shaped paths, the current `HOME`
@@ -148,6 +149,59 @@ possible through event ids, the fictional user, and trace id after the raw
 values are removed. Tests must prove raw values are absent from persisted
 events, search, Explorer DTOs, linked-chat context, diagnostics, snapshots, and
 portable packages.
+
+### `company-timestamp-diversity`
+
+Company-trial fixture for timestamp encodings. Includes RFC3339 UTC, the same
+instant with positive and negative offsets, epoch seconds, epoch milliseconds,
+fractional seconds, logfmt with an explicit RFC3339 offset, RFC5424-style
+syslog with an offset, yearless classic syslog, DST-ambiguous local time without
+an offset, malformed and missing timestamps, known source-clock skew, and a
+late-arriving event.
+
+Truth distinguishes exact shared instants, similar local display only, unusable
+timestamps, order-only or incomplete times, known skew **without** claiming
+automatic correction, and late arrival. Import only
+`scenarios/company-timestamp-diversity/import/`.
+
+Canonical probes: `shared-instant`, `event_id=ts-yearless-syslog`,
+`event_id=ts-dst-ambiguous`. This scenario supports evaluation of future
+timestamp work (#670); it does **not** claim normalization already ships.
+
+### `company-known-noise`
+
+Company-trial fixture for noise versus real signal. Includes frequent health
+checks, repetitive retry warnings, a known-benign health-probe connection-reset
+template, a superficially similar but important payment-settle reset, other
+ERROR events that share only a level, and a real checkout incident whose
+visibility would be damaged by suppress-all-ERROR.
+
+Truth lists exact `safe_suppression_candidates` counts, events that
+`must_remain_visible`, and `unsafe_broad_predicates` (level-only and broad
+regex) with would-hide counts. Import only
+`scenarios/company-known-noise/import/`.
+
+Canonical probes: `event_id=noise-important-reset`,
+`event_id=noise-incident-error`, `GET /health`. Supports evaluation of future
+known-noise work (#671); it does **not** claim suppression already ships.
+
+### `company-original-fidelity`
+
+Company-trial fixture for original-line fidelity across JSON (deliberate key
+order, unknown fields, nested objects), logfmt, syslog, plain text, CRLF, a
+long but bounded line, Unicode, punctuation/escapes, and
+`LOG-LAB-INVALID` credential-shaped markers.
+
+Truth lists which textual properties should remain visible in a future
+**Original (redacted)** representation and which synthetic values must be
+redacted. Import only `scenarios/company-original-fidelity/import/`.
+
+Canonical probes: `event_id=fid-json-nested`, `event_id=fid-long-line`, `café`.
+Supports evaluation of future Original (redacted) work (#673); it does **not**
+claim that view already ships.
+
+A non-technical company-data trial procedure lives in
+`docs/COMPANY_LOG_DATA_TRIAL.md`.
 
 ### Generated `scale` (legacy medium / large)
 

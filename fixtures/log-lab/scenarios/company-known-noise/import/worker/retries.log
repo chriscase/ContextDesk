@@ -1,0 +1,3 @@
+ts=1735743610 level=warn service=queue-worker host=worker-02.example trace_id=trace-noise-retry-0 msg="event_id=noise-retry-0 retrying delivery attempt=1 reason=temporary-timeout job=job-noise-0"
+ts=1735743611 level=warn service=queue-worker host=worker-02.example trace_id=trace-noise-retry-1 msg="event_id=noise-retry-1 retrying delivery attempt=2 reason=temporary-timeout job=job-noise-1"
+ts=1735743612 level=warn service=queue-worker host=worker-02.example trace_id=trace-noise-retry-2 msg="event_id=noise-retry-2 retrying delivery attempt=3 reason=temporary-timeout job=job-noise-2"
