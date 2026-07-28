@@ -72,8 +72,8 @@ describe("TimelineNavigator", () => {
     });
   });
 
-  it("does no timeline work until opened and renders only fixed summary slots", async () => {
-    render(
+  it("is visible by default, collapses accessibly, and does no work while closed", async () => {
+    const { rerender } = render(
       <TimelineNavigator
         corpusId="c1"
         filter={{ levels: ["error"] }}
@@ -82,10 +82,6 @@ describe("TimelineNavigator", () => {
       />,
     );
 
-    expect(host.hostLogTimelineSummary).not.toHaveBeenCalled();
-    expect(screen.getByText("closed · no timeline work")).toBeTruthy();
-
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     await waitFor(() =>
       expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
         "c1",
@@ -95,9 +91,81 @@ describe("TimelineNavigator", () => {
     );
     expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
     expect(screen.getByText(/42 matching events summarized/)).toBeTruthy();
-    expect(screen.getByTestId("timeline-navigator-bars").style.padding).toBe(
-      "3px 4px",
+    const toggle = screen.getByTestId("timeline-navigator-toggle");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-label")).toBe("Collapse timeline");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-label")).toBe("Expand timeline");
+    expect(screen.getByText("Collapsed · no timeline work")).toBeTruthy();
+    const callsWhileOpen = vi.mocked(host.hostLogTimelineSummary).mock.calls
+      .length;
+    rerender(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{ levels: ["warning"] }}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
     );
+    expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(callsWhileOpen);
+
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(toggle);
+    await waitFor(() =>
+      expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(
+        callsWhileOpen + 1,
+      ),
+    );
+  });
+
+  it("closes on Escape and restores focus to the disclosure", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const scrubber = await screen.findByLabelText("Timeline position");
+    scrubber.focus();
+    fireEvent.keyDown(scrubber, { key: "Escape" });
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("timeline-navigator-toggle"),
+      ),
+    );
+  });
+
+  it("does not duplicate the global summary query for one visible lane", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{ sources: ["api.log"] }}
+        residentEvents={[]}
+        lanes={[{ id: "lane-1", label: "API", sources: ["api.log"] }]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+      "c1",
+      { sources: ["api.log"] },
+      96,
+    );
+    expect(screen.queryByTestId("timeline-lane-coverage")).toBeNull();
   });
 
   it("does not broaden an empty visible-lane source intersection", async () => {
@@ -110,8 +178,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
 
     expect(
       screen.getByText("No events match the visible lane sources"),
@@ -130,7 +196,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={onSeekSeq}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     await screen.findByTestId("timeline-bucket-3");
     fireEvent.click(screen.getByTestId("timeline-bucket-3"));
 
@@ -161,7 +226,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     const range = await screen.findByLabelText("Timeline position");
     fireEvent.change(range, { target: { value: "3" } });
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
@@ -169,6 +233,81 @@ describe("TimelineNavigator", () => {
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
     );
+  });
+
+  it("materializes zero buckets and exposes stacked canonical levels", async () => {
+    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue({
+      ...summary,
+      buckets: [
+        {
+          ...summary.buckets[0],
+          count: 30,
+          byLevel: {
+            error: 4,
+            warning: 3,
+            info: 12,
+            debug: 6,
+            custom: 2,
+          },
+        },
+      ],
+    });
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[target]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const first = await screen.findByTestId("timeline-bucket-0");
+    expect(first.querySelectorAll(".timeline-navigator__stack i")).toHaveLength(
+      5,
+    );
+    expect(first.getAttribute("aria-label")).toContain("Other 5");
+    expect(screen.getByTestId("timeline-bucket-1").className).toContain(
+      "timeline-navigator__bucket--empty",
+    );
+    expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
+    expect(screen.getByTestId("timeline-resident-range")).toBeTruthy();
+  });
+
+  it("commits keyboard seeks only after a navigation key is released", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const scrubber = await screen.findByLabelText("Timeline position");
+    fireEvent.change(scrubber, { target: { value: "3" } });
+    fireEvent.keyDown(scrubber, { key: "End" });
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+    fireEvent.keyUp(scrubber, { key: "End" });
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(
+      await screen.findByTestId("timeline-committed-position"),
+    ).toBeTruthy();
+  });
+
+  it("uses concise UTC labels while retaining exact bucket details", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const scrubber = await screen.findByLabelText("Timeline position");
+    expect(scrubber.getAttribute("aria-valuetext")).toMatch(
+      /^\d{2}:\d{2}:\d{2}Z · 30 events · wall clock$/,
+    );
+    expect(scrubber.getAttribute("title")).toContain("2023-");
   });
 
   it("labels order-only summaries as order rather than calendar time", async () => {
@@ -186,9 +325,11 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
-    expect(await screen.findByText(/order 1–10/)).toBeTruthy();
-    expect(screen.getByText(/order only \(not calendar time\)/)).toBeTruthy();
+    const scrubber = await screen.findByLabelText("Timeline position");
+    expect(scrubber.getAttribute("title")).toBe("order 1–10");
+    expect(scrubber.getAttribute("aria-valuetext")).toContain(
+      "order only (not calendar time)",
+    );
   });
 
   it("shows bounded per-lane coverage without upgrading an order-only lane", async () => {
@@ -211,7 +352,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     const coverage = await screen.findByTestId("timeline-lane-coverage");
     expect(within(coverage).getByText("API")).toBeTruthy();
     expect(within(coverage).getByText("Worker")).toBeTruthy();
@@ -236,7 +376,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     rerender(
       <TimelineNavigator
         corpusId="c1"
@@ -279,7 +418,6 @@ describe("TimelineNavigator", () => {
         onSeekSeq={onSeekSeq}
       />,
     );
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     await screen.findByTestId("timeline-bucket-0");
     fireEvent.click(screen.getByTestId("timeline-bucket-0"));
     fireEvent.click(screen.getByTestId("timeline-bucket-3"));
@@ -297,5 +435,40 @@ describe("TimelineNavigator", () => {
 
     fireEvent.click(screen.getByTestId("timeline-bucket-2"));
     expect(await screen.findByText(/No event in/)).toBeTruthy();
+  });
+
+  it("shows summary and seek failures as visible errors", async () => {
+    vi.mocked(host.hostLogTimelineSummary).mockRejectedValueOnce(
+      new Error("summary unavailable"),
+    );
+    const { unmount } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "summary unavailable",
+    );
+    unmount();
+
+    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue(summary);
+    vi.mocked(host.hostLogQueryEvents).mockRejectedValueOnce(
+      new Error("seek unavailable"),
+    );
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "seek unavailable",
+    );
   });
 });
