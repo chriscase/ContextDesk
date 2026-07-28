@@ -83,7 +83,7 @@
         "reason": "Yearless classic syslog must not be assumed to have a year or timezone."
       }
     ],
-    "product_gap_note": "Supports evaluation of future timestamp normalization (#670). Does not assert that normalization or auto-correction already ships.",
+    "product_gap_note": "Explicit-offset JSON, logfmt, and RFC5424 timestamps normalize to whole UTC seconds (#681). The fixture also evaluates unresolved local/yearless/DST time, source skew, and late arrival that remain #670; it does not claim inference or automatic correction.",
     "shared_instant": {
       "epoch_milliseconds": 1735737600000,
       "epoch_seconds": 1735737600,

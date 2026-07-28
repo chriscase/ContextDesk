@@ -4,12 +4,14 @@ A short, non-technical procedure for trying ContextDesk with **your** company
 logs. Use this when you want a go/no-go read on whether the product helps a real
 investigation—without putting secrets or private data into bug reports.
 
-This document is a trial runbook. It does **not** claim that timestamp
-normalization, known-noise suppression, or an Original (redacted) view already
-ship. Those are future product work (see #670, #671, #673). Synthetic Log Lab
-scenarios under `fixtures/log-lab/scenarios/company-*` encode the same concerns
-for automated tests; prefer those for offline proof, and this runbook for a
-live company-data session.
+This document is a trial runbook, not a blanket capability claim. ContextDesk
+normalizes timestamps only when an explicit offset makes the instant
+unambiguous and provides a bounded **Original (redacted)** inspector view.
+Per-source timezone/year/DST policy and clock-skew diagnostics remain #670;
+durable known-noise suppression remains #671. Synthetic Log Lab scenarios
+under `fixtures/log-lab/scenarios/company-*` encode the same concerns for
+automated tests; prefer those for offline proof, and this runbook for a live
+company-data session.
 
 ## Before you start
 
@@ -43,14 +45,14 @@ live company-data session.
 
 Work through each row. Mark pass / fail / skip and a one-line note.
 
-| Area | What to try | Pass if |
-| --- | --- | --- |
-| Find | Search for a known incident token (request id, error string, host) | The expected line is findable without false “empty” results when the token exists |
-| Filter | Filter by level, service, or source if available | Results match what you can verify in the raw files |
-| Lanes / sources | Open more than one source | You can tell which file a line came from; basename collisions do not merge unrelated hosts |
-| Timeline | Scroll/seek around the incident window | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
-| Bookmarks / investigation | Save 2–3 important events | You can reopen them later in the same session |
-| Linked chat | Ask a narrow question with tools enabled if your build supports it | Answers that cite events can be checked against the source lines |
+| Area                      | What to try                                                        | Pass if                                                                                    |
+| ------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Find                      | Search for a known incident token (request id, error string, host) | The expected line is findable without false “empty” results when the token exists          |
+| Filter                    | Filter by level, service, or source if available                   | Results match what you can verify in the raw files                                         |
+| Lanes / sources           | Open more than one source                                          | You can tell which file a line came from; basename collisions do not merge unrelated hosts |
+| Timeline                  | Scroll/seek around the incident window                             | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
+| Bookmarks / investigation | Save 2–3 important events                                          | You can reopen them later in the same session                                              |
+| Linked chat               | Ask a narrow question with tools enabled if your build supports it | Answers that cite events can be checked against the source lines                           |
 
 ## AI and evidence
 
@@ -95,37 +97,37 @@ fabricates evidence you cannot correct from the UI.
 
 ## Results table (copy per trial)
 
-| Field | Value |
-| --- | --- |
-| Date | |
-| Build / version | |
-| Sample description (no secrets) | |
-| Approx. files / events | |
-| Formats / timezone notes | |
-| Provider / model | |
-| Tools enabled? | Y / N |
-| Find | pass / fail / skip — notes |
-| Filter | pass / fail / skip — notes |
-| Lanes / sources | pass / fail / skip — notes |
-| Timeline | pass / fail / skip — notes |
-| Bookmarks / investigation | pass / fail / skip — notes |
-| Linked chat | pass / fail / skip — notes |
-| Timestamp issues seen | |
-| Noise / clutter issues seen | |
-| Original-line / redaction issues seen | |
-| Performance notes | |
-| Go / no-go | |
-| Follow-ups (issue ids, if any) | |
+| Field                                 | Value                      |
+| ------------------------------------- | -------------------------- |
+| Date                                  |                            |
+| Build / version                       |                            |
+| Sample description (no secrets)       |                            |
+| Approx. files / events                |                            |
+| Formats / timezone notes              |                            |
+| Provider / model                      |                            |
+| Tools enabled?                        | Y / N                      |
+| Find                                  | pass / fail / skip — notes |
+| Filter                                | pass / fail / skip — notes |
+| Lanes / sources                       | pass / fail / skip — notes |
+| Timeline                              | pass / fail / skip — notes |
+| Bookmarks / investigation             | pass / fail / skip — notes |
+| Linked chat                           | pass / fail / skip — notes |
+| Timestamp issues seen                 |                            |
+| Noise / clutter issues seen           |                            |
+| Original-line / redaction issues seen |                            |
+| Performance notes                     |                            |
+| Go / no-go                            |                            |
+| Follow-ups (issue ids, if any)        |                            |
 
 ## Related synthetic fixtures
 
 For offline, deterministic coverage of the same themes (no company data):
 
-| Scenario | Import root |
-| --- | --- |
-| Timestamp diversity | `fixtures/log-lab/scenarios/company-timestamp-diversity/import/` |
-| Known noise vs signal | `fixtures/log-lab/scenarios/company-known-noise/import/` |
-| Original-line fidelity | `fixtures/log-lab/scenarios/company-original-fidelity/import/` |
+| Scenario               | Import root                                                      |
+| ---------------------- | ---------------------------------------------------------------- |
+| Timestamp diversity    | `fixtures/log-lab/scenarios/company-timestamp-diversity/import/` |
+| Known noise vs signal  | `fixtures/log-lab/scenarios/company-known-noise/import/`         |
+| Original-line fidelity | `fixtures/log-lab/scenarios/company-original-fidelity/import/`   |
 
 Always import the `import/` child. Truth manifests under `truth/` are
 evaluator-only and must not be selected as an import root.

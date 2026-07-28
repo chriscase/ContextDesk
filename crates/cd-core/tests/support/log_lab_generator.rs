@@ -1072,7 +1072,7 @@ fn company_timestamp_diversity_truth(files: &[ImportFile]) -> Value {
                 "source": "05-skew-and-late.log",
                 "note": "Late-arriving event: wall time may disagree with ingest or file order."
             },
-            "product_gap_note": "Supports evaluation of future timestamp normalization (#670). Does not assert that normalization or auto-correction already ships.",
+            "product_gap_note": "Explicit-offset JSON, logfmt, and RFC5424 timestamps normalize to whole UTC seconds (#681). The fixture also evaluates unresolved local/yearless/DST time, source skew, and late arrival that remain #670; it does not claim inference or automatic correction.",
             "canonical_queries": [
                 {"kind": "literal", "text": "shared-instant"},
                 {"kind": "literal", "text": "event_id=ts-yearless-syslog"},
@@ -1457,7 +1457,7 @@ fn company_original_fidelity_truth(files: &[ImportFile]) -> Value {
                 "event_id=fid-long-line",
                 "trace-fid-json"
             ],
-            "product_gap_note": "Supports evaluation of future Original (redacted) fidelity (#673). Does not claim the Original view already ships.",
+            "product_gap_note": "Original (redacted) storage and the explicit inspector view ship through #676/#673. The fixture evaluates bounded redacted fidelity and does not claim byte-identical raw source preservation, unredacted recovery, or line-separator preservation.",
             "canonical_queries": [
                 {"kind": "literal", "text": "event_id=fid-json-nested"},
                 {"kind": "literal", "text": "event_id=fid-long-line"},

@@ -160,7 +160,7 @@
         ]
       }
     ],
-    "product_gap_note": "Supports evaluation of future Original (redacted) fidelity (#673). Does not claim the Original view already ships.",
+    "product_gap_note": "Original (redacted) storage and the explicit inspector view ship through #676/#673. The fixture evaluates bounded redacted fidelity and does not claim byte-identical raw source preservation, unredacted recovery, or line-separator preservation.",
     "raw_values_for_test_only": [
       "sk-LOG-LAB-INVALID-companyfidelity01",
       "LOG-LAB-INVALID-BEARER-companyfidelity01"
