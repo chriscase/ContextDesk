@@ -14,6 +14,7 @@ const HANDBOOK_CHAPTERS: &[&str] = &[
     "docs/design/PROVEN_METHODS.md",
     "docs/design/proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md",
     "docs/design/proven-methods/LOG_EVIDENCE_PIPELINE.md",
+    "docs/design/OPERATIONAL_METRIC_TRACKS.md",
     "docs/design/proven-methods/INVESTIGATION_LOOP.md",
     "docs/design/proven-methods/METHOD_TEMPLATE.md",
 ];

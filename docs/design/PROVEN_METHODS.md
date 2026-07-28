@@ -104,6 +104,7 @@ flowchart LR
 | ------------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model?                          | **Partial**: strong linked-log and ordinary-chat isolation ship; one explicit main-chat corpus attachment is in local integration; multi-corpus and phase-aware retry work remain #693/#649 | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
 | Log evidence pipeline          | How do raw records become honest, searchable, scalable evidence?                       | **Partial**: batch single-corpus analysis ships; full timestamp policy, durable noise rules, and versioned cross-corpus application baselines remain #670/#671/#690 | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md)                   |
+| Operational metric alignment   | How can unlike time-series signals share log time without implying comparable values?  | **Standalone slice**: schema, validation, bounded renderer, interaction contract, and deterministic fixtures ship locally; import, attachment, persistence, and Explorer wiring remain #706/#707 | [Operational metric tracks](OPERATIONAL_METRIC_TRACKS.md)                         |
 | Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
 | Future method documentation    | How should another process be documented and challenged?                               | **Local integration** until this handbook is merged                                                                                 | [Method chapter template](proven-methods/METHOD_TEMPLATE.md)                       |
 
@@ -194,6 +195,7 @@ feature decisions:
 - [`cd.v1` protocol](../PROTOCOL.md)
 - [Log and large-corpus analysis](LOG_ANALYSIS.md)
 - [Log Investigation Workspace](LOG_EXPLORER.md)
+- [Operational metric tracks](OPERATIONAL_METRIC_TRACKS.md)
 - [Memory infrastructure](MEMORY.md)
 - [In-app Help Center](HELP_CENTER.md)
 - [External module substrate ADR](../adr/0001-external-module-substrate.md)
