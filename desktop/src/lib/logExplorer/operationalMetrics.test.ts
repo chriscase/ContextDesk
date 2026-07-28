@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampMetricRange,
   downsampleMetricPoints,
+  metricPointsForRange,
   pointFallsInGap,
   validateOperationalMetricsDocument,
 } from "./operationalMetrics";
@@ -55,18 +56,41 @@ describe("operational metrics schema", () => {
 
 describe("operational metric rendering helpers", () => {
   it("bounds dense data deterministically while retaining endpoints and spikes", () => {
-    const source = Array.from({ length: 1_000 }, (_, timestamp) => ({
-      timestamp,
-      value: timestamp === 501 ? 10_000 : timestamp % 17,
-    }));
-    const first = downsampleMetricPoints(source, 80);
-    const second = downsampleMetricPoints(source, 80);
+    const sixMinuteSamplesForTwoMonths = 60 * 24 * 10;
+    const source = Array.from(
+      { length: sixMinuteSamplesForTwoMonths },
+      (_, index) => ({
+        timestamp: 1_735_689_600 + index * 6 * 60,
+        value: index === 7_321 ? 10_000 : index % 17,
+      }),
+    );
+    const first = downsampleMetricPoints(source, 240);
+    const second = downsampleMetricPoints(source, 240);
 
     expect(first).toEqual(second);
-    expect(first.length).toBeLessThanOrEqual(80);
+    expect(first.length).toBeLessThanOrEqual(240);
     expect(first[0]).toEqual(source[0]);
     expect(first[first.length - 1]).toEqual(source[source.length - 1]);
     expect(first.some((point) => point.value === 10_000)).toBe(true);
+  });
+
+  it("selects only a zoomed source range before rendering finer detail", () => {
+    const source = Array.from({ length: 30 * 24 * 10 }, (_, index) => ({
+      timestamp: index * 6 * 60,
+      value: index,
+    }));
+    const dayTen = 10 * 24 * 60 * 60;
+    const visible = metricPointsForRange(source, {
+      from: dayTen,
+      to: dayTen + 24 * 60 * 60,
+    });
+
+    expect(visible.length).toBe(243);
+    expect(visible[0].timestamp).toBe(dayTen - 6 * 60);
+    expect(visible[visible.length - 1].timestamp).toBe(
+      dayTen + 24 * 60 * 60 + 6 * 60,
+    );
+    expect(downsampleMetricPoints(visible, 240)).toHaveLength(240);
   });
 
   it("treats declared missing intervals as gaps, including their boundaries", () => {

@@ -21,14 +21,19 @@ flowchart LR
   T --> P["Shared pointer/keyboard cursor"]
   P --> V["Preview all track values"]
   P -->|"pointer release"| S["One bounded seek request"]
-  S --> L["Nearby logs (integration residual)"]
+  S --> L["Nearby logs"]
+  P --> B["Brush a time range"]
+  B --> Z["Zoom all tracks + log histogram"]
+  Z --> R["Reset to full range"]
 ```
 
 - Moving the pointer previews the same instant across every visible track.
 - Dragging previews a bounded range across every track.
-- Pointer release emits one bounded timestamp callback that an eventual Log
-  Explorer integration can resolve to nearby logs. A release without a matching
-  pointer start is ignored.
+- Pointer release resolves to one bounded nearby-log seek. A release without a
+  matching pointer start is ignored.
+- A nonzero brushed range enables **Zoom to selection**. Zoom requeries the
+  backend histogram for that range and gives every metric track the same exact
+  visible bounds. **Reset full range** restores the corpus view.
 - Arrow keys move the shared cursor. Home and End move to the document bounds.
   Shift plus an arrow extends the selected range. Enter or Space commits the
   shared cursor as one bounded nearby-log seek.
@@ -46,7 +51,16 @@ flowchart LR
 The first implementation is SVG and dependency-free. Deterministic min/max
 bucket downsampling bounds each track to 240 rendered points by default while
 retaining endpoints and local extrema. The integration can choose a different
-bound, but should measure before increasing it.
+bound, but should measure before increasing it. Source samples are selected for
+the visible range before downsampling, so repeated zooms progressively expose
+finer original samples without changing their timestamps. One neighbor on each
+side is retained so lines can enter and leave the viewport.
+
+The deterministic large-series proof uses two months of six-minute samples
+(14,400 points in one track), verifies a one-sample spike survives the
+240-command render bound, and verifies a one-day zoom selects only the relevant
+source window before rendering. This proves bounded chart work, not unbounded
+file ingestion: the session importer has the separate aggregate caps below.
 
 The component is orientation-agnostic. Its `stacked` and `compact-side`
 presentations are density hints applied to the same instance, data, cursor,
@@ -60,6 +74,8 @@ Compact is a sparkline-like evidence companion: it shortens plots and removes
 nonessential visible metadata while retaining the complete accessible
 description. A parent may provide shared time bounds; the renderer expands
 those bounds when necessary so no imported measurement is silently discarded.
+An explicit visible range is narrower by design and clips the chart to the
+shared zoom domain.
 
 ## Two explicit ingestion paths
 
@@ -83,7 +99,9 @@ shared metric cursor to one bounded timeline bucket seek and delegates the
 existing nearby-log load. Compact is the default session track size, with
 standard and detailed choices in the metric header. In the stacked
 presentation, metric tracks precede the log-volume histogram so the histogram
-acts as the bottom evidence track.
+acts as the bottom evidence track. Brushing and zooming preserve that shared
+domain; each zoom reissues the existing fixed-bucket backend summary rather than
+loading all matching log events.
 
 ### 1. Separately imported metric bundle
 
@@ -311,14 +329,15 @@ gaps, cap input size, and pass the final document through the shared validator.
 - a `stacked` or `compact-side` presentation hint for the same renderer;
 - a compact, standard, or detailed track size;
 - optional parent-owned shared time bounds;
+- optional exact visible bounds for progressive zoom;
 - optional controlled cursor and selected range;
 - a deterministic per-track render bound;
 - cursor preview, range selection, and pointer-release seek callbacks.
 
-It deliberately does not query logs or own attachment state. The eventual
-integration resolves the release timestamp to nearby events, allows a user to
-approve view changes, and keeps metric rendering inactive while its panel is
-closed.
+It deliberately does not query logs or own attachment state. Timeline Navigator
+owns the session attachment, resolves releases to nearby events, requeries the
+bounded histogram when the user explicitly zooms, and keeps metric rendering
+inactive while its panel is closed.
 
 The following are **not shipped by the current session slice**:
 

@@ -10,6 +10,7 @@ import {
   clampMetricRange,
   downsampleMetricPoints,
   metricDocumentTimeRange,
+  metricPointsForRange,
   pointFallsInGap,
   type OperationalMetricPoint,
   type OperationalMetricRange,
@@ -34,6 +35,11 @@ export type OperationalMetricTracksProps = {
    * The effective domain always includes every metric sample.
    */
   sharedTimeBounds?: OperationalMetricRange;
+  /**
+   * Optional exact viewport within the shared domain. Source samples are
+   * selected before downsampling so zooming progressively reveals detail.
+   */
+  visibleTimeBounds?: OperationalMetricRange;
   cursorTimestamp?: number;
   selectedRange?: OperationalMetricRange | null;
   maxRenderedPointsPerTrack?: number;
@@ -213,9 +219,13 @@ function MetricTrack({
   onKeyboardCommit,
 }: MetricTrackProps) {
   const [showReading, setShowReading] = useState(false);
+  const visibleSourcePoints = useMemo(
+    () => metricPointsForRange(series.points, bounds),
+    [bounds, series.points],
+  );
   const points = useMemo(
-    () => downsampleMetricPoints(series.points, maxRenderedPoints),
-    [maxRenderedPoints, series.points],
+    () => downsampleMetricPoints(visibleSourcePoints, maxRenderedPoints),
+    [maxRenderedPoints, visibleSourcePoints],
   );
   const domain = useMemo(() => yDomain(series), [series]);
   const paths = useMemo(
@@ -492,6 +502,7 @@ export function OperationalMetricTracks({
   presentation = "stacked",
   density = "standard",
   sharedTimeBounds,
+  visibleTimeBounds,
   cursorTimestamp,
   selectedRange,
   maxRenderedPointsPerTrack = 240,
@@ -504,8 +515,13 @@ export function OperationalMetricTracks({
     [document],
   );
   const bounds = useMemo(
-    () => resolveTimeBounds(documentBounds, sharedTimeBounds),
-    [documentBounds, sharedTimeBounds],
+    () => {
+      const fullBounds = resolveTimeBounds(documentBounds, sharedTimeBounds);
+      return visibleTimeBounds
+        ? clampMetricRange(visibleTimeBounds, fullBounds)
+        : fullBounds;
+    },
+    [documentBounds, sharedTimeBounds, visibleTimeBounds],
   );
   const [internalCursor, setInternalCursor] = useState(bounds.from);
   const [internalSelection, setInternalSelection] =

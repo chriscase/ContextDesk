@@ -113,6 +113,16 @@
   color: var(--fg, #e8eaed);
 }
 
+.timeline-navigator__metric-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.timeline-navigator__metric-action:disabled:hover {
+  border-color: var(--border-subtle, #2a2d33);
+  color: color-mix(in srgb, var(--fg, #e8eaed) 78%, var(--fg-muted, #9aa0a6));
+}
+
 .timeline-navigator__metric-action:focus-visible {
   outline: 2px solid var(--accent, #5b9fd4);
   outline-offset: 1px;
@@ -396,6 +406,10 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.timeline-navigator__session-metrics-note > div {
+  flex-wrap: wrap;
 }
 
 .timeline-navigator__session-metrics-note select {

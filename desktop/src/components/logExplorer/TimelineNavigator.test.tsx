@@ -458,6 +458,78 @@ describe("TimelineNavigator", () => {
     expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
   });
 
+  it("zooms a brushed metric range and restores the full shared timeline", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{ levels: ["error"] }}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+
+    const cpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    Object.defineProperty(cpu, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.pointerDown(cpu, { clientX: 25, pointerId: 1 });
+    fireEvent.pointerMove(cpu, { clientX: 75, pointerId: 1 });
+    fireEvent.pointerUp(cpu, { clientX: 75, pointerId: 1 });
+    const zoom = screen.getByRole("button", { name: "Zoom to selection" });
+    expect(zoom.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(zoom);
+
+    await waitFor(() =>
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          levels: ["error"],
+          timeFrom: 1_700_000_010,
+          timeTo: 1_700_000_030,
+        }),
+        [],
+        96,
+      ),
+    );
+    const zoomedCpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010");
+    expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000030");
+    expect(screen.getByText(/zoomed/)).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reset full range" }),
+    );
+    await waitFor(() => {
+      const calls = vi.mocked(host.hostLogSharedTimelineSummary).mock.calls;
+      expect(calls[calls.length - 1]?.[1]).toEqual({ levels: ["error"] });
+    });
+    const restoredCpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    expect(restoredCpu.getAttribute("aria-valuemin")).toBe("1700000000");
+    expect(restoredCpu.getAttribute("aria-valuemax")).toBe("1700000040");
+  });
+
   it("fails closed when session metric time cannot align honestly", async () => {
     const invalid = structuredClone(sessionMetrics);
     invalid.series[1]!.timeQuality = "order_only";

@@ -339,6 +339,42 @@ export function downsampleMetricPoints(
   return bounded;
 }
 
+/**
+ * Select the source samples needed for a visible time range, retaining at most
+ * one neighbor on either side so a line can enter and leave the viewport
+ * without scanning or rendering the rest of the series.
+ */
+export function metricPointsForRange(
+  points: readonly OperationalMetricPoint[],
+  range: OperationalMetricRange,
+): OperationalMetricPoint[] {
+  if (points.length === 0) return [];
+  const from = Math.min(range.from, range.to);
+  const to = Math.max(range.from, range.to);
+
+  let low = 0;
+  let high = points.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (points[middle].timestamp < from) low = middle + 1;
+    else high = middle;
+  }
+  const firstVisible = low;
+
+  low = firstVisible;
+  high = points.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (points[middle].timestamp <= to) low = middle + 1;
+    else high = middle;
+  }
+  const afterVisible = low;
+
+  const start = Math.max(0, firstVisible - 1);
+  const end = Math.min(points.length, afterVisible + 1);
+  return points.slice(start, end);
+}
+
 export function metricDocumentTimeRange(
   document: OperationalMetricsDocumentV1,
 ): OperationalMetricRange {

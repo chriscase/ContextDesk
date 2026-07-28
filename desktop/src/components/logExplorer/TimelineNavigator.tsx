@@ -26,6 +26,7 @@ import { OperationalMetricTracks } from "./OperationalMetricTracks";
 import {
   metricDocumentTimeRange,
   validateOperationalMetricsDocument,
+  type OperationalMetricRange,
   type OperationalMetricsDocumentV1,
 } from "../../lib/logExplorer/operationalMetrics";
 import "./TimelineNavigator.css";
@@ -172,13 +173,24 @@ export function TimelineNavigator({
   const [metricDensity, setMetricDensity] = useState<
     "compact" | "standard" | "detailed"
   >("compact");
+  const [metricSelection, setMetricSelection] =
+    useState<OperationalMetricRange | null>(null);
+  const [metricViewRange, setMetricViewRange] =
+    useState<OperationalMetricRange | null>(null);
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
   const detailDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
-  const filterKey = JSON.stringify(filter);
+  const effectiveFilter: EventQueryDto = metricViewRange
+    ? {
+        ...filter,
+        timeFrom: Math.max(filter.timeFrom ?? -Infinity, metricViewRange.from),
+        timeTo: Math.min(filter.timeTo ?? Infinity, metricViewRange.to),
+      }
+    : filter;
+  const effectiveFilterKey = JSON.stringify(effectiveFilter);
   const laneKey = JSON.stringify(
     lanes.map((lane) => ({
       id: lane.id,
@@ -265,7 +277,7 @@ export function TimelineNavigator({
         : [];
     void hostLogSharedTimelineSummary(
       corpusId,
-      filter,
+      effectiveFilter,
       requestedLanes,
       NAVIGATOR_BUCKETS,
     )
@@ -310,7 +322,7 @@ export function TimelineNavigator({
     };
     // Keys intentionally represent the complete serializable predicates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corpusId, emptySourceScope, filterKey, laneKey, open]);
+  }, [corpusId, effectiveFilterKey, emptySourceScope, laneKey, open]);
 
   const counts = summary?.counts ?? [];
   const maxCount = Math.max(1, ...counts);
@@ -431,6 +443,8 @@ export function TimelineNavigator({
       setMetricDocument(validated.data);
       setMetricFileName(file.name);
       setMetricsOpen(true);
+      setMetricSelection(null);
+      setMetricViewRange(null);
       previewTimestamp(metricRange.from);
     } catch (cause) {
       setMetricDocument(null);
@@ -449,7 +463,7 @@ export function TimelineNavigator({
     setStatus(`Seeking ${compactBucketRange(summary, index)}…`);
     try {
       const page = await hostLogQueryEvents(corpusId, {
-        ...filter,
+        ...effectiveFilter,
         timeFrom: start,
         timeTo: end,
         afterSeq: null,
@@ -604,6 +618,8 @@ export function TimelineNavigator({
                             setMetricFileName(null);
                             setMetricError(null);
                             setMetricsOpen(false);
+                            setMetricSelection(null);
+                            setMetricViewRange(null);
                           }}
                         >
                           Clear
@@ -842,9 +858,42 @@ export function TimelineNavigator({
                           <option value="detailed">Detailed</option>
                         </select>
                       </label>
+                      <button
+                        type="button"
+                        className="timeline-navigator__metric-action"
+                        disabled={
+                          metricSelection == null ||
+                          metricSelection.to - metricSelection.from < 1
+                        }
+                        onClick={() => {
+                          if (!metricSelection) return;
+                          setMetricViewRange(metricSelection);
+                          setMetricSelection(null);
+                        }}
+                      >
+                        Zoom to selection
+                      </button>
+                      {metricViewRange ? (
+                        <button
+                          type="button"
+                          className="timeline-navigator__metric-action"
+                          onClick={() => {
+                            setMetricViewRange(null);
+                            setMetricSelection(null);
+                          }}
+                        >
+                          Reset full range
+                        </button>
+                      ) : null}
                     </div>
                     <span title={metricFileName ?? undefined}>
                       {metricFileName} · session only · not persisted
+                      {metricViewRange
+                        ? ` · zoomed ${compactTime(
+                            summary,
+                            metricViewRange.from,
+                          )}–${compactTime(summary, metricViewRange.to)}`
+                        : ""}
                     </span>
                   </div>
                   <OperationalMetricTracks
@@ -855,6 +904,7 @@ export function TimelineNavigator({
                         ? { from: summary.spanFrom, to: summary.spanTo }
                         : undefined
                     }
+                    visibleTimeBounds={metricViewRange ?? undefined}
                     cursorTimestamp={
                       sharedCursorTimestamp ??
                       summary.spanFrom ??
@@ -863,6 +913,8 @@ export function TimelineNavigator({
                     onCursorChange={(timestamp) => {
                       previewTimestamp(timestamp);
                     }}
+                    selectedRange={metricSelection}
+                    onRangeSelect={setMetricSelection}
                     onSeekTimestamp={seekTimestamp}
                   />
                 </section>
