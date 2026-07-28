@@ -1323,13 +1323,11 @@ fn company_original_fidelity_files() -> Vec<ImportFile> {
         base + 2
     );
 
-    let syslog_line = format!(
-        "<14>1 2025-01-01T15:20:00.000Z syslog-02.example orders-api - - - event_id=fid-syslog unicode=café status=ok"
-    );
+    let syslog_line = "<14>1 2025-01-01T15:20:00.000Z syslog-02.example orders-api - - - event_id=fid-syslog unicode=café status=ok".to_string();
 
-    let plain = format!(
+    let plain =
         "INFO event_id=fid-plain plain text with punctuation: a,b; c=\"quoted\" and unicode café λ"
-    );
+            .to_string();
 
     let crlf = format!(
         "INFO event_id=fid-crlf-0 first windows line\r\nWARN event_id=fid-crlf-1 second windows line bearer={bearer}\r\n"
