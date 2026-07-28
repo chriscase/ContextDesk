@@ -22,6 +22,20 @@ pub const DEFAULT_TIMELINE_BUCKETS: usize = 96;
 /// Hard cap on timeline summary buckets returned across IPC.
 pub const MAX_TIMELINE_BUCKETS: usize = 256;
 
+/// Hard cap on source-scoped lanes in one shared-axis timeline response.
+pub const MAX_SHARED_TIMELINE_LANES: usize = 4;
+
+/// Hard cap on source names accepted for one shared-axis lane.
+pub const MAX_SHARED_TIMELINE_LANE_SOURCES: usize = 64;
+
+/// The shared-axis contract always returns these five canonical severity series.
+pub const SHARED_TIMELINE_SEVERITY_SERIES: usize = 5;
+
+/// Maximum number of dense count cells in one shared-axis response:
+/// one total series, five canonical severity series, and four lane series.
+pub const MAX_SHARED_TIMELINE_COUNT_CELLS: usize =
+    MAX_TIMELINE_BUCKETS * (1 + SHARED_TIMELINE_SEVERITY_SERIES + MAX_SHARED_TIMELINE_LANES);
+
 /// Minimum unix ts treated as plausible wall-clock (2000-01-01).
 pub const MIN_WALL_TS: i64 = 946_684_800;
 
@@ -248,6 +262,156 @@ pub struct TimelineSummary {
     pub total_matched: u64,
     /// Non-empty buckets only, ordered by index.
     pub buckets: Vec<TimelineSummaryBucket>,
+}
+
+/// One source-scoped lane requested on the global shared timeline axis.
+///
+/// An empty source list deliberately describes an empty lane; it never widens
+/// to all sources. Source scopes are intersected with `filter.sources` when the
+/// global filter already restricts sources.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineLaneScope {
+    /// Exact source names (OR) for this lane.
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+/// Bounded input for one global timeline axis plus source-scoped lane tracks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineSummaryQuery {
+    /// Uses the same predicates as visible Explorer rows. Paging cursors and
+    /// page limits are intentionally ignored.
+    #[serde(default)]
+    pub filter: EventQuery,
+    /// Desired bucket count, clamped to [`MAX_TIMELINE_BUCKETS`].
+    #[serde(default = "default_timeline_buckets")]
+    pub max_buckets: usize,
+    /// Source-scoped lanes projected onto the one global axis.
+    #[serde(default)]
+    pub lanes: Vec<SharedTimelineLaneScope>,
+}
+
+impl Default for SharedTimelineSummaryQuery {
+    fn default() -> Self {
+        Self {
+            filter: EventQuery::default(),
+            max_buckets: DEFAULT_TIMELINE_BUCKETS,
+            lanes: Vec::new(),
+        }
+    }
+}
+
+/// Fixed canonical severity identities for a shared timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedTimelineSeverity {
+    /// Fatal and error events.
+    Error,
+    /// Warning events.
+    Warn,
+    /// Informational events.
+    Info,
+    /// Debug and trace events.
+    Debug,
+    /// Unknown and arbitrary custom levels.
+    Other,
+}
+
+impl SharedTimelineSeverity {
+    /// Stable display/serialization order for the fixed response shape.
+    pub const ALL: [Self; SHARED_TIMELINE_SEVERITY_SERIES] = [
+        Self::Error,
+        Self::Warn,
+        Self::Info,
+        Self::Debug,
+        Self::Other,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Error => 0,
+            Self::Warn => 1,
+            Self::Info => 2,
+            Self::Debug => 3,
+            Self::Other => 4,
+        }
+    }
+
+    fn from_index(index: i64) -> Option<Self> {
+        Self::ALL.get(usize::try_from(index).ok()?).copied()
+    }
+}
+
+/// One explicit slot on the global fixed-width axis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineAxisBucket {
+    /// Zero-based index shared by every returned series and lane.
+    pub index: u32,
+    /// Inclusive timestamp (wall-clock seconds or explicit order value).
+    pub start: i64,
+    /// Exclusive timestamp/order bound.
+    pub end: i64,
+}
+
+/// One canonical severity series with an explicit value for every axis slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineSeveritySeries {
+    /// Canonical identity of this fixed series.
+    pub severity: SharedTimelineSeverity,
+    /// Dense counts indexed exactly like `SharedTimelineSummary.buckets`.
+    pub counts: Vec<u64>,
+}
+
+/// One requested source lane projected onto the global axis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineLaneSummary {
+    /// Stable zero-based position in the request.
+    pub lane_index: u8,
+    /// Number of unique requested sources remaining after intersection with an
+    /// active global source filter.
+    pub source_count: usize,
+    /// Honest quality of timestamps actually present in this lane. Empty lanes
+    /// use `OrderOnly` because no wall-clock evidence exists.
+    pub time_quality: TimeQuality,
+    /// Exact events matched in this lane.
+    pub total_matched: u64,
+    /// Dense counts indexed exactly like `SharedTimelineSummary.buckets`.
+    pub counts: Vec<u64>,
+}
+
+/// One bounded response for a global timeline and up to four source lanes.
+///
+/// All count vectors are dense and have exactly `bucket_count` entries, making
+/// zero-valued gaps explicit. The response contains exactly five severity
+/// series and no event bodies or unbounded level map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTimelineSummary {
+    /// Reliability of the globally filtered timestamps.
+    pub time_quality: TimeQuality,
+    /// Inclusive first timestamp/order value, or none when empty.
+    pub span_from: Option<i64>,
+    /// Exclusive final timestamp/order value, or none when empty.
+    pub span_to: Option<i64>,
+    /// Width shared by every bucket, series, and lane.
+    pub bucket_width: i64,
+    /// Number of explicit slots on the shared axis.
+    pub bucket_count: usize,
+    /// Exact events matched by the global filter.
+    pub total_matched: u64,
+    /// Every axis slot, including gaps.
+    pub buckets: Vec<SharedTimelineAxisBucket>,
+    /// Dense total event counts for every axis slot.
+    pub counts: Vec<u64>,
+    /// Exactly five series in Error, Warn, Info, Debug, Other order.
+    pub severity_series: Vec<SharedTimelineSeveritySeries>,
+    /// At most [`MAX_SHARED_TIMELINE_LANES`] dense source-lane series.
+    pub lanes: Vec<SharedTimelineLaneSummary>,
 }
 
 /// One explorer event row (redacted message + honest time quality).
@@ -633,6 +797,319 @@ pub fn query_timeline_summary(
         total_matched: total_matched.max(0) as u64,
         buckets: by_index.into_values().collect(),
     })
+}
+
+/// Query one bounded global timeline axis with canonical severity and source
+/// lane series.
+///
+/// The API is additive; [`query_timeline_summary`] keeps its sparse legacy
+/// response unchanged. Each SQL grouping is bounded by the bucket/series caps,
+/// while the returned dense arrays make gaps explicit.
+///
+/// This core-only contract does not expose cooperative cancellation. True
+/// cancellation requires host/IPC lifecycle wiring around DuckDB execution;
+/// callers must not present the bounded response as cancellable until that
+/// integration exists.
+pub fn query_shared_timeline_summary(
+    corpus: &LogCorpus,
+    q: &SharedTimelineSummaryQuery,
+) -> CoreResult<SharedTimelineSummary> {
+    validate_shared_timeline_query(q)?;
+    let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
+    let lane_sources = q
+        .lanes
+        .iter()
+        .map(|lane| intersect_lane_sources(&q.filter.sources, &lane.sources))
+        .collect::<Vec<_>>();
+    let (where_sql, binds) = build_where(&q.filter);
+    let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
+    let (min_ts, max_ts, total_matched) = corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&bounds_sql).map_err(duck_err)?;
+        stmt.query_row(params_ref(&binds).as_slice(), |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(duck_err)
+    })?;
+
+    let (Some(min_ts), Some(max_ts)) = (min_ts, max_ts) else {
+        return Ok(empty_shared_timeline(lane_sources));
+    };
+    let (span_to, bucket_width, bucket_count) = shared_timeline_axis(min_ts, max_ts, max_buckets)?;
+    let buckets = (0..bucket_count)
+        .map(|index| {
+            let start = min_ts.saturating_add((index as i64).saturating_mul(bucket_width));
+            SharedTimelineAxisBucket {
+                index: index as u32,
+                start,
+                end: start.saturating_add(bucket_width).min(span_to),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let severity_sql = format!(
+        "SELECT CAST(FLOOR((ts - ?) / CAST(? AS DOUBLE)) AS BIGINT) AS bucket_index, \
+         CASE \
+           WHEN lower(level) IN ('fatal', 'critical', 'crit', 'severe', 'error', 'err') THEN 0 \
+           WHEN lower(level) IN ('warning', 'warn') THEN 1 \
+           WHEN lower(level) IN ('info', 'notice') THEN 2 \
+           WHEN lower(level) IN ('debug', 'trace') THEN 3 \
+           ELSE 4 \
+         END AS severity_index, \
+         COUNT(*) \
+         FROM events WHERE {where_sql} \
+         GROUP BY bucket_index, severity_index \
+         ORDER BY bucket_index, severity_index"
+    );
+    let mut severity_binds = vec![Value::BigInt(min_ts), Value::BigInt(bucket_width)];
+    severity_binds.extend(binds);
+    let grouped_severity = corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&severity_sql).map_err(duck_err)?;
+        let rows = stmt
+            .query_map(params_ref(&severity_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(duck_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(duck_err)?);
+        }
+        Ok(out)
+    })?;
+
+    let mut counts = vec![0_u64; bucket_count];
+    let mut severity_counts: [Vec<u64>; SHARED_TIMELINE_SEVERITY_SERIES] =
+        std::array::from_fn(|_| vec![0_u64; bucket_count]);
+    for (raw_index, raw_severity, raw_count) in grouped_severity {
+        let index = checked_timeline_bucket(raw_index, bucket_count)?;
+        let severity = SharedTimelineSeverity::from_index(raw_severity).ok_or_else(|| {
+            CoreError::Message("duckdb: shared timeline severity fell outside fixed series".into())
+        })?;
+        let count = raw_count.max(0) as u64;
+        counts[index] = counts[index].saturating_add(count);
+        severity_counts[severity.index()][index] =
+            severity_counts[severity.index()][index].saturating_add(count);
+    }
+
+    let mut lanes = Vec::with_capacity(lane_sources.len());
+    for (lane_index, sources) in lane_sources.iter().enumerate() {
+        lanes.push(query_shared_timeline_lane(
+            corpus,
+            &q.filter,
+            sources,
+            lane_index,
+            min_ts,
+            bucket_width,
+            bucket_count,
+        )?);
+    }
+
+    let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
+        (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
+        (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
+        _ => TimeQuality::Mixed,
+    };
+    let severity_series = SharedTimelineSeverity::ALL
+        .into_iter()
+        .map(|severity| SharedTimelineSeveritySeries {
+            severity,
+            counts: std::mem::take(&mut severity_counts[severity.index()]),
+        })
+        .collect();
+
+    Ok(SharedTimelineSummary {
+        time_quality,
+        span_from: Some(min_ts),
+        span_to: Some(span_to),
+        bucket_width,
+        bucket_count,
+        total_matched: total_matched.max(0) as u64,
+        buckets,
+        counts,
+        severity_series,
+        lanes,
+    })
+}
+
+fn validate_shared_timeline_query(q: &SharedTimelineSummaryQuery) -> CoreResult<()> {
+    if q.lanes.len() > MAX_SHARED_TIMELINE_LANES {
+        return Err(CoreError::Message(format!(
+            "shared timeline lane cap exceeded: {} requested, maximum is {}",
+            q.lanes.len(),
+            MAX_SHARED_TIMELINE_LANES
+        )));
+    }
+    for (index, lane) in q.lanes.iter().enumerate() {
+        if lane.sources.len() > MAX_SHARED_TIMELINE_LANE_SOURCES {
+            return Err(CoreError::Message(format!(
+                "shared timeline lane {index} source cap exceeded: {} requested, maximum is {}",
+                lane.sources.len(),
+                MAX_SHARED_TIMELINE_LANE_SOURCES
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn intersect_lane_sources(global: &[String], requested: &[String]) -> Vec<String> {
+    let mut sources = Vec::with_capacity(requested.len());
+    for source in requested {
+        if sources.contains(source) {
+            continue;
+        }
+        if global.is_empty() || global.contains(source) {
+            sources.push(source.clone());
+        }
+    }
+    sources
+}
+
+fn shared_timeline_axis(
+    min_ts: i64,
+    max_ts: i64,
+    max_buckets: usize,
+) -> CoreResult<(i64, i64, usize)> {
+    let span_to = max_ts.checked_add(1).ok_or_else(|| {
+        CoreError::Message("shared timeline cannot represent an exclusive i64::MAX bound".into())
+    })?;
+    let inclusive_span = max_ts.saturating_sub(min_ts).saturating_add(1).max(1);
+    let bucket_width = inclusive_span
+        .saturating_add(max_buckets as i64 - 1)
+        .checked_div(max_buckets as i64)
+        .unwrap_or(1)
+        .max(1);
+    let bucket_count = inclusive_span
+        .saturating_add(bucket_width - 1)
+        .checked_div(bucket_width)
+        .unwrap_or(1)
+        .clamp(1, max_buckets as i64) as usize;
+    Ok((span_to, bucket_width, bucket_count))
+}
+
+fn checked_timeline_bucket(raw_index: i64, bucket_count: usize) -> CoreResult<usize> {
+    if raw_index < 0 || raw_index as usize >= bucket_count {
+        return Err(CoreError::Message(
+            "duckdb: shared timeline bucket fell outside global axis".into(),
+        ));
+    }
+    Ok(raw_index as usize)
+}
+
+fn query_shared_timeline_lane(
+    corpus: &LogCorpus,
+    global_filter: &EventQuery,
+    sources: &[String],
+    lane_index: usize,
+    min_ts: i64,
+    bucket_width: i64,
+    bucket_count: usize,
+) -> CoreResult<SharedTimelineLaneSummary> {
+    let mut counts = vec![0_u64; bucket_count];
+    if sources.is_empty() {
+        return Ok(SharedTimelineLaneSummary {
+            lane_index: lane_index as u8,
+            source_count: 0,
+            time_quality: TimeQuality::OrderOnly,
+            total_matched: 0,
+            counts,
+        });
+    }
+
+    let mut filter = global_filter.clone();
+    filter.sources = sources.to_vec();
+    let (where_sql, binds) = build_where(&filter);
+    let lane_sql = format!(
+        "SELECT CAST(FLOOR((ts - ?) / CAST(? AS DOUBLE)) AS BIGINT) AS bucket_index, \
+         COUNT(*), MIN(ts), MAX(ts) \
+         FROM events WHERE {where_sql} \
+         GROUP BY bucket_index ORDER BY bucket_index"
+    );
+    let mut lane_binds = vec![Value::BigInt(min_ts), Value::BigInt(bucket_width)];
+    lane_binds.extend(binds);
+    let grouped = corpus.with_connection(|conn| {
+        let mut stmt = conn.prepare(&lane_sql).map_err(duck_err)?;
+        let rows = stmt
+            .query_map(params_ref(&lane_binds).as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(duck_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(duck_err)?);
+        }
+        Ok(out)
+    })?;
+
+    let mut total_matched = 0_u64;
+    let mut lane_min = None;
+    let mut lane_max = None;
+    for (raw_index, raw_count, bucket_min, bucket_max) in grouped {
+        let index = checked_timeline_bucket(raw_index, bucket_count)?;
+        let count = raw_count.max(0) as u64;
+        counts[index] = counts[index].saturating_add(count);
+        total_matched = total_matched.saturating_add(count);
+        lane_min = Some(lane_min.map_or(bucket_min, |value: i64| value.min(bucket_min)));
+        lane_max = Some(lane_max.map_or(bucket_max, |value: i64| value.max(bucket_max)));
+    }
+    let time_quality = match (lane_min, lane_max) {
+        (Some(min), Some(max)) => match (classify_ts(min), classify_ts(max)) {
+            (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
+            (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
+            _ => TimeQuality::Mixed,
+        },
+        _ => TimeQuality::OrderOnly,
+    };
+
+    Ok(SharedTimelineLaneSummary {
+        lane_index: lane_index as u8,
+        source_count: sources.len(),
+        time_quality,
+        total_matched,
+        counts,
+    })
+}
+
+fn empty_shared_timeline(lane_sources: Vec<Vec<String>>) -> SharedTimelineSummary {
+    SharedTimelineSummary {
+        time_quality: TimeQuality::OrderOnly,
+        span_from: None,
+        span_to: None,
+        bucket_width: 1,
+        bucket_count: 0,
+        total_matched: 0,
+        buckets: Vec::new(),
+        counts: Vec::new(),
+        severity_series: SharedTimelineSeverity::ALL
+            .into_iter()
+            .map(|severity| SharedTimelineSeveritySeries {
+                severity,
+                counts: Vec::new(),
+            })
+            .collect(),
+        lanes: lane_sources
+            .into_iter()
+            .enumerate()
+            .map(|(lane_index, sources)| SharedTimelineLaneSummary {
+                lane_index: lane_index as u8,
+                source_count: sources.len(),
+                time_quality: TimeQuality::OrderOnly,
+                total_matched: 0,
+                counts: Vec::new(),
+            })
+            .collect(),
+    }
 }
 
 /// Query events with SQL filters + keyset pagination.
@@ -1827,6 +2304,32 @@ mod tests {
         (dir, report.corpus_id)
     }
 
+    fn shared_timeline_fixture() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("api.log"),
+            concat!(
+                "{\"ts\":1700000000,\"level\":\"error\",\"message\":\"api failed\"}\n",
+                "{\"ts\":1700000004,\"level\":\"warn\",\"message\":\"api retry\"}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("worker.log"),
+            concat!(
+                "{\"ts\":1700000009,\"level\":\"info\",\"message\":\"worker done\"}\n",
+                "{\"ts\":1700000009,\"level\":\"debug\",\"message\":\"worker detail\"}\n",
+                "{\"ts\":1700000009,\"level\":\"audit\",\"message\":\"worker custom\"}\n",
+            ),
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "shared-timeline", None, "none").unwrap();
+        (dir, report.corpus_id)
+    }
+
     #[test]
     fn original_representation_preserves_formats_but_stays_out_of_event_pages() {
         let dir = tempfile::tempdir().unwrap();
@@ -2034,6 +2537,368 @@ mod tests {
         assert!(empty.buckets.is_empty());
         assert_eq!(empty.span_from, None);
         assert_eq!(empty.span_to, None);
+    }
+
+    #[test]
+    fn shared_timeline_uses_one_dense_axis_for_severities_and_source_lanes() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 5,
+                lanes: vec![
+                    SharedTimelineLaneScope {
+                        sources: vec!["api.log".into()],
+                    },
+                    SharedTimelineLaneScope {
+                        sources: vec!["worker.log".into()],
+                    },
+                    SharedTimelineLaneScope {
+                        sources: vec!["api.log".into(), "worker.log".into()],
+                    },
+                    SharedTimelineLaneScope {
+                        sources: vec!["missing.log".into()],
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.time_quality, TimeQuality::Wall);
+        assert_eq!(summary.span_from, Some(1_700_000_000));
+        assert_eq!(summary.span_to, Some(1_700_000_010));
+        assert_eq!(summary.bucket_width, 2);
+        assert_eq!(summary.bucket_count, 5);
+        assert_eq!(summary.total_matched, 5);
+        assert_eq!(summary.counts, vec![1, 0, 1, 0, 3]);
+        assert_eq!(
+            summary
+                .buckets
+                .iter()
+                .map(|bucket| bucket.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            summary
+                .buckets
+                .iter()
+                .map(|bucket| (bucket.start, bucket.end))
+                .collect::<Vec<_>>(),
+            vec![
+                (1_700_000_000, 1_700_000_002),
+                (1_700_000_002, 1_700_000_004),
+                (1_700_000_004, 1_700_000_006),
+                (1_700_000_006, 1_700_000_008),
+                (1_700_000_008, 1_700_000_010),
+            ]
+        );
+
+        assert_eq!(
+            summary.severity_series.len(),
+            SHARED_TIMELINE_SEVERITY_SERIES
+        );
+        assert_eq!(
+            summary
+                .severity_series
+                .iter()
+                .map(|series| series.severity)
+                .collect::<Vec<_>>(),
+            SharedTimelineSeverity::ALL
+        );
+        let severity_counts = |severity| {
+            &summary
+                .severity_series
+                .iter()
+                .find(|series| series.severity == severity)
+                .unwrap()
+                .counts
+        };
+        assert_eq!(
+            severity_counts(SharedTimelineSeverity::Error),
+            &vec![1, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            severity_counts(SharedTimelineSeverity::Warn),
+            &vec![0, 0, 1, 0, 0]
+        );
+        assert_eq!(
+            severity_counts(SharedTimelineSeverity::Info),
+            &vec![0, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            severity_counts(SharedTimelineSeverity::Debug),
+            &vec![0, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            severity_counts(SharedTimelineSeverity::Other),
+            &vec![0, 0, 0, 0, 1],
+            "an arbitrary custom level must collapse into the bounded Other series"
+        );
+
+        assert_eq!(summary.lanes.len(), 4);
+        assert_eq!(summary.lanes[0].counts, vec![1, 0, 1, 0, 0]);
+        assert_eq!(summary.lanes[1].counts, vec![0, 0, 0, 0, 3]);
+        assert_eq!(summary.lanes[2].counts, summary.counts);
+        assert_eq!(summary.lanes[2].source_count, 2);
+        assert_eq!(summary.lanes[3].counts, vec![0, 0, 0, 0, 0]);
+        assert_eq!(summary.lanes[3].total_matched, 0);
+        assert_eq!(summary.lanes[3].time_quality, TimeQuality::OrderOnly);
+        assert!(summary
+            .severity_series
+            .iter()
+            .all(|series| series.counts.len() == summary.bucket_count));
+        assert!(summary
+            .lanes
+            .iter()
+            .all(|lane| lane.counts.len() == summary.bucket_count));
+    }
+
+    #[test]
+    fn shared_timeline_intersects_lane_sources_with_the_global_filter() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter: EventQuery {
+                    sources: vec!["api.log".into()],
+                    ..Default::default()
+                },
+                max_buckets: 5,
+                lanes: vec![
+                    SharedTimelineLaneScope {
+                        sources: vec!["api.log".into(), "worker.log".into()],
+                    },
+                    SharedTimelineLaneScope {
+                        sources: vec!["worker.log".into()],
+                    },
+                    SharedTimelineLaneScope { sources: vec![] },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.total_matched, 2);
+        assert_eq!(summary.lanes[0].source_count, 1);
+        assert_eq!(summary.lanes[0].total_matched, 2);
+        assert_eq!(summary.lanes[0].counts, summary.counts);
+        assert_eq!(summary.lanes[1].source_count, 0);
+        assert_eq!(summary.lanes[1].total_matched, 0);
+        assert!(summary.lanes[1].counts.iter().all(|count| *count == 0));
+        assert_eq!(summary.lanes[2].source_count, 0);
+        assert_eq!(summary.lanes[2].total_matched, 0);
+    }
+
+    #[test]
+    fn shared_timeline_canonical_severity_aliases_match_the_ui_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::create(&cache, "severity-aliases").unwrap();
+        let aliases = [
+            ("fatal", SharedTimelineSeverity::Error),
+            ("critical", SharedTimelineSeverity::Error),
+            ("crit", SharedTimelineSeverity::Error),
+            ("severe", SharedTimelineSeverity::Error),
+            ("error", SharedTimelineSeverity::Error),
+            ("err", SharedTimelineSeverity::Error),
+            ("warning", SharedTimelineSeverity::Warn),
+            ("warn", SharedTimelineSeverity::Warn),
+            ("info", SharedTimelineSeverity::Info),
+            ("notice", SharedTimelineSeverity::Info),
+            ("debug", SharedTimelineSeverity::Debug),
+            ("trace", SharedTimelineSeverity::Debug),
+            ("audit", SharedTimelineSeverity::Other),
+            ("unknown", SharedTimelineSeverity::Other),
+        ];
+        corpus
+            .with_connection(|conn| {
+                for (seq, (level, _)) in aliases.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO events \
+                         (seq, ts, level, service, host, template_id, params, trace_id, message, source) \
+                         VALUES (?1, ?2, ?3, NULL, NULL, 0, '[]', NULL, ?3, 'aliases.log')",
+                        duckdb::params![seq as i64, 1_700_000_000_i64, level],
+                    )
+                    .map_err(duck_err)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let summary =
+            query_shared_timeline_summary(&corpus, &SharedTimelineSummaryQuery::default()).unwrap();
+        assert_eq!(summary.bucket_count, 1);
+        assert_eq!(summary.total_matched, aliases.len() as u64);
+        for severity in SharedTimelineSeverity::ALL {
+            let expected = aliases
+                .iter()
+                .filter(|(_, expected)| *expected == severity)
+                .count() as u64;
+            let series = summary
+                .severity_series
+                .iter()
+                .find(|series| series.severity == severity)
+                .unwrap();
+            assert_eq!(
+                series.counts,
+                vec![expected],
+                "{severity:?} aliases must match the UI's canonical mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_timeline_preserves_mixed_and_order_only_time_honesty() {
+        let (dir, id) = multi_source_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let mixed = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 12,
+                lanes: vec![
+                    SharedTimelineLaneScope {
+                        sources: vec!["api.log".into()],
+                    },
+                    SharedTimelineLaneScope {
+                        sources: vec!["plain.log".into()],
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(mixed.time_quality, TimeQuality::Mixed);
+        assert_eq!(mixed.lanes[0].time_quality, TimeQuality::Wall);
+        assert_eq!(mixed.lanes[1].time_quality, TimeQuality::OrderOnly);
+
+        let order_only = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter: EventQuery {
+                    sources: vec!["plain.log".into()],
+                    ..Default::default()
+                },
+                max_buckets: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(order_only.time_quality, TimeQuality::OrderOnly);
+        assert_eq!(order_only.total_matched, 10);
+        assert_eq!(order_only.counts.iter().sum::<u64>(), 10);
+    }
+
+    #[test]
+    fn shared_timeline_enforces_bucket_lane_source_and_response_caps() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let capped = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: usize::MAX,
+                lanes: (0..MAX_SHARED_TIMELINE_LANES)
+                    .map(|_| SharedTimelineLaneScope {
+                        sources: vec!["api.log".into()],
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let explicit_cap = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: MAX_TIMELINE_BUCKETS,
+                lanes: (0..MAX_SHARED_TIMELINE_LANES)
+                    .map(|_| SharedTimelineLaneScope {
+                        sources: vec!["api.log".into()],
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(capped, explicit_cap);
+        assert!(capped.bucket_count <= MAX_TIMELINE_BUCKETS);
+        assert_eq!(capped.lanes.len(), MAX_SHARED_TIMELINE_LANES);
+        assert_eq!(
+            capped.severity_series.len(),
+            SHARED_TIMELINE_SEVERITY_SERIES
+        );
+        let dense_cells = capped.counts.len()
+            + capped
+                .severity_series
+                .iter()
+                .map(|series| series.counts.len())
+                .sum::<usize>()
+            + capped
+                .lanes
+                .iter()
+                .map(|lane| lane.counts.len())
+                .sum::<usize>();
+        assert!(dense_cells <= MAX_SHARED_TIMELINE_COUNT_CELLS);
+
+        let too_many_lanes = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                lanes: (0..=MAX_SHARED_TIMELINE_LANES)
+                    .map(|_| SharedTimelineLaneScope::default())
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(too_many_lanes.to_string().contains("lane cap exceeded"));
+
+        let too_many_sources = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                lanes: vec![SharedTimelineLaneScope {
+                    sources: (0..=MAX_SHARED_TIMELINE_LANE_SOURCES)
+                        .map(|index| format!("source-{index}.log"))
+                        .collect(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(too_many_sources.to_string().contains("source cap exceeded"));
+    }
+
+    #[test]
+    fn shared_timeline_empty_filter_keeps_fixed_series_and_requested_lanes() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let empty = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter: EventQuery {
+                    keyword: Some("absent timeline marker".into()),
+                    ..Default::default()
+                },
+                lanes: vec![SharedTimelineLaneScope {
+                    sources: vec!["api.log".into()],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(empty.bucket_count, 0);
+        assert!(empty.buckets.is_empty());
+        assert!(empty.counts.is_empty());
+        assert_eq!(empty.severity_series.len(), SHARED_TIMELINE_SEVERITY_SERIES);
+        assert!(empty
+            .severity_series
+            .iter()
+            .all(|series| series.counts.is_empty()));
+        assert_eq!(empty.lanes.len(), 1);
+        assert_eq!(empty.lanes[0].source_count, 1);
+        assert!(empty.lanes[0].counts.is_empty());
+        assert_eq!(empty.lanes[0].total_matched, 0);
     }
 
     #[test]

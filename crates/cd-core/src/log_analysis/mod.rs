@@ -50,13 +50,17 @@ pub use package::{
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use query::{
     classify_ts, corpus_time_quality, query_event_neighborhood, query_events, query_facets,
-    query_timeline_summary, search_events, search_events_advanced,
+    query_shared_timeline_summary, query_timeline_summary, search_events, search_events_advanced,
     search_events_advanced_with_cancel, EventNeighborhood, EventNeighborhoodQuery, EventPage,
     EventQuery, EventSearchHit, EventSearchQuery, EventSearchResult, ExplorerEvent, LogFacets,
-    SearchMatchMode, TargetResolveStatus, TimeQuality, TimelineSummary, TimelineSummaryBucket,
-    TimelineSummaryQuery, DEFAULT_EVENT_PAGE, DEFAULT_NEIGHBORHOOD_RADIUS,
+    SearchMatchMode, SharedTimelineAxisBucket, SharedTimelineLaneScope, SharedTimelineLaneSummary,
+    SharedTimelineSeverity, SharedTimelineSeveritySeries, SharedTimelineSummary,
+    SharedTimelineSummaryQuery, TargetResolveStatus, TimeQuality, TimelineSummary,
+    TimelineSummaryBucket, TimelineSummaryQuery, DEFAULT_EVENT_PAGE, DEFAULT_NEIGHBORHOOD_RADIUS,
     DEFAULT_TIMELINE_BUCKETS, MAX_EVENT_PAGE, MAX_NEIGHBORHOOD_RADIUS, MAX_REGEX_SCAN_EVENTS,
-    MAX_SEARCH_EXCERPT_LEN, MAX_SEARCH_PATTERN_LEN, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
+    MAX_SEARCH_EXCERPT_LEN, MAX_SEARCH_PATTERN_LEN, MAX_SHARED_TIMELINE_COUNT_CELLS,
+    MAX_SHARED_TIMELINE_LANES, MAX_SHARED_TIMELINE_LANE_SOURCES, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
+    SHARED_TIMELINE_SEVERITY_SERIES,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
