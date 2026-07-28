@@ -150,10 +150,17 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
 
 fn parse_ts_value(v: &serde_json::Value) -> Option<i64> {
     if let Some(n) = v.as_i64() {
-        return Some(normalize_epoch_number(n));
+        return decode_unix_epoch_to_secs_i64(n);
+    }
+    // JSON numbers above i64::MAX arrive as u64; reject rather than f64-round.
+    if let Some(n) = v.as_u64() {
+        if n > i64::MAX as u64 {
+            return None;
+        }
+        return decode_unix_epoch_to_secs_i64(n as i64);
     }
     if let Some(f) = v.as_f64() {
-        return Some(normalize_epoch_number(f as i64));
+        return decode_unix_epoch_to_secs_f64(f);
     }
     if let Some(s) = v.as_str() {
         return parse_explicit_timestamp(s);
@@ -161,20 +168,10 @@ fn parse_ts_value(v: &serde_json::Value) -> Option<i64> {
     None
 }
 
-/// Convert epoch seconds or milliseconds to Unix whole seconds.
-fn normalize_epoch_number(n: i64) -> i64 {
-    // Values past ~2286-11 in seconds are treated as milliseconds (existing heuristic).
-    if n > 10_000_000_000 {
-        n / 1000
-    } else {
-        n
-    }
-}
-
 /// Parse an unambiguous timestamp to Unix **whole seconds**.
 ///
 /// Accepts:
-/// - integer epoch seconds or milliseconds (string or via callers for JSON numbers);
+/// - bounded integer epoch seconds, milliseconds, microseconds, or nanoseconds;
 /// - RFC3339 / RFC5424 timestamps with explicit `Z` or numeric UTC offset
 ///   (optional fractional seconds).
 ///
@@ -187,15 +184,123 @@ fn parse_explicit_timestamp(s: &str) -> Option<i64> {
     if s.is_empty() || s == "-" {
         return None;
     }
-    if let Ok(n) = s.parse::<i64>() {
-        return Some(normalize_epoch_number(n));
+    if let Some(secs) = parse_numeric_epoch_str(s) {
+        return Some(secs);
     }
     // `parse_from_rfc3339` requires an explicit offset (`Z` or ±HH:MM). Offsetless
     // local faces such as `2025-01-01T13:20:00` fail here on purpose.
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Some(dt.timestamp());
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
+// ---------------------------------------------------------------------------
+// Bounded Unix epoch-unit decoding (#708 / child of #670)
+// ---------------------------------------------------------------------------
+//
+// Storage remains Unix **whole seconds** only. Subsecond source digits may
+// decide the unit (ms/us/ns) but are truncated away when converting to seconds;
+// they are not persisted.
+//
+// Unit bands (non-negative raw integer magnitude, exclusive upper edges):
+//   seconds:      [0, 1e11)
+//   milliseconds: [1e11, 1e14)
+//   microseconds: [1e14, 1e17)
+//   nanoseconds:  [1e17, 1e19)  (also capped by i64::MAX ≈ 9.22e18)
+//
+// After conversion, the whole-second result must lie in:
+//   [EPOCH_SEC_MIN, EPOCH_SEC_MAX] = [0, 4_102_444_800]
+//   (1970-01-01T00:00:00Z ..= 2100-01-01T00:00:00Z inclusive)
+//
+// Rationale: these magnitude bands are non-overlapping for ordinary modern
+// telemetry, and the post-check keeps decoded instants inside a documented
+// wall-clock window so overflow/implausible values fail closed to order-only
+// instead of wrapping or inventing a unit. Negatives are unsupported (no
+// pre-1970 policy in this child). This is not a universal timestamp-quality
+// claim — only a deterministic decode policy for explicit numeric epochs.
+
+/// Inclusive minimum accepted whole-second epoch (1970-01-01T00:00:00Z).
+const EPOCH_SEC_MIN: i64 = 0;
+/// Inclusive maximum accepted whole-second epoch (2100-01-01T00:00:00Z).
+const EPOCH_SEC_MAX: i64 = 4_102_444_800;
+
+/// Exclusive upper bound for the seconds magnitude band (`[0, 1e11)`).
+const EPOCH_BAND_MS_MIN: i64 = 100_000_000_000;
+/// Exclusive upper bound for the milliseconds band (`[1e11, 1e14)`).
+const EPOCH_BAND_US_MIN: i64 = 100_000_000_000_000;
+/// Lower bound for the nanoseconds band (`[1e17, i64::MAX]` subject to
+/// post-conversion `EPOCH_SEC_MAX`). `1e19` does not fit in `i64`.
+const EPOCH_BAND_NS_MIN: i64 = 100_000_000_000_000_000;
+
+const MS_PER_SEC: i64 = 1_000;
+const US_PER_SEC: i64 = 1_000_000;
+const NS_PER_SEC: i64 = 1_000_000_000;
+
+fn epoch_secs_in_policy(secs: i64) -> bool {
+    (EPOCH_SEC_MIN..=EPOCH_SEC_MAX).contains(&secs)
+}
+
+/// Decode a non-negative integer Unix epoch in s/ms/us/ns to whole seconds.
+/// Returns `None` for negatives, out-of-band magnitudes, or decoded seconds
+/// outside `[EPOCH_SEC_MIN, EPOCH_SEC_MAX]`. Uses checked division only.
+fn decode_unix_epoch_to_secs_i64(raw: i64) -> Option<i64> {
+    if raw < 0 {
+        return None;
     }
-    None
+    let secs = if raw < EPOCH_BAND_MS_MIN {
+        // seconds
+        raw
+    } else if raw < EPOCH_BAND_US_MIN {
+        // milliseconds → whole seconds (truncate subsecond)
+        raw.checked_div(MS_PER_SEC)?
+    } else if raw < EPOCH_BAND_NS_MIN {
+        // microseconds
+        raw.checked_div(US_PER_SEC)?
+    } else {
+        // nanoseconds — band upper edge is i64::MAX (1e19 does not fit in i64)
+        raw.checked_div(NS_PER_SEC)?
+    };
+    if epoch_secs_in_policy(secs) {
+        Some(secs)
+    } else {
+        None
+    }
+}
+
+/// Decode a JSON floating numeric epoch. Nonfinite values are rejected.
+/// Classification uses the truncated integer magnitude; fractional parts are
+/// not stored (whole-second contract).
+fn decode_unix_epoch_to_secs_f64(raw: f64) -> Option<i64> {
+    if !raw.is_finite() {
+        return None;
+    }
+    if raw < 0.0 {
+        return None;
+    }
+    // Reject magnitudes that cannot be represented exactly enough for unit
+    // classification in i64 (above i64::MAX as float).
+    if raw > i64::MAX as f64 {
+        return None;
+    }
+    // Truncate toward zero into i64 for unit bands (subseconds discarded).
+    let as_i = raw as i64;
+    decode_unix_epoch_to_secs_i64(as_i)
+}
+
+/// Parse a decimal integer string (optional leading `+`, optional leading zeros)
+/// as a bounded epoch. Rejects empty, non-digit (after sign), and overflow.
+fn parse_numeric_epoch_str(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let body = s.strip_prefix('+').unwrap_or(s);
+    if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Reject pure sign or strings that overflow i64.
+    let n = body.parse::<i64>().ok()?;
+    decode_unix_epoch_to_secs_i64(n)
 }
 
 fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
@@ -689,6 +794,60 @@ mod tests {
     }
 
     #[test]
+    fn epoch_unit_same_instant_across_json_and_logfmt_s_ms_us_ns() {
+        let s = SHARED_INSTANT_SECS;
+        let ms = s.checked_mul(1_000).expect("ms");
+        let us = s.checked_mul(1_000_000).expect("us");
+        let ns = s.checked_mul(1_000_000_000).expect("ns");
+
+        let cases = [
+            (
+                format!(r#"{{"ts":{s},"level":"info","message":"json-s"}}"#),
+                "json-s",
+            ),
+            (
+                format!(r#"{{"ts":{ms},"level":"info","message":"json-ms"}}"#),
+                "json-ms",
+            ),
+            (
+                format!(r#"{{"ts":{us},"level":"info","message":"json-us"}}"#),
+                "json-us",
+            ),
+            (
+                format!(r#"{{"ts":{ns},"level":"info","message":"json-ns"}}"#),
+                "json-ns",
+            ),
+            (
+                format!(r#"{{"ts":"{s}","level":"info","message":"json-s-str"}}"#),
+                "json-s-str",
+            ),
+            (
+                format!(r#"{{"ts":"{ms}","level":"info","message":"json-ms-str"}}"#),
+                "json-ms-str",
+            ),
+            (format!("ts={s} level=info msg=logfmt-s"), "logfmt-s"),
+            (format!("ts={ms} level=info msg=logfmt-ms"), "logfmt-ms"),
+            (format!("ts={us} level=info msg=logfmt-us"), "logfmt-us"),
+            (format!("ts={ns} level=info msg=logfmt-ns"), "logfmt-ns"),
+            (format!("ts=+{s} level=info msg=logfmt-plus"), "logfmt-plus"),
+            (
+                format!("ts={s:020} level=info msg=logfmt-leading-zeros"),
+                "logfmt-zeros",
+            ),
+        ];
+        for (line, label) in cases {
+            let p = parse_line(&line, None, 99);
+            assert_eq!(
+                p.ts,
+                Some(SHARED_INSTANT_SECS),
+                "{label}: line={line} stored={:?}",
+                p.ts
+            );
+            assert!(!p.message.is_empty(), "{label} must not drop the record");
+        }
+    }
+
+    #[test]
     fn logfmt_epoch_integer_still_parses() {
         let p = parse_line(
             r#"ts=1735737600 level=info service=worker msg=epoch-s host=n1"#,
@@ -713,5 +872,159 @@ mod tests {
         let next = r#"ts=2025-01-01T13:20:01.001Z level=info service=billing msg=next host=api-01.example"#;
         let p_next = parse_line(next, Some(LogFormat::Logfmt), 0);
         assert_eq!(p_next.ts, Some(SHARED_INSTANT_SECS + 1));
+    }
+
+    #[test]
+    fn epoch_unit_json_float_truncates_to_whole_seconds() {
+        // Fractional float informs nothing beyond whole-second storage.
+        let line = r#"{"ts":1735737600.999,"level":"info","message":"frac"}"#;
+        let p = parse_line(line, Some(LogFormat::Json), 0);
+        assert_eq!(p.ts, Some(SHARED_INSTANT_SECS));
+        // ms-scale float with fraction
+        let line_ms = r#"{"ts":1735737600123.9,"level":"info","message":"frac-ms"}"#;
+        let p_ms = parse_line(line_ms, Some(LogFormat::Json), 0);
+        assert_eq!(p_ms.ts, Some(SHARED_INSTANT_SECS));
+    }
+
+    #[test]
+    fn epoch_unit_boundaries_just_inside_and_outside() {
+        // Seconds band upper edge: just inside EPOCH_SEC_MAX, just outside.
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(EPOCH_SEC_MAX),
+            Some(EPOCH_SEC_MAX)
+        );
+        assert_eq!(decode_unix_epoch_to_secs_i64(EPOCH_SEC_MAX + 1), None);
+
+        // Just below ms band → still seconds (if in policy).
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(EPOCH_BAND_MS_MIN - 1),
+            // 1e11 - 1 is year ~5138, outside EPOCH_SEC_MAX → reject
+            None
+        );
+        // Just inside ms band that decodes into policy window.
+        let ms_ok = SHARED_INSTANT_SECS * 1_000;
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(ms_ok),
+            Some(SHARED_INSTANT_SECS)
+        );
+        // Just below us band (still ms).
+        let just_below_us = EPOCH_BAND_US_MIN - 1;
+        let secs = just_below_us / 1_000;
+        if epoch_secs_in_policy(secs) {
+            assert_eq!(decode_unix_epoch_to_secs_i64(just_below_us), Some(secs));
+        } else {
+            assert_eq!(decode_unix_epoch_to_secs_i64(just_below_us), None);
+        }
+        // Just inside us band.
+        let us_ok = SHARED_INSTANT_SECS * 1_000_000;
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(us_ok),
+            Some(SHARED_INSTANT_SECS)
+        );
+        // Just inside ns band.
+        let ns_ok = SHARED_INSTANT_SECS * 1_000_000_000;
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(ns_ok),
+            Some(SHARED_INSTANT_SECS)
+        );
+        // EPOCH_SEC_MIN
+        assert_eq!(decode_unix_epoch_to_secs_i64(0), Some(0));
+        // Max ns that still decodes to EPOCH_SEC_MAX
+        let max_ns = EPOCH_SEC_MAX.checked_mul(1_000_000_000).expect("max ns");
+        assert_eq!(decode_unix_epoch_to_secs_i64(max_ns), Some(EPOCH_SEC_MAX));
+        // One second past max in ns form
+        if let Some(over_ns) = max_ns.checked_add(1_000_000_000) {
+            assert_eq!(decode_unix_epoch_to_secs_i64(over_ns), None);
+        }
+    }
+
+    #[test]
+    fn epoch_unit_rejects_negatives_nonfinite_and_overflow() {
+        assert_eq!(decode_unix_epoch_to_secs_i64(-1), None);
+        assert_eq!(decode_unix_epoch_to_secs_i64(-SHARED_INSTANT_SECS), None);
+        assert_eq!(decode_unix_epoch_to_secs_f64(f64::NAN), None);
+        assert_eq!(decode_unix_epoch_to_secs_f64(f64::INFINITY), None);
+        assert_eq!(decode_unix_epoch_to_secs_f64(f64::NEG_INFINITY), None);
+        assert_eq!(decode_unix_epoch_to_secs_f64(-1.0), None);
+        // Magnitude above i64::MAX as float
+        assert_eq!(decode_unix_epoch_to_secs_f64((i64::MAX as f64) * 2.0), None);
+
+        // Full-line: rejected numeric → order-only ingest_seq; line not dropped.
+        let ingest = 7777_i64;
+        let json_neg = r#"{"ts":-1,"level":"warn","message":"neg"}"#;
+        let p = parse_line(json_neg, Some(LogFormat::Json), ingest as u64);
+        assert_eq!(p.ts, Some(ingest));
+        assert!(p.message.contains("neg"));
+        assert_eq!(p.raw, json_neg);
+
+        let json_nan = r#"{"ts":null,"level":"warn","message":"null-ts"}"#;
+        let p_null = parse_line(json_nan, Some(LogFormat::Json), ingest as u64);
+        assert_eq!(p_null.ts, Some(ingest));
+
+        let logfmt_bad = "ts=not-a-number level=error msg=bad";
+        let p_lf = parse_line(logfmt_bad, Some(LogFormat::Logfmt), ingest as u64);
+        assert_eq!(p_lf.ts, Some(ingest));
+        assert_eq!(p_lf.message, "bad");
+
+        let logfmt_neg = "ts=-99 level=error msg=neg-lf";
+        let p_neg = parse_line(logfmt_neg, Some(LogFormat::Logfmt), ingest as u64);
+        assert_eq!(p_neg.ts, Some(ingest));
+        assert_eq!(p_neg.message, "neg-lf");
+    }
+
+    #[test]
+    fn epoch_unit_digit_strings_and_leading_sign() {
+        assert_eq!(
+            parse_numeric_epoch_str(&format!("{SHARED_INSTANT_SECS}")),
+            Some(SHARED_INSTANT_SECS)
+        );
+        assert_eq!(
+            parse_numeric_epoch_str(&format!("+{SHARED_INSTANT_SECS}")),
+            Some(SHARED_INSTANT_SECS)
+        );
+        assert_eq!(
+            parse_numeric_epoch_str(&format!("000{SHARED_INSTANT_SECS}")),
+            Some(SHARED_INSTANT_SECS)
+        );
+        assert_eq!(parse_numeric_epoch_str(""), None);
+        assert_eq!(parse_numeric_epoch_str("+"), None);
+        assert_eq!(parse_numeric_epoch_str("12ab"), None);
+        assert_eq!(parse_numeric_epoch_str("1_735_737_600"), None); // underscores not accepted
+                                                                    // Overflow i64
+        assert_eq!(
+            parse_numeric_epoch_str("999999999999999999999999999999"),
+            None
+        );
+    }
+
+    #[test]
+    fn epoch_unit_subsecond_source_does_not_claim_persisted_precision() {
+        // ms with non-zero remainder still stores whole seconds only.
+        let ms = SHARED_INSTANT_SECS * 1_000 + 999;
+        assert_eq!(decode_unix_epoch_to_secs_i64(ms), Some(SHARED_INSTANT_SECS));
+        let ns = SHARED_INSTANT_SECS * 1_000_000_000 + 999_999_999;
+        assert_eq!(decode_unix_epoch_to_secs_i64(ns), Some(SHARED_INSTANT_SECS));
+        let line = format!(r#"{{"ts":{ms},"level":"info","message":"ms-rem"}}"#);
+        let p = parse_line(&line, Some(LogFormat::Json), 0);
+        assert_eq!(p.ts, Some(SHARED_INSTANT_SECS));
+    }
+
+    #[test]
+    fn epoch_unit_band_edges_and_json_u64_overflow() {
+        // Magnitude at ms band edge: 1e11 ms → 1e8 seconds (1973-03-03) — in policy.
+        assert_eq!(
+            decode_unix_epoch_to_secs_i64(EPOCH_BAND_MS_MIN),
+            Some(EPOCH_BAND_MS_MIN / 1_000)
+        );
+        // Just below ns band is microseconds; 1e17-1 us is far past 2100 → reject.
+        assert_eq!(decode_unix_epoch_to_secs_i64(EPOCH_BAND_NS_MIN - 1), None);
+        // i64::MAX as ns → seconds beyond EPOCH_SEC_MAX → reject
+        assert_eq!(decode_unix_epoch_to_secs_i64(i64::MAX), None);
+
+        // JSON number that only fits u64 (> i64::MAX) must not wrap.
+        let huge = r#"{"ts":18446744073709551615,"level":"info","message":"u64-max"}"#;
+        let p = parse_line(huge, Some(LogFormat::Json), 55);
+        assert_eq!(p.ts, Some(55), "u64 overflow must fall back to order-only");
+        assert!(p.message.contains("u64-max"));
     }
 }
