@@ -133,6 +133,14 @@ export function IconChevronRight({ className }: IconProps) {
   );
 }
 
+export function IconChevronDown({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m6 9 6 6 6-6" />
+    </Svg>
+  );
+}
+
 /** Log Explorer — event traces under a focused inspection lens. */
 export function IconLogExplorer({ className, title }: IconProps) {
   return (

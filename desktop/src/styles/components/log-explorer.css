@@ -106,6 +106,192 @@
   flex-wrap: wrap;
 }
 
+.log-explorer__toolbar-picker {
+  position: relative;
+}
+
+.log-explorer__picker-trigger {
+  align-items: center;
+  appearance: none;
+  background: var(--bg-app, #0b0c0e);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 7px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: 0.35rem;
+  min-height: 1.8rem;
+  padding: 0.22rem 0.4rem 0.22rem 0.5rem;
+}
+
+.log-explorer__picker-trigger:hover,
+.log-explorer__picker-trigger--open {
+  border-color: color-mix(
+    in srgb,
+    var(--accent, #5b9fd4) 72%,
+    var(--border-subtle, #2a2d33)
+  );
+}
+
+.log-explorer__picker-trigger:focus-visible {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: 2px;
+}
+
+.log-explorer__picker-trigger > svg {
+  color: var(--fg-muted, #9aa0a6);
+  height: 0.8rem;
+  transition: transform 140ms ease;
+  width: 0.8rem;
+}
+
+.log-explorer__picker-trigger--open > svg {
+  transform: rotate(180deg);
+}
+
+.log-explorer__picker-label {
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.68rem;
+}
+
+.log-explorer__picker-value {
+  font-size: 0.75rem;
+  font-weight: 560;
+}
+
+.log-explorer__picker-menu {
+  background: var(--bg-elevated, #121418);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 10px;
+  box-shadow: 0 14px 32px rgb(0 0 0 / 32%);
+  display: grid;
+  gap: 0.2rem;
+  max-height: min(26rem, calc(100vh - 5rem));
+  min-width: 17.5rem;
+  overflow: auto;
+  padding: 0.35rem;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 40;
+}
+
+.log-explorer__picker-option {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  gap: 0.65rem;
+  padding: 0.55rem;
+  text-align: left;
+  width: 100%;
+}
+
+.log-explorer__picker-option:hover,
+.log-explorer__picker-option[aria-checked="true"] {
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 9%, transparent);
+}
+
+.log-explorer__picker-option[aria-checked="true"] {
+  border-color: color-mix(
+    in srgb,
+    var(--accent, #5b9fd4) 35%,
+    transparent
+  );
+}
+
+.log-explorer__picker-option:focus-visible {
+  border-color: var(--accent, #5b9fd4);
+  outline: 2px solid
+    color-mix(in srgb, var(--accent, #5b9fd4) 55%, transparent);
+  outline-offset: -1px;
+}
+
+.log-explorer__picker-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.log-explorer__picker-visual {
+  color: var(--fg-muted, #9aa0a6);
+  flex: 0 0 4.75rem;
+}
+
+.log-explorer__picker-copy {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.log-explorer__picker-option-title {
+  font-size: 0.78rem;
+  font-weight: 620;
+}
+
+.log-explorer__picker-description {
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.69rem;
+  line-height: 1.35;
+}
+
+.log-explorer__picker-footer {
+  align-items: center;
+  border-top: 1px solid var(--border-subtle, #2a2d33);
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  margin-top: 0.15rem;
+  padding: 0.5rem;
+}
+
+.log-explorer__picker-setting {
+  align-items: center;
+  color: var(--fg-muted, #9aa0a6);
+  display: flex;
+  font-size: 0.7rem;
+  gap: 0.5rem;
+}
+
+.log-explorer__picker-setting select {
+  background: var(--bg-app, #0b0c0e);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 5px;
+  color: inherit;
+  font: inherit;
+  padding: 0.22rem 0.35rem;
+}
+
+.log-explorer__time-link-visual {
+  fill: var(--bg-elevated, #121418);
+  height: 2rem;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.25;
+  width: 4.75rem;
+}
+
+.log-explorer__time-link-visual circle {
+  fill: var(--accent, #5b9fd4);
+  stroke: none;
+}
+
+.log-explorer__time-link-cursor {
+  stroke: var(--accent, #5b9fd4);
+  stroke-dasharray: 2 2;
+}
+
+.log-explorer__time-link-gap {
+  fill: color-mix(in srgb, var(--fg-muted, #9aa0a6) 12%, transparent);
+  stroke-dasharray: 2 2;
+}
+
 .log-explorer--narrow .log-explorer__identity {
   flex-basis: auto;
 }
@@ -113,6 +299,22 @@
 .log-explorer--narrow .log-explorer__identity-separator,
 .log-explorer--narrow .log-explorer__corpus {
   display: none;
+}
+
+.log-explorer--narrow .log-explorer__picker-menu {
+  bottom: 0.6rem;
+  left: 0.6rem;
+  max-height: min(70vh, 26rem);
+  min-width: 0;
+  position: fixed;
+  right: 0.6rem;
+  top: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .log-explorer__picker-trigger > svg {
+    transition: none;
+  }
 }
 
 .log-explorer__toolbar-field {

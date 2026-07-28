@@ -257,6 +257,36 @@ function eventNeighborhood(
   };
 }
 
+function openToolbarPicker(testId: string) {
+  const trigger = screen.getByTestId(testId);
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(trigger);
+  }
+  return trigger;
+}
+
+function chooseToolbarOption(testId: string, name: RegExp) {
+  openToolbarPicker(testId);
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
+function chooseLaneCount(count: number) {
+  chooseToolbarOption(
+    "lane-count-picker",
+    new RegExp(`^${count} lane${count === 1 ? "\\b" : "s\\b"}`),
+  );
+}
+
+function chooseRowMode(mode: "Single line" | "Preview" | "Deep") {
+  chooseToolbarOption("row-mode-picker", new RegExp(`^${mode}\\b`));
+}
+
+function chooseTimeMode(
+  mode: "Independent" | "Follow selection" | "Align exact time",
+) {
+  chooseToolbarOption("time-link-picker", new RegExp(`^${mode}\\b`));
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -367,6 +397,39 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("uses descriptive keyboard-accessible toolbar pickers with truthful dismissal", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    const timeTrigger = openToolbarPicker("time-link-picker");
+    const timeMenu = screen.getByRole("menu", { name: "Time options" });
+    expect(
+      within(timeMenu).getByText(
+        "Selecting an event seeks each lane to its nearest time.",
+      ),
+    ).toBeTruthy();
+    const independent = within(timeMenu).getByRole("menuitemradio", {
+      name: /^Independent\b/,
+    });
+    const follow = within(timeMenu).getByRole("menuitemradio", {
+      name: /^Follow selection\b/,
+    });
+    await waitFor(() => expect(document.activeElement).toBe(independent));
+    fireEvent.keyDown(independent, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(follow);
+    fireEvent.keyDown(follow, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(timeTrigger));
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+
+    openToolbarPicker("row-mode-picker");
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+    fireEvent.click(screen.getByTestId("log-explorer-lanes"));
+    expect(screen.queryByRole("menu", { name: "Rows options" })).toBeNull();
+
+    chooseRowMode("Deep");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain("Deep");
+  });
+
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
@@ -472,14 +535,20 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-max-lane-count")).toBe("1");
     });
 
-    const twoLUnavailable = screen.getByRole("button", { name: "2L" });
+    const lanePicker = openToolbarPicker("lane-count-picker");
+    const twoLUnavailable = screen.getByRole("menuitemradio", {
+      name: /^2 lanes\b/,
+    });
     expect((twoLUnavailable as HTMLButtonElement).disabled).toBe(true);
     expect(twoLUnavailable.title).toMatch(
-      /need 840px of usable evidence width; 748px available/,
+      /Needs 840px of usable evidence width; 748px available/,
     );
     expect(
-      (screen.getByRole("button", { name: "1L" }) as HTMLButtonElement)
-        .disabled,
+      (
+        screen.getByRole("menuitemradio", {
+          name: /^1 lane\b/,
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(false);
 
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
@@ -487,7 +556,10 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-usable-evidence-width")).toBe("1012");
       expect(root.getAttribute("data-max-lane-count")).toBe("2");
     });
-    const twoL = screen.getByRole("button", { name: "2L" });
+    openToolbarPicker("lane-count-picker");
+    const twoL = screen.getByRole("menuitemradio", {
+      name: /^2 lanes\b/,
+    });
     expect((twoL as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(twoL);
     await waitFor(() =>
@@ -528,15 +600,17 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(root.getAttribute("data-max-lane-count")).toBe("4"),
     );
-    const fourL = screen.getByRole("button", { name: "4L" });
+    openToolbarPicker("lane-count-picker");
+    const fourL = screen.getByRole("menuitemradio", {
+      name: /^4 lanes\b/,
+    });
     expect((fourL as HTMLButtonElement).disabled).toBe(false);
     fourL.focus();
-    fireEvent.keyDown(fourL, { key: "Enter" });
     fireEvent.click(fourL);
     await waitFor(() =>
       expect(root.getAttribute("data-lane-count")).toBe("4"),
     );
-    expect(document.activeElement).toBe(fourL);
+    await waitFor(() => expect(document.activeElement).toBe(lanePicker));
   });
 
   it("focuses Find with the platform find shortcut", async () => {
@@ -590,10 +664,11 @@ describe("LogExplorer shell", () => {
     expect(eventTime.tabIndex).toBe(0);
     expect(eventTime.getAttribute("aria-label")).toMatch(/wall clock.*UTC/);
 
+    openToolbarPicker("row-mode-picker");
     fireEvent.change(screen.getByTestId("preview-lines"), {
       target: { value: "12" },
     });
-    fireEvent.click(screen.getByTestId("line-mode-wrap"));
+    chooseRowMode("Preview");
     await waitFor(() =>
       expect(
         screen
@@ -632,8 +707,8 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-lane-count")).toBe("1");
       expect(screen.queryByTestId("collapse-linked-chat")).toBeNull();
       expect(screen.queryByTestId("expand-linked-chat")).toBeNull();
-      expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
-      fireEvent.click(screen.getByTestId("line-mode-full"));
+      expect(screen.queryByTestId("lane-count-picker")).toBeNull();
+      chooseRowMode("Deep");
       await waitFor(() =>
         expect(
           screen
@@ -1329,7 +1404,8 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    await screen.findAllByTitle("worker.log");
+    chooseLaneCount(2);
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = screen.getByTestId("lane-editor");
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -1429,9 +1505,7 @@ describe("LogExplorer shell", () => {
       );
       render(<LogExplorer corpusId="c1" />);
       await screen.findByTitle(sources[lanes - 1]!);
-      fireEvent.click(
-        screen.getByTitle(`${lanes} evidence lane${lanes === 1 ? "" : "s"}`),
-      );
+      chooseLaneCount(lanes);
 
       const root = await screen.findByTestId("log-explorer");
       await waitFor(() => {
@@ -1450,11 +1524,9 @@ describe("LogExplorer shell", () => {
     async (laneCount) => {
       render(<LogExplorer corpusId="c1" />);
       if (laneCount > 1) {
-        fireEvent.click(
-          await screen.findByTitle(`${laneCount} evidence lanes`),
-        );
+        chooseLaneCount(laneCount);
       }
-      fireEvent.click(screen.getByTestId("line-mode-full"));
+      chooseRowMode("Deep");
 
       await waitFor(() =>
         expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(
@@ -1516,7 +1588,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("audit.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
 
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
@@ -1595,7 +1667,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("paged.log");
-    fireEvent.click(screen.getByTitle("4 evidence lanes"));
+    chooseLaneCount(4);
     await waitFor(() => expect(laneRequest).toBe(4));
 
     const shared = eventPage("shared.log", "wall", 2, 1_700_000_000, 6);
@@ -1663,7 +1735,7 @@ describe("LogExplorer shell", () => {
     );
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("db.log");
-    fireEvent.click(screen.getByTitle("3 evidence lanes"));
+    chooseLaneCount(3);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() => {
       expect(root.getAttribute("data-time-quality")).toBe("order_only");
@@ -1683,7 +1755,7 @@ describe("LogExplorer shell", () => {
       "matched unavailable",
     );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     // Order-only aggregate refuses wall-clock link.
     expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
@@ -1723,12 +1795,12 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("wall"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("align_time");
 
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
@@ -1761,13 +1833,15 @@ describe("LogExplorer shell", () => {
     expect(
       screen.getByTestId("log-explorer-global-counts").textContent,
     ).not.toContain("order only");
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("independent");
-    expect(
-      screen.getByText(
-        "Align unavailable: every visible lane needs matching events",
-      ),
-    ).toBeTruthy();
+    const unavailableAlign = screen.getByRole("menuitemradio", {
+      name: /^Align exact time\b/,
+    }) as HTMLButtonElement;
+    expect(unavailableAlign.disabled).toBe(true);
+    expect(unavailableAlign.title).toBe(
+      "Every visible lane needs matching events.",
+    );
 
     fireEvent.click(
       screen.getByRole("button", { name: "keyword:no-shared-result ×" }),
@@ -1780,7 +1854,7 @@ describe("LogExplorer shell", () => {
           ?.getAttribute("data-time-status"),
       ).toBe("loaded");
     });
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("align_time");
   });
 
@@ -1817,13 +1891,15 @@ describe("LogExplorer shell", () => {
       expect(
         screen.getByText("time unavailable · no matching events"),
       ).toBeTruthy();
-      fireEvent.click(screen.getByTestId("time-link-align_time"));
+      chooseTimeMode("Align exact time");
       expect(root.getAttribute("data-link-mode")).toBe("independent");
-      expect(
-        screen.getByText(
-          "Align unavailable: every visible lane needs matching events",
-        ),
-      ).toBeTruthy();
+      const unavailableAlign = screen.getByRole("menuitemradio", {
+        name: /^Align exact time\b/,
+      }) as HTMLButtonElement;
+      expect(unavailableAlign.disabled).toBe(true);
+      expect(unavailableAlign.title).toBe(
+        "Every visible lane needs matching events.",
+      );
     },
   );
 
@@ -1885,12 +1961,12 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("wall"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("align_time"),
     );
@@ -1940,16 +2016,22 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("mixed"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("independent");
-    expect(screen.getByText(/Align unavailable: mixed time/)).toBeTruthy();
+    const unavailableAlign = screen.getByRole("menuitemradio", {
+      name: /^Align exact time\b/,
+    }) as HTMLButtonElement;
+    expect(unavailableAlign.disabled).toBe(true);
+    expect(unavailableAlign.title).toMatch(
+      /mixed time quality.*not a reliable shared wall clock/,
+    );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     expect(root.getAttribute("data-link-mode")).toBe("follow_cursor");
     expect(screen.queryByTestId("aligned-time-axis")).toBeNull();
   });
@@ -1974,7 +2056,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     // New behavior: both lanes start as All sources — not auto-split by first-N.
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = await screen.findByTestId("lane-editor");
@@ -1990,7 +2072,7 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-time-quality")).toBe("mixed"),
     );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("follow_cursor"),
     );
@@ -2067,7 +2149,7 @@ describe("LogExplorer shell", () => {
   it("opens the compact lane composer, assigns sources independently, and restores focus on Done", async () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     fireEvent.click(toggle);
 
     const editor = await screen.findByTestId("lane-editor");
@@ -2118,7 +2200,7 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");
 
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     fireEvent.click(toggle);
     let editor = await screen.findByTestId("lane-editor");
     let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -2136,8 +2218,8 @@ describe("LogExplorer shell", () => {
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
 
-    fireEvent.click(screen.getByTitle("1 evidence lane"));
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(1);
+    chooseLaneCount(2);
     fireEvent.click(toggle);
     editor = await screen.findByTestId("lane-editor");
     laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -2490,7 +2572,7 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() =>
       expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(2),
     );
@@ -2947,7 +3029,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
         "13 matched",
@@ -3076,7 +3158,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
         "13 matched",

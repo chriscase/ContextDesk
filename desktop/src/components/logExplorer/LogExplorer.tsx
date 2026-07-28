@@ -5,11 +5,13 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import {
   createLogSearchRequestId,
@@ -79,7 +81,11 @@ import {
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
-import { IconChevronLeft, IconLogExplorer } from "../icons";
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconLogExplorer,
+} from "../icons";
 import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
@@ -125,6 +131,204 @@ type FindPageHistory = {
   start: FindCursor | null;
   base: number;
 };
+
+type ToolbarPickerOption<T extends string> = {
+  value: T;
+  label: string;
+  description: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  visual?: ReactNode;
+};
+
+function ToolbarPicker<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  testId,
+  footer,
+}: {
+  label: string;
+  value: T;
+  options: ToolbarPickerOption<T>[];
+  onChange: (value: T) => void;
+  testId: string;
+  footer?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const selected = options.find((option) => option.value === value);
+
+  const close = useCallback((restoreFocus = true) => {
+    setOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => triggerRef.current?.focus());
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && !rootRef.current?.contains(target)) close(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    queueMicrotask(() => {
+      rootRef.current
+        ?.querySelector<HTMLElement>(
+          '[role="menuitemradio"][aria-checked="true"]:not(:disabled)',
+        )
+        ?.focus();
+    });
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [close, open]);
+
+  const moveOptionFocus = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const buttons = Array.from(
+      rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitemradio"]:not(:disabled)',
+      ) ?? [],
+    );
+    if (buttons.length === 0) return;
+    const current = buttons.indexOf(event.currentTarget);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? buttons.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+            buttons.length;
+    buttons[next]?.focus();
+  };
+
+  return (
+    <div className="log-explorer__toolbar-picker" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
+        data-testid={testId}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="log-explorer__picker-label">{label}</span>
+        <span className="log-explorer__picker-value">
+          {selected?.label ?? value}
+        </span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div
+          id={id}
+          className="log-explorer__picker-menu"
+          role="menu"
+          aria-label={`${label} options`}
+        >
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className="log-explorer__picker-option"
+              role="menuitemradio"
+              aria-checked={option.value === value}
+              disabled={option.disabled}
+              title={option.disabledReason}
+              data-value={option.value}
+              onKeyDown={moveOptionFocus}
+              onClick={() => {
+                onChange(option.value);
+                close();
+              }}
+            >
+              {option.visual ? (
+                <span className="log-explorer__picker-visual">
+                  {option.visual}
+                </span>
+              ) : null}
+              <span className="log-explorer__picker-copy">
+                <span className="log-explorer__picker-option-title">
+                  {option.label}
+                  {option.value === value ? (
+                    <span aria-hidden="true"> ✓</span>
+                  ) : null}
+                </span>
+                <span className="log-explorer__picker-description">
+                  {option.disabledReason ?? option.description}
+                </span>
+              </span>
+            </button>
+          ))}
+          {footer ? (
+            <div className="log-explorer__picker-footer">{footer}</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimeLinkVisual({ mode }: { mode: TimeLinkMode }) {
+  return (
+    <svg
+      viewBox="0 0 76 32"
+      aria-hidden="true"
+      className={`log-explorer__time-link-visual log-explorer__time-link-visual--${mode}`}
+    >
+      <path d="M4 9h68M4 23h68" />
+      {mode === "independent" ? (
+        <>
+          <circle cx="18" cy="9" r="2.5" />
+          <circle cx="51" cy="9" r="2.5" />
+          <circle cx="31" cy="23" r="2.5" />
+          <circle cx="65" cy="23" r="2.5" />
+        </>
+      ) : null}
+      {mode === "follow_cursor" ? (
+        <>
+          <path d="M39 3v26" className="log-explorer__time-link-cursor" />
+          <circle cx="34" cy="9" r="2.5" />
+          <circle cx="43" cy="23" r="2.5" />
+          <path d="m34 14 5 4 4-4" />
+        </>
+      ) : null}
+      {mode === "align_time" ? (
+        <>
+          <path d="M23 4v23M54 4v23" className="log-explorer__time-link-cursor" />
+          <circle cx="23" cy="9" r="2.5" />
+          <circle cx="23" cy="23" r="2.5" />
+          <circle cx="54" cy="9" r="2.5" />
+          <path d="M48 19h12v8H48z" className="log-explorer__time-link-gap" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
 
 function filtersToQuery(
   f: ExplorerFilters,
@@ -2290,62 +2494,60 @@ export function LogExplorer({ corpusId }: Props) {
           )}
         </div>
         <div className="log-explorer__toolbar">
-          {(
-            [
-              ["independent", "Indep"],
-              ["follow_cursor", "Follow"],
-              ["align_time", "Align"],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              className={`log-explorer__btn ${linkMode === mode ? "log-explorer__btn--active" : ""}`}
-              data-testid={`time-link-${mode}`}
-              title={
-                mode === "independent"
-                  ? "Lanes page and scroll independently"
-                  : mode === "follow_cursor"
-                    ? "Selecting an event seeks peers to nearest time (not row alignment)"
-                    : "Align lanes on a shared vertical time axis with explicit gap bands"
+          <ToolbarPicker
+            label="Time"
+            value={linkMode}
+            testId="time-link-picker"
+            options={[
+              {
+                value: "independent",
+                label: "Independent",
+                description: "Each lane pages and scrolls on its own.",
+                visual: <TimeLinkVisual mode="independent" />,
+              },
+              {
+                value: "follow_cursor",
+                label: "Follow selection",
+                description:
+                  "Selecting an event seeks each lane to its nearest time.",
+                disabled:
+                  !visibleLanesHaveEvents || timeQuality === "order_only",
+                disabledReason: !visibleLanesHaveEvents
+                  ? "Every visible lane needs matching events."
+                  : timeQuality === "order_only"
+                    ? "Order-only events cannot support time seeking."
+                    : undefined,
+                visual: <TimeLinkVisual mode="follow_cursor" />,
+              },
+              {
+                value: "align_time",
+                label: "Align exact time",
+                description:
+                  "Share a vertical wall-clock axis and show explicit gaps.",
+                disabled: !visibleLanesHaveEvents || timeQuality !== "wall",
+                disabledReason: !visibleLanesHaveEvents
+                  ? "Every visible lane needs matching events."
+                  : timeQuality !== "wall"
+                    ? `${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock.`
+                    : undefined,
+                visual: <TimeLinkVisual mode="align_time" />,
+              },
+            ]}
+            onChange={(mode) => {
+              if (mode === "follow_cursor" && timeQuality === "mixed") {
+                setStatus(
+                  "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
+                );
               }
-              onClick={() => {
-                if (
-                  mode !== "independent" &&
-                  !visibleLanesHaveEvents
-                ) {
-                  setStatus(
-                    `${label} unavailable: every visible lane needs matching events`,
-                  );
-                  return;
-                }
-                if (mode === "align_time" && timeQuality !== "wall") {
-                  setStatus(
-                    `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
-                  );
-                  return;
-                }
-                if (mode === "follow_cursor" && timeQuality === "order_only") {
-                  setStatus(
-                    "Time link unavailable: order-only time cannot claim wall-clock alignment",
-                  );
-                  return;
-                }
-                if (mode === "follow_cursor" && timeQuality === "mixed") {
-                  setStatus(
-                    "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
-                  );
-                }
-                setTimeLinkMode(mode);
-              }}
-            >
-              {label}
-            </button>
-          ))}
-          <HelpTip
-            label="Time-link modes"
-            title="Time-link modes"
-            content={HELP_TIME_LINK}
+              setTimeLinkMode(mode);
+            }}
+            footer={
+              <HelpTip
+                label="Time-link modes"
+                title="Time-link modes"
+                content={HELP_TIME_LINK}
+              />
+            }
           />
           <button
             ref={laneEditorToggleRef}
@@ -2361,79 +2563,97 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Lanes…
           </button>
-          <button
-            type="button"
-            className="log-explorer__btn"
-            onClick={() =>
-              setDensity((d) => (d === "compact" ? "comfortable" : "compact"))
+          {breakpoint !== "narrow" ? (
+            <ToolbarPicker
+              label="Lanes"
+              value={String(laneCount)}
+              testId="lane-count-picker"
+              options={[1, 2, 3, 4].map((count) => {
+                const unavailable = count > maxLaneCount;
+                const requiredWidth = count * MIN_EVIDENCE_LANE_WIDTH_PX;
+                return {
+                  value: String(count),
+                  label: `${count} ${count === 1 ? "lane" : "lanes"}`,
+                  description:
+                    count === 1
+                      ? "Use the full evidence canvas for one stream."
+                      : `Compare ${count} evidence streams side by side.`,
+                  disabled: unavailable,
+                  disabledReason: unavailable
+                    ? `Needs ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available.`
+                    : undefined,
+                };
+              })}
+              onChange={(count) => configureLanes(Number(count))}
+            />
+          ) : null}
+          <ToolbarPicker
+            label="Rows"
+            value={lineMode}
+            testId="row-mode-picker"
+            options={[
+              {
+                value: "compact",
+                label: "Single line",
+                description:
+                  "Maximum scan density; expand individual events as needed.",
+              },
+              {
+                value: "wrap",
+                label: "Preview",
+                description: `Show up to ${previewLines} lines in each row.`,
+              },
+              {
+                value: "full",
+                label: "Deep",
+                description: `Show up to ${Math.min(24, previewLines * 2)} lines; the inspector remains complete.`,
+              },
+            ]}
+            onChange={setLineMode}
+            footer={
+              <>
+                <label className="log-explorer__picker-setting">
+                  Preview depth
+                  <select
+                    value={previewLines}
+                    aria-label="Preview lines per event"
+                    data-testid="preview-lines"
+                    onChange={(event) =>
+                      setPreviewLines(Number(event.target.value))
+                    }
+                  >
+                    {[2, 4, 8, 12].map((lines) => (
+                      <option key={lines} value={lines}>
+                        {lines} lines
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <HelpTip
+                  label="Long-line reading help"
+                  title="Reading long events"
+                  content={HELP_LONG_LINES}
+                />
+              </>
             }
-          >
-            {density}
-          </button>
-          {breakpoint !== "narrow" &&
-            [1, 2, 3, 4].map((n) => {
-              const unavailable = n > maxLaneCount;
-              const requiredWidth = n * MIN_EVIDENCE_LANE_WIDTH_PX;
-              return (
-                <button
-                  key={n}
-                  type="button"
-                  className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
-                  disabled={unavailable}
-                  onClick={() => configureLanes(n)}
-                  title={
-                    unavailable
-                      ? `${n} evidence lanes need ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available`
-                      : `${n} evidence lane${n > 1 ? "s" : ""}`
-                  }
-                >
-                  {n}L
-                </button>
-              );
-            })}
-          {(
-            [
-              ["compact", "1 line"],
-              ["wrap", "Preview"],
-              ["full", "Deep"],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              className={`log-explorer__btn ${lineMode === mode ? "log-explorer__btn--active" : ""}`}
-              data-testid={`line-mode-${mode}`}
-              onClick={() => setLineMode(mode)}
-              title={
-                mode === "compact"
-                  ? "Dense single-line rows; expand an individual event or use the inspector"
-                  : mode === "wrap"
-                    ? `Show up to ${previewLines} lines per row`
-                    : `Show up to ${Math.min(24, previewLines * 2)} lines per row; inspector remains complete`
-              }
-            >
-              {label}
-            </button>
-          ))}
-          <label className="log-explorer__toolbar-field">
-            Preview
-            <select
-              value={previewLines}
-              aria-label="Preview lines per event"
-              data-testid="preview-lines"
-              onChange={(event) => setPreviewLines(Number(event.target.value))}
-            >
-              {[2, 4, 8, 12].map((lines) => (
-                <option key={lines} value={lines}>
-                  {lines} lines
-                </option>
-              ))}
-            </select>
-          </label>
-          <HelpTip
-            label="Long-line reading help"
-            title="Reading long events"
-            content={HELP_LONG_LINES}
+          />
+          <ToolbarPicker
+            label="Density"
+            value={density}
+            testId="density-picker"
+            options={[
+              {
+                value: "comfortable",
+                label: "Comfortable",
+                description: "More breathing room for focused reading.",
+              },
+              {
+                value: "compact",
+                label: "Compact",
+                description: "Fit more evidence on screen for rapid scanning.",
+              },
+            ]}
+            onChange={setDensity}
           />
           <button
             type="button"
