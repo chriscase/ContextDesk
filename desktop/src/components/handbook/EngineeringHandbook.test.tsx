@@ -130,17 +130,30 @@ describe("EngineeringHandbook", () => {
         "## Trust boundary",
         "",
         "The host remains authoritative.",
+        "",
+        "## Recovery",
+        "",
+        "Failures remain visible.",
       ].join("\n"),
     });
     const { container } = render(<EngineeringHandbook />);
-    await screen.findByRole("heading", { name: "Trust boundary", level: 2 });
+    await screen.findByRole("heading", { name: "Recovery", level: 2 });
 
     const reader = container.querySelector<HTMLElement>(".handbook-reader");
     const components = document.getElementById("components");
     const trustBoundary = document.getElementById("trust-boundary");
+    const recovery = document.getElementById("recovery");
     expect(reader).toBeTruthy();
     expect(components).toBeTruthy();
     expect(trustBoundary).toBeTruthy();
+    expect(recovery).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Recovery" })
+          .getAttribute("aria-current"),
+      ).toBe("location"),
+    );
     Object.defineProperty(components, "offsetTop", {
       configurable: true,
       value: 120,
@@ -149,10 +162,18 @@ describe("EngineeringHandbook", () => {
       configurable: true,
       value: 720,
     });
-    Object.defineProperty(reader, "scrollTop", {
+    Object.defineProperty(recovery, "offsetTop", {
       configurable: true,
-      writable: true,
-      value: 700,
+      value: 1_300,
+    });
+    Object.defineProperties(reader, {
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: { configurable: true, value: 1_400 },
+      scrollTop: {
+        configurable: true,
+        writable: true,
+        value: 700,
+      },
     });
 
     fireEvent.scroll(reader as HTMLElement);
@@ -168,6 +189,21 @@ describe("EngineeringHandbook", () => {
         .getByRole("button", { name: "Components" })
         .getAttribute("aria-current"),
     ).toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "Recovery" })
+        .getAttribute("aria-current"),
+    ).toBeNull();
+
+    (reader as HTMLElement).scrollTop = 900;
+    fireEvent.scroll(reader as HTMLElement);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Recovery" })
+          .getAttribute("aria-current"),
+      ).toBe("location"),
+    );
   });
 
   it("routes Markdown links to the supplied callback with the raw target", async () => {

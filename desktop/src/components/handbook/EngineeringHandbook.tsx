@@ -65,6 +65,13 @@ export function EngineeringHandbook({ initialChapterId, onNavigate }: Props) {
       setActiveHeadingId(null);
       return;
     }
+    const atEnd =
+      reader.scrollHeight > reader.clientHeight &&
+      reader.scrollTop + reader.clientHeight >= reader.scrollHeight - 2;
+    if (atEnd) {
+      setActiveHeadingId(visibleHeadings[visibleHeadings.length - 1].id);
+      return;
+    }
     const threshold = reader.scrollTop + 72;
     let current = visibleHeadings[0].id;
     for (const heading of visibleHeadings) {
