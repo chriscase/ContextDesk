@@ -510,7 +510,7 @@ export function TimelineNavigator({
                     <div
                       key={lane.id}
                       className="log-explorer__navigator-lane-row"
-                      data-lane-id={lane.id}
+                      data-timeline-lane-id={lane.id}
                     >
                       <span title={lane.label}>{lane.label}</span>
                       {lane.summary ? (
@@ -550,7 +550,6 @@ export function TimelineNavigator({
           ) : null}
           <span
             className="log-explorer__navigator-status timeline-navigator__status"
-            role="status"
             aria-live="polite"
           >
             {status}

@@ -87,7 +87,7 @@ vi.mock("../../lib/host", () => ({
     totalMatched: 2,
     timeQuality: "wall",
   })),
-  hostLogTimelineSummary: vi.fn(async () => ({
+  hostLogSharedTimelineSummary: vi.fn(async () => ({
     timeQuality: "wall",
     spanFrom: 1_700_000_000,
     spanTo: 1_700_000_004,
@@ -95,21 +95,20 @@ vi.mock("../../lib/host", () => ({
     bucketCount: 4,
     totalMatched: 2,
     buckets: [
-      {
-        index: 0,
-        start: 1_700_000_000,
-        end: 1_700_000_001,
-        count: 1,
-        byLevel: { error: 1 },
-      },
-      {
-        index: 1,
-        start: 1_700_000_001,
-        end: 1_700_000_002,
-        count: 1,
-        byLevel: { info: 1 },
-      },
+      { index: 0, start: 1_700_000_000, end: 1_700_000_001 },
+      { index: 1, start: 1_700_000_001, end: 1_700_000_002 },
+      { index: 2, start: 1_700_000_002, end: 1_700_000_003 },
+      { index: 3, start: 1_700_000_003, end: 1_700_000_004 },
     ],
+    counts: [1, 1, 0, 0],
+    severitySeries: [
+      { severity: "error", counts: [1, 0, 0, 0] },
+      { severity: "warn", counts: [0, 0, 0, 0] },
+      { severity: "info", counts: [0, 1, 0, 0] },
+      { severity: "debug", counts: [0, 0, 0, 0] },
+      { severity: "other", counts: [0, 0, 0, 0] },
+    ],
+    lanes: [],
   })),
   hostLogQueryEventOriginal: vi.fn(async () => ({
     state: "unavailable",
@@ -513,9 +512,7 @@ describe("LogExplorer shell", () => {
     expect(firstList.getAttribute("data-field-emphasis")).toBe("payload");
     expect(firstList.querySelector("[data-level-token]")).toBeTruthy();
     expect(
-      localStorage.getItem(
-        "contextdesk.logExplorer.metadataPresentation.v1",
-      ),
+      localStorage.getItem("contextdesk.logExplorer.metadataPresentation.v1"),
     ).toBe("compact");
     expect(
       localStorage.getItem("contextdesk.logExplorer.fieldEmphasis.v1"),
@@ -525,14 +522,14 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
     expect(
-      screen.getByTestId("log-explorer").getAttribute(
-        "data-metadata-presentation",
-      ),
+      screen
+        .getByTestId("log-explorer")
+        .getAttribute("data-metadata-presentation"),
     ).toBe("compact");
     expect(
-      screen.getAllByTestId("virtualized-event-list")[0]!.getAttribute(
-        "data-field-emphasis",
-      ),
+      screen
+        .getAllByTestId("virtualized-event-list")[0]!
+        .getAttribute("data-field-emphasis"),
     ).toBe("payload");
   });
 
@@ -868,9 +865,7 @@ describe("LogExplorer shell", () => {
       ).textContent,
     ).toBe('{"message":"auth failure","unknown":"kept"}');
     expect(
-      within(inspector)
-        .getByTestId("detail-copy")
-        .getAttribute("aria-label"),
+      within(inspector).getByTestId("detail-copy").getAttribute("aria-label"),
     ).toBe("Copy stored Original (redacted) record 1");
 
     fireEvent.click(within(inspector).getByTestId("detail-copy"));
@@ -887,7 +882,9 @@ describe("LogExplorer shell", () => {
     ).toBe("auth failure");
     fireEvent.click(within(inspector).getByTestId("detail-copy"));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
-    expect(writeText.mock.calls[1]?.[0]).toContain("\terror\tapi.log\tauth failure");
+    expect(writeText.mock.calls[1]?.[0]).toContain(
+      "\terror\tapi.log\tauth failure",
+    );
     expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(1);
   });
 
@@ -916,9 +913,8 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
     fireEvent.click(within(inspector).getByRole("button", { name: "Retry" }));
     expect(
-      (
-        await within(inspector).findByTestId("detail-original-unavailable")
-      ).textContent,
+      (await within(inspector).findByTestId("detail-original-unavailable"))
+        .textContent,
     ).toBe("Original representation unavailable for this corpus");
     expect(
       (within(inspector).getByTestId("detail-copy") as HTMLButtonElement)
@@ -4445,14 +4441,17 @@ describe("LogExplorer shell", () => {
       );
     });
 
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
 
-    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
       "c1",
       expect.objectContaining({
         sources: ["api.log", "worker.log", "queue.log", "db.log"],
       }),
+      [
+        { sources: ["api.log", "worker.log"] },
+        { sources: ["queue.log", "db.log"] },
+      ],
       96,
     );
     expect(host.hostLogQueryEvents).toHaveBeenCalledWith(

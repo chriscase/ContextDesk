@@ -743,9 +743,7 @@ export function LogExplorer({ corpusId }: Props) {
   >({ status: "idle" });
   const detailOriginalRequestRef = useRef(0);
   const detailSeqRef = useRef<number | null>(null);
-  const detailRepresentationRef = useRef<"formatted" | "original">(
-    "formatted",
-  );
+  const detailRepresentationRef = useRef<"formatted" | "original">("formatted");
   const showDetail = useCallback((event: ExplorerEventDto) => {
     detailOriginalRequestRef.current += 1;
     detailSeqRef.current = event.seq;
@@ -900,11 +898,7 @@ export function LogExplorer({ corpusId }: Props) {
       const value = localStorage.getItem(
         "contextdesk.logExplorer.fieldEmphasis.v1",
       );
-      if (
-        value === "balanced" ||
-        value === "payload" ||
-        value === "metadata"
-      ) {
+      if (value === "balanced" || value === "payload" || value === "metadata") {
         return value;
       }
     } catch {
@@ -3920,9 +3914,7 @@ export function LogExplorer({ corpusId }: Props) {
                     aria-label="Row field emphasis"
                     data-testid="row-field-emphasis"
                     onChange={(event) =>
-                      setFieldEmphasis(
-                        event.target.value as RowFieldEmphasis,
-                      )
+                      setFieldEmphasis(event.target.value as RowFieldEmphasis)
                     }
                   >
                     <option value="balanced">Balanced</option>
@@ -4964,8 +4956,8 @@ export function LogExplorer({ corpusId }: Props) {
               }}
             />
             <HelpTip
-              label="Timeline navigator help"
-              title="Timeline navigator"
+              label="Investigation timeline help"
+              title="Investigation timeline"
               content={HELP_TIMELINE_NAVIGATOR}
             />
             {linkMode === "align_time" ? (
