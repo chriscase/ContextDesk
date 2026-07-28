@@ -122,6 +122,17 @@ function bucketLabel(summary: SharedTimelineSummaryDto, index: number) {
   return `mixed time/order ${start}–${Math.max(start, end - 1)}`;
 }
 
+function compactBucketRange(
+  summary: SharedTimelineSummaryDto,
+  index: number,
+) {
+  const { start, end } = bucketBounds(summary, index);
+  return `${compactTime(summary, start)}–${compactTime(
+    summary,
+    Math.max(start, end - 1),
+  )}`;
+}
+
 /**
  * Fixed-size corpus navigator. While expanded it performs bounded summary
  * queries; dragging never queries until the user commits a position.
@@ -140,6 +151,7 @@ export function TimelineNavigator({
   const [error, setError] = useState<string | null>(null);
   const [laneSummaries, setLaneSummaries] = useState<LaneSummaryState[]>([]);
   const [previewIndex, setPreviewIndex] = useState(0);
+  const [detailIndex, setDetailIndex] = useState<number | null>(null);
   const [committedIndex, setCommittedIndex] = useState<number | null>(null);
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
@@ -268,7 +280,7 @@ export function TimelineNavigator({
     const { start, end } = bucketBounds(summary, index);
     setPreviewIndex(index);
     setError(null);
-    setStatus(`Seeking ${bucketLabel(summary, index)}…`);
+    setStatus(`Seeking ${compactBucketRange(summary, index)}…`);
     try {
       const page = await hostLogQueryEvents(corpusId, {
         ...filter,
@@ -284,14 +296,14 @@ export function TimelineNavigator({
       if (request !== seekRequest.current) return;
       const event = page.events[0];
       if (!event) {
-        setStatus(`No event in ${bucketLabel(summary, index)}`);
+        setStatus(`No event in ${compactBucketRange(summary, index)}`);
         return;
       }
       await onSeekSeq(event.seq, event);
       if (request !== seekRequest.current) return;
       setCommittedIndex(index);
       setStatus(
-        `Moved to seq ${event.seq} · ${bucketLabel(summary, index)} · bounded neighborhood loaded`,
+        `Moved to seq ${event.seq} · ${compactTime(summary, event.ts)} · bounded neighborhood loaded`,
       );
     } catch (cause) {
       if (request !== seekRequest.current) return;
@@ -370,24 +382,17 @@ export function TimelineNavigator({
                       </span>
                     ))}
                   </div>
+                  <span
+                    className="timeline-navigator__current"
+                    data-testid="timeline-current-summary"
+                  >
+                    {compactTime(
+                      summary,
+                      bucketBounds(summary, previewIndex).start,
+                    )}{" "}
+                    · {counts[previewIndex] ?? 0} events
+                  </span>
                   <div className="timeline-navigator__actions">
-                    <details className="timeline-navigator__data">
-                      <summary>Timeline data</summary>
-                      <ol>
-                        {counts.map((count, index) => (
-                          <li key={index}>
-                            {compactTime(
-                              summary,
-                              bucketBounds(summary, index).start,
-                            )}
-                            : {count} events
-                            {levelSummary(summary, index)
-                              ? ` (${levelSummary(summary, index)})`
-                              : " (empty)"}
-                          </li>
-                        ))}
-                      </ol>
-                    </details>
                     <HelpTip
                       label="Investigation timeline help"
                       title="Investigation timeline"
@@ -441,7 +446,11 @@ export function TimelineNavigator({
                           .join(" ")}
                         data-testid={`timeline-bucket-${index}`}
                         aria-label={`${bucketLabel(summary, index)} · ${count} events${breakdown ? ` · ${breakdown}` : " · empty"}${residentIndexes.has(index) ? " · resident range" : ""}${committedIndex === index ? " · committed position" : ""}`}
-                        title={`${bucketLabel(summary, index)} · ${count} events${breakdown ? ` · ${breakdown}` : ""}`}
+                        aria-describedby={
+                          detailIndex === index
+                            ? "timeline-bucket-detail"
+                            : undefined
+                        }
                         style={
                           {
                             "--bucket-height":
@@ -454,6 +463,16 @@ export function TimelineNavigator({
                                 : `${3 + Math.round((levels.error / maxErrorCount) * 9)}px`,
                           } as CSSProperties
                         }
+                        onPointerEnter={() => {
+                          setPreviewIndex(index);
+                          setDetailIndex(index);
+                        }}
+                        onPointerLeave={() => setDetailIndex(null)}
+                        onFocus={() => {
+                          setPreviewIndex(index);
+                          setDetailIndex(index);
+                        }}
+                        onBlur={() => setDetailIndex(null)}
                         onClick={() => void seekBucket(index)}
                       >
                         <span className="timeline-navigator__stack">
@@ -498,9 +517,13 @@ export function TimelineNavigator({
                     aria-label="Timeline position"
                     aria-valuetext={`${compactTime(summary, bucketBounds(summary, previewIndex).start)} · ${counts[previewIndex]} events · ${timeQualityLabel(summary.timeQuality)}`}
                     title={bucketLabel(summary, previewIndex)}
-                    onChange={(event) =>
-                      setPreviewIndex(Number(event.target.value))
-                    }
+                    onFocus={() => setDetailIndex(previewIndex)}
+                    onBlur={() => setDetailIndex(null)}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      setPreviewIndex(next);
+                      setDetailIndex(next);
+                    }}
                     onPointerUp={(event) =>
                       void seekBucket(Number(event.currentTarget.value))
                     }
@@ -516,16 +539,51 @@ export function TimelineNavigator({
                     }}
                   />
                 </div>
+                {detailIndex != null ? (
+                  <div
+                    id="timeline-bucket-detail"
+                    role="tooltip"
+                    className="timeline-navigator__bucket-detail"
+                    data-testid="timeline-bucket-detail"
+                    style={
+                      {
+                        "--timeline-detail-x": `${((detailIndex + 0.5) / summary.bucketCount) * 100}%`,
+                      } as CSSProperties
+                    }
+                  >
+                    <strong>{compactBucketRange(summary, detailIndex)}</strong>
+                    <span>
+                      {counts[detailIndex] ?? 0} events
+                      {levelSummary(summary, detailIndex)
+                        ? ` · ${levelSummary(summary, detailIndex)}`
+                        : " · empty bucket"}
+                    </span>
+                    <code>{bucketLabel(summary, detailIndex)}</code>
+                    {laneSummaries.some((lane) => lane.summary) ? (
+                      <ul aria-label="Bucket lane breakdown">
+                        {laneSummaries.map((lane) => (
+                          <li key={lane.id}>
+                            <span>{lane.label}</span>
+                            <b>
+                              {lane.summary?.counts[detailIndex] ?? "unavailable"}
+                            </b>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <small>
+                      {residentIndexes.has(detailIndex)
+                        ? "Resident evidence is loaded here."
+                        : "Outside the resident evidence window."}
+                      {committedIndex === detailIndex
+                        ? " Current committed position."
+                        : ""}
+                    </small>
+                  </div>
+                ) : null}
                 <div className="timeline-navigator__axis" aria-hidden="true">
                   <span>
                     {compactTime(summary, bucketBounds(summary, 0).start)}
-                  </span>
-                  <span>
-                    {compactTime(
-                      summary,
-                      bucketBounds(summary, previewIndex).start,
-                    )}{" "}
-                    preview
                   </span>
                   <span>
                     {compactTime(

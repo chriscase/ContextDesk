@@ -285,10 +285,10 @@ describe("TimelineNavigator", () => {
     const track = await screen.findByTestId("timeline-navigator-track");
     expect(track.querySelector(".timeline-navigator__topline")).toBeTruthy();
     expect(track.querySelector(".timeline-navigator__chart")).toBeTruthy();
-    expect(track.querySelector(".timeline-navigator__data")).toBeTruthy();
-    expect(
-      track.parentElement?.querySelector(":scope > .timeline-navigator__data"),
-    ).toBeNull();
+    expect(screen.getByTestId("timeline-current-summary").textContent).toMatch(
+      /^\d{2}:\d{2}:\d{2}Z · 30 events$/,
+    );
+    expect(screen.queryByText("Timeline data")).toBeNull();
     expect(screen.getByTestId("timeline-bucket-0").className).toContain(
       "timeline-navigator__bucket--has-error",
     );
@@ -346,6 +346,23 @@ describe("TimelineNavigator", () => {
       /^\d{2}:\d{2}:\d{2}Z · 30 events · wall clock$/,
     );
     expect(scrubber.getAttribute("title")).toContain("2023-");
+    expect(
+      document.querySelectorAll(".timeline-navigator__axis span"),
+    ).toHaveLength(2);
+
+    const bucket = screen.getByTestId("timeline-bucket-0");
+    bucket.focus();
+    const detail = await screen.findByTestId("timeline-bucket-detail");
+    expect(bucket.getAttribute("aria-describedby")).toBe(
+      "timeline-bucket-detail",
+    );
+    expect(detail.getAttribute("role")).toBe("tooltip");
+    expect(detail.textContent).toContain("30 events");
+    expect(detail.textContent).toContain("Error 1");
+    expect(detail.textContent).toContain("2023-");
+
+    fireEvent.blur(bucket);
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
   });
 
   it("labels order-only summaries as order rather than calendar time", async () => {
@@ -423,6 +440,15 @@ describe("TimelineNavigator", () => {
       96,
     );
     expect(coverage.querySelectorAll("i")).toHaveLength(8);
+    const bucket = screen.getByTestId("timeline-bucket-3");
+    fireEvent.pointerEnter(bucket);
+    const detail = screen.getByTestId("timeline-bucket-detail");
+    const breakdown = within(detail).getByRole("list", {
+      name: "Bucket lane breakdown",
+    });
+    expect(within(breakdown).getByText("API")).toBeTruthy();
+    expect(within(breakdown).getByText("Worker")).toBeTruthy();
+    expect(within(breakdown).getByText("12")).toBeTruthy();
   });
 
   it("ignores a stale summary after filters change", async () => {

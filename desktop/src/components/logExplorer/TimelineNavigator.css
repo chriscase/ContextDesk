@@ -54,6 +54,7 @@
 }
 
 .timeline-navigator__track {
+  position: relative;
   min-width: 12rem;
   width: 100%;
 }
@@ -83,6 +84,20 @@
   align-items: center;
   gap: 0.25rem;
   flex-shrink: 0;
+}
+
+.timeline-navigator__current {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(
+    in srgb,
+    var(--fg, #e8eaed) 86%,
+    var(--fg-muted, #9aa0a6)
+  );
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .timeline-navigator__legend span {
@@ -254,13 +269,74 @@
   justify-content: space-between;
   gap: 0.5rem;
   margin-top: 0.1rem;
-  color: var(--fg-muted, #9aa0a6);
-  font-size: 0.58rem;
+  color: color-mix(
+    in srgb,
+    var(--fg, #e8eaed) 70%,
+    var(--fg-muted, #9aa0a6)
+  );
+  font-size: 0.62rem;
+  font-weight: 520;
   font-variant-numeric: tabular-nums;
 }
 
-.timeline-navigator__axis span:nth-child(2) {
+.timeline-navigator__bucket-detail {
+  --detail-width: min(19rem, calc(100% - 1rem));
+
+  position: absolute;
+  z-index: 20;
+  top: 1.45rem;
+  left: clamp(
+    calc(var(--detail-width) / 2),
+    var(--timeline-detail-x),
+    calc(100% - var(--detail-width) / 2)
+  );
+  display: grid;
+  gap: 0.22rem;
+  width: var(--detail-width);
+  padding: 0.55rem 0.65rem;
+  border: 1px solid
+    color-mix(in srgb, var(--accent, #5b9fd4) 48%, var(--border-subtle, #2a2d33));
+  border-radius: 0.45rem;
+  background: color-mix(
+    in srgb,
+    var(--bg-elevated, #121418) 96%,
+    transparent
+  );
+  box-shadow: 0 0.8rem 2rem rgb(0 0 0 / 44%);
   color: var(--fg, #e8eaed);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.timeline-navigator__bucket-detail > span,
+.timeline-navigator__bucket-detail > code,
+.timeline-navigator__bucket-detail > small {
+  color: color-mix(
+    in srgb,
+    var(--fg, #e8eaed) 76%,
+    var(--fg-muted, #9aa0a6)
+  );
+}
+
+.timeline-navigator__bucket-detail > code {
+  overflow-wrap: anywhere;
+  font-size: 0.61rem;
+}
+
+.timeline-navigator__bucket-detail ul {
+  display: grid;
+  gap: 0.12rem;
+  margin: 0.15rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline-navigator__bucket-detail li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
 }
 
 .timeline-navigator__data {
