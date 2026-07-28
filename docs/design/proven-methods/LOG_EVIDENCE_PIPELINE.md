@@ -470,12 +470,12 @@ instant while ambiguous controls remain order-only.
 | Slice                          | Status                        | What is true now                                              | What is not claimed                     |
 | ------------------------------ | ----------------------------- | ------------------------------------------------------------- | --------------------------------------- |
 | Batch ingest/store/templates   | **Shipped**                   | Embedded local pipeline and deterministic states              | Live sources/tailing                    |
-| Redacted Original              | **Local integration**         | Implemented on acceptance branch with bounded metadata        | Available on current `main`             |
+| Redacted Original              | **Local integration**         | Implemented and tested on the acceptance branch                | Availability on `main` before promotion is not claimed |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
-| Explicit-offset logfmt/RFC5424 | **Local integration**         | #681 implementation/tests exist locally                       | Shipped until promotion                 |
+| Explicit-offset logfmt/RFC5424 | **Local integration**         | Implementation and parser tests exist on the acceptance branch | Availability on `main` and full #670 policy are not claimed |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
-| Timeline                       | **Partial/local enhancement** | Bounded summary ships; richer navigator is in acceptance work | Metric tracks and full #670 trust model |
+| Timeline                       | **Local integration over shipped summaries** | Full-width shared-axis timeline, chart-wide scrubber, severity stacks, sparse-error signal, resident range, and lane coverage are implemented on the acceptance branch | Metric tracks (#667), full #670 time policy, and promotion proof are not claimed |
 | Noise suppression              | **Planned**                   | Temporary filters exist                                       | Durable auditable squelch policy (#671) |
 | Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
 

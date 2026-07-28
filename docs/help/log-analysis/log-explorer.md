@@ -33,12 +33,12 @@ import/export, and open investigation. It is not a million-row browser.
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Find vs Filter         | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist                                                                                                                                              |
 | Counts                 | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total                                                                                                                                                                                                                                                                                             |
-| Bookmarks              | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore                                                                                                                                                                                                                                                                                                                         |
+| Bookmarks              | New saves preserve the exact selected event set, including noncontiguous selections, and reject duplicate exact sets. Activation loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore                                                                                                                                                                                                                                             |
 | Investigation evidence | Selecting rows reveals **Ask about selection** and **Save evidence**. Saved exact identities live outside disposable corpus caches, survive chat deletion, and can be previewed without changing the Explorer before an explicit reveal                                                                                                                                                                                                                              |
 | Bidirectional paging   | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; a local **Retry** appears only after a page failure                                                                                                                                                                                                                                                                                                                  |
 | Timestamps             | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time                                                                                                                                                                                                                                                 |
-| Columns                | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally                                                                                                                                                                                                                                                                                                      |
-| Long lines             | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event                                                                                                                                                                                                                                                                                                  |
+| Rows / columns         | New profiles default to Compact tokens and Payload focus with payload-first widths. Switch among Full labels/Compact tokens and Payload/Balanced/Metadata without changing evidence. Complete labels and provenance remain keyboard-focusable. Drag or keyboard-resize Time / Level / Source / Message; Reset restores payload-first defaults                                                                                                                       |
+| Long lines / fidelity  | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. The inspector shows complete formatted content and, when stored, the separately bounded **Original (redacted)** representation with normalization/truncation disclosures                                                                                                                                                                                                                     |
 | Narrow layout          | Logs remain primary and single-lane. Filters and Investigation (Evidence/Chat) open intentionally as keyboard-safe drawers with state summaries and focus restoration                                                                                                                                                                                                                                                                                                |
 | Evidence lanes         | 1–4 user-composed source groups. The same source may appear in more than one lane                                                                                                                                                                                                                                                                                                                                                                                    |
 | Time-link modes        | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets                                                                                                                                                                                                                          |
@@ -113,6 +113,11 @@ distinguish Error, Warning, Info, Debug, and Other without relying on color
 alone. The highlighted range marks buckets represented in the current bounded
 resident window.
 
+Sparse errors receive a separate red patterned signal scaled against the
+largest visible error count. This keeps rare errors discoverable without
+falsifying a bucket's total-volume height or severity proportions. Exact counts
+remain available in **Timeline data** and accessible labels.
+
 Drag or click anywhere on the broad chart scrubber. Movement changes the
 preview marker without querying; releasing requests one event from that bucket
 and loads its bounded neighborhood, leaving a separate committed marker.
@@ -135,14 +140,20 @@ summary work until it is reopened.
 Row height follows the displayed content, so a short one-line event remains
 compact instead of reserving the entire preview maximum.
 Press **X** on a focused row or use **Expand** for one event. Select a row for
-the complete redacted message and metadata in the resizable inspector; row
-preview truncation never claims to be the complete record.
+the complete formatted content and metadata in the resizable inspector. When
+stored, **Original (redacted)** provides a separately bounded representation
+with normalization and truncation disclosures; it is not claimed to be
+byte-identical raw input. Row preview truncation never claims to be the
+complete record.
 
 ## Bookmarks
 
-A bookmark points to a stable event or range. Activating it resolves the target
-directly. If current filters or lane membership hide it, Explorer clearly
-offers a temporary reveal and a way to restore the prior view.
+New bookmarks preserve the exact selected event set, including noncontiguous
+selections. Saving the same exact set again reports **Already bookmarked**
+instead of creating a duplicate. Legacy single/range bookmarks remain
+readable. Activating a bookmark resolves its target directly. If current
+filters or lane membership hide it, Explorer clearly offers a temporary reveal
+and a way to restore the prior view.
 
 ## Investigation evidence
 

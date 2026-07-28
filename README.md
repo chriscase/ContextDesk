@@ -33,30 +33,13 @@ through [`branding.toml`](branding.toml).
 | **Identity**    | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179))                |
 | **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md)                       |
 
-![ContextDesk desktop — empty chat with starter prompts, session sidebar, and composer](docs/media/screenshot.png)
-
-<p align="center"><sub>Desktop host (macOS): first-chat product home, pane tabs, composer, model picker, session-only context honesty. Capture notes in <a href="docs/media/README.md"><code>docs/media/README.md</code></a>.</sub></p>
-
 ### Product gallery (packaged app)
 
-Real frames from the packaged macOS app on current `main` (see capture SHA in [`docs/media/README.md`](docs/media/README.md)). Not a substitute for owner Log Explorer GUI acceptance ([#525](https://github.com/chriscase/ContextDesk/issues/525)).
-
-| First-chat home                                                            | Help Center                                             | Logs library                                         |
-| -------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
-| ![First-chat home (normal)](docs/media/gallery/first-chat-home-normal.png) | ![Help Center (dark)](docs/media/gallery/help-dark.png) | ![Logs library](docs/media/gallery/logs-library.png) |
-
-| Help · Light                                     | Help · Slate                                     | Ordinary chat honesty                                                      |
-| ------------------------------------------------ | ------------------------------------------------ | -------------------------------------------------------------------------- |
-| ![Help light](docs/media/gallery/help-light.png) | ![Help slate](docs/media/gallery/help-slate.png) | ![Session-only context](docs/media/gallery/ordinary-chat-session-only.png) |
-
-Narrow / practical 800×600 minimum (Chat → Logs → Help, no primary chrome clip):
-
-| 800×600 Chat (first-chat home)                          | 800×600 Logs                                            | 800×600 Help                                            |
-| ------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
-| ![Chat narrow](docs/media/gallery/nav-800x600-chat.png) | ![Logs narrow](docs/media/gallery/nav-800x600-logs.png) | ![Help narrow](docs/media/gallery/nav-800x600-help.png) |
-
-<p align="center"><img src="docs/media/gallery/main-nav-800x600.png" alt="800×600 contact strip: Chat, Logs, Help" width="900" /></p>
-<p align="center"><sub>Contact strip of the three 800×600 frames above. Wide first-chat is max width on the built-in Retina display (~1427 logical px), not an external ultrawide capture.</sub></p>
+Public product captures are temporarily withheld pending neutral-profile
+recapture, exact source-SHA recording, and publication review under
+[#653](https://github.com/chriscase/ContextDesk/issues/653). Existing
+acceptance captures may contain owner-specific model/profile information or
+show an older interface and are not current product evidence.
 
 ### From raw logs to a durable investigation
 
@@ -162,25 +145,11 @@ machine-checked against production symbols. Partial work is listed separately.
 
 ### Log Explorer at scale
 
-The packaged desktop app below is investigating the deterministic 100,000-event
-Log Lab corpus. The first view aligns two composed source groups on exact shared
-UTC timestamps and shows missing evidence as explicit gap cells.
-
-![Log Explorer aligning two source-group lanes over a deterministic 100,000-event corpus, with explicit gap cells and a complete event inspector](docs/media/log-explorer-align-100k.jpeg)
-
-The same corpus can expand to four independently composed evidence lanes on an
-ultrawide display. These are real macOS packaged-app acceptance captures, not
-mockups; the event count is fixture data, not a universal performance claim.
-
-![Log Explorer showing four composed evidence lanes over a deterministic 100,000-event corpus on an ultrawide display](docs/media/log-explorer-four-lanes-100k.jpeg)
-
-A separate seven-day synthetic corpus exercises deep time navigation rather
-than just row volume. Here the investigation timeline remains open after a
-bounded seek into its final time bucket, with the selected event and surrounding
-rows still mounted and the complete event inspector visible. The 25,000-event
-count is fixture data, not a production-size ceiling or throughput claim.
-
-![Log Explorer keeping a deep seven-day Navigator seek visible with the final time bucket, surrounding rows, and selected event inspector](docs/media/log-explorer-seven-day-navigator.jpeg)
+Deterministic Log Lab corpora exercise 100,000-event multi-lane investigation
+and a separate 25,000-event seven-day time span. These fixture counts support
+repeatable acceptance checks; they are not production ceilings or universal
+performance claims. Neutral exact-SHA screenshots will return here only after
+they pass the publication gate tracked by #653.
 
 **Roadmap / partial (do not treat as done):**
 

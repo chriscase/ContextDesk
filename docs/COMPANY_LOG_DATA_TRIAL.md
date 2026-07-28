@@ -65,6 +65,8 @@ Work through each row. Mark pass / fail / skip and a one-line note.
 | ------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | Find                      | Search for a known incident token (request id, error string, host) | The expected line is findable without false “empty” results when the token exists          |
 | Filter                    | Filter by level, service, or source if available                   | Results match what you can verify in the raw files                                         |
+| Rows / Original           | Use Compact tokens + Payload, switch presentations, and compare one long event with Original (redacted) | Presentation changes do not change evidence; provenance remains recoverable; normalization/redaction/truncation is disclosed |
+| Bidirectional paging      | Scroll substantially down and back up                              | Older and newer pages load automatically without paging buttons or losing the logical position |
 | Lanes / sources           | Open more than one source                                          | You can tell which file a line came from; basename collisions do not merge unrelated hosts |
 | Timeline                  | Scroll/seek around the incident window                             | Order is usable; mixed or order-only data is not presented as perfect wall-clock certainty |
 | Bookmarks / investigation | Save 2–3 exact events and one finding; close and reopen Explorer    | Saved evidence resolves to the same events or visibly reports stale/missing identities     |
@@ -150,6 +152,8 @@ OS profile when policy requires a guaranteed clean environment.
 | Tools enabled?                        | Y / N                      |
 | Find                                  | pass / fail / skip — notes |
 | Filter                                | pass / fail / skip — notes |
+| Rows / Original                       | pass / fail / skip — notes |
+| Bidirectional paging                  | pass / fail / skip — notes |
 | Lanes / sources                       | pass / fail / skip — notes |
 | Timeline                              | pass / fail / skip — notes |
 | Bookmarks / investigation             | pass / fail / skip — notes |

@@ -31,7 +31,7 @@ clustering, and “why” tools.
 | Stage | What happens | Evidence or boundary |
 | --- | --- | --- |
 | Ingest | A file or directory is read into a named disposable corpus | `ingest_logs` is SoftWrite because it materializes local analysis data |
-| Parse | The detector handles supported structured and text formats | Malformed lines are reported; the run does not claim perfect parsing |
+| Parse | Supported structured formats are parsed defensibly; malformed or unsupported structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting |
 | Redact | Secret-like values and sensitive parameters are scrubbed | Redaction happens before persistence and embedding |
 | Template | Drain groups variable messages into stable templates | Parameters remain separate from the template pattern |
 | Store | Events and templates are persisted under the app cache | DuckDB serves time/filter/aggregate scans; logs are not durable memory |
@@ -72,7 +72,7 @@ whether a few patterns dominate or a long tail remains.
 | `cluster_problems` | Read | Rank groups of related templates by severity, frequency, and anomaly |
 | `timeline` | Read | Count events over time for a filter |
 | `correlate_logs` | Read | Find templates that spike or co-occur around an incident |
-| `anomalies_logs` | Read | Compare an incident window with a baseline for new or rare templates |
+| `anomalies_logs` | Read | Compare an incident window with an explicitly supplied baseline window inside the same current corpus. This is not a learned or cross-corpus application baseline |
 | `trace_logs` | Read | Follow a trace or request identifier across services and time |
 
 ## A practical triage loop
@@ -113,7 +113,11 @@ This is batch, post-mortem analysis. Live tailing, continuous alerts, and
 remote S3/Loki/Elastic/Kubernetes log-source connectors are not shipped in this
 pipeline. A cloud embedding option, when used, requires an explicit
 content-leaves-this-machine decision and remains separate from local re-analysis.
-Bookmarks are not included in portable package v1.
+Bookmarks are not included in portable package v1. Durable noise/squelch rules
+are not shipped (#671). Per-source timezone/year/DST policy, subsecond
+provenance, and clock-skew correction remain incomplete (#670). Corpora are
+analyzed independently; versioned learned application baselines are not
+shipped (#690).
 
 > Important:
 > Redaction reduces risk but cannot prove that arbitrary logs contain no

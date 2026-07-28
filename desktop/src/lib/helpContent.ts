@@ -106,7 +106,7 @@ export const HELP_TIMELINE_NAVIGATOR: HelpTipContent = {
     "Empty buckets are honest gaps. Preview, committed seek, and resident range are distinct. Order-only data is labeled as order, not formatted as calendar time.",
   safety:
     "The overview returns bounded counts only, never full event bodies. Severity has text and pattern equivalents in addition to color. Exact UTC bucket bounds remain available in details.",
-  helpLocator: "help://log-explorer#timeline-navigator",
+  helpLocator: "help://log-explorer#investigation-timeline",
 };
 
 export const HELP_LANE_COMPOSE: HelpTipContent = {

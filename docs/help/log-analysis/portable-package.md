@@ -24,6 +24,9 @@ Peers use **Import package…** (SoftWrite Accept). Import always creates a **ne
 Packages declare `format_version` and `min_reader_version`.  
 If the package is **newer** than this build, ContextDesk refuses import with a clear message — upgrade or re-export as v1.
 
-Packages may still contain sensitive redacted analysis; share only with trusted peers.
+Packages may still contain sensitive redacted analysis; share only with trusted
+peers. Portable package v1 exports corpus events/templates but does not include
+bookmarks, durable Investigation records, or linked-chat history. Import
+creates a new corpus identity, so those artifacts do not silently transfer.
 
 See also [How log analysis works](log-analysis-pipeline.md).

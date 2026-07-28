@@ -3,15 +3,15 @@
 **Status:** product/architecture contract (owner decisions locked 2026-07-25)  
 **Related:** [`LOG_ANALYSIS.md`](LOG_ANALYSIS.md) (DuckDB corpora, Drain, tools) · Logs library tab · session/chat model · portable packages  
 
-## 0. Problem
+## 0. Problem and shipped foundation
 
-Engineers troubleshooting large multi-service systems need to **see**, **align**, **search**, and **reason with AI** over post-mortem dumps. Today ContextDesk:
-
-- Ingests dumps into **DuckDB event stores** + templates + vectors (analysis corpus).
-- Offers a thin **Logs** tab (stats, crude volume strip, basic search) and **agent tools**.
-- Does **not** offer a deep, multi-source log browser, time-linked parallel views, corpus-bound chat in-context, or bookmarks.
-
-The existing “timeline” is event **volume** only — not a log browser.
+Engineers troubleshooting large multi-service systems need to **see**, **align**,
+**search**, and **reason with AI** over post-mortem dumps. ContextDesk now ships
+a bounded multi-source Log Explorer with virtualized bidirectional rows, one to
+four composed lanes, exact-time alignment, a shared investigation timeline,
+durable bookmarks and Investigation records, and corpus-linked governed chat.
+Remaining work is explicitly tracked under the partial and planned sections
+below.
 
 ## 1. North star
 
@@ -19,8 +19,8 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 | Job | Workspace support |
 |-----|-------------------|
-| What broke when? | Lanes + volume strip + level filters |
-| Multi-component causality | 2–4 source-group lanes, optional timestamp-linked scroll + gap visualization |
+| What broke when? | Full-width bounded investigation timeline with volume, severity, sparse-error signals, gaps, resident range, and seek |
+| Multi-component causality | 1–4 source-group lanes, optional timestamp-linked scroll + gap visualization |
 | Find similar failures | Keyword + template-semantic → events |
 | AI help without paste floods | Inline chat rail on corpus; tools use corpus + view + selection |
 | Hand off | Existing corpus package; later: view/bookmarks export |
@@ -29,9 +29,15 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 
 1. **Chat column in v1** of the explorer window (inline). Chat uses **optimized, governed evidence contexts**: a linked turn must obtain bounded corpus-tool evidence and may cross-check normal configured read-only workspace, memory, Help, or connector sources. ContextDesk owns eligibility, caps, provenance, and permissions; the model synthesizes results rather than receiving raw multi‑MB pastes. Retrieval is staged for self-hosted-model reliability: `search_logs` grounds the linked corpus first; an explicit workspace/runbook request then stages `search_kb`; once those requested sources succeed and no broader source was requested, the provider receives a tool-closed, bounded synthesis context. Ungrounded or fabricated call-shaped prose is withheld rather than presented as evidence.
 2. **Agent awareness of viewport:** the model should know what the engineer is looking at (active filters, time range, visible/selected events, lane source groups) and may emit **navigation links** that open or focus interesting sources/ranges in the viewer (user chooses to follow).
-3. **Bookmarks:** engineer can bookmark interesting **lines or ranges** easily (persistent on corpus).
-4. **Lanes:** **2–4** evidence lanes; responsive layout uses full real estate when available.
-5. **Chat binding:** **any chat** may link to a corpus (`linkedCorpusId`), not only chats created from the explorer. Explorer lists all chats for that corpus and can create/append.
+3. **Bookmarks:** new saves preserve an exact bounded event set, including
+   noncontiguous selections, and reject duplicate exact sets. Legacy
+   single/range bookmarks remain readable.
+4. **Lanes:** one to four evidence lanes are available according to usable
+   width; hidden memberships survive visible lane-count changes.
+5. **Chat binding:** the owner contract allows **any chat** to persist a corpus
+   link (`linkedCorpusId`), not only chats created from Explorer. The shipped
+   governed corpus-turn path remains the Explorer linked-chat rail; an ordinary
+   main-screen chat never gains ambient corpus access.
 
 ## 3. Surface split
 
@@ -53,13 +59,14 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
 ### Ultrawide default
 
 ```text
-┌─ Explorer · corpus name · time quality · link ON/OFF · density ─────┐
-│ Filters │ Evidence lanes (1–4)              │ Chats for corpus      │
-│ sources │  lane A | lane B | …              │ list · new · open     │
-│ levels  │  optional ts-link + gap bands     │ active thread         │
-│ time    │  virtualized rows                 │ selection → ask       │
-│ search  │  detail / bookmarks               │ agent nav links → UI  │
-└─────────┴───────────────────────────────────┴───────────────────────┘
+┌─ Log Explorer / corpus · time quality · counts ─────────────────────┐
+│ Time · Lanes · Rows · Density · Columns · Bookmark                 │
+├─────────┬─────────────────────────────────────────┬─────────────────┤
+│ Filters │ Full-width investigation timeline       │ Investigation / │
+│         ├─────────────────────────────────────────┤ Chat rail       │
+│         │ 1–4 virtualized evidence lanes          │                 │
+│         │ payload-first rows + event inspector    │                 │
+└─────────┴─────────────────────────────────────────┴─────────────────┘
 ```
 
 ### Narrow
@@ -108,8 +115,9 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
   cells are visually explicit gaps, never placeholder log events. Repeated
   same-time events use stable occurrence rows rather than being dropped.
 - Align is intentionally an event-time axis, not proportional elapsed-time
-  spacing. The separate lazy range navigator uses fixed-size SQL summaries to
-  move the resident window across the full filtered span.
+  spacing. The integrated full-width Timeline uses fixed-size SQL summaries
+  and a chart-wide scrubber to move the resident window across the full
+  filtered span.
 - Mixed, order-only, empty, failed, or unloaded lanes fail closed for Align;
   they cannot be upgraded by a more reliable lane.
 
@@ -127,9 +135,9 @@ Per corpus under app cache:
 |-----|---------|
 | `log_query_events` | Paged/keyset events with filter + sort |
 | `log_facets` | Sources, levels, services, hosts under filter |
-| `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the lazy range navigator; no event bodies |
+| `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the integrated full-width Timeline; no event bodies |
 | `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor and supports request-scoped cooperative cancellation |
-| Bookmarks CRUD | Line or range anchors on corpus |
+| Bookmarks CRUD | Exact bounded event sets on one corpus, with duplicate prevention and legacy line/range reads |
 | Chat link | List/create sessions with `linkedCorpusId` |
 | View context snapshot | Serialize filters/lanes/selection for agent |
 
@@ -141,7 +149,8 @@ Per corpus under app cache:
 
 Each turn / tool path may include:
 
-- Corpus id (host active default when explorer focused)
+- Explicit persisted `linkedCorpusId`; Explorer focus never gives an ordinary
+  chat ambient corpus access
 - Filter + time window summary
 - Visible/selected seq ranges (ids, not full bodies beyond a small cap)
 - Bookmark list summaries
@@ -166,7 +175,10 @@ UI renders as clickable chips; user opt-in applies filters / opens lane / scroll
 - Legacy bookmarks remain readable as **single seq** or **range
   [seqFrom, seqTo]** entries. Their optional time bounds are display hints, not
   authoritative identity, and merely opening a legacy sidecar does not rewrite it.
-- Named label, color optional, notes.
+- Current bookmarks use a generated label, exact payload-free identities,
+  duplicate prevention, keyboard shortcut **B**, and an Explorer list with
+  reveal, restore, and delete actions. Rich titles, rationale, findings, and
+  notes belong to the durable Investigation workflow.
 - Persist under corpus (e.g. `bookmarks.json` sidecar, package-export later).
 - Keyboard: `b` bookmark selection; list panel in explorer.
 
@@ -186,7 +198,7 @@ rewriting them:
 - Writes require the expected revision. A competing Explorer window wins
   cleanly and a stale writer receives a visible conflict instead of overwriting
   the newer revision.
-- The right-side **Investigation** rail switches compactly between Evidence and
+- The right-side **Investigation** rail switches compactly between Investigation and
   Chat while the hidden chat remains mounted with its draft, model, transcript,
   and scroll state intact.
 - Evidence Preview re-resolves a bounded set of rows from DuckDB without
@@ -221,7 +233,10 @@ history, finding walkthroughs, or report assembly.
 - Prefer parsed wall-clock `ts`.
 - If missing: store order via `seq`; UI must **not** present synthetic seq as calendar time without label (existing pain).
 - Track quality: wall / mixed / order_only (corpus + per-source).
-- Optional later: per-source timezone offset for multi-box dumps.
+- **Planned under #670:** explicit per-source timezone/year rules, DST
+  ambiguity handling, original timestamp provenance, subsecond precision,
+  clock-skew proposals, and reversible correction overlays. Current code does
+  not guess these values.
 
 ## 9. UX / visual bar
 
@@ -239,22 +254,20 @@ history, finding walkthroughs, or report assembly.
 - Full SIEM / alerting
 - Raising session-context 200-file chat-pack as the path for large dumps (corpus remains correct)
 
-## 11. Phasing
+## 11. Delivery history and current residuals
 
-| Phase | Deliverable |
-|-------|-------------|
-| 0 | This design + wireframes (narrow/normal/ultrawide) |
-| 1 | Query API: events page, facets, filtered timeline |
-| 2 | Multi-window shell: filters, single-lane grid, detail, density, splitters |
-| 3 | Chat column: list/create/append any linked chats; view context to model; nav links |
-| 4 | Bookmarks (line + range) |
-| 5 | Multi-lane (2–4) + timestamp link + gaps |
-| 6 | Search depth (keyword + semantic → events) polish |
-| 7 | Help / CLAIMS / package note for bookmarks |
+Phases 1–7—the bounded query APIs, multi-window Explorer, governed linked-chat
+rail, exact-set bookmarks, one-to-four composed lanes, search depth, and
+Help/package disclosures—are implemented.
 
-**Milestone “usable”:** phases 1–3.  
-**Milestone “flagship multi-source”:** +5.  
-**Milestone “bookmark + search depth”:** +4, +6.
+Current residuals are tracked explicitly:
+
+- #670 timestamp provenance and per-source timezone/year/DST/skew rules;
+- #671 durable, auditable noise policy;
+- #690 versioned cross-corpus application baselines;
+- #646 model finding proposals and review lifecycle;
+- #532 fuller report assembly; and
+- remaining packaged owner acceptance.
 
 ## 12. Security
 
