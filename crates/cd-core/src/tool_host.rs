@@ -151,6 +151,8 @@ pub struct ToolHost {
     log_cache_dir: Option<PathBuf>,
     /// Default corpus for log tools when `corpus` arg is omitted (wizard handoff).
     active_log_corpus: Option<String>,
+    /// Turn-scoped corpus that provider-generated arguments cannot override.
+    scoped_log_corpus: Option<String>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -246,6 +248,7 @@ impl ToolHost {
             log_analysis_enabled: false,
             log_cache_dir: None,
             active_log_corpus: None,
+            scoped_log_corpus: None,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -869,8 +872,28 @@ impl ToolHost {
         self.active_log_corpus.as_deref()
     }
 
+    /// Pin log tools to one turn-scoped corpus regardless of provider arguments.
+    pub fn set_log_corpus_scope(&mut self, corpus_id: Option<String>) {
+        self.scoped_log_corpus = corpus_id.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+    }
+
+    /// Current turn-scoped log corpus, when a linked Explorer turn is active.
+    pub fn log_corpus_scope(&self) -> Option<&str> {
+        self.scoped_log_corpus.as_deref()
+    }
+
     /// Resolve corpus id from tool args, falling back to the host active corpus.
     fn resolve_log_corpus(&self, args: &Value, tool: &str) -> CoreResult<String> {
+        if let Some(cid) = self.scoped_log_corpus.as_deref() {
+            return Ok(cid.to_string());
+        }
         if let Some(cid) = args.get("corpus").and_then(|v| v.as_str()) {
             let t = cid.trim();
             if !t.is_empty() {
@@ -5908,6 +5931,22 @@ mod tests {
                 .unwrap(),
             "abc-123"
         );
+        assert_eq!(
+            host.resolve_log_corpus(&json!({"corpus": "override"}), "cluster_problems")
+                .unwrap(),
+            "override"
+        );
+        host.set_log_corpus_scope(Some("linked-corpus".into()));
+        assert_eq!(
+            host.resolve_log_corpus(
+                &json!({"corpus": "provider-invented-corpus"}),
+                "cluster_problems"
+            )
+            .unwrap(),
+            "linked-corpus"
+        );
+        assert_eq!(host.log_corpus_scope(), Some("linked-corpus"));
+        host.set_log_corpus_scope(None);
         assert_eq!(
             host.resolve_log_corpus(&json!({"corpus": "override"}), "cluster_problems")
                 .unwrap(),

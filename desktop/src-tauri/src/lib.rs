@@ -3082,9 +3082,12 @@ async fn agent_turn(
     // Linked turns bind the turn-scoped corpus; ordinary chats must not inherit
     // Explorer ambient active corpus for the duration of the turn (#530).
     let previous_log_corpus = host.active_log_corpus().map(str::to_string);
+    let previous_log_scope = host.log_corpus_scope().map(str::to_string);
     if let Some(context) = log_explorer_context.as_ref() {
+        host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.set_active_log_corpus(Some(context.corpus_id.clone()));
     } else {
+        host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
     let result = if req.force_local {
@@ -3118,6 +3121,7 @@ async fn agent_turn(
         .await
         .map_err(|e| e.to_string())
     };
+    host.set_log_corpus_scope(previous_log_scope);
     host.set_active_log_corpus(previous_log_corpus);
     {
         let mut host_guard = state.host.lock().expect("host");
