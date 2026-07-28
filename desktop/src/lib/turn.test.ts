@@ -33,6 +33,35 @@ describe("shortSourceLabel", () => {
 });
 
 describe("applyEventsToMessage", () => {
+  it("persists the linked-log fallback notice alongside the grounded answer", () => {
+    const events: EventDto[] = [
+      {
+        kind: "turn_started",
+        payload: { session_id: "linked-1", model: "fixture-model" },
+      },
+      {
+        kind: "error",
+        payload: {
+          code: "linked_log_only_fallback",
+          message:
+            "Continuing with bounded read-only log tools; workspace files are unavailable.",
+        },
+      },
+      { kind: "text_delta", payload: { text: "Grounded log finding." } },
+      { kind: "turn_completed", payload: { reason: "stop" } },
+    ];
+    const batched = applyEventsToMessage(base(), events).msg;
+    const incremental = events.reduce(
+      (message, event) => applyEventsToMessage(message, [event]).msg,
+      base(),
+    );
+
+    expect(batched.content).toContain("**Limited context:**");
+    expect(batched.content).toContain("Grounded log finding.");
+    expect(batched.content).not.toContain("**Error:**");
+    expect(incremental).toEqual(batched);
+  });
+
   it("concatenates text_delta", () => {
     const events: EventDto[] = [
       { kind: "text_delta", payload: { text: "Hello" } },

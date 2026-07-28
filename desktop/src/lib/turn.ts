@@ -140,7 +140,9 @@ export function applyEventsToMessage(
         };
         break;
       case "error":
-        content += `\n\n**Error:** ${String(p.message ?? "unknown")}\n`;
+        content += `\n\n**${
+          p.code === "linked_log_only_fallback" ? "Limited context" : "Error"
+        }:** ${String(p.message ?? "unknown")}\n`;
         break;
       default:
         break;

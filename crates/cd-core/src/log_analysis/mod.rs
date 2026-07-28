@@ -25,8 +25,10 @@ pub mod why;
 
 pub use analysis::{cluster_problems, timeline, ClusterSummary, TimelineBucket};
 pub use bookmarks::{
-    add_line_bookmark, add_range_bookmark, bookmark_summaries, delete_bookmark, list_bookmarks,
-    update_bookmark, Bookmark, BookmarkSummary, NewBookmark,
+    add_evidence_bookmark, add_line_bookmark, add_range_bookmark, bookmark_summaries,
+    delete_bookmark, list_bookmarks, list_resolved_bookmarks, resolve_bookmark, update_bookmark,
+    Bookmark, BookmarkEventRef, BookmarkEvidenceStatus, BookmarkSummary, NewBookmark,
+    NewEvidenceBookmark, ResolvedBookmark, MAX_BOOKMARK_EVENT_REFS,
 };
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{
@@ -59,7 +61,7 @@ pub use query::{
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,
 };
-pub use search::{search_logs, SearchHit, SearchLogsQuery};
+pub use search::{search_logs, SearchEvidenceIdentity, SearchHit, SearchLogsQuery};
 
 pub use store::{
     CorpusEmbeddingStatus, CorpusId, CorpusMeta, CorpusStats, CorpusSummary, EmbeddingState,

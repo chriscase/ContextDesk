@@ -159,7 +159,13 @@ UI renders as clickable chips; user opt-in applies filters / opens lane / scroll
 
 ### Bookmarks
 
-- Bookmark **single seq** or **range [seqFrom, seqTo]** (and optional time bounds).
+- New evidence saves persist an exact bounded event set. Each payload-free
+  reference contains corpus id, seq, relative source, and timestamp/time-quality
+  hints; the trusted core revalidates those hints against DuckDB before save and
+  on reopen. Noncontiguous selections are never widened to `min(seq)..max(seq)`.
+- Legacy bookmarks remain readable as **single seq** or **range
+  [seqFrom, seqTo]** entries. Their optional time bounds are display hints, not
+  authoritative identity, and merely opening a legacy sidecar does not rewrite it.
 - Named label, color optional, notes.
 - Persist under corpus (e.g. `bookmarks.json` sidecar, package-export later).
 - Keyboard: `b` bookmark selection; list panel in explorer.

@@ -281,6 +281,7 @@ export function TimelineNavigator({
                 data-testid="timeline-navigator-bars"
                 style={{
                   gridTemplateColumns: `repeat(${summary.bucketCount}, minmax(2px, 1fr))`,
+                  padding: "3px 4px",
                 }}
               >
                 {counts.map((count, index) => (

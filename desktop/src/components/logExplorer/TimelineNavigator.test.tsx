@@ -95,6 +95,9 @@ describe("TimelineNavigator", () => {
     );
     expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
     expect(screen.getByText(/42 matching events summarized/)).toBeTruthy();
+    expect(screen.getByTestId("timeline-navigator-bars").style.padding).toBe(
+      "3px 4px",
+    );
   });
 
   it("does not broaden an empty visible-lane source intersection", async () => {

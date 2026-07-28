@@ -1424,7 +1424,10 @@ pub fn query_event_neighborhood(
     })
 }
 
-fn fetch_event_by_seq(corpus: &LogCorpus, seq: u64) -> CoreResult<Option<ExplorerEvent>> {
+pub(crate) fn fetch_event_by_seq(
+    corpus: &LogCorpus,
+    seq: u64,
+) -> CoreResult<Option<ExplorerEvent>> {
     corpus.with_connection(|conn| {
         let sql =
             "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
@@ -1433,6 +1436,37 @@ fn fetch_event_by_seq(corpus: &LogCorpus, seq: u64) -> CoreResult<Option<Explore
         let binds = [Value::BigInt(seq as i64)];
         let mut rows = bind_and_map_events(&mut stmt, &binds)?;
         Ok(rows.pop())
+    })
+}
+
+pub(crate) fn fetch_events_by_seqs(
+    corpus: &LogCorpus,
+    seqs: &[u64],
+) -> CoreResult<Vec<ExplorerEvent>> {
+    if seqs.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut unique = seqs.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    corpus.with_connection(|conn| {
+        let mut events = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(MAX_EVENT_PAGE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+                 FROM events WHERE seq IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
+            let binds = chunk
+                .iter()
+                .map(|seq| Value::BigInt(*seq as i64))
+                .collect::<Vec<_>>();
+            events.extend(bind_and_map_events(&mut stmt, &binds)?);
+        }
+        Ok(events)
     })
 }
 

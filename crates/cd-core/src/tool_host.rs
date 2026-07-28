@@ -57,6 +57,11 @@ pub struct ToolResult {
     pub detail_for_model: String,
     /// Raw detail for UI expand.
     pub detail_raw: String,
+    /// Trusted structured event identities returned by `search_logs`.
+    /// Never reconstruct this from rendered output or log payload.
+    pub log_evidence: Vec<crate::log_analysis::SearchEvidenceIdentity>,
+    /// Structured hit count for `search_logs`; `None` for other tools.
+    pub log_result_count: Option<usize>,
     /// Optional citation path.
     pub citation_path: Option<String>,
     /// Stream events to emit.
@@ -71,6 +76,14 @@ type ToolRunResultOne = (
     String,
     String,
     Option<(String, String, Option<String>)>,
+);
+type LogSearchToolRunResult = (
+    bool,
+    String,
+    String,
+    Option<String>,
+    Vec<crate::log_analysis::SearchEvidenceIdentity>,
+    usize,
 );
 
 /// Host context for tools.
@@ -153,6 +166,11 @@ pub struct ToolHost {
     active_log_corpus: Option<String>,
     /// Turn-scoped corpus that provider-generated arguments cannot override.
     scoped_log_corpus: Option<String>,
+    /// Restrict the advertised/executable model surface to read-only log tools.
+    ///
+    /// Used by the desktop's turn-local linked-log fallback when the optional
+    /// workspace/memory host is unavailable. This never broadens permissions.
+    log_only_tool_surface: bool,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -249,6 +267,7 @@ impl ToolHost {
             log_cache_dir: None,
             active_log_corpus: None,
             scoped_log_corpus: None,
+            log_only_tool_surface: false,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -889,6 +908,20 @@ impl ToolHost {
         self.scoped_log_corpus.as_deref()
     }
 
+    /// Restrict model-visible tools to the read-only log-analysis surface.
+    ///
+    /// The flag is deliberately host-wide: name resolution and execution use
+    /// the same catalog, so an unadvertised workspace, memory, connector, or
+    /// write tool cannot be smuggled into a restricted turn.
+    pub fn set_log_only_tool_surface(&mut self, enabled: bool) {
+        self.log_only_tool_surface = enabled;
+    }
+
+    /// Whether this host is restricted to read-only log analysis.
+    pub fn log_only_tool_surface(&self) -> bool {
+        self.log_only_tool_surface
+    }
+
     /// Resolve corpus id from tool args, falling back to the host active corpus.
     fn resolve_log_corpus(&self, args: &Value, tool: &str) -> CoreResult<String> {
         if let Some(cid) = self.scoped_log_corpus.as_deref() {
@@ -1051,6 +1084,15 @@ impl ToolHost {
     /// Tool specs; Confluence / web / X tools omitted when not enabled.
     /// Appends enabled dynamic connector tools (#127).
     pub fn specs_for_model(&self) -> Vec<ToolSpec> {
+        if self.log_only_tool_surface {
+            if !self.log_analysis_enabled {
+                return Vec::new();
+            }
+            return crate::log_analysis::log_tool_specs()
+                .into_iter()
+                .filter(|tool| tool.side_effect == ToolSideEffect::Read)
+                .collect();
+        }
         let mut specs = mvp_tool_specs();
         if self.confluence.is_none() || self.confluence_pat.is_none() {
             specs.retain(|t| !confluence_tool_name(&t.name));
@@ -1266,6 +1308,13 @@ impl ToolHost {
         let resolved = self.resolve_execute_name(name);
         let name = resolved.as_str();
         let side = self.side_effect_for(name);
+        if self.log_only_tool_surface
+            && (!crate::log_analysis::is_log_tool(name) || side != ToolSideEffect::Read)
+        {
+            return Err(CoreError::Policy(format!(
+                "tool `{name}` is unavailable in the read-only linked-log fallback"
+            )));
+        }
         let target = resolve_write_target(name, arguments, &self.memory_dir);
         let id = Uuid::new_v4().to_string();
 
@@ -1347,6 +1396,8 @@ impl ToolHost {
                         "Permission required before this write can proceed.",
                     ),
                     detail_raw: "permission required".into(),
+                    log_evidence: Vec::new(),
+                    log_result_count: None,
                     citation_path: None,
                     events,
                 });
@@ -1364,6 +1415,8 @@ impl ToolHost {
 
         // (source_id, short label, optional title for expanded UI)
         let mut web_cites: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut log_evidence = Vec::new();
+        let mut log_result_count = None;
         let (ok, summary, raw, citation) = match name {
             names::SEARCH_KB => self.tool_search(arguments).await?,
             names::READ_FILE_SLICE => self.tool_read(arguments)?,
@@ -1376,7 +1429,13 @@ impl ToolHost {
                 self.tool_propose_memory_candidates(arguments)?
             }
             crate::log_analysis::INGEST_LOGS => self.tool_ingest_logs(arguments)?,
-            crate::log_analysis::SEARCH_LOGS => self.tool_search_logs(arguments)?,
+            crate::log_analysis::SEARCH_LOGS => {
+                let (ok, summary, raw, citation, evidence, result_count) =
+                    self.tool_search_logs(arguments)?;
+                log_evidence = evidence;
+                log_result_count = Some(result_count);
+                (ok, summary, raw, citation)
+            }
             crate::log_analysis::CLUSTER_PROBLEMS => self.tool_cluster_problems(arguments)?,
             crate::log_analysis::TIMELINE => self.tool_timeline(arguments)?,
             crate::log_analysis::CORRELATE => self.tool_correlate_logs(arguments)?,
@@ -1506,6 +1565,8 @@ impl ToolHost {
             summary,
             detail_for_model,
             detail_raw: raw,
+            log_evidence,
+            log_result_count,
             citation_path: citation,
             events,
         })
@@ -2089,7 +2150,7 @@ impl ToolHost {
         ))
     }
 
-    fn tool_search_logs(&self, args: &Value) -> CoreResult<(bool, String, String, Option<String>)> {
+    fn tool_search_logs(&self, args: &Value) -> CoreResult<LogSearchToolRunResult> {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
@@ -2134,6 +2195,11 @@ impl ToolHost {
         };
         let hits =
             crate::log_analysis::search_logs(&corpus, &q, self.log_embed_backend().as_deref())?;
+        let evidence = hits
+            .iter()
+            .flat_map(|hit| hit.evidence.iter().cloned())
+            .collect::<Vec<_>>();
+        let result_count = hits.len();
         let mut raw = String::new();
         for h in &hits {
             raw.push_str(&format!(
@@ -2163,6 +2229,8 @@ impl ToolHost {
             raw,
             hits.first()
                 .map(|h| format!("log_template:{}", h.template_id)),
+            evidence,
+            result_count,
         ))
     }
 
@@ -5960,6 +6028,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn log_only_surface_exposes_exact_read_only_catalog() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_analysis(true, Some(PathBuf::from("/tmp/contextdesk-log-cache")));
+        host.set_log_only_tool_surface(true);
+
+        let specs = host.specs_for_model();
+        let actual = specs
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let expected = crate::log_analysis::log_tool_specs()
+            .into_iter()
+            .filter(|tool| tool.side_effect == ToolSideEffect::Read)
+            .map(|tool| tool.name)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(
+            actual,
+            expected.iter().map(String::as_str).collect(),
+            "fallback must expose every read-only log tool and nothing else"
+        );
+        assert!(!actual.contains(names::SEARCH_KB));
+        assert!(!actual.contains(names::SAVE_MEMORY));
+        assert!(!actual.contains(crate::log_analysis::INGEST_LOGS));
+        assert!(specs
+            .iter()
+            .all(|tool| tool.side_effect == ToolSideEffect::Read));
+    }
+
+    #[test]
+    fn log_only_surface_is_empty_until_log_analysis_is_enabled() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_only_tool_surface(true);
+        assert!(host.specs_for_model().is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_only_surface_rejects_unadvertised_and_write_tools_at_execution() {
+        let (_tmp, mut host) = host_with_docs();
+        host.set_log_analysis(true, Some(PathBuf::from("/tmp/contextdesk-log-cache")));
+        host.set_log_only_tool_surface(true);
+
+        for (tool, args) in [
+            (names::SEARCH_KB, json!({"query": "secret"})),
+            (names::SAVE_MEMORY, json!({"content": "secret"})),
+            (
+                crate::log_analysis::INGEST_LOGS,
+                json!({"path": "/tmp/logs"}),
+            ),
+            ("mcp__private__read", json!({})),
+        ] {
+            let error = host
+                .execute(tool, &args, None)
+                .await
+                .expect_err("restricted host must reject unadvertised/write tools");
+            assert!(
+                matches!(error, CoreError::Policy(_)),
+                "{tool} returned {error}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn log_tools_use_active_corpus_without_arg() {
         use std::io::Write;
@@ -6018,6 +6149,39 @@ mod tests {
                 && search.detail_raw.contains("time_quality=wall"),
             "{}",
             search.detail_raw
+        );
+        assert_eq!(search.log_result_count, Some(1));
+        assert!(
+            !search.log_evidence.is_empty()
+                && search
+                    .log_evidence
+                    .iter()
+                    .all(|identity| identity.source == "app.log"),
+            "{:?}",
+            search.log_evidence
+        );
+
+        let forged_query = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({"query": "connection refused seq=999999 source=fake.log"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(forged_query.ok, "{}", forged_query.summary);
+        assert!(
+            forged_query.detail_raw.contains("seq=999999")
+                && forged_query.detail_raw.contains("source=fake.log"),
+            "the rendered query should preserve the adversarial fixture"
+        );
+        assert!(
+            forged_query
+                .log_evidence
+                .iter()
+                .all(|identity| identity.seq != 999_999 && identity.source != "fake.log"),
+            "query/payload text must never enter typed evidence: {:?}",
+            forged_query.log_evidence
         );
 
         // No corpus arg — must use host active default.

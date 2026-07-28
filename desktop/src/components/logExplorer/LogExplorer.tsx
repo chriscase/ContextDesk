@@ -121,6 +121,12 @@ const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
 const SPLITTER_WIDTH_PX = 6;
 const COLLAPSED_FILTER_WIDTH_PX = 42;
 const COLLAPSED_CHAT_WIDTH_PX = 42;
+const EVENT_COLUMNS = [
+  { label: "Time", index: 0 as const },
+  { label: "Lvl", index: 1 as const },
+  { label: "Source", index: 2 as const },
+  { label: "Message", index: 3 as const },
+] as const;
 
 type FindCursor = {
   seq: number;
@@ -651,6 +657,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
   >({});
+  const [laneScrollLeft, setLaneScrollLeft] = useState<Record<string, number>>(
+    {},
+  );
   const [bookmarkFocusTarget, setBookmarkFocusTarget] = useState<{
     laneId: string;
     seq: number;
@@ -1936,9 +1945,49 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const from = seqs[0]!;
     const to = seqs[seqs.length - 1]!;
-    const existing = bookmarks.find(
-      (bookmark) => bookmark.seqFrom === from && bookmark.seqTo === to,
+    const residentBySeq = new Map(
+      Object.values(laneEvents)
+        .flat()
+        .map((event) => [event.seq, event] as const),
     );
+    const selectedEvents = seqs.map((seq) => residentBySeq.get(seq));
+    if (selectedEvents.some((event) => !event)) {
+      setStatus(
+        "Selection changed before it could be saved — reselect the evidence",
+      );
+      return;
+    }
+    const eventRefs = selectedEvents.map((event) => ({
+      corpusId,
+      seq: event!.seq,
+      source: event!.source,
+      timestampHint: event!.ts,
+      timeQualityHint: event!.timeQuality,
+    }));
+    const contiguous = seqs.every(
+      (seq, index) => index === 0 || seq === seqs[index - 1]! + 1,
+    );
+    const oneSource = new Set(eventRefs.map((event) => event.source)).size === 1;
+    const exactKey = (refs: typeof eventRefs) =>
+      refs
+        .map(
+          (event) =>
+            `${event.corpusId}\u0000${event.seq}\u0000${event.source}\u0000${event.timestampHint}\u0000${event.timeQualityHint}`,
+        )
+        .sort()
+        .join("\u0001");
+    const selectedKey = exactKey(eventRefs);
+    const existing = bookmarks.find((bookmark) => {
+      if (bookmark.eventRefs?.length) {
+        return exactKey(bookmark.eventRefs) === selectedKey;
+      }
+      return (
+        contiguous &&
+        oneSource &&
+        bookmark.seqFrom === from &&
+        bookmark.seqTo === to
+      );
+    });
     if (existing) {
       setStatus(`Already bookmarked: ${existing.label}`);
       return;
@@ -1947,9 +1996,13 @@ export function LogExplorer({ corpusId }: Props) {
       const bm = await hostLogAddBookmark(corpusId, {
         seqFrom: from,
         seqTo: to,
-        label: from === to ? `seq ${from}` : `seq ${from}–${to}`,
-        tsFrom: detail?.ts ?? null,
-        tsTo: detail?.ts ?? null,
+        eventRefs,
+        label:
+          from === to
+            ? `seq ${from}`
+            : contiguous
+              ? `seq ${from}–${to}`
+              : `${seqs.length} selected events`,
       });
       setBookmarks((current) =>
         current.some((bookmark) => bookmark.id === bm.id)
@@ -2031,13 +2084,26 @@ export function LogExplorer({ corpusId }: Props) {
 
   /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
   const activateBookmark = async (b: LogBookmarkDto) => {
-    const seq = b.seqFrom;
+    if (b.evidenceStatus === "missing" || b.evidenceStatus === "stale") {
+      setBookmarkRevealState("missing");
+      setStatus(
+        b.evidenceStatus === "missing"
+          ? `Bookmark evidence is missing from this corpus: ${b.label}`
+          : `Bookmark evidence identity no longer matches this corpus: ${b.label}`,
+      );
+      return;
+    }
+    const exactRefs = b.eventRefs ?? [];
+    const targetRef = exactRefs[0];
+    const seq = targetRef?.seq ?? b.seqFrom;
     setHighlight(
       new Set(
-        Array.from(
-          { length: Math.max(1, b.seqTo - b.seqFrom + 1) },
-          (_, i) => b.seqFrom + i,
-        ),
+        exactRefs.length > 0
+          ? exactRefs.map((eventRef) => eventRef.seq)
+          : Array.from(
+              { length: Math.max(1, b.seqTo - b.seqFrom + 1) },
+              (_, i) => b.seqFrom + i,
+            ),
       ),
     );
 
@@ -2058,6 +2124,18 @@ export function LogExplorer({ corpusId }: Props) {
         setBookmarkRevealState("missing");
         setStatus(
           `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
+        );
+        return;
+      }
+      if (
+        targetRef &&
+        (resolved.target.source !== targetRef.source ||
+          resolved.target.ts !== targetRef.timestampHint ||
+          resolved.target.timeQuality !== targetRef.timeQualityHint)
+      ) {
+        setBookmarkRevealState("missing");
+        setStatus(
+          `Bookmark evidence identity no longer matches this corpus: ${b.label}`,
         );
         return;
       }
@@ -2576,6 +2654,7 @@ export function LogExplorer({ corpusId }: Props) {
     laneCount,
     filters,
   );
+  const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
 
   return (
     <div
@@ -2847,58 +2926,6 @@ export function LogExplorer({ corpusId }: Props) {
         </div>
       </header>
 
-      <div
-        className="log-explorer__col-headers"
-        data-testid="log-explorer-col-headers"
-        role="row"
-        style={{
-          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`,
-        }}
-      >
-        {(
-          [
-            { label: "Time", index: 0 as const },
-            { label: "Lvl", index: 1 as const },
-            { label: "Source", index: 2 as const },
-            { label: "Message", index: 3 as const },
-          ] as const
-        ).map((col) => (
-          <div
-            key={col.label}
-            className="log-explorer__col-header"
-            role="columnheader"
-          >
-            <span>{col.label}</span>
-            <button
-              type="button"
-              className="log-explorer__col-resizer"
-              data-testid={`col-resize-${col.index}`}
-              aria-label={`Resize ${col.label} column`}
-              title="Drag or use ← → to resize"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                colDragRef.current = {
-                  index: col.index,
-                  startX: e.clientX,
-                  startW: colWidths[col.index],
-                };
-                document.body.style.cursor = "col-resize";
-                document.body.style.userSelect = "none";
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "ArrowLeft") {
-                  e.preventDefault();
-                  setColWidths((w) => resizeCol(w, col.index, -0.5));
-                } else if (e.key === "ArrowRight") {
-                  e.preventDefault();
-                  setColWidths((w) => resizeCol(w, col.index, 0.5));
-                }
-              }}
-            />
-          </div>
-        ))}
-      </div>
-
       {laneEditorOpen && (
         <div
           ref={laneEditorRef}
@@ -2940,7 +2967,13 @@ export function LogExplorer({ corpusId }: Props) {
               </button>
             </div>
           </div>
-          <div className="log-explorer__lane-editor-content">
+          <div
+            className="log-explorer__lane-editor-content"
+            style={{
+              paddingInlineEnd: "0.25rem",
+              scrollbarGutter: "stable",
+            }}
+          >
             <p className="log-explorer__lane-editor-help">
               Empty membership means all sources. A source can belong to more
               than one lane.
@@ -3668,6 +3701,15 @@ export function LogExplorer({ corpusId }: Props) {
                   >
                     {b.label}
                   </button>
+                  {b.evidenceStatus === "missing" ||
+                  b.evidenceStatus === "stale" ? (
+                    <span
+                      className="log-explorer__chat-preview"
+                      data-testid={`bookmark-evidence-status-${b.id}`}
+                    >
+                      {b.evidenceStatus === "missing" ? "Missing" : "Stale"}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     className="log-explorer__btn"
@@ -3849,6 +3891,61 @@ export function LogExplorer({ corpusId }: Props) {
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
                   </div>
+                  <div
+                    className="log-explorer__col-header-viewport"
+                    data-testid={`log-explorer-col-header-viewport-${lane.id}`}
+                  >
+                    <div
+                      className="log-explorer__col-headers"
+                      data-testid={`log-explorer-col-headers-${lane.id}`}
+                      role="row"
+                      aria-label={`${lane.label} column headings`}
+                      style={{
+                        gridTemplateColumns: columnGridTemplate,
+                        transform: `translateX(-${laneScrollLeft[lane.id] ?? 0}px)`,
+                      }}
+                    >
+                      {EVENT_COLUMNS.map((col) => (
+                        <div
+                          key={col.label}
+                          className="log-explorer__col-header"
+                          role="columnheader"
+                        >
+                          <span>{col.label}</span>
+                          <button
+                            type="button"
+                            className="log-explorer__col-resizer"
+                            data-testid={`col-resize-${lane.id}-${col.index}`}
+                            aria-label={`Resize ${col.label} column for ${lane.label}`}
+                            title="Drag or use ← → to resize every visible lane"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              colDragRef.current = {
+                                index: col.index,
+                                startX: e.clientX,
+                                startW: colWidths[col.index],
+                              };
+                              document.body.style.cursor = "col-resize";
+                              document.body.style.userSelect = "none";
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "ArrowLeft") {
+                                e.preventDefault();
+                                setColWidths((w) =>
+                                  resizeCol(w, col.index, -0.5),
+                                );
+                              } else if (e.key === "ArrowRight") {
+                                e.preventDefault();
+                                setColWidths((w) =>
+                                  resizeCol(w, col.index, 0.5),
+                                );
+                              }
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
                     alignedRows={
@@ -3863,6 +3960,13 @@ export function LogExplorer({ corpusId }: Props) {
                       linkMode === "align_time"
                         ? setAlignedScrollTop
                         : undefined
+                    }
+                    onHorizontalScroll={(scrollLeft) =>
+                      setLaneScrollLeft((current) =>
+                        current[lane.id] === scrollLeft
+                          ? current
+                          : { ...current, [lane.id]: scrollLeft },
+                      )
                     }
                     timeQuality={timeQuality}
                     selected={selected}

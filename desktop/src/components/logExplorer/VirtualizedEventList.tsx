@@ -56,6 +56,8 @@ type Props = {
   /** Shared scroll coordinate for aligned lanes. */
   linkedScrollTop?: number;
   onLinkedScrollTop?: (scrollTop: number) => void;
+  /** Keep the lane-local column heading aligned with horizontal row scroll. */
+  onHorizontalScroll?: (scrollLeft: number) => void;
   scrollToSeq?: number | null;
   /** One-shot keyboard focus target paired with an explicit seek. */
   focusToSeq?: number | null;
@@ -132,6 +134,7 @@ export function VirtualizedEventList({
   alignedRows,
   linkedScrollTop,
   onLinkedScrollTop,
+  onHorizontalScroll,
   scrollToSeq,
   focusToSeq,
   onFocusToSeq,
@@ -202,6 +205,8 @@ export function VirtualizedEventList({
   }, [displayRows]);
   const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
+  const onHorizontalScrollRef = useRef(onHorizontalScroll);
+  onHorizontalScrollRef.current = onHorizontalScroll;
   const onNearBottomRef = useRef(onNearBottom);
   onNearBottomRef.current = onNearBottom;
   const [scrollTop, setScrollTop] = useState(0);
@@ -227,6 +232,7 @@ export function VirtualizedEventList({
       setScrollTop(el.scrollTop);
       setViewportH(el.clientHeight);
       onLinkedScrollTop?.(el.scrollTop);
+      onHorizontalScroll?.(el.scrollLeft);
       const now = Date.now();
       if (now - edgeCooldown.current < 200) return;
       if (nearTop(el.scrollTop, edgeRowH)) {
@@ -239,7 +245,13 @@ export function VirtualizedEventList({
         onNearBottom?.();
       }
     },
-    [onLinkedScrollTop, onNearBottom, onNearTop, edgeRowH],
+    [
+      onHorizontalScroll,
+      onLinkedScrollTop,
+      onNearBottom,
+      onNearTop,
+      edgeRowH,
+    ],
   );
 
   useEffect(() => {
@@ -259,6 +271,17 @@ export function VirtualizedEventList({
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
     if (el) setViewportH(el.clientHeight || 400);
   }, []);
+
+  useLayoutEffect(() => {
+    onHorizontalScrollRef.current?.(parentRef.current?.scrollLeft ?? 0);
+    return () => onHorizontalScrollRef.current?.(0);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (displayRows.length === 0) {
+      onHorizontalScrollRef.current?.(0);
+    }
+  }, [displayRows.length]);
 
   const previousLayout = useRef<{
     keys: string[];

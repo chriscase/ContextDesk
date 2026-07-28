@@ -646,18 +646,24 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/long-message/);
 
-    const headers = screen.getByTestId("log-explorer-col-headers");
+    const headers = screen.getByRole("row", {
+      name: "All sources column headings",
+    });
     expect(headers.style.gridTemplateColumns).toContain("12rem");
-    const messageResize = screen.getByTestId("col-resize-3");
+    const messageResize = within(headers).getByRole("button", {
+      name: "Resize Message column for All sources",
+    });
     expect(messageResize.getAttribute("aria-label")).toBe(
-      "Resize Message column",
+      "Resize Message column for All sources",
     );
     fireEvent.keyDown(messageResize, { key: "ArrowRight" });
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
     );
 
-    const timeResize = screen.getByTestId("col-resize-0");
+    const timeResize = within(headers).getByRole("button", {
+      name: "Resize Time column for All sources",
+    });
     fireEvent.mouseDown(timeResize, { clientX: 100 });
     fireEvent.mouseMove(window, { clientX: 132 });
     fireEvent.mouseUp(window);
@@ -706,6 +712,101 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
     );
+  });
+
+  it("scopes synchronized resizable headings to every visible lane", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    chooseLaneCount(2);
+
+    const lanes = screen.getByTestId("log-explorer-lanes");
+    const filters = screen.getByTestId("log-explorer-filters");
+    const chat = screen.getByTestId("log-explorer-chat");
+    const headings = screen.getAllByRole("row", {
+      name: /column headings$/,
+    });
+    expect(headings).toHaveLength(2);
+    expect(headings.every((heading) => lanes.contains(heading))).toBe(true);
+    expect(headings.some((heading) => filters.contains(heading))).toBe(false);
+    expect(headings.some((heading) => chat.contains(heading))).toBe(false);
+
+    for (const heading of headings) {
+      expect(within(heading).getAllByRole("columnheader")).toHaveLength(4);
+      expect(heading.style.gridTemplateColumns).toContain("12rem");
+    }
+
+    const laneTwoHeading = screen.getByRole("row", {
+      name: "Lane 2 column headings",
+    });
+    fireEvent.keyDown(
+      within(laneTwoHeading).getByRole("button", {
+        name: "Resize Message column for Lane 2",
+      }),
+      { key: "ArrowRight" },
+    );
+    await waitFor(() => {
+      for (const heading of headings) {
+        expect(heading.style.gridTemplateColumns).toContain("12.5rem");
+      }
+    });
+
+    const laneTwo = screen
+      .getByRole("row", { name: "Lane 2 column headings" })
+      .closest<HTMLElement>("[data-lane-id]");
+    expect(laneTwo).toBeTruthy();
+    const laneTwoRows = await within(laneTwo!).findByTestId(
+      "virtualized-event-list",
+    );
+    Object.defineProperty(laneTwoRows, "scrollLeft", {
+      configurable: true,
+      value: 48,
+      writable: true,
+    });
+    fireEvent.scroll(laneTwoRows);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("row", { name: "Lane 2 column headings" }).style
+          .transform,
+      ).toBe("translateX(-48px)"),
+    );
+    expect(
+      screen.getByRole("row", { name: "All sources column headings" }).style
+        .transform,
+    ).toBe("translateX(-0px)");
+
+    chooseLaneCount(1);
+    chooseLaneCount(2);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("row", { name: "Lane 2 column headings" }).style
+          .transform,
+      ).toBe("translateX(-0px)"),
+    );
+  });
+
+  it("keeps compact rail controls, event rows, and timestamps keyboard focusable", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const message = await screen.findByText("auth failure");
+
+    const collapseFilters = screen.getByTestId("collapse-log-filters");
+    collapseFilters.focus();
+    expect(document.activeElement).toBe(collapseFilters);
+
+    const collapseChat = screen.getByTestId("collapse-linked-chat");
+    collapseChat.focus();
+    expect(document.activeElement).toBe(collapseChat);
+
+    const row = message.closest('[role="listitem"]') as HTMLElement;
+    row.focus();
+    expect(document.activeElement).toBe(row);
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(false);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(true);
+
+    const timestamp = screen.getByTestId("event-time-1");
+    timestamp.focus();
+    expect(document.activeElement).toBe(timestamp);
+    expect(timestamp.closest('[role="listitem"]')).toBe(row);
   });
 
   it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {
@@ -1365,6 +1466,186 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/not found in corpus/)).toBeTruthy();
     expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
   });
+
+  it("saves and highlights an exact noncontiguous evidence set without intervening rows", async () => {
+    const sharedTs = 1_700_000_100;
+    const events: host.ExplorerEventDto[] = [
+      {
+        seq: 10,
+        ts: sharedTs,
+        timeQuality: "wall",
+        level: "error",
+        service: "api",
+        host: null,
+        templateId: 10,
+        traceId: null,
+        message: "first selected clue",
+        source: "api.log",
+      },
+      {
+        seq: 11,
+        ts: sharedTs + 1,
+        timeQuality: "wall",
+        level: "info",
+        service: "api",
+        host: null,
+        templateId: 11,
+        traceId: null,
+        message: "intervening unselected event",
+        source: "api.log",
+      },
+      {
+        seq: 12,
+        ts: sharedTs,
+        timeQuality: "wall",
+        level: "warn",
+        service: "worker",
+        host: null,
+        templateId: 12,
+        traceId: null,
+        message: "second selected clue at duplicate timestamp",
+        source: "worker.log",
+      },
+    ];
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 2, "worker.log": 1 },
+      levels: { error: 1, info: 1, warn: 1 },
+      services: { api: 2, worker: 1 },
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue({
+      ...defaultEventPage(),
+      events,
+      totalMatched: events.length,
+    });
+    const eventRefs: host.LogBookmarkEventRefDto[] = [events[0]!, events[2]!].map(
+      (event) => ({
+        corpusId: "c1",
+        seq: event.seq,
+        source: event.source,
+        timestampHint: event.ts,
+        timeQualityHint: event.timeQuality,
+      }),
+    );
+    vi.mocked(host.hostLogAddBookmark).mockResolvedValue({
+      id: "bm-exact",
+      label: "2 selected events",
+      seqFrom: 10,
+      seqTo: 12,
+      eventRefs,
+      evidenceStatus: "verified",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(events[0]!),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("first selected clue"));
+    fireEvent.click(
+      screen.getByText("second selected clue at duplicate timestamp"),
+      { metaKey: true },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+
+    await waitFor(() =>
+      expect(host.hostLogAddBookmark).toHaveBeenCalledWith("c1", {
+        seqFrom: 10,
+        seqTo: 12,
+        eventRefs,
+        label: "2 selected events",
+      }),
+    );
+    expect(
+      vi.mocked(host.hostLogAddBookmark).mock.calls[0]![1].eventRefs?.map(
+        (eventRef) => eventRef.seq,
+      ),
+    ).toEqual([10, 12]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    await screen.findByText("Already bookmarked: 2 selected events");
+    expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-exact"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: 10 }),
+      ),
+    );
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="10"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="11"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(false);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="12"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      evidenceStatus: "missing" as const,
+      visibleStatus: "Missing",
+      message: "Bookmark evidence is missing from this corpus",
+    },
+    {
+      evidenceStatus: "stale" as const,
+      visibleStatus: "Stale",
+      message: "Bookmark evidence identity no longer matches this corpus",
+    },
+  ])(
+    "keeps $evidenceStatus exact evidence visible and refuses unrelated navigation",
+    async ({ evidenceStatus, visibleStatus, message }) => {
+      const target = defaultEventPage().events[0]!;
+      vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+        {
+          id: `bm-${evidenceStatus}`,
+          label: "durable exact clue",
+          seqFrom: target.seq,
+          seqTo: target.seq,
+          eventRefs: [
+            {
+              corpusId: "c1",
+              seq: target.seq,
+              source: target.source,
+              timestampHint: target.ts,
+              timeQualityHint: target.timeQuality,
+            },
+          ],
+          evidenceStatus,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]);
+
+      render(<LogExplorer corpusId="c1" />);
+      expect(
+        (
+          await screen.findByTestId(
+            `bookmark-evidence-status-bm-${evidenceStatus}`,
+          )
+        ).textContent,
+      ).toContain(visibleStatus);
+      fireEvent.click(
+        screen.getByTestId(`bookmark-activate-bm-${evidenceStatus}`),
+      );
+      expect(screen.getByRole("status").textContent).toContain(message);
+      expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+      expect(
+        screen.getByTestId(`bookmark-activate-bm-${evidenceStatus}`),
+      ).toBeTruthy();
+    },
+  );
 
   it("temporarily composes the correct lane for a bookmark outside all visible lanes", async () => {
     const target: host.ExplorerEventDto = {
@@ -2176,6 +2457,11 @@ describe("LogExplorer shell", () => {
     expect(document.activeElement).toBe(
       screen.getByTestId("lane-editor-close"),
     );
+    const editorContent = editor.querySelector(
+      ".log-explorer__lane-editor-content",
+    ) as HTMLElement;
+    expect(editorContent.style.scrollbarGutter).toBe("stable");
+    expect(editorContent.style.paddingInlineEnd).toBe("0.25rem");
 
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(
