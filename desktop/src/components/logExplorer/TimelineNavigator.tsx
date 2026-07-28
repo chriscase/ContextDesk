@@ -7,11 +7,12 @@ import {
 } from "react";
 import {
   hostLogQueryEvents,
-  hostLogTimelineSummary,
+  hostLogSharedTimelineSummary,
   type EventQueryDto,
   type ExplorerEventDto,
-  type TimelineSummaryBucketDto,
-  type TimelineSummaryDto,
+  type SharedTimelineLaneSummaryDto,
+  type SharedTimelineSeverity,
+  type SharedTimelineSummaryDto,
 } from "../../lib/host";
 import {
   formatCanonicalUtc,
@@ -38,13 +39,15 @@ type Props = {
 type LaneSummaryState = {
   id: string;
   label: string;
-  summary: TimelineSummaryDto | null;
+  summary: SharedTimelineLaneSummaryDto | null;
   error: string | null;
 };
 
-type CanonicalLevel = "error" | "warn" | "info" | "debug" | "other";
-
-const LEVELS: { key: CanonicalLevel; label: string; glyph: string }[] = [
+const LEVELS: {
+  key: SharedTimelineSeverity;
+  label: string;
+  glyph: string;
+}[] = [
   { key: "error", label: "Error", glyph: "E" },
   { key: "warn", label: "Warning", glyph: "W" },
   { key: "info", label: "Info", glyph: "I" },
@@ -52,67 +55,38 @@ const LEVELS: { key: CanonicalLevel; label: string; glyph: string }[] = [
   { key: "other", label: "Other", glyph: "O" },
 ];
 
-function canonicalLevel(level: string): CanonicalLevel {
-  switch (level.trim().toLowerCase()) {
-    case "fatal":
-    case "critical":
-    case "crit":
-    case "severe":
-    case "error":
-    case "err":
-      return "error";
-    case "warning":
-    case "warn":
-      return "warn";
-    case "info":
-    case "notice":
-      return "info";
-    case "debug":
-    case "trace":
-      return "debug";
-    default:
-      return "other";
-  }
-}
-
-function levelCounts(bucket?: TimelineSummaryBucketDto) {
-  const result: Record<CanonicalLevel, number> = {
+function levelCounts(summary: SharedTimelineSummaryDto, index: number) {
+  const result: Record<SharedTimelineSeverity, number> = {
     error: 0,
     warn: 0,
     info: 0,
     debug: 0,
     other: 0,
   };
-  for (const [level, count] of Object.entries(bucket?.byLevel ?? {})) {
-    result[canonicalLevel(level)] += count;
+  for (const series of summary.severitySeries) {
+    result[series.severity] = series.counts[index] ?? 0;
   }
-  const classified = Object.values(result).reduce(
-    (total, count) => total + count,
-    0,
-  );
-  result.other += Math.max(0, (bucket?.count ?? 0) - classified);
   return result;
 }
 
-function levelSummary(bucket?: TimelineSummaryBucketDto) {
-  const counts = levelCounts(bucket);
+function levelSummary(summary: SharedTimelineSummaryDto, index: number) {
+  const counts = levelCounts(summary, index);
   return LEVELS.filter(({ key }) => counts[key] > 0)
     .map(({ key, label }) => `${label} ${counts[key]}`)
     .join(", ");
 }
 
-function bucketBounds(summary: TimelineSummaryDto, index: number) {
-  const start = (summary.spanFrom ?? 0) + index * summary.bucketWidth;
-  return {
-    start,
-    end: Math.min(
-      start + summary.bucketWidth,
-      summary.spanTo ?? start + summary.bucketWidth,
-    ),
-  };
+function bucketBounds(summary: SharedTimelineSummaryDto, index: number) {
+  return (
+    summary.buckets[index] ?? {
+      index,
+      start: summary.spanFrom ?? 0,
+      end: summary.spanTo ?? summary.spanFrom ?? 0,
+    }
+  );
 }
 
-function compactTime(summary: TimelineSummaryDto, ts: number) {
+function compactTime(summary: SharedTimelineSummaryDto, ts: number) {
   if (summary.timeQuality === "order_only") return `order ${ts}`;
   if (summary.timeQuality === "mixed" && ts < 946_684_800) {
     return `~order ${ts}`;
@@ -135,7 +109,7 @@ function compactTime(summary: TimelineSummaryDto, ts: number) {
   }
 }
 
-function bucketLabel(summary: TimelineSummaryDto, index: number) {
+function bucketLabel(summary: SharedTimelineSummaryDto, index: number) {
   const { start, end } = bucketBounds(summary, index);
   if (summary.timeQuality === "wall") {
     return `${formatCanonicalUtc(start)}–${formatCanonicalUtc(Math.max(start, end - 1))}`;
@@ -159,7 +133,7 @@ export function TimelineNavigator({
   onSeekSeq,
 }: Props) {
   const [open, setOpen] = useState(true);
-  const [summary, setSummary] = useState<TimelineSummaryDto | null>(null);
+  const [summary, setSummary] = useState<SharedTimelineSummaryDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [laneSummaries, setLaneSummaries] = useState<LaneSummaryState[]>([]);
@@ -199,51 +173,33 @@ export function TimelineNavigator({
     setLaneSummaries([]);
     setCommittedIndex(null);
     setStatus("Loading bounded timeline summary…");
-    const laneRequests =
+    const requestedLanes =
       lanes.length > 1
-        ? lanes.slice(0, 4).map((lane) =>
-            lane.emptySourceScope
-              ? Promise.resolve<TimelineSummaryDto | null>(null)
-              : hostLogTimelineSummary(
-                  corpusId,
-                  {
-                    ...filter,
-                    sources:
-                      lane.sources.length > 0
-                        ? lane.sources
-                        : (filter.sources ?? []),
-                  },
-                  NAVIGATOR_BUCKETS,
-                ),
-          )
+        ? lanes.slice(0, 4).map((lane) => ({
+            sources: lane.emptySourceScope ? [] : lane.sources,
+          }))
         : [];
-    void Promise.allSettled([
-      hostLogTimelineSummary(corpusId, filter, NAVIGATOR_BUCKETS),
-      ...laneRequests,
-    ])
-      .then((results) => {
+    void hostLogSharedTimelineSummary(
+      corpusId,
+      filter,
+      requestedLanes,
+      NAVIGATOR_BUCKETS,
+    )
+      .then((next) => {
         if (request !== summaryRequest.current) return;
-        const global = results[0];
-        if (!global || global.status === "rejected") {
-          throw global?.reason ?? new Error("Timeline summary unavailable");
-        }
-        const next = global.value;
         setSummary(next);
         setPreviewIndex(0);
         setLaneSummaries(
           lanes.length > 1
             ? lanes.slice(0, 4).map((lane, index) => {
-                const result = results[index + 1];
+                const result = next.lanes.find(
+                  (candidate) => candidate.laneIndex === index,
+                );
                 return {
                   id: lane.id,
                   label: lane.label,
-                  summary: result?.status === "fulfilled" ? result.value : null,
-                  error:
-                    result?.status === "rejected"
-                      ? String(result.reason)
-                      : result?.value == null
-                        ? "no events match visible lane"
-                        : null,
+                  summary: result ?? null,
+                  error: result ? null : "lane coverage unavailable",
                 };
               })
             : [],
@@ -271,21 +227,7 @@ export function TimelineNavigator({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [corpusId, emptySourceScope, filterKey, laneKey, open]);
 
-  const bucketsByIndex = useMemo(() => {
-    const buckets = new Map<number, TimelineSummaryBucketDto>();
-    for (const bucket of summary?.buckets ?? []) {
-      buckets.set(bucket.index, bucket);
-    }
-    return buckets;
-  }, [summary]);
-
-  const counts = useMemo(() => {
-    const values = Array.from({ length: summary?.bucketCount ?? 0 }, () => 0);
-    for (const bucket of summary?.buckets ?? []) {
-      if (bucket.index < values.length) values[bucket.index] = bucket.count;
-    }
-    return values;
-  }, [summary]);
+  const counts = summary?.counts ?? [];
   const maxCount = Math.max(1, ...counts);
 
   const residentIndexes = useMemo(() => {
@@ -427,9 +369,8 @@ export function TimelineNavigator({
                     />
                   ) : null}
                   {counts.map((count, index) => {
-                    const bucket = bucketsByIndex.get(index);
-                    const levels = levelCounts(bucket);
-                    const breakdown = levelSummary(bucket);
+                    const levels = levelCounts(summary, index);
+                    const breakdown = levelSummary(summary, index);
                     return (
                       <button
                         // Bucket indexes are stable for this summary request.
@@ -552,8 +493,8 @@ export function TimelineNavigator({
                     <li key={index}>
                       {compactTime(summary, bucketBounds(summary, index).start)}
                       : {count} events
-                      {levelSummary(bucketsByIndex.get(index))
-                        ? ` (${levelSummary(bucketsByIndex.get(index))})`
+                      {levelSummary(summary, index)
+                        ? ` (${levelSummary(summary, index)})`
                         : " (empty)"}
                     </li>
                   ))}
@@ -577,29 +518,22 @@ export function TimelineNavigator({
                           <div
                             className="log-explorer__navigator-lane-slots"
                             style={{
-                              gridTemplateColumns: `repeat(${lane.summary.bucketCount}, minmax(1px, 1fr))`,
+                              gridTemplateColumns: `repeat(${lane.summary.counts.length}, minmax(1px, 1fr))`,
                             }}
                           >
-                            {Array.from(
-                              { length: lane.summary.bucketCount },
-                              (_, index) => {
-                                const count =
-                                  lane.summary?.buckets.find(
-                                    (bucket) => bucket.index === index,
-                                  )?.count ?? 0;
-                                return (
-                                  <i
-                                    key={index}
-                                    data-count={count}
-                                    className={
-                                      count > 0
-                                        ? "log-explorer__navigator-lane-slot--filled"
-                                        : ""
-                                    }
-                                  />
-                                );
-                              },
-                            )}
+                            {lane.summary.counts.map((count, index) => {
+                              return (
+                                <i
+                                  key={index}
+                                  data-count={count}
+                                  className={
+                                    count > 0
+                                      ? "log-explorer__navigator-lane-slot--filled"
+                                      : ""
+                                  }
+                                />
+                              );
+                            })}
                           </div>
                           <span>
                             {timeQualityLabel(lane.summary.timeQuality)}

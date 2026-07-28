@@ -1890,6 +1890,44 @@ export type TimelineSummaryDto = {
   buckets: TimelineSummaryBucketDto[];
 };
 
+export type SharedTimelineSeverity =
+  "error" | "warn" | "info" | "debug" | "other";
+
+export type SharedTimelineAxisBucketDto = {
+  index: number;
+  start: number;
+  end: number;
+};
+
+export type SharedTimelineSeveritySeriesDto = {
+  severity: SharedTimelineSeverity;
+  counts: number[];
+};
+
+export type SharedTimelineLaneSummaryDto = {
+  laneIndex: number;
+  sourceCount: number;
+  timeQuality: TimeQuality;
+  totalMatched: number;
+  counts: number[];
+};
+
+export type SharedTimelineSummaryDto = {
+  timeQuality: TimeQuality;
+  spanFrom: number | null;
+  spanTo: number | null;
+  bucketWidth: number;
+  bucketCount: number;
+  totalMatched: number;
+  /** Complete fixed-width axis, including empty slots. */
+  buckets: SharedTimelineAxisBucketDto[];
+  counts: number[];
+  /** Exactly Error, Warn, Info, Debug, and Other. */
+  severitySeries: SharedTimelineSeveritySeriesDto[];
+  /** Requested source lanes projected onto the same axis. */
+  lanes: SharedTimelineLaneSummaryDto[];
+};
+
 export type LogFacetsDto = {
   sources: Record<string, number>;
   levels: Record<string, number>;
@@ -2140,6 +2178,45 @@ export async function hostLogTimelineSummary(
   return invoke<TimelineSummaryDto>("log_timeline_summary", {
     corpusId,
     query: { filter, maxBuckets },
+  });
+}
+
+/** One bounded timeline response whose global, severity, and lane tracks share an axis. */
+export async function hostLogSharedTimelineSummary(
+  corpusId: string,
+  filter: EventQueryDto = {},
+  lanes: { sources: string[] }[] = [],
+  maxBuckets = 96,
+): Promise<SharedTimelineSummaryDto> {
+  if (!isTauri()) {
+    return {
+      timeQuality: "order_only",
+      spanFrom: null,
+      spanTo: null,
+      bucketWidth: 1,
+      bucketCount: 0,
+      totalMatched: 0,
+      buckets: [],
+      counts: [],
+      severitySeries: [
+        { severity: "error", counts: [] },
+        { severity: "warn", counts: [] },
+        { severity: "info", counts: [] },
+        { severity: "debug", counts: [] },
+        { severity: "other", counts: [] },
+      ],
+      lanes: lanes.map((lane, laneIndex) => ({
+        laneIndex,
+        sourceCount: new Set(lane.sources).size,
+        timeQuality: "order_only",
+        totalMatched: 0,
+        counts: [],
+      })),
+    };
+  }
+  return invoke<SharedTimelineSummaryDto>("log_shared_timeline_summary", {
+    corpusId,
+    query: { filter, lanes, maxBuckets },
   });
 }
 

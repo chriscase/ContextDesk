@@ -5266,6 +5266,19 @@ fn log_timeline_summary(
     cd_core::log_analysis::query_timeline_summary(&c, &query).map_err(|e| e.to_string())
 }
 
+/// One bounded global timeline axis with canonical severity and lane tracks.
+#[tauri::command]
+fn log_shared_timeline_summary(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::SharedTimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_shared_timeline_summary(&c, &query).map_err(|e| e.to_string())
+}
+
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
 #[tauri::command]
 fn log_query_event_neighborhood(
@@ -6715,6 +6728,7 @@ pub fn run() {
             log_query_events,
             log_query_event_original,
             log_timeline_summary,
+            log_shared_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
             log_search_events,
@@ -6844,6 +6858,23 @@ mod log_original_host_tests {
         assert!(
             !original_command.contains("ensure_host("),
             "local read-only record lookup must not construct the agent host"
+        );
+        assert!(
+            src.contains("log_shared_timeline_summary,"),
+            "shared-axis timeline command must be registered"
+        );
+        let shared_start = src
+            .find("fn log_shared_timeline_summary(")
+            .expect("shared timeline command");
+        let neighborhood_start = src[shared_start..]
+            .find("fn log_query_event_neighborhood(")
+            .map(|offset| shared_start + offset)
+            .expect("shared timeline command boundary");
+        let shared_command = &src[shared_start..neighborhood_start];
+        assert!(shared_command.contains("query_shared_timeline_summary"));
+        assert!(
+            !shared_command.contains("ensure_host("),
+            "local bounded summary must not construct the agent host"
         );
     }
 }

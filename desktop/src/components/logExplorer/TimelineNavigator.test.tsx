@@ -10,11 +10,11 @@ import * as host from "../../lib/host";
 import { TimelineNavigator } from "./TimelineNavigator";
 
 vi.mock("../../lib/host", () => ({
-  hostLogTimelineSummary: vi.fn(),
+  hostLogSharedTimelineSummary: vi.fn(),
   hostLogQueryEvents: vi.fn(),
 }));
 
-const summary: host.TimelineSummaryDto = {
+const summary: host.SharedTimelineSummaryDto = {
   timeQuality: "wall",
   spanFrom: 1_700_000_000,
   spanTo: 1_700_000_040,
@@ -22,21 +22,20 @@ const summary: host.TimelineSummaryDto = {
   bucketCount: 4,
   totalMatched: 42,
   buckets: [
-    {
-      index: 0,
-      start: 1_700_000_000,
-      end: 1_700_000_010,
-      count: 30,
-      byLevel: { info: 30 },
-    },
-    {
-      index: 3,
-      start: 1_700_000_030,
-      end: 1_700_000_040,
-      count: 12,
-      byLevel: { error: 12 },
-    },
+    { index: 0, start: 1_700_000_000, end: 1_700_000_010 },
+    { index: 1, start: 1_700_000_010, end: 1_700_000_020 },
+    { index: 2, start: 1_700_000_020, end: 1_700_000_030 },
+    { index: 3, start: 1_700_000_030, end: 1_700_000_040 },
   ],
+  counts: [30, 0, 0, 12],
+  severitySeries: [
+    { severity: "error", counts: [0, 0, 0, 12] },
+    { severity: "warn", counts: [0, 0, 0, 0] },
+    { severity: "info", counts: [30, 0, 0, 0] },
+    { severity: "debug", counts: [0, 0, 0, 0] },
+    { severity: "other", counts: [0, 0, 0, 0] },
+  ],
+  lanes: [],
 };
 
 const target: host.ExplorerEventDto = {
@@ -63,7 +62,7 @@ function deferred<T>() {
 describe("TimelineNavigator", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue(summary);
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue(summary);
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue({
       events: [target],
       nextCursor: null,
@@ -83,9 +82,10 @@ describe("TimelineNavigator", () => {
     );
 
     await waitFor(() =>
-      expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
         "c1",
         { levels: ["error"] },
+        [],
         96,
       ),
     );
@@ -99,8 +99,8 @@ describe("TimelineNavigator", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(toggle.getAttribute("aria-label")).toBe("Expand timeline");
     expect(screen.getByText("Collapsed · no timeline work")).toBeTruthy();
-    const callsWhileOpen = vi.mocked(host.hostLogTimelineSummary).mock.calls
-      .length;
+    const callsWhileOpen = vi.mocked(host.hostLogSharedTimelineSummary).mock
+      .calls.length;
     rerender(
       <TimelineNavigator
         corpusId="c1"
@@ -109,14 +109,16 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(callsWhileOpen);
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(
+      callsWhileOpen,
+    );
 
     toggle.focus();
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(document.activeElement).toBe(toggle);
     await waitFor(() =>
-      expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(
         callsWhileOpen + 1,
       ),
     );
@@ -158,11 +160,12 @@ describe("TimelineNavigator", () => {
     );
 
     await waitFor(() =>
-      expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(1),
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1),
     );
-    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
       "c1",
       { sources: ["api.log"] },
+      [],
       96,
     );
     expect(screen.queryByTestId("timeline-lane-coverage")).toBeNull();
@@ -182,7 +185,7 @@ describe("TimelineNavigator", () => {
     expect(
       screen.getByText("No events match the visible lane sources"),
     ).toBeTruthy();
-    expect(host.hostLogTimelineSummary).not.toHaveBeenCalled();
+    expect(host.hostLogSharedTimelineSummary).not.toHaveBeenCalled();
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
   });
 
@@ -236,20 +239,15 @@ describe("TimelineNavigator", () => {
   });
 
   it("materializes zero buckets and exposes stacked canonical levels", async () => {
-    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue({
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
       ...summary,
-      buckets: [
-        {
-          ...summary.buckets[0],
-          count: 30,
-          byLevel: {
-            error: 4,
-            warning: 3,
-            info: 12,
-            debug: 6,
-            custom: 2,
-          },
-        },
+      counts: [30, 0, 0, 0],
+      severitySeries: [
+        { severity: "error", counts: [4, 0, 0, 0] },
+        { severity: "warn", counts: [3, 0, 0, 0] },
+        { severity: "info", counts: [12, 0, 0, 0] },
+        { severity: "debug", counts: [6, 0, 0, 0] },
+        { severity: "other", counts: [5, 0, 0, 0] },
       ],
     });
     render(
@@ -311,11 +309,17 @@ describe("TimelineNavigator", () => {
   });
 
   it("labels order-only summaries as order rather than calendar time", async () => {
-    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue({
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
       ...summary,
       timeQuality: "order_only",
       spanFrom: 1,
       spanTo: 41,
+      buckets: [
+        { index: 0, start: 1, end: 11 },
+        { index: 1, start: 11, end: 21 },
+        { index: 2, start: 21, end: 31 },
+        { index: 3, start: 31, end: 41 },
+      ],
     });
     render(
       <TimelineNavigator
@@ -333,13 +337,25 @@ describe("TimelineNavigator", () => {
   });
 
   it("shows bounded per-lane coverage without upgrading an order-only lane", async () => {
-    vi.mocked(host.hostLogTimelineSummary).mockImplementation(
-      async (_corpusId, filter) => ({
-        ...summary,
-        timeQuality:
-          filter?.sources?.[0] === "worker.log" ? "order_only" : "wall",
-      }),
-    );
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      lanes: [
+        {
+          laneIndex: 0,
+          sourceCount: 1,
+          timeQuality: "wall",
+          totalMatched: 30,
+          counts: [30, 0, 0, 0],
+        },
+        {
+          laneIndex: 1,
+          sourceCount: 1,
+          timeQuality: "order_only",
+          totalMatched: 12,
+          counts: [0, 0, 0, 12],
+        },
+      ],
+    });
     render(
       <TimelineNavigator
         corpusId="c1"
@@ -359,13 +375,19 @@ describe("TimelineNavigator", () => {
     expect(
       within(coverage).getByText("order only (not calendar time)"),
     ).toBeTruthy();
-    expect(host.hostLogTimelineSummary).toHaveBeenCalledTimes(3);
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1);
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
+      "c1",
+      { levels: ["error"] },
+      [{ sources: ["api.log"] }, { sources: ["worker.log"] }],
+      96,
+    );
     expect(coverage.querySelectorAll("i")).toHaveLength(8);
   });
 
   it("ignores a stale summary after filters change", async () => {
-    const old = deferred<host.TimelineSummaryDto>();
-    vi.mocked(host.hostLogTimelineSummary)
+    const old = deferred<host.SharedTimelineSummaryDto>();
+    vi.mocked(host.hostLogSharedTimelineSummary)
       .mockImplementationOnce(() => old.promise)
       .mockResolvedValueOnce({ ...summary, totalMatched: 7 });
     const { rerender } = render(
@@ -438,7 +460,7 @@ describe("TimelineNavigator", () => {
   });
 
   it("shows summary and seek failures as visible errors", async () => {
-    vi.mocked(host.hostLogTimelineSummary).mockRejectedValueOnce(
+    vi.mocked(host.hostLogSharedTimelineSummary).mockRejectedValueOnce(
       new Error("summary unavailable"),
     );
     const { unmount } = render(
@@ -454,7 +476,7 @@ describe("TimelineNavigator", () => {
     );
     unmount();
 
-    vi.mocked(host.hostLogTimelineSummary).mockResolvedValue(summary);
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue(summary);
     vi.mocked(host.hostLogQueryEvents).mockRejectedValueOnce(
       new Error("seek unavailable"),
     );

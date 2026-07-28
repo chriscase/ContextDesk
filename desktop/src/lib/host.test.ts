@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hostLogQueryEventOriginal,
+  hostLogSharedTimelineSummary,
   modelSelectionKey,
   normalizeProviderKind,
   parseModelSelectionKey,
@@ -19,6 +20,38 @@ beforeEach(() => {
     {};
 });
 
+describe("hostLogSharedTimelineSummary", () => {
+  it("sends one bounded shared-axis request with exact lane scopes", async () => {
+    invokeMock.mockResolvedValue({
+      timeQuality: "wall",
+      spanFrom: 1,
+      spanTo: 2,
+      bucketWidth: 1,
+      bucketCount: 1,
+      totalMatched: 1,
+      buckets: [{ index: 0, start: 1, end: 2 }],
+      counts: [1],
+      severitySeries: [],
+      lanes: [],
+    });
+
+    await hostLogSharedTimelineSummary(
+      "corpus-1",
+      { levels: ["error"] },
+      [{ sources: ["api.log", "worker.log"] }],
+      96,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("log_shared_timeline_summary", {
+      corpusId: "corpus-1",
+      query: {
+        filter: { levels: ["error"] },
+        lanes: [{ sources: ["api.log", "worker.log"] }],
+        maxBuckets: 96,
+      },
+    });
+  });
+});
+
 describe("profileIdForKind", () => {
   it("maps known kinds to stable keychain profile ids", () => {
     expect(profileIdForKind("ollama")).toBe("ollama-local");
@@ -35,8 +68,12 @@ describe("profileIdForKind", () => {
 describe("normalizeProviderKind", () => {
   it("normalizes ollama and openai_compatible", () => {
     expect(normalizeProviderKind("ollama")).toBe("ollama");
-    expect(normalizeProviderKind("openai_compatible")).toBe("openai_compatible");
-    expect(normalizeProviderKind("openai-compatible")).toBe("openai_compatible");
+    expect(normalizeProviderKind("openai_compatible")).toBe(
+      "openai_compatible",
+    );
+    expect(normalizeProviderKind("openai-compatible")).toBe(
+      "openai_compatible",
+    );
   });
 
   it("keeps anthropic (does not collapse to none)", () => {
@@ -99,12 +136,12 @@ describe("hostLogQueryEventOriginal", () => {
       redactionApplied: false,
     });
 
-    await expect(hostLogQueryEventOriginal("corpus-1", 42)).resolves.toMatchObject(
-      {
-        state: "available",
-        text: "source",
-      },
-    );
+    await expect(
+      hostLogQueryEventOriginal("corpus-1", 42),
+    ).resolves.toMatchObject({
+      state: "available",
+      text: "source",
+    });
     expect(invokeMock).toHaveBeenCalledWith("log_query_event_original", {
       corpusId: "corpus-1",
       seq: 42,
