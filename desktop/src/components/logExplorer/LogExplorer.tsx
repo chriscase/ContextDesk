@@ -79,7 +79,7 @@ import {
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
-import { IconChevronLeft } from "../icons";
+import { IconChevronLeft, IconLogExplorer } from "../icons";
 import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
@@ -2176,6 +2176,7 @@ export function LogExplorer({ corpusId }: Props) {
   ]
     .filter(Boolean)
     .join(" ");
+  const corpusLabel = summary?.name ?? corpusId.slice(0, 8);
   const bodyStyle =
     breakpoint === "narrow"
       ? undefined
@@ -2244,8 +2245,21 @@ export function LogExplorer({ corpusId }: Props) {
       onKeyDown={onKeyDown}
     >
       <header className="log-explorer__titlebar">
-        <div className="log-explorer__title">
-          Log Explorer · {summary?.name ?? corpusId.slice(0, 8)}
+        <div
+          className="log-explorer__identity"
+          data-testid="log-explorer-identity"
+          aria-label={`Log Explorer for ${corpusLabel}`}
+        >
+          <span className="log-explorer__mark" aria-hidden="true">
+            <IconLogExplorer />
+          </span>
+          <span className="log-explorer__title">Log Explorer</span>
+          <span className="log-explorer__identity-separator" aria-hidden="true">
+            /
+          </span>
+          <span className="log-explorer__corpus" title={corpusLabel}>
+            {corpusLabel}
+          </span>
         </div>
         <div
           className="log-explorer__meta"
@@ -2274,7 +2288,6 @@ export function LogExplorer({ corpusId }: Props) {
               {laneCount} lane queries
             </span>
           )}
-          <span className="log-explorer__badge">{breakpoint}</span>
         </div>
         <div className="log-explorer__toolbar">
           {(

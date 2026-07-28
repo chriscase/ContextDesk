@@ -341,6 +341,12 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     expect(root).toBeTruthy();
     expect(root.getAttribute("data-resizable")).toBe("true");
+    const identity = await screen.findByLabelText("Log Explorer for fixture");
+    expect(within(identity).getByText("Log Explorer")).toBeTruthy();
+    expect(within(identity).getByTitle("fixture")).toBeTruthy();
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).not.toContain("normal");
     expect(screen.getByTestId("log-explorer-filters")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-lanes")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat")).toBeTruthy();

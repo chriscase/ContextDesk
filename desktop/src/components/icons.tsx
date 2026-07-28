@@ -133,6 +133,18 @@ export function IconChevronRight({ className }: IconProps) {
   );
 }
 
+/** Log Explorer — event traces under a focused inspection lens. */
+export function IconLogExplorer({ className, title }: IconProps) {
+  return (
+    <Svg className={className} title={title}>
+      <path d="M3 6h8M3 10h5M3 14h6M3 18h5" />
+      <circle cx="15" cy="12" r="5" />
+      <path d="m18.5 15.5 3 3" />
+      <path d="M12 12h1.5l1.25-2.25L16.5 14l1-2H18" />
+    </Svg>
+  );
+}
+
 /** Circle question mark — setup help / popover trigger. */
 export function IconHelp({ className }: IconProps) {
   return (
