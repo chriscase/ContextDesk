@@ -56,6 +56,8 @@ type Props = {
   /** Shared scroll coordinate for aligned lanes. */
   linkedScrollTop?: number;
   onLinkedScrollTop?: (scrollTop: number) => void;
+  /** Keep the lane-local column heading aligned with horizontal row scroll. */
+  onHorizontalScroll?: (scrollLeft: number) => void;
   scrollToSeq?: number | null;
   /** One-shot keyboard focus target paired with an explicit seek. */
   focusToSeq?: number | null;
@@ -132,6 +134,7 @@ export function VirtualizedEventList({
   alignedRows,
   linkedScrollTop,
   onLinkedScrollTop,
+  onHorizontalScroll,
   scrollToSeq,
   focusToSeq,
   onFocusToSeq,
@@ -227,6 +230,7 @@ export function VirtualizedEventList({
       setScrollTop(el.scrollTop);
       setViewportH(el.clientHeight);
       onLinkedScrollTop?.(el.scrollTop);
+      onHorizontalScroll?.(el.scrollLeft);
       const now = Date.now();
       if (now - edgeCooldown.current < 200) return;
       if (nearTop(el.scrollTop, edgeRowH)) {
@@ -239,7 +243,13 @@ export function VirtualizedEventList({
         onNearBottom?.();
       }
     },
-    [onLinkedScrollTop, onNearBottom, onNearTop, edgeRowH],
+    [
+      onHorizontalScroll,
+      onLinkedScrollTop,
+      onNearBottom,
+      onNearTop,
+      edgeRowH,
+    ],
   );
 
   useEffect(() => {

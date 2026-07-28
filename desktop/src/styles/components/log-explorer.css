@@ -1600,17 +1600,24 @@
   overscroll-behavior: contain;
 }
 
+.log-explorer__col-header-viewport {
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-subtle, #2a2d33);
+}
+
 .log-explorer__col-headers {
   display: grid;
   gap: 0.4rem;
   align-items: center;
-  flex-shrink: 0;
+  min-width: 100%;
   padding: 0.15rem var(--le-data-inset);
   font-size: 0.68rem;
   font-weight: 600;
   color: var(--fg-muted, #9aa0a6);
-  border-bottom: 1px solid var(--border-subtle, #2a2d33);
   user-select: none;
+  will-change: transform;
 }
 
 .log-explorer__col-header {

@@ -749,6 +749,30 @@ describe("LogExplorer shell", () => {
         expect(heading.style.gridTemplateColumns).toContain("12.5rem");
       }
     });
+
+    const laneTwo = screen
+      .getByRole("row", { name: "Lane 2 column headings" })
+      .closest<HTMLElement>("[data-lane-id]");
+    expect(laneTwo).toBeTruthy();
+    const laneTwoRows = within(laneTwo!).getByTestId(
+      "virtualized-event-list",
+    );
+    Object.defineProperty(laneTwoRows, "scrollLeft", {
+      configurable: true,
+      value: 48,
+      writable: true,
+    });
+    fireEvent.scroll(laneTwoRows);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("row", { name: "Lane 2 column headings" }).style
+          .transform,
+      ).toBe("translateX(-48px)"),
+    );
+    expect(
+      screen.getByRole("row", { name: "All sources column headings" }).style
+        .transform,
+    ).toBe("translateX(-0px)");
   });
 
   it("keeps compact rail controls, event rows, and timestamps keyboard focusable", async () => {

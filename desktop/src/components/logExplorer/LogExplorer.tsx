@@ -657,6 +657,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneScrollSeq, setLaneScrollSeq] = useState<
     Record<string, number | null>
   >({});
+  const [laneScrollLeft, setLaneScrollLeft] = useState<Record<string, number>>(
+    {},
+  );
   const [bookmarkFocusTarget, setBookmarkFocusTarget] = useState<{
     laneId: string;
     seq: number;
@@ -3889,51 +3892,59 @@ export function LogExplorer({ corpusId }: Props) {
                     </span>
                   </div>
                   <div
-                    className="log-explorer__col-headers"
-                    data-testid={`log-explorer-col-headers-${lane.id}`}
-                    role="row"
-                    aria-label={`${lane.label} column headings`}
-                    style={{ gridTemplateColumns: columnGridTemplate }}
+                    className="log-explorer__col-header-viewport"
+                    data-testid={`log-explorer-col-header-viewport-${lane.id}`}
                   >
-                    {EVENT_COLUMNS.map((col) => (
-                      <div
-                        key={col.label}
-                        className="log-explorer__col-header"
-                        role="columnheader"
-                      >
-                        <span>{col.label}</span>
-                        <button
-                          type="button"
-                          className="log-explorer__col-resizer"
-                          data-testid={`col-resize-${lane.id}-${col.index}`}
-                          aria-label={`Resize ${col.label} column for ${lane.label}`}
-                          title="Drag or use ← → to resize every visible lane"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            colDragRef.current = {
-                              index: col.index,
-                              startX: e.clientX,
-                              startW: colWidths[col.index],
-                            };
-                            document.body.style.cursor = "col-resize";
-                            document.body.style.userSelect = "none";
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "ArrowLeft") {
+                    <div
+                      className="log-explorer__col-headers"
+                      data-testid={`log-explorer-col-headers-${lane.id}`}
+                      role="row"
+                      aria-label={`${lane.label} column headings`}
+                      style={{
+                        gridTemplateColumns: columnGridTemplate,
+                        transform: `translateX(-${laneScrollLeft[lane.id] ?? 0}px)`,
+                      }}
+                    >
+                      {EVENT_COLUMNS.map((col) => (
+                        <div
+                          key={col.label}
+                          className="log-explorer__col-header"
+                          role="columnheader"
+                        >
+                          <span>{col.label}</span>
+                          <button
+                            type="button"
+                            className="log-explorer__col-resizer"
+                            data-testid={`col-resize-${lane.id}-${col.index}`}
+                            aria-label={`Resize ${col.label} column for ${lane.label}`}
+                            title="Drag or use ← → to resize every visible lane"
+                            onMouseDown={(e) => {
                               e.preventDefault();
-                              setColWidths((w) =>
-                                resizeCol(w, col.index, -0.5),
-                              );
-                            } else if (e.key === "ArrowRight") {
-                              e.preventDefault();
-                              setColWidths((w) =>
-                                resizeCol(w, col.index, 0.5),
-                              );
-                            }
-                          }}
-                        />
-                      </div>
-                    ))}
+                              colDragRef.current = {
+                                index: col.index,
+                                startX: e.clientX,
+                                startW: colWidths[col.index],
+                              };
+                              document.body.style.cursor = "col-resize";
+                              document.body.style.userSelect = "none";
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "ArrowLeft") {
+                                e.preventDefault();
+                                setColWidths((w) =>
+                                  resizeCol(w, col.index, -0.5),
+                                );
+                              } else if (e.key === "ArrowRight") {
+                                e.preventDefault();
+                                setColWidths((w) =>
+                                  resizeCol(w, col.index, 0.5),
+                                );
+                              }
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
                   </div>
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
@@ -3949,6 +3960,13 @@ export function LogExplorer({ corpusId }: Props) {
                       linkMode === "align_time"
                         ? setAlignedScrollTop
                         : undefined
+                    }
+                    onHorizontalScroll={(scrollLeft) =>
+                      setLaneScrollLeft((current) =>
+                        current[lane.id] === scrollLeft
+                          ? current
+                          : { ...current, [lane.id]: scrollLeft },
+                      )
                     }
                     timeQuality={timeQuality}
                     selected={selected}
