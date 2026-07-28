@@ -10,7 +10,7 @@ use super::{
     verify_safety, write_json, LabResult, FIXED_SEED, GENERATOR_VERSION, TRUTH_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -28,10 +28,12 @@ pub const PAGING_STRESS_DEFAULT_EVENTS: usize = 12_000;
 
 /// Scenario id written under `scenarios/<id>/` for behavior profiles.
 pub const BEHAVIOR_SCENARIO_ID: &str = "behavior-scale";
-pub const BEHAVIOR_SCENARIO_VERSION: u32 = 1;
+pub const BEHAVIOR_SCENARIO_VERSION: u32 = 2;
 
 const BASE_TS: i64 = 1_735_732_800; // 2025-01-01T00:00:00Z fixed lab epoch
 const DAY_SECS: i64 = 86_400;
+const BURST_EVENT_COUNT: usize = 40;
+const SOURCE_SKEW_SECS: i64 = 90;
 
 /// Independent generation controls for behavior-rich profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +156,12 @@ struct SentinelPlan {
     /// Quiet gap markers (start/end ordinals documented in manifest).
     quiet_gap_start: usize,
     quiet_gap_end: usize,
+    /// Deterministic same-second burst.
+    burst_start: usize,
+    burst_end: usize,
+    /// Exact late-arrival pair inside the skew window.
+    late_arrival_lead: usize,
+    late_arrival_event: usize,
 }
 
 impl SentinelPlan {
@@ -181,9 +189,24 @@ impl SentinelPlan {
             shared_ts_a: clamp(500),
             shared_ts_b: clamp(501),
             quiet_gap_start: clamp(event_count / 3),
-            quiet_gap_end: clamp(event_count / 3 + event_count / 20),
+            quiet_gap_end: clamp(event_count / 2),
+            burst_start: clamp(event_count / 5),
+            burst_end: clamp(
+                (event_count / 5)
+                    .saturating_add(BURST_EVENT_COUNT.saturating_sub(1))
+                    .min(last.saturating_sub(1)),
+            ),
+            late_arrival_lead: clamp((event_count.saturating_mul(3) / 5).saturating_sub(1).max(1)),
+            late_arrival_event: clamp((event_count.saturating_mul(3) / 5).max(1)),
         }
     }
+}
+
+#[derive(Debug)]
+struct TimestampPlan {
+    nominal: Vec<i64>,
+    actual: Vec<i64>,
+    skewed_indices: Vec<usize>,
 }
 
 /// Generate a behavior-rich scale corpus under `scenarios/behavior-scale/`.
@@ -229,10 +252,11 @@ pub fn generate_behavior(
     let mut multiline_count = 0u64;
     let mut equal_ts_pairs = 0u64;
 
-    // Pre-compute timestamps so quiet gaps and shared stamps are exact.
-    let timestamps = plan_timestamps(controls, &sentinels, &mut rng);
-    // Source assignment (with intentional misalignment windows).
+    // Source assignment and timestamps are planned together so source-specific
+    // gaps, skew, bursts, and late arrivals are generated truth, not prose.
     let assignments = plan_source_assignments(controls, &sources, &sentinels, &mut rng);
+    let timestamp_plan = plan_timestamps(controls, &sentinels, &assignments);
+    let timestamps = &timestamp_plan.actual;
 
     for index in 0..controls.event_count {
         let source_index = assignments[index];
@@ -240,7 +264,6 @@ pub fn generate_behavior(
         let ts = timestamps[index];
         let level = pick_level(index, &mut rng);
         *severity.entry(level.to_string()).or_insert(0) += 1;
-        *per_source.entry(source_path.to_string()).or_insert(0) += 1;
 
         let marker = sentinel_marker(index, &sentinels);
         let is_long = controls.long_line_percent > 0
@@ -272,12 +295,10 @@ pub fn generate_behavior(
         );
 
         // Rotation: write a slice of traffic to `*.log.1` / sibling files.
-        let use_rotation = controls.rotation_every > 0
-            && index > 0
-            && index % controls.rotation_every < controls.rotation_every / 10
-            && source_path.ends_with(".log");
-        if use_rotation {
-            let rotated = format!("{source_path}.1");
+        let output_source = output_source_path(controls, source_path, index);
+        if output_source != source_path {
+            let rotated = output_source;
+            *per_source.entry(rotated.clone()).or_insert(0) += 1;
             if !rotation_writers.contains_key(&rotated) {
                 let path = import_root.join(&rotated);
                 if let Some(parent) = path.parent() {
@@ -286,9 +307,8 @@ pub fn generate_behavior(
                 rotation_writers.insert(rotated.clone(), fs::File::create(path)?);
             }
             writeln!(rotation_writers.get_mut(&rotated).unwrap(), "{line}")?;
-            // Still count under primary source for expected totals; rotation
-            // files add extra events — track them separately below.
         } else {
+            *per_source.entry(source_path.to_string()).or_insert(0) += 1;
             writeln!(writers[source_index], "{line}")?;
         }
     }
@@ -300,15 +320,30 @@ pub fn generate_behavior(
     let actual_events: usize = import_files.iter().map(|(_, n)| *n).sum();
     let file_hashes = hashes_for_paths(root, &collect_paths(&import_root)?)?;
 
+    let actual_from = timestamps.iter().copied().min().unwrap_or(BASE_TS);
+    let actual_to = timestamps.iter().copied().max().unwrap_or(BASE_TS);
+    let actual_span = actual_to.saturating_sub(actual_from);
     let time_span = json!({
-        "from_ts": BASE_TS,
-        "to_ts": BASE_TS + controls.span_secs,
-        "span_secs": controls.span_secs,
-        "span_days": (controls.span_secs as f64 / DAY_SECS as f64)
+        "from_ts": actual_from,
+        "to_ts": actual_to,
+        "span_secs": actual_span,
+        "span_days": (actual_span as f64 / DAY_SECS as f64),
+        "requested_span_secs": controls.span_secs
     });
 
-    let quiet_from = timestamps[sentinels.quiet_gap_start];
-    let quiet_to = timestamps[sentinels.quiet_gap_end.min(timestamps.len() - 1)];
+    let lane_gaps = source_gap_records(controls, &sentinels, timestamps, &assignments, &sources);
+    let burst_windows = burst_records(controls, &sentinels, timestamps, &assignments, &sources);
+    let skew_windows = skew_records(
+        controls,
+        &sentinels,
+        &timestamp_plan,
+        &assignments,
+        &sources,
+    );
+    let late_arrival_count = timestamps
+        .windows(2)
+        .filter(|pair| pair[1] < pair[0])
+        .count();
 
     let investigation = json!({
         "profile": controls.profile,
@@ -325,15 +360,8 @@ pub fn generate_behavior(
         "long_line_count": long_line_count,
         "multiline_count": multiline_count,
         "equal_timestamp_markers": equal_ts_pairs,
-        "lane_gaps": [
-            {
-                "id": "primary-quiet-gap",
-                "from_ts": quiet_from,
-                "to_ts": quiet_to,
-                "duration_secs": quiet_to.saturating_sub(quiet_from),
-                "description": "Documented quiet interval for Align-by-time / navigator tests (#486/#522)."
-            }
-        ],
+        "lane_gaps": lane_gaps,
+        "burst_windows": burst_windows,
         "aligned_intervals": [
             {
                 "id": "shared-ts-pair",
@@ -342,19 +370,23 @@ pub fn generate_behavior(
                 "description": "Two events share one wall timestamp across sources for alignment proof."
             }
         ],
-        "misaligned_intervals": [
-            {
-                "id": "source-skew-window",
-                "description": "Odd-indexed sources run ~90s behind even-indexed peers during the middle third of the span."
-            }
-        ],
+        "misaligned_intervals": skew_windows,
+        "late_arrivals": {
+            "count": late_arrival_count,
+            "lead_generation_index": sentinels.late_arrival_lead,
+            "event_generation_index": sentinels.late_arrival_event,
+            "lead_ts": timestamps[sentinels.late_arrival_lead],
+            "event_ts": timestamps[sentinels.late_arrival_event],
+            "seconds_behind_previous": timestamps[sentinels.late_arrival_lead]
+                .saturating_sub(timestamps[sentinels.late_arrival_event])
+        },
         "sentinels": {
-            "find_beyond_first_page": sentinel_record(sentinels.find_beyond_first_page, &timestamps, &assignments, &sources, "FIND_RARE_BEYOND_PAGE"),
-            "find_beyond_4k": sentinel_record(sentinels.find_beyond_4k, &timestamps, &assignments, &sources, "FIND_RARE_BEYOND_4K"),
-            "find_deep": sentinel_record(sentinels.find_deep, &timestamps, &assignments, &sources, "FIND_RARE_DEEP"),
-            "bookmark_page_boundary": sentinel_record(sentinels.bookmark_page_boundary, &timestamps, &assignments, &sources, "BOOKMARK_PAGE_BOUNDARY"),
-            "bookmark_evict_window": sentinel_record(sentinels.bookmark_evict_window, &timestamps, &assignments, &sources, "BOOKMARK_EVICT_WINDOW"),
-            "bookmark_near_end": sentinel_record(sentinels.bookmark_near_end, &timestamps, &assignments, &sources, "BOOKMARK_NEAR_END")
+            "find_beyond_first_page": sentinel_record(controls, sentinels.find_beyond_first_page, timestamps, &assignments, &sources, "FIND_RARE_BEYOND_PAGE"),
+            "find_beyond_4k": sentinel_record(controls, sentinels.find_beyond_4k, timestamps, &assignments, &sources, "FIND_RARE_BEYOND_4K"),
+            "find_deep": sentinel_record(controls, sentinels.find_deep, timestamps, &assignments, &sources, "FIND_RARE_DEEP"),
+            "bookmark_page_boundary": sentinel_record(controls, sentinels.bookmark_page_boundary, timestamps, &assignments, &sources, "BOOKMARK_PAGE_BOUNDARY"),
+            "bookmark_evict_window": sentinel_record(controls, sentinels.bookmark_evict_window, timestamps, &assignments, &sources, "BOOKMARK_EVICT_WINDOW"),
+            "bookmark_near_end": sentinel_record(controls, sentinels.bookmark_near_end, timestamps, &assignments, &sources, "BOOKMARK_NEAR_END")
         },
         "expected_queries": [
             {"kind": "find", "text": "FIND_RARE_BEYOND_PAGE", "min_hits": 1, "placement": "beyond_first_page"},
@@ -408,7 +440,8 @@ pub fn generate_behavior(
                 "severities": severity,
                 "time_quality": controls.time_quality,
                 "files_by_path": file_hashes.iter().map(|(k,v)| (k.clone(), json!({"sha256": v}))).collect::<serde_json::Map<_,_>>(),
-                "time_span_secs": controls.span_secs,
+                "time_span_secs": actual_span,
+                "requested_time_span_secs": controls.span_secs,
                 "traffic_shape": controls.traffic_shape,
                 "profile": controls.profile,
                 "requested_events": controls.event_count,
@@ -425,54 +458,60 @@ pub fn generate_behavior(
 fn plan_timestamps(
     controls: &BehaviorControls,
     sentinels: &SentinelPlan,
-    rng: &mut LabRng,
-) -> Vec<i64> {
+    assignments: &[usize],
+) -> TimestampPlan {
     let n = controls.event_count;
     let span = controls.span_secs.max(1);
-    let mut out = Vec::with_capacity(n);
+    let denominator = n.saturating_sub(1).max(1) as i128;
+    let mut nominal = (0..n)
+        .map(|index| {
+            let offset = (span as i128 * index as i128) / denominator;
+            BASE_TS.saturating_add(offset as i64)
+        })
+        .collect::<Vec<_>>();
 
-    match controls.traffic_shape.as_str() {
-        "paging" => {
-            // Dense: ~50 events/sec so paging is about ordinal, not calendar.
-            for i in 0..n {
-                out.push(BASE_TS + (i as i64 / 50));
-            }
-        }
-        _ => {
-            // sparse_burst (default) and any future shapes share this path.
-            // Map ordinal → fractional position, then apply burst/quiet warping.
-            for i in 0..n {
-                let mut frac = i as f64 / n.max(1) as f64;
-                // Quiet gap: compress ordinals in the quiet band into a tiny
-                // wall interval, then jump — creates a long wall quiet with few events.
-                let q0 = sentinels.quiet_gap_start as f64 / n.max(1) as f64;
-                let q1 = sentinels.quiet_gap_end as f64 / n.max(1) as f64;
-                if frac >= q0 && frac <= q1 {
-                    // Keep wall time almost flat across quiet ordinals.
-                    frac = q0 + (frac - q0) * 0.02;
-                } else if frac > q1 {
-                    // Stretch remaining span after quiet.
-                    let remain = 1.0 - q1;
-                    let local = (frac - q1) / remain.max(1e-9);
-                    frac = q0 + 0.02 * (q1 - q0) + local * (1.0 - q0 - 0.02 * (q1 - q0));
-                }
-                // Bursts: every ~7% of span, pack 40 events into the same second.
-                let burst_bucket = (i / 40) % 17;
-                let ts = if burst_bucket == 0 {
-                    BASE_TS + ((frac * span as f64) as i64)
-                } else {
-                    BASE_TS + ((frac * span as f64) as i64) + rng.next_usize(3) as i64
-                };
-                out.push(ts.clamp(BASE_TS, BASE_TS + span));
-            }
-            // Force shared timestamps for alignment sentinels.
-            if n > sentinels.shared_ts_b {
-                let shared = out[sentinels.shared_ts_a];
-                out[sentinels.shared_ts_b] = shared;
-            }
+    if sentinels.burst_end > sentinels.burst_start {
+        let burst_ts = nominal[sentinels.burst_start];
+        for ts in &mut nominal[sentinels.burst_start..=sentinels.burst_end] {
+            *ts = burst_ts;
         }
     }
-    out
+    if sentinels.shared_ts_b < n {
+        nominal[sentinels.shared_ts_b] = nominal[sentinels.shared_ts_a];
+    }
+    if sentinels.late_arrival_event < n {
+        nominal[sentinels.late_arrival_event] = nominal[sentinels.late_arrival_lead];
+    }
+
+    let skew_start = n / 3;
+    let skew_end = n.saturating_mul(2) / 3;
+    let mut actual = nominal.clone();
+    let mut skewed_indices = Vec::new();
+    let last_skew_index = skew_end.min(n.saturating_sub(1));
+    for (index, actual_ts) in actual
+        .iter_mut()
+        .enumerate()
+        .take(last_skew_index + 1)
+        .skip(skew_start)
+    {
+        let in_burst = index >= sentinels.burst_start && index <= sentinels.burst_end;
+        let is_shared = index == sentinels.shared_ts_a || index == sentinels.shared_ts_b;
+        let is_boundary = index == 0 || index == n.saturating_sub(1);
+        if !in_burst
+            && !is_shared
+            && !is_boundary
+            && assignments.get(index).is_some_and(|source| source % 2 == 1)
+        {
+            *actual_ts = actual_ts.saturating_sub(SOURCE_SKEW_SECS).max(BASE_TS);
+            skewed_indices.push(index);
+        }
+    }
+
+    TimestampPlan {
+        nominal,
+        actual,
+        skewed_indices,
+    }
 }
 
 fn plan_source_assignments(
@@ -526,7 +565,125 @@ fn plan_source_assignments(
         out[sentinels.shared_ts_a] = 0;
         out[sentinels.shared_ts_b] = 1;
     }
+    if sentinels.late_arrival_event < n && sc > 1 {
+        out[sentinels.late_arrival_lead] = 0;
+        out[sentinels.late_arrival_event] = 1;
+    }
     out
+}
+
+fn source_gap_records(
+    controls: &BehaviorControls,
+    sentinels: &SentinelPlan,
+    timestamps: &[i64],
+    assignments: &[usize],
+    sources: &[&str],
+) -> Vec<Value> {
+    if sources.len() <= 2 {
+        return Vec::new();
+    }
+    let affected = (2..sources.len()).collect::<BTreeSet<_>>();
+    let affected_sources = assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, source_index)| affected.contains(source_index))
+        .map(|(index, source_index)| output_source_path(controls, sources[*source_index], index))
+        .collect::<BTreeSet<_>>();
+    let from_ts = (0..sentinels.quiet_gap_start)
+        .filter(|index| affected.contains(&assignments[*index]))
+        .map(|index| timestamps[index])
+        .max();
+    let to_ts = ((sentinels.quiet_gap_end + 1)..timestamps.len())
+        .filter(|index| affected.contains(&assignments[*index]))
+        .map(|index| timestamps[index])
+        .min();
+    match (from_ts, to_ts) {
+        (Some(from_ts), Some(to_ts)) if to_ts > from_ts => vec![json!({
+            "id": "primary-source-quiet-gap",
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "duration_secs": to_ts - from_ts,
+            "from_generation_index": sentinels.quiet_gap_start,
+            "to_generation_index": sentinels.quiet_gap_end,
+            "affected_sources": affected_sources,
+            "description": "Sources listed in affected_sources emit no events inside this generated wall-time interval."
+        })],
+        _ => Vec::new(),
+    }
+}
+
+fn burst_records(
+    controls: &BehaviorControls,
+    sentinels: &SentinelPlan,
+    timestamps: &[i64],
+    assignments: &[usize],
+    sources: &[&str],
+) -> Vec<Value> {
+    if sentinels.burst_end <= sentinels.burst_start {
+        return Vec::new();
+    }
+    let ts = timestamps[sentinels.burst_start];
+    let event_count = (sentinels.burst_start..=sentinels.burst_end)
+        .filter(|index| timestamps[*index] == ts)
+        .count();
+    let affected_sources = (sentinels.burst_start..=sentinels.burst_end)
+        .map(|index| output_source_path(controls, sources[assignments[index]], index))
+        .collect::<BTreeSet<_>>();
+    vec![json!({
+        "id": "same-second-burst",
+        "from_generation_index": sentinels.burst_start,
+        "to_generation_index": sentinels.burst_end,
+        "ts": ts,
+        "event_count": event_count,
+        "affected_sources": affected_sources,
+        "description": "All events in this deterministic generation window share one wall-clock second."
+    })]
+}
+
+fn skew_records(
+    controls: &BehaviorControls,
+    sentinels: &SentinelPlan,
+    plan: &TimestampPlan,
+    assignments: &[usize],
+    sources: &[&str],
+) -> Vec<Value> {
+    if plan.skewed_indices.is_empty() {
+        return Vec::new();
+    }
+    let affected_sources = plan
+        .skewed_indices
+        .iter()
+        .map(|index| output_source_path(controls, sources[assignments[*index]], *index))
+        .collect::<BTreeSet<_>>();
+    let verified_count = plan
+        .skewed_indices
+        .iter()
+        .filter(|index| {
+            plan.nominal[**index].saturating_sub(plan.actual[**index]) == SOURCE_SKEW_SECS
+        })
+        .count();
+    vec![json!({
+        "id": "source-skew-window",
+        "from_generation_index": plan.skewed_indices[0],
+        "to_generation_index": *plan.skewed_indices.last().unwrap(),
+        "offset_secs": -SOURCE_SKEW_SECS,
+        "applied_event_count": verified_count,
+        "affected_sources": affected_sources,
+        "late_arrival_event_index": sentinels.late_arrival_event,
+        "description": "Odd-indexed affected sources are exactly 90 seconds behind their nominal generated timestamps."
+    })]
+}
+
+fn output_source_path(controls: &BehaviorControls, source_path: &str, index: usize) -> String {
+    let use_rotation = controls.rotation_every > 0
+        && index > 0
+        && index % controls.rotation_every < controls.rotation_every / 10
+        && source_path.ends_with(".log");
+    if use_rotation {
+        format!("{source_path}.1")
+    } else {
+        source_path.to_string()
+    }
 }
 
 fn pick_level(index: usize, rng: &mut LabRng) -> &'static str {
@@ -562,6 +719,7 @@ fn sentinel_marker(index: usize, plan: &SentinelPlan) -> Option<String> {
 }
 
 fn sentinel_record(
+    controls: &BehaviorControls,
     index: usize,
     timestamps: &[i64],
     assignments: &[usize],
@@ -571,7 +729,8 @@ fn sentinel_record(
     let source = sources
         .get(assignments.get(index).copied().unwrap_or(0))
         .copied()
-        .unwrap_or("edge/access.jsonl");
+        .map(|source| output_source_path(controls, source, index))
+        .unwrap_or_else(|| "edge/access.jsonl".into());
     json!({
         "generation_index": index,
         "token": token,

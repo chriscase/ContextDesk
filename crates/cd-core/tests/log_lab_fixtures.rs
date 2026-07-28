@@ -7,7 +7,7 @@ use log_lab_generator::{
     PAGING_STRESS_PROFILE, SEVEN_DAY_PROFILE, UI_MEDIUM_PROFILE,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +35,58 @@ fn generated_subset_hashes(root: &Path) -> BTreeMap<String, String> {
     hashes.remove(".gitignore");
     hashes.remove("README.md");
     hashes
+}
+
+#[derive(Debug)]
+struct BehaviorRow {
+    source: String,
+    generation_index: usize,
+    ts: i64,
+}
+
+fn parse_behavior_rows(root: &Path) -> Vec<BehaviorRow> {
+    let import_root = root.join("scenarios/behavior-scale/import");
+    let mut rows = Vec::new();
+    for path in walkdir_files(&import_root) {
+        let source = path
+            .strip_prefix(&import_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        for line in fs::read_to_string(path).unwrap().lines() {
+            let json = serde_json::from_str::<Value>(line).ok();
+            let ts = json
+                .as_ref()
+                .and_then(|value| value["ts"].as_i64())
+                .or_else(|| {
+                    line.split_whitespace()
+                        .find_map(|token| token.strip_prefix("ts=")?.parse().ok())
+                })
+                .unwrap_or_else(|| panic!("wall-time behavior row lacked ts: {line}"));
+            let event_marker = "event_id=behavior-";
+            let marker_start = line
+                .find(event_marker)
+                .unwrap_or_else(|| panic!("behavior row lacked event id: {line}"))
+                + event_marker.len();
+            let marker_end = line[marker_start..]
+                .find(|ch: char| !ch.is_ascii_digit())
+                .map(|offset| marker_start + offset)
+                .unwrap_or(line.len());
+            let generation_index = line[marker_start..marker_end].parse().unwrap();
+            rows.push(BehaviorRow {
+                source: source.clone(),
+                generation_index,
+                ts,
+            });
+        }
+    }
+    rows.sort_by_key(|row| row.generation_index);
+    rows
+}
+
+fn linear_behavior_ts(index: usize, event_count: usize, span_secs: i64) -> i64 {
+    let denominator = event_count.saturating_sub(1).max(1) as i128;
+    1_735_732_800 + ((span_secs as i128 * index as i128) / denominator) as i64
 }
 
 #[test]
@@ -211,7 +263,7 @@ fn log_lab_behavior_profiles_are_deterministic_with_rich_manifests() {
 
         let manifest = load_behavior_manifest(&first_root).unwrap();
         assert_eq!(manifest["scenario_id"], "behavior-scale");
-        assert_eq!(manifest["scenario_version"], 1);
+        assert_eq!(manifest["scenario_version"], 2);
         assert_eq!(
             manifest["generator_version"],
             "contextdesk.log_lab.generator.v1"
@@ -219,7 +271,10 @@ fn log_lab_behavior_profiles_are_deterministic_with_rich_manifests() {
         assert_eq!(manifest["seed"], 52_620_260_725_u64);
         assert_eq!(manifest["expected"]["events"], events as u64);
         assert_eq!(manifest["expected"]["profile"], profile);
-        assert_eq!(manifest["expected"]["time_span_secs"], controls.span_secs);
+        assert_eq!(
+            manifest["expected"]["requested_time_span_secs"],
+            controls.span_secs
+        );
         assert!(manifest["expected"]["traffic_shape"].as_str().is_some());
         assert!(
             manifest["investigation"]["sentinels"]["find_beyond_first_page"]["token"]
@@ -248,8 +303,133 @@ fn log_lab_behavior_profiles_are_deterministic_with_rich_manifests() {
             .as_array()
             .is_some_and(|t| t.len() >= 3));
 
-        // Sentinel tokens must appear in the import tree (not only the truth file).
+        // Parse actual generated rows: truth metadata must describe emitted
+        // timestamps and file identities, not merely contain plausible fields.
         let import_root = first_root.join("scenarios/behavior-scale/import");
+        let rows = parse_behavior_rows(&first_root);
+        assert_eq!(rows.len(), events);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.generation_index)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            events,
+            "{profile} generation indices must be unique"
+        );
+        let actual_from = rows.iter().map(|row| row.ts).min().unwrap();
+        let actual_to = rows.iter().map(|row| row.ts).max().unwrap();
+        assert_eq!(actual_to - actual_from, controls.span_secs, "{profile}");
+        assert_eq!(
+            manifest["expected"]["time_span_secs"],
+            actual_to - actual_from
+        );
+        assert_eq!(
+            manifest["investigation"]["time_span"]["from_ts"],
+            actual_from
+        );
+        assert_eq!(manifest["investigation"]["time_span"]["to_ts"], actual_to);
+
+        let actual_source_counts =
+            rows.iter()
+                .fold(BTreeMap::<String, u64>::new(), |mut counts, row| {
+                    *counts.entry(row.source.clone()).or_default() += 1;
+                    counts
+                });
+        let manifest_source_counts = manifest["expected"]["sources"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(source, count)| (source.clone(), count.as_u64().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            manifest_source_counts, actual_source_counts,
+            "{profile} per-file source counts"
+        );
+
+        let burst = &manifest["investigation"]["burst_windows"][0];
+        let burst_start = burst["from_generation_index"].as_u64().unwrap() as usize;
+        let burst_end = burst["to_generation_index"].as_u64().unwrap() as usize;
+        let burst_ts = burst["ts"].as_i64().unwrap();
+        let burst_rows = rows
+            .iter()
+            .filter(|row| row.generation_index >= burst_start && row.generation_index <= burst_end)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            burst_rows.len() as u64,
+            burst["event_count"].as_u64().unwrap()
+        );
+        assert!(
+            burst_rows.len() >= 32,
+            "{profile} burst must be meaningfully dense"
+        );
+        assert!(
+            burst_rows.iter().all(|row| row.ts == burst_ts),
+            "{profile} declared burst rows did not share one second"
+        );
+
+        let gap = &manifest["investigation"]["lane_gaps"][0];
+        let gap_from = gap["from_ts"].as_i64().unwrap();
+        let gap_to = gap["to_ts"].as_i64().unwrap();
+        let gap_duration = gap["duration_secs"].as_i64().unwrap();
+        let gap_sources = gap["affected_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            gap_duration >= controls.span_secs / 10,
+            "{profile} source gap was only {gap_duration}s"
+        );
+        assert!(
+            rows.iter().all(|row| {
+                !gap_sources.contains(row.source.as_str()) || row.ts <= gap_from || row.ts >= gap_to
+            }),
+            "{profile} emitted an affected-source event inside its declared gap"
+        );
+
+        let skew = &manifest["investigation"]["misaligned_intervals"][0];
+        assert_eq!(skew["offset_secs"], -90);
+        let skew_sources = skew["affected_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !skew_sources.is_empty(),
+            "{profile} skew affected no sources"
+        );
+        let skew_start = skew["from_generation_index"].as_u64().unwrap() as usize;
+        let skew_end = skew["to_generation_index"].as_u64().unwrap() as usize;
+        let verified_skew_rows = rows
+            .iter()
+            .filter(|row| {
+                row.generation_index >= skew_start
+                    && row.generation_index <= skew_end
+                    && skew_sources.contains(row.source.as_str())
+                    && row.ts
+                        == linear_behavior_ts(row.generation_index, events, controls.span_secs) - 90
+            })
+            .count();
+        assert!(
+            verified_skew_rows > 0,
+            "{profile} did not emit the declared 90-second source skew"
+        );
+
+        let late = &manifest["investigation"]["late_arrivals"];
+        let lead_index = late["lead_generation_index"].as_u64().unwrap() as usize;
+        let event_index = late["event_generation_index"].as_u64().unwrap() as usize;
+        assert_eq!(rows[lead_index].generation_index, lead_index);
+        assert_eq!(rows[event_index].generation_index, event_index);
+        assert_eq!(
+            rows[lead_index].ts - rows[event_index].ts,
+            90,
+            "{profile} late-arrival pair"
+        );
+        assert!(late["count"].as_u64().unwrap() > 0);
+
+        // Sentinel tokens must appear in the import tree (not only the truth file).
         let mut blob = String::new();
         for entry in walkdir_files(&import_root) {
             blob.push_str(&fs::read_to_string(&entry).unwrap_or_default());
