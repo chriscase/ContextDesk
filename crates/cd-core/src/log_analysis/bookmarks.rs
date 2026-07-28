@@ -3,15 +3,24 @@
 //! Persisted as `bookmarks.json` under the corpus root (sidecar, not in package v1).
 
 use super::store::LogCorpus;
-use super::{query::fetch_event_by_seq, TimeQuality};
+use super::{query::fetch_events_by_seqs, ExplorerEvent, TimeQuality};
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 /// Bookmark document version.
 pub const BOOKMARKS_VERSION: u32 = 2;
 /// A selection is resident and bounded; refuse unexpectedly large evidence sets.
 pub const MAX_BOOKMARK_EVENT_REFS: usize = 512;
+/// Bound one sidecar so a malformed file cannot monopolize Explorer startup.
+pub const MAX_BOOKMARKS: usize = 1_024;
+/// Bound total exact-reference validation work across one sidecar.
+pub const MAX_BOOKMARK_TOTAL_EVENT_REFS: usize = 8_192;
+
+static BOOKMARK_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
 /// Stable, payload-free identity for one saved evidence event.
 ///
@@ -158,6 +167,27 @@ pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
             file.version
         )));
     }
+    if file.bookmarks.len() > MAX_BOOKMARKS {
+        return Err(CoreError::Message(format!(
+            "bookmark sidecar exceeds {MAX_BOOKMARKS} entries"
+        )));
+    }
+    let total_event_refs = file.bookmarks.iter().try_fold(0usize, |total, bookmark| {
+        if bookmark.event_refs.len() > MAX_BOOKMARK_EVENT_REFS {
+            return Err(CoreError::Message(format!(
+                "bookmark {} exceeds {MAX_BOOKMARK_EVENT_REFS} exact event references",
+                bookmark.id
+            )));
+        }
+        total
+            .checked_add(bookmark.event_refs.len())
+            .ok_or_else(|| CoreError::Message("bookmark reference count overflow".into()))
+    })?;
+    if total_event_refs > MAX_BOOKMARK_TOTAL_EVENT_REFS {
+        return Err(CoreError::Message(format!(
+            "bookmark sidecar exceeds {MAX_BOOKMARK_TOTAL_EVENT_REFS} exact event references"
+        )));
+    }
     Ok(file.bookmarks)
 }
 
@@ -167,38 +197,60 @@ fn write_all(corpus: &LogCorpus, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
         bookmarks,
     };
     let path = bookmarks_path(corpus);
-    std::fs::write(&path, serde_json::to_vec_pretty(&file)?)
-        .map_err(|e| CoreError::Message(format!("write bookmarks: {e}")))?;
+    let bytes = serde_json::to_vec_pretty(&file)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(corpus.root())
+        .map_err(|e| CoreError::Message(format!("create bookmark temporary file: {e}")))?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|()| temporary.as_file_mut().sync_all())
+        .map_err(|e| CoreError::Message(format!("write bookmark temporary file: {e}")))?;
+    temporary
+        .persist(&path)
+        .map_err(|e| CoreError::Message(format!("publish bookmarks atomically: {}", e.error)))?;
+    #[cfg(unix)]
+    std::fs::File::open(corpus.root())
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| CoreError::Message(format!("sync bookmark directory: {e}")))?;
     Ok(())
 }
 
-fn validate_event_ref(
-    corpus: &LogCorpus,
+fn mutation_guard() -> CoreResult<MutexGuard<'static, ()>> {
+    BOOKMARK_MUTATION_LOCK
+        .lock()
+        .map_err(|_| CoreError::Message("bookmark mutation lock is poisoned".into()))
+}
+
+fn validate_event_ref_from_map(
+    corpus_id: &str,
     event_ref: &BookmarkEventRef,
-) -> CoreResult<BookmarkEvidenceStatus> {
-    if event_ref.corpus_id != corpus.id() {
-        return Ok(BookmarkEvidenceStatus::Stale);
+    actual_by_seq: &HashMap<u64, ExplorerEvent>,
+) -> BookmarkEvidenceStatus {
+    if event_ref.corpus_id != corpus_id {
+        return BookmarkEvidenceStatus::Stale;
     }
-    let Some(actual) = fetch_event_by_seq(corpus, event_ref.seq)? else {
-        return Ok(BookmarkEvidenceStatus::Missing);
+    let Some(actual) = actual_by_seq.get(&event_ref.seq) else {
+        return BookmarkEvidenceStatus::Missing;
     };
     if actual.source != event_ref.source
         || actual.ts != event_ref.timestamp_hint
         || actual.time_quality != event_ref.time_quality_hint
     {
-        return Ok(BookmarkEvidenceStatus::Stale);
+        return BookmarkEvidenceStatus::Stale;
     }
-    Ok(BookmarkEvidenceStatus::Verified)
+    BookmarkEvidenceStatus::Verified
 }
 
-/// Validate one bookmark against the current authoritative corpus.
-pub fn resolve_bookmark(corpus: &LogCorpus, bookmark: Bookmark) -> CoreResult<ResolvedBookmark> {
+fn resolve_bookmark_with_events(
+    corpus_id: &str,
+    bookmark: Bookmark,
+    actual_by_seq: &HashMap<u64, ExplorerEvent>,
+) -> ResolvedBookmark {
     let evidence_status = if bookmark.event_refs.is_empty() {
         BookmarkEvidenceStatus::LegacyRange
     } else {
         let mut status = BookmarkEvidenceStatus::Verified;
         for event_ref in &bookmark.event_refs {
-            match validate_event_ref(corpus, event_ref)? {
+            match validate_event_ref_from_map(corpus_id, event_ref, actual_by_seq) {
                 BookmarkEvidenceStatus::Missing => {
                     status = BookmarkEvidenceStatus::Missing;
                     break;
@@ -211,18 +263,51 @@ pub fn resolve_bookmark(corpus: &LogCorpus, bookmark: Bookmark) -> CoreResult<Re
         }
         status
     };
-    Ok(ResolvedBookmark {
+    ResolvedBookmark {
         bookmark,
         evidence_status,
-    })
+    }
+}
+
+/// Validate one bookmark against the current authoritative corpus.
+pub fn resolve_bookmark(corpus: &LogCorpus, bookmark: Bookmark) -> CoreResult<ResolvedBookmark> {
+    if bookmark.event_refs.len() > MAX_BOOKMARK_EVENT_REFS {
+        return Err(CoreError::Message(format!(
+            "bookmark {} exceeds {MAX_BOOKMARK_EVENT_REFS} exact event references",
+            bookmark.id
+        )));
+    }
+    let seqs = bookmark
+        .event_refs
+        .iter()
+        .map(|event_ref| event_ref.seq)
+        .collect::<Vec<_>>();
+    let actual_by_seq = fetch_events_by_seqs(corpus, &seqs)?
+        .into_iter()
+        .map(|event| (event.seq, event))
+        .collect::<HashMap<_, _>>();
+    Ok(resolve_bookmark_with_events(
+        corpus.id(),
+        bookmark,
+        &actual_by_seq,
+    ))
 }
 
 /// Load bookmarks and validate exact evidence references without rewriting the sidecar.
 pub fn list_resolved_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<ResolvedBookmark>> {
-    list_bookmarks(corpus)?
+    let bookmarks = list_bookmarks(corpus)?;
+    let seqs = bookmarks
+        .iter()
+        .flat_map(|bookmark| bookmark.event_refs.iter().map(|event_ref| event_ref.seq))
+        .collect::<Vec<_>>();
+    let actual_by_seq = fetch_events_by_seqs(corpus, &seqs)?
         .into_iter()
-        .map(|bookmark| resolve_bookmark(corpus, bookmark))
-        .collect()
+        .map(|event| (event.seq, event))
+        .collect::<HashMap<_, _>>();
+    Ok(bookmarks
+        .into_iter()
+        .map(|bookmark| resolve_bookmark_with_events(corpus.id(), bookmark, &actual_by_seq))
+        .collect())
 }
 
 /// Create a single-line bookmark.
@@ -295,11 +380,11 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
     } else {
         (seq_to, seq_from)
     };
+    let _guard = mutation_guard()?;
     let mut all = list_bookmarks(corpus)?;
-    if let Some(existing) = all
-        .iter()
-        .find(|bookmark| bookmark.seq_from == from && bookmark.seq_to == to)
-    {
+    if let Some(existing) = all.iter().find(|bookmark| {
+        bookmark.event_refs.is_empty() && bookmark.seq_from == from && bookmark.seq_to == to
+    }) {
         return Ok(existing.clone());
     }
     let now = crate::embed::now_unix_secs();
@@ -336,15 +421,26 @@ fn canonicalize_event_refs(
         )));
     }
 
-    let mut canonical = Vec::with_capacity(requested.len());
-    for requested_ref in requested {
+    for requested_ref in &requested {
         if requested_ref.corpus_id != corpus.id() {
             return Err(CoreError::Message(format!(
                 "bookmark event seq {} belongs to a different corpus",
                 requested_ref.seq
             )));
         }
-        let Some(actual) = fetch_event_by_seq(corpus, requested_ref.seq)? else {
+    }
+    let requested_seqs = requested
+        .iter()
+        .map(|event_ref| event_ref.seq)
+        .collect::<Vec<_>>();
+    let actual_by_seq = fetch_events_by_seqs(corpus, &requested_seqs)?
+        .into_iter()
+        .map(|event| (event.seq, event))
+        .collect::<HashMap<_, _>>();
+
+    let mut canonical = Vec::with_capacity(requested.len());
+    for requested_ref in requested {
+        let Some(actual) = actual_by_seq.get(&requested_ref.seq) else {
             return Err(CoreError::Message(format!(
                 "bookmark event seq {} is missing from corpus",
                 requested_ref.seq
@@ -362,7 +458,7 @@ fn canonicalize_event_refs(
         canonical.push(BookmarkEventRef {
             corpus_id: corpus.id().to_string(),
             seq: actual.seq,
-            source: actual.source,
+            source: actual.source.clone(),
             timestamp_hint: actual.ts,
             time_quality_hint: actual.time_quality,
         });
@@ -397,6 +493,7 @@ fn exact_sets_equal(left: &[BookmarkEventRef], right: &[BookmarkEventRef]) -> bo
 /// Create an exact evidence bookmark after trusted-core identity validation.
 pub fn add_evidence_bookmark(corpus: &LogCorpus, new: NewEvidenceBookmark) -> CoreResult<Bookmark> {
     let event_refs = canonicalize_event_refs(corpus, new.event_refs)?;
+    let _guard = mutation_guard()?;
     let mut all = list_bookmarks(corpus)?;
     if let Some(existing) = all
         .iter()
@@ -448,6 +545,7 @@ pub fn update_bookmark(
     note: Option<Option<String>>,
     color: Option<Option<String>>,
 ) -> CoreResult<Bookmark> {
+    let _guard = mutation_guard()?;
     let mut all = list_bookmarks(corpus)?;
     let bm = all
         .iter_mut()
@@ -470,6 +568,7 @@ pub fn update_bookmark(
 
 /// Delete by id (no-op success if missing).
 pub fn delete_bookmark(corpus: &LogCorpus, id: &str) -> CoreResult<bool> {
+    let _guard = mutation_guard()?;
     let mut all = list_bookmarks(corpus)?;
     let before = all.len();
     all.retain(|b| b.id != id);
@@ -837,6 +936,100 @@ mod tests {
     }
 
     #[test]
+    fn legacy_range_does_not_alias_noncontiguous_exact_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&dir);
+        let exact = add_evidence_bookmark(
+            &corpus,
+            NewEvidenceBookmark {
+                event_refs: vec![
+                    evidence_ref(&corpus, 10, "api.log", 1_700_000_010),
+                    evidence_ref(&corpus, 12, "worker.log", 1_700_000_010),
+                ],
+                label: "events 10 and 12 only".into(),
+                note: None,
+                color: None,
+            },
+        )
+        .unwrap();
+        let range = add_range_bookmark(
+            &corpus,
+            NewBookmark {
+                seq_from: 10,
+                seq_to: 12,
+                label: "inclusive range 10 through 12".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+
+        assert_ne!(range.id, exact.id);
+        assert!(range.event_refs.is_empty());
+        assert_eq!(
+            exact
+                .event_refs
+                .iter()
+                .map(|event_ref| event_ref.seq)
+                .collect::<Vec<_>>(),
+            vec![10, 12]
+        );
+        assert_eq!(list_bookmarks(&corpus).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn concurrent_mutations_publish_complete_readable_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "concurrent-bookmarks").unwrap();
+        let corpus_id = corpus.id().to_string();
+        let root = dir.path().to_path_buf();
+        drop(corpus);
+
+        let writers = (0..16u64)
+            .map(|seq| {
+                let root = root.clone();
+                let corpus_id = corpus_id.clone();
+                std::thread::spawn(move || {
+                    let corpus = LogCorpus::open(&root, &corpus_id).unwrap();
+                    add_range_bookmark(
+                        &corpus,
+                        NewBookmark {
+                            seq_from: seq,
+                            seq_to: seq,
+                            label: format!("bookmark {seq}"),
+                            note: None,
+                            color: None,
+                            ts_from: None,
+                            ts_to: None,
+                        },
+                    )
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let reopened = LogCorpus::open(&root, &corpus_id).unwrap();
+        let all = list_bookmarks(&reopened).unwrap();
+        assert_eq!(all.len(), 16);
+        assert_eq!(
+            all.iter()
+                .map(|bookmark| bookmark.seq_from)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            16
+        );
+        let raw = std::fs::read(bookmarks_path(&reopened)).unwrap();
+        let parsed: BookmarkFile = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(parsed.version, BOOKMARKS_VERSION);
+        assert_eq!(parsed.bookmarks.len(), 16);
+    }
+
+    #[test]
     fn stale_and_missing_exact_references_remain_visible() {
         let dir = tempfile::tempdir().unwrap();
         let corpus = evidence_corpus(&dir);
@@ -923,5 +1116,37 @@ mod tests {
             std::fs::read(bookmarks_path(&corpus)).unwrap(),
             future.as_slice()
         );
+    }
+
+    #[test]
+    fn oversized_loaded_evidence_set_fails_before_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&dir);
+        let event_refs = (0..=MAX_BOOKMARK_EVENT_REFS)
+            .map(|_| evidence_ref(&corpus, 10, "api.log", 1_700_000_010))
+            .collect::<Vec<_>>();
+        let now = crate::embed::now_unix_secs();
+        write_all(
+            &corpus,
+            vec![Bookmark {
+                id: "oversized".into(),
+                label: "oversized exact set".into(),
+                seq_from: 10,
+                seq_to: 10,
+                ts_from: Some(1_700_000_010),
+                ts_to: Some(1_700_000_010),
+                event_refs,
+                color: None,
+                note: None,
+                created_at: now,
+                updated_at: now,
+            }],
+        )
+        .unwrap();
+
+        let error = list_resolved_bookmarks(&corpus).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("exceeds 512 exact event references"));
     }
 }

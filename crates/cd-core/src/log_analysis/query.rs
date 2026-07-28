@@ -1439,6 +1439,37 @@ pub(crate) fn fetch_event_by_seq(
     })
 }
 
+pub(crate) fn fetch_events_by_seqs(
+    corpus: &LogCorpus,
+    seqs: &[u64],
+) -> CoreResult<Vec<ExplorerEvent>> {
+    if seqs.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut unique = seqs.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    corpus.with_connection(|conn| {
+        let mut events = Vec::with_capacity(unique.len());
+        for chunk in unique.chunks(MAX_EVENT_PAGE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
+                 FROM events WHERE seq IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
+            let binds = chunk
+                .iter()
+                .map(|seq| Value::BigInt(*seq as i64))
+                .collect::<Vec<_>>();
+            events.extend(bind_and_map_events(&mut stmt, &binds)?);
+        }
+        Ok(events)
+    })
+}
+
 fn count_matched(corpus: &LogCorpus, filter: &EventQuery) -> CoreResult<u64> {
     let (where_sql, binds) = build_where(filter);
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
