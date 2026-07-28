@@ -422,7 +422,7 @@ export function ChatPane(props: ChatPaneProps) {
                               Guided workflows
                             </div>
                             <div
-                              className="chat-wizard-cards"
+                              className="first-chat-workflow-grid"
                               role="group"
                               aria-label="Guided workflows"
                             >
@@ -430,7 +430,7 @@ export function ChatPane(props: ChatPaneProps) {
                                 <>
                                   <button
                                     type="button"
-                                    className="chat-action-card chat-wizard-card"
+                                    className="chat-action-card first-chat-workflow-card"
                                     data-testid="chat-guided-workflow"
                                     data-action="launch-workflow"
                                     disabled={busy}
@@ -450,7 +450,7 @@ export function ChatPane(props: ChatPaneProps) {
                                   </button>
                                   <button
                                     type="button"
-                                    className="chat-action-card chat-wizard-card"
+                                    className="chat-action-card first-chat-workflow-card"
                                     data-testid="chat-guided-workflow"
                                     data-action="launch-workflow"
                                     disabled={busy}
@@ -473,7 +473,7 @@ export function ChatPane(props: ChatPaneProps) {
                               {onOpenGuidedSetup ? (
                                 <button
                                   type="button"
-                                  className="chat-action-card chat-wizard-card"
+                                  className="chat-action-card first-chat-workflow-card"
                                   data-testid="chat-guided-workflow"
                                   data-action="launch-workflow"
                                   disabled={busy}
