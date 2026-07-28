@@ -490,9 +490,9 @@ describe("TimelineNavigator", () => {
       }),
     });
 
-    fireEvent.pointerDown(cpu, { clientX: 25, pointerId: 1 });
-    fireEvent.pointerMove(cpu, { clientX: 75, pointerId: 1 });
-    fireEvent.pointerUp(cpu, { clientX: 75, pointerId: 1 });
+    fireEvent.pointerDown(cpu, { clientX: 25.5, pointerId: 1 });
+    fireEvent.pointerMove(cpu, { clientX: 74.5, pointerId: 1 });
+    fireEvent.pointerUp(cpu, { clientX: 74.5, pointerId: 1 });
     const zoom = screen.getByRole("button", { name: "Zoom to selection" });
     expect(zoom.hasAttribute("disabled")).toBe(false);
     fireEvent.click(zoom);
@@ -512,8 +512,8 @@ describe("TimelineNavigator", () => {
     const zoomedCpu = await screen.findByRole("slider", {
       name: "CPU shared time cursor",
     });
-    expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010");
-    expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000030");
+    expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010.2");
+    expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000029.8");
     expect(screen.getByText(/zoomed/)).toBeTruthy();
 
     fireEvent.click(

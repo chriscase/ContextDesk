@@ -186,8 +186,12 @@ export function TimelineNavigator({
   const effectiveFilter: EventQueryDto = metricViewRange
     ? {
         ...filter,
-        timeFrom: Math.max(filter.timeFrom ?? -Infinity, metricViewRange.from),
-        timeTo: Math.min(filter.timeTo ?? Infinity, metricViewRange.to),
+        timeFrom: Math.floor(
+          Math.max(filter.timeFrom ?? -Infinity, metricViewRange.from),
+        ),
+        timeTo: Math.ceil(
+          Math.min(filter.timeTo ?? Infinity, metricViewRange.to),
+        ),
       }
     : filter;
   const effectiveFilterKey = JSON.stringify(effectiveFilter);
