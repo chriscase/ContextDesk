@@ -796,6 +796,9 @@ export function LogExplorer({ corpusId }: Props) {
     seq: number;
   } | null>(null);
   const [alignedScrollTop, setAlignedScrollTop] = useState(0);
+  const [alignedMeasuredHeights, setAlignedMeasuredHeights] = useState<
+    Record<string, Record<string, number>>
+  >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [investigation, setInvestigation] =
@@ -3480,14 +3483,47 @@ export function LogExplorer({ corpusId }: Props) {
     saveLinkMode(corpusId, mode);
   };
 
+  const recordAlignedRowHeights = useCallback(
+    (laneId: string, heights: Record<string, number>) => {
+      setAlignedMeasuredHeights((current) => {
+        const previousLane = current[laneId] ?? {};
+        let changed = false;
+        const merged = { ...previousLane };
+        for (const [key, height] of Object.entries(heights)) {
+          if (merged[key] !== height) {
+            merged[key] = height;
+            changed = true;
+          }
+        }
+        return changed ? { ...current, [laneId]: merged } : current;
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setAlignedMeasuredHeights({});
+  }, [
+    colWidths,
+    density,
+    expandedSeqs,
+    filters.keyword,
+    findExcerpts,
+    laneCount,
+    laneEvents,
+    lineMode,
+    previewLines,
+  ]);
+
   const alignedRowsByLane = useMemo(() => {
     if (linkMode !== "align_time" || timeQuality !== "wall" || laneCount < 2) {
       return {};
     }
     const baseRowH = density === "compact" ? 22 : 28;
     const boundedPreview = Math.min(12, Math.max(2, previewLines));
-    return buildAlignedLaneRows(
-      lanes.slice(0, laneCount).map((lane) => ({
+    const visibleLanes = lanes.slice(0, laneCount);
+    const estimated = buildAlignedLaneRows(
+      visibleLanes.map((lane) => ({
         id: lane.id,
         events: laneEvents[lane.id] ?? [],
       })),
@@ -3502,10 +3538,38 @@ export function LogExplorer({ corpusId }: Props) {
             (filters.keyword
               ? centeredLiteralExcerpt(event.message, filters.keyword)
               : event.message),
-        ),
+      ),
       baseRowH,
     );
+    const firstLaneRows = estimated[visibleLanes[0]?.id ?? ""] ?? [];
+    const sharedMeasuredHeights = new Map<string, number>();
+    for (let index = 0; index < firstLaneRows.length; index += 1) {
+      const reference = firstLaneRows[index]!;
+      let complete = true;
+      let height = baseRowH;
+      for (const lane of visibleLanes) {
+        const row = estimated[lane.id]?.[index];
+        if (!row?.event) continue;
+        const measured = alignedMeasuredHeights[lane.id]?.[reference.key];
+        if (measured == null) {
+          complete = false;
+          break;
+        }
+        height = Math.max(height, measured);
+      }
+      if (complete) sharedMeasuredHeights.set(reference.key, height);
+    }
+    return Object.fromEntries(
+      visibleLanes.map((lane) => [
+        lane.id,
+        (estimated[lane.id] ?? []).map((row) => ({
+          ...row,
+          height: sharedMeasuredHeights.get(row.key) ?? row.height,
+        })),
+      ]),
+    );
   }, [
+    alignedMeasuredHeights,
     density,
     expandedSeqs,
     filters.keyword,
@@ -5124,6 +5188,14 @@ export function LogExplorer({ corpusId }: Props) {
                     onLinkedScrollTop={
                       linkMode === "align_time"
                         ? setAlignedScrollTop
+                        : undefined
+                    }
+                    alignedLaneId={
+                      linkMode === "align_time" ? lane.id : undefined
+                    }
+                    onAlignedRowHeights={
+                      linkMode === "align_time"
+                        ? recordAlignedRowHeights
                         : undefined
                     }
                     onHorizontalScroll={(scrollLeft) =>

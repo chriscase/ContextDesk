@@ -3188,7 +3188,7 @@ describe("LogExplorer shell", () => {
       host: null,
       templateId: 1,
       traceId: null,
-      message: `${source} seq ${seq}`,
+      message: `${source} seq ${seq} ${"detail ".repeat(40)}`,
       source,
     });
     vi.mocked(host.hostLogFacets).mockResolvedValue({
@@ -3241,6 +3241,20 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("align_time"),
     );
+    chooseRowMode("Deep");
+    for (const message of document.querySelectorAll<HTMLElement>(
+      "[data-row-message-seq]",
+    )) {
+      const seq = Number(message.dataset.rowMessageSeq);
+      Object.defineProperty(message, "scrollHeight", {
+        configurable: true,
+        value: seq === 11 ? 90 : seq === 21 ? 54 : 18,
+      });
+    }
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "12" },
+    });
 
     expect(root.getAttribute("data-aligned-slots")).toBe("3");
     expect(screen.getByTestId("aligned-time-axis").textContent).toMatch(
@@ -3250,6 +3264,10 @@ describe("LogExplorer shell", () => {
     expect(lists).toHaveLength(2);
     expect(lists[0]!.getAttribute("data-aligned-slots")).toBe("3");
     expect(lists[1]!.getAttribute("data-aligned-slots")).toBe("3");
+    await waitFor(() => {
+      expect(lists[0]!.getAttribute("data-total-height")).toBe("158");
+      expect(lists[1]!.getAttribute("data-total-height")).toBe("158");
+    });
     expect(screen.getAllByTestId("aligned-gap")).toHaveLength(2);
     expect(
       (document.querySelector('[data-seq="11"]') as HTMLElement).style.top,

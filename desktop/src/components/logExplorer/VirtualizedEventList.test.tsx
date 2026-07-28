@@ -346,6 +346,155 @@ describe("VirtualizedEventList", () => {
     expect(measuredEventRowHeight(18, 28, 8)).toBe(28);
   });
 
+  it("reports painted Align slot heights to the shared lane axis", async () => {
+    const event = makeEvents(1)[0]!;
+    event.message = "aligned stack trace ".repeat(30);
+    const onAlignedRowHeights = vi.fn();
+    const alignedRows = [
+      {
+        key: "1700000000:0",
+        ts: event.ts,
+        event,
+        height: 156,
+      },
+    ];
+    const props = {
+      events: [event],
+      alignedRows,
+      alignedLaneId: "lane-1",
+      onAlignedRowHeights,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(<VirtualizedEventList {...props} />);
+    const message = screen.getByText(/aligned stack trace/);
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 72,
+    });
+
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 5, 2]} />);
+
+    await waitFor(() =>
+      expect(onAlignedRowHeights).toHaveBeenCalledWith("lane-1", {
+        "1700000000:0": 84,
+      }),
+    );
+  });
+
+  it("attaches resize observation after an empty list becomes populated", () => {
+    const original = globalThis.ResizeObserver;
+    const observed: Element[] = [];
+    const disconnect = vi.fn();
+    globalThis.ResizeObserver = class {
+      observe(element: Element) {
+        observed.push(element);
+      }
+      unobserve() {}
+      disconnect() {
+        disconnect();
+      }
+    };
+    try {
+      const props = {
+        timeQuality: "wall" as const,
+        selected: new Set<number>(),
+        highlight: new Set<number>(),
+        density: "comfortable" as const,
+        onRowClick: vi.fn(),
+      };
+      const { rerender } = render(
+        <VirtualizedEventList {...props} events={[]} />,
+      );
+      expect(observed.at(-1)?.textContent).toContain("No events match filters");
+
+      rerender(<VirtualizedEventList {...props} events={makeEvents(1)} />);
+      expect(observed.at(-1)?.getAttribute("data-testid")).toBe(
+        "virtualized-event-list",
+      );
+      expect(observed).toHaveLength(1);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+
+  it("prunes measured heights when the resident event window changes", async () => {
+    const first = makeEvents(1)[0]!;
+    first.message = "first long payload ".repeat(20);
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={[first]} />,
+    );
+    const firstMessage = screen.getByText(/first long payload/);
+    Object.defineProperty(firstMessage, "scrollHeight", {
+      configurable: true,
+      value: 72,
+    });
+    rerender(
+      <VirtualizedEventList
+        {...props}
+        events={[first]}
+        colWidths={[7, 2, 5, 2]}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-measured-rows"),
+      ).toBe("1"),
+    );
+
+    const second = { ...makeEvents(1)[0]!, seq: 2, message: "short" };
+    rerender(<VirtualizedEventList {...props} events={[second]} />);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-measured-rows"),
+      ).toBe("0"),
+    );
+  });
+
+  it("clamps the retained within-row anchor when a measured row shrinks", () => {
+    const expanded = makeEvents(4).map((event) => ({
+      ...event,
+      message: "x".repeat(1_000),
+    }));
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={expanded} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 100,
+    });
+
+    rerender(<VirtualizedEventList {...props} events={makeEvents(4)} />);
+
+    expect((list as HTMLDivElement).scrollTop).toBe(27);
+  });
+
   it("uses the user preview depth and a backend hit-centered excerpt", () => {
     const event = makeEvents(1)[0]!;
     event.message = `prefix ${"noise ".repeat(40)}NEEDLE${" tail".repeat(40)}`;
