@@ -329,6 +329,14 @@ export function LinkedChatRail({
     });
   }, [collapsed, compactLayout]);
 
+  useLayoutEffect(() => {
+    if (collapsed || compactLayout || !activeChatId) return;
+    const savedScroll = scrollByChatRef.current[activeChatId];
+    const thread = threadRef.current;
+    if (savedScroll == null || !thread) return;
+    thread.scrollTop = savedScroll;
+  }, [activeChatId, collapsed, compactLayout]);
+
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
     : true;
@@ -404,6 +412,13 @@ export function LinkedChatRail({
     setFollowByChat((m) => ({ ...m, [activeChatId]: true }));
     setDetachedByChat((m) => ({ ...m, [activeChatId]: false }));
     scrollToLatest("smooth");
+  };
+
+  const toggleCollapsed = () => {
+    if (!collapsed && activeChatId && threadRef.current) {
+      scrollByChatRef.current[activeChatId] = threadRef.current.scrollTop;
+    }
+    onToggleCollapsed?.();
   };
 
   const openChat = async (id: string) => {
@@ -878,7 +893,7 @@ export function LinkedChatRail({
           className="log-explorer__chat-reopen"
           data-testid="expand-linked-chat"
           aria-label={`Expand linked chat rail${chats.length > 0 ? `, ${chats.length} chat${chats.length === 1 ? "" : "s"}` : ""}`}
-          onClick={onToggleCollapsed}
+          onClick={toggleCollapsed}
         >
           <span aria-hidden="true">Chat</span>
           {chats.length > 0 ? (
@@ -929,9 +944,9 @@ export function LinkedChatRail({
               className="log-explorer__btn"
               aria-label="Collapse linked chat rail"
               data-testid="collapse-linked-chat"
-              onClick={onToggleCollapsed}
+              onClick={toggleCollapsed}
             >
-              Hide
+              Collapse chat
             </button>
           ) : null}
           {compactLayout && onRequestClose ? (

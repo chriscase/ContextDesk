@@ -381,6 +381,60 @@ describe("LogExplorer shell", () => {
     expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
   });
 
+  it("collapses either side rail, preserves active filters, and restores focus", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    const body = screen.getByTestId("log-explorer-body");
+    const filters = screen.getByTestId("log-explorer-filters");
+    const errorFilter = within(filters).getByRole("checkbox", {
+      name: /error/i,
+    }) as HTMLInputElement;
+
+    fireEvent.click(errorFilter);
+    expect(errorFilter.checked).toBe(true);
+    fireEvent.click(screen.getByTestId("collapse-log-filters"));
+
+    expect(root.getAttribute("data-filters-collapsed")).toBe("true");
+    expect(root.getAttribute("data-usable-evidence-width")).toBe("3492");
+    expect(screen.queryByTestId("splitter-filters")).toBeNull();
+    expect(body.style.gridTemplateColumns).toContain("42px 0px 1fr");
+    const reopenFilters = screen.getByTestId("expand-log-filters");
+    expect(reopenFilters.getAttribute("aria-label")).toBe(
+      "Expand log filters, 1 active",
+    );
+    await waitFor(() => expect(document.activeElement).toBe(reopenFilters));
+
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    expect(root.getAttribute("data-chat-collapsed")).toBe("true");
+    expect(root.getAttribute("data-usable-evidence-width")).toBe("3756");
+    expect(body.style.gridTemplateColumns).toContain("1fr 0px 42px");
+
+    fireEvent.click(reopenFilters);
+    expect(root.getAttribute("data-filters-collapsed")).toBe("false");
+    expect(screen.getByTestId("splitter-filters")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("collapse-log-filters"),
+      ),
+    );
+    expect(
+      (
+        within(screen.getByTestId("log-explorer-filters")).getByRole(
+          "checkbox",
+          { name: /error/i },
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("expand-linked-chat"));
+    expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("collapse-linked-chat"),
+      ),
+    );
+  });
+
   it("gates lane counts by usable evidence width and restores the preferred composed lanes", async () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,

@@ -340,8 +340,14 @@ describe("LinkedChatRail", () => {
     );
     const { rerender } = render(renderRail(false));
 
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat A"),
+    );
     const composer = await screen.findByLabelText("Chat message");
     fireEvent.change(composer, { target: { value: "keep this draft" } });
+    const thread = screen.getByTestId("log-explorer-chat-thread");
+    thread.scrollTop = 144;
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
     expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
 
@@ -364,6 +370,7 @@ describe("LinkedChatRail", () => {
     expect(
       (screen.getByLabelText("Chat message") as HTMLTextAreaElement).value,
     ).toBe("keep this draft");
+    expect(screen.getByTestId("log-explorer-chat-thread").scrollTop).toBe(144);
   });
 
   it("keeps governed cross-source tools and citations visible with the linked answer", async () => {

@@ -112,6 +112,7 @@ const FIND_PAGE_SIZE = 50;
 // evidence grid, after the live Filters/Chat rail widths and splitters.
 const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
 const SPLITTER_WIDTH_PX = 6;
+const COLLAPSED_FILTER_WIDTH_PX = 42;
 const COLLAPSED_CHAT_WIDTH_PX = 42;
 
 type FindCursor = {
@@ -370,6 +371,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [filtersCollapsed, setFiltersCollapsed] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [chatSummary, setChatSummary] = useState({
     chatCount: 0,
@@ -403,6 +405,9 @@ export function LogExplorer({ corpusId }: Props) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
+  const filtersCollapseRef = useRef<HTMLButtonElement>(null);
+  const filtersReopenRef = useRef<HTMLButtonElement>(null);
+  const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const laneSourceRequestRef = useRef(0);
@@ -581,6 +586,16 @@ export function LogExplorer({ corpusId }: Props) {
   }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
 
   useEffect(() => {
+    const previous = previousFiltersCollapsedRef.current;
+    previousFiltersCollapsedRef.current = filtersCollapsed;
+    if (breakpoint === "narrow" || previous === filtersCollapsed) return;
+    queueMicrotask(() => {
+      if (filtersCollapsed) filtersReopenRef.current?.focus();
+      else filtersCollapseRef.current?.focus();
+    });
+  }, [breakpoint, filtersCollapsed]);
+
+  useEffect(() => {
     try {
       localStorage.setItem(
         "contextdesk.logExplorer.detailH.v1",
@@ -657,8 +672,9 @@ export function LogExplorer({ corpusId }: Props) {
       : Math.max(
           0,
           explorerWidth -
-            filterW -
-            SPLITTER_WIDTH_PX -
+            (filtersCollapsed
+              ? COLLAPSED_FILTER_WIDTH_PX
+              : filterW + SPLITTER_WIDTH_PX) -
             (chatCollapsed
               ? COLLAPSED_CHAT_WIDTH_PX
               : SPLITTER_WIDTH_PX + chatW),
@@ -2163,9 +2179,15 @@ export function LogExplorer({ corpusId }: Props) {
     breakpoint === "narrow"
       ? undefined
       : ({
-          gridTemplateColumns: chatCollapsed
-            ? `${filterW}px 6px 1fr 0px 42px`
-            : `${filterW}px 6px 1fr 6px ${chatW}px`,
+          gridTemplateColumns: `${
+            filtersCollapsed
+              ? `${COLLAPSED_FILTER_WIDTH_PX}px 0px`
+              : `${filterW}px ${SPLITTER_WIDTH_PX}px`
+          } 1fr ${
+            chatCollapsed
+              ? `0px ${COLLAPSED_CHAT_WIDTH_PX}px`
+              : `${SPLITTER_WIDTH_PX}px ${chatW}px`
+          }`,
         } as React.CSSProperties);
 
   const toggleExpand = (seq: number) => {
@@ -2215,6 +2237,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-link-mode={linkMode}
       data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
+      data-filters-collapsed={filtersCollapsed ? "true" : "false"}
       data-chat-collapsed={chatCollapsed ? "true" : "false"}
       data-resizable="true"
       onKeyDown={onKeyDown}
@@ -2621,8 +2644,15 @@ export function LogExplorer({ corpusId }: Props) {
       >
         <aside
           id="log-explorer-filter-panel"
-          className="log-explorer__filters"
+          className={`log-explorer__filters${
+            breakpoint !== "narrow" && filtersCollapsed
+              ? " log-explorer__filters--collapsed"
+              : ""
+          }`}
           data-testid="log-explorer-filters"
+          data-collapsed={
+            breakpoint !== "narrow" && filtersCollapsed ? "true" : "false"
+          }
           style={
             breakpoint === "narrow"
               ? ({ flexDirection: "column" } as React.CSSProperties)
@@ -2630,30 +2660,78 @@ export function LogExplorer({ corpusId }: Props) {
           }
           role={breakpoint === "narrow" ? "dialog" : undefined}
           aria-label={
-            breakpoint === "narrow" ? "Log filters drawer" : undefined
+            breakpoint === "narrow"
+              ? "Log filters drawer"
+              : filtersCollapsed
+                ? "Log filters collapsed"
+                : "Log filters panel"
           }
         >
-          {breakpoint === "narrow" ? (
+          {breakpoint !== "narrow" && filtersCollapsed ? (
             <button
+              ref={filtersReopenRef}
               type="button"
-              className="log-explorer__btn log-explorer__drawer-close"
-              data-testid="close-filters-drawer"
-              onClick={() => {
-                setNarrowFiltersOpen(false);
-                queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
-              }}
+              className="log-explorer__filters-reopen"
+              data-testid="expand-log-filters"
+              aria-label={`Expand log filters${activeFilterCount > 0 ? `, ${activeFilterCount} active` : ""}`}
+              onClick={() => setFiltersCollapsed(false)}
             >
-              Close filters
+              <span aria-hidden="true">Filters</span>
+              {activeFilterCount > 0 ? (
+                <span
+                  className="log-explorer__filters-reopen-count"
+                  aria-hidden="true"
+                >
+                  {activeFilterCount}
+                </span>
+              ) : null}
             </button>
-          ) : null}
-          <div className="log-explorer__section-title">
+          ) : (
+            <>
+              {breakpoint === "narrow" ? (
+                <button
+                  type="button"
+                  className="log-explorer__btn log-explorer__drawer-close"
+                  data-testid="close-filters-drawer"
+                  onClick={() => {
+                    setNarrowFiltersOpen(false);
+                    queueMicrotask(() =>
+                      narrowFiltersToggleRef.current?.focus(),
+                    );
+                  }}
+                >
+                  Close filters
+                </button>
+              ) : (
+                <header className="log-explorer__filters-header">
+                  <div>
+                    <strong>Filters</strong>
+                    <span>
+                      {activeFilterCount > 0
+                        ? `${activeFilterCount} active`
+                        : "All logs"}
+                    </span>
+                  </div>
+                  <button
+                    ref={filtersCollapseRef}
+                    type="button"
+                    className="log-explorer__btn"
+                    data-testid="collapse-log-filters"
+                    aria-label="Collapse log filters panel"
+                    onClick={() => setFiltersCollapsed(true)}
+                  >
+                    Collapse filters
+                  </button>
+                </header>
+              )}
+              <div className="log-explorer__section-title">
             Find{" "}
             <HelpTip
               label="Find vs Filter"
               title="Find vs Filter"
               content={HELP_FIND_VS_FILTER}
             />
-          </div>
+              </div>
           <input
             ref={findInputRef}
             className="log-explorer__search"
@@ -3218,9 +3296,11 @@ export function LogExplorer({ corpusId }: Props) {
               ))
             )}
           </div>
+            </>
+          )}
         </aside>
 
-        {breakpoint !== "narrow" && (
+        {breakpoint !== "narrow" && !filtersCollapsed && (
           <div
             className="log-explorer__splitter"
             data-testid="splitter-filters"
