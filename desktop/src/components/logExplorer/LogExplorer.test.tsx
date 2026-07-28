@@ -480,6 +480,54 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
+  it("keeps compact metadata and field emphasis inside Rows and persists them", async () => {
+    const first = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByLabelText("Row metadata presentation"), {
+      target: { value: "compact" },
+    });
+    fireEvent.change(screen.getByLabelText("Row field emphasis"), {
+      target: { value: "payload" },
+    });
+
+    const root = screen.getByTestId("log-explorer");
+    expect(root.getAttribute("data-metadata-presentation")).toBe("compact");
+    expect(root.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain(
+      "Tokens",
+    );
+    const firstList = screen.getAllByTestId("virtualized-event-list")[0]!;
+    expect(firstList.getAttribute("data-metadata-presentation")).toBe(
+      "compact",
+    );
+    expect(firstList.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(firstList.querySelector("[data-level-token]")).toBeTruthy();
+    expect(
+      localStorage.getItem(
+        "contextdesk.logExplorer.metadataPresentation.v1",
+      ),
+    ).toBe("compact");
+    expect(
+      localStorage.getItem("contextdesk.logExplorer.fieldEmphasis.v1"),
+    ).toBe("payload");
+
+    first.unmount();
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    expect(
+      screen.getByTestId("log-explorer").getAttribute(
+        "data-metadata-presentation",
+      ),
+    ).toBe("compact");
+    expect(
+      screen.getAllByTestId("virtualized-event-list")[0]!.getAttribute(
+        "data-field-emphasis",
+      ),
+    ).toBe("payload");
+  });
+
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");

@@ -6,10 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import {
-  eventRowHeight,
-  VirtualizedEventList,
-} from "./VirtualizedEventList";
+import { eventRowHeight, VirtualizedEventList } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
 
 function makeEvents(n: number): ExplorerEventDto[] {
@@ -388,5 +385,194 @@ describe("VirtualizedEventList", () => {
     await waitFor(() => expect(firstRequest).toHaveBeenCalledTimes(1));
     rerender(renderList(11, replacementRequest));
     expect(replacementRequest).not.toHaveBeenCalled();
+  });
+
+  it("keeps Standard and balanced presentation as the backward-compatible default", () => {
+    const event = makeEvents(1)[0]!;
+    event.service = "checkout-api";
+    event.host = "worker-01";
+    const onRowClick = vi.fn();
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set([event.seq])}
+        highlight={new Set([event.seq])}
+        density="comfortable"
+        onRowClick={onRowClick}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    const row = list.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`)!;
+    expect(list.getAttribute("data-metadata-presentation")).toBe("standard");
+    expect(list.getAttribute("data-field-emphasis")).toBe("balanced");
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(true);
+    expect(row.classList.contains("log-explorer__row--highlight")).toBe(true);
+    expect(screen.getByText(event.source).getAttribute("title")).toBe(
+      event.source,
+    );
+    expect(list.querySelector("[data-source-token]")).toBeNull();
+
+    fireEvent.click(row);
+    expect(onRowClick).toHaveBeenLastCalledWith(event, false);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(onRowClick).toHaveBeenLastCalledWith(event, false);
+  });
+
+  it("disambiguates colliding compact provenance labels deterministically", () => {
+    const events = makeEvents(2);
+    events[0]!.source = "/srv/region-a/api.log";
+    events[1]!.source = "/srv/region-b/api.log";
+    events[0]!.service = "checkout-A-production";
+    events[1]!.service = "checkout-B-production";
+    events[0]!.host = "worker-A-production";
+    events[1]!.host = "worker-B-production";
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      metadataPresentation: "compact" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={events} />,
+    );
+
+    const labelsBySource = () =>
+      new Map(
+        Array.from(
+          screen
+            .getByTestId("virtualized-event-list")
+            .querySelectorAll<HTMLElement>("[data-source-token]"),
+        ).map((element) => [
+          element.dataset.fullSource!,
+          {
+            source: element.dataset.sourceToken,
+            service: element.dataset.serviceToken,
+            host: element.dataset.hostToken,
+          },
+        ]),
+      );
+    const firstLabels = labelsBySource();
+    expect(firstLabels.get(events[0]!.source)?.source).not.toBe(
+      firstLabels.get(events[1]!.source)?.source,
+    );
+    expect(firstLabels.get(events[0]!.source)?.service).not.toBe(
+      firstLabels.get(events[1]!.source)?.service,
+    );
+    expect(firstLabels.get(events[0]!.source)?.host).not.toBe(
+      firstLabels.get(events[1]!.source)?.host,
+    );
+
+    rerender(
+      <VirtualizedEventList {...props} events={[...events].reverse()} />,
+    );
+    expect(labelsBySource()).toEqual(firstLabels);
+  });
+
+  it("keeps unknown compact levels textual, unique, and fully explained", () => {
+    const events = makeEvents(3);
+    events[0]!.level = "mystery";
+    events[1]!.level = "muted";
+    events[2]!.level = "error";
+    render(
+      <VirtualizedEventList
+        events={events}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const levelTokens = Array.from(
+      screen
+        .getByTestId("virtualized-event-list")
+        .querySelectorAll<HTMLElement>("[data-level-token]"),
+    );
+    const mystery = levelTokens.find(
+      (token) => token.dataset.fullLevel === "mystery",
+    )!;
+    const muted = levelTokens.find(
+      (token) => token.dataset.fullLevel === "muted",
+    )!;
+    const error = levelTokens.find(
+      (token) => token.dataset.fullLevel === "error",
+    )!;
+    expect(mystery.dataset.levelToken).not.toBe(muted.dataset.levelToken);
+    expect(mystery.dataset.levelToken).toMatch(/^M\?/);
+    expect(error.dataset.levelToken).toBe("E");
+    expect(mystery.classList.contains("log-explorer__level--other")).toBe(true);
+    expect(mystery.getAttribute("aria-label")).toContain("Level mystery");
+    expect(mystery.getAttribute("title")).toBe("Level: mystery");
+  });
+
+  it("exposes complete Unicode provenance to pointer and keyboard users", () => {
+    const event = makeEvents(1)[0]!;
+    event.source = "/var/log/服务/🚀-gateway-production.jsonl";
+    event.service = "结算-服务-production";
+    event.host = "主机-東京-production";
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const provenance = screen.getByLabelText(
+      `Source ${event.source}; Service ${event.service}; Host ${event.host}`,
+    );
+    expect(provenance.getAttribute("title")).toBe(
+      `Source: ${event.source}\nService: ${event.service}\nHost: ${event.host}`,
+    );
+    expect(provenance.getAttribute("tabindex")).toBe("0");
+    provenance.focus();
+    expect(document.activeElement).toBe(provenance);
+    expect(provenance.getAttribute("data-source-token")).toContain("🚀");
+  });
+
+  it("changes emphasis as presentation only and preserves authoritative interaction data", () => {
+    const event = makeEvents(1)[0]!;
+    event.source = "/logs/api/app.jsonl";
+    event.service = "checkout-api";
+    event.host = "node-17";
+    event.message = "payload=authoritative event text";
+    const original = structuredClone(event);
+    const onRowClick = vi.fn();
+    const onToggleExpand = vi.fn();
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        fieldEmphasis="payload"
+        onRowClick={onRowClick}
+        onToggleExpand={onToggleExpand}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    const row = list.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`)!;
+    const message = screen.getByText(event.message);
+    expect(list.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(message.getAttribute("title")).toBe(event.message);
+    expect(event).toEqual(original);
+
+    fireEvent.click(row, { ctrlKey: true });
+    expect(onRowClick).toHaveBeenLastCalledWith(event, true);
+    fireEvent.keyDown(row, { key: "x" });
+    expect(onToggleExpand).toHaveBeenCalledWith(event.seq);
   });
 });

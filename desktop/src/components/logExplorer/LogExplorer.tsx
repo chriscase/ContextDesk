@@ -125,6 +125,8 @@ import {
   eventRowHeight,
   VirtualizedEventList,
   type LineMode,
+  type RowFieldEmphasis,
+  type RowMetadataPresentation,
 } from "./VirtualizedEventList";
 import {
   captureInvestigationView,
@@ -179,6 +181,7 @@ type ToolbarPickerOption<T extends string> = {
 function ToolbarPicker<T extends string>({
   label,
   value,
+  valueLabel,
   options,
   onChange,
   testId,
@@ -186,6 +189,7 @@ function ToolbarPicker<T extends string>({
 }: {
   label: string;
   value: T;
+  valueLabel?: string;
   options: ToolbarPickerOption<T>[];
   onChange: (value: T) => void;
   testId: string;
@@ -272,7 +276,7 @@ function ToolbarPicker<T extends string>({
       >
         <span className="log-explorer__picker-label">{label}</span>
         <span className="log-explorer__picker-value">
-          {selected?.label ?? value}
+          {valueLabel ?? selected?.label ?? value}
         </span>
         <IconChevronDown />
       </button>
@@ -847,6 +851,35 @@ export function LogExplorer({ corpusId }: Props) {
     }
     return "compact";
   });
+  const [metadataPresentation, setMetadataPresentation] =
+    useState<RowMetadataPresentation>(() => {
+      try {
+        const value = localStorage.getItem(
+          "contextdesk.logExplorer.metadataPresentation.v1",
+        );
+        if (value === "standard" || value === "compact") return value;
+      } catch {
+        /* ignore */
+      }
+      return "standard";
+    });
+  const [fieldEmphasis, setFieldEmphasis] = useState<RowFieldEmphasis>(() => {
+    try {
+      const value = localStorage.getItem(
+        "contextdesk.logExplorer.fieldEmphasis.v1",
+      );
+      if (
+        value === "balanced" ||
+        value === "payload" ||
+        value === "metadata"
+      ) {
+        return value;
+      }
+    } catch {
+      /* ignore */
+    }
+    return "balanced";
+  });
   const [previewLines, setPreviewLines] = useState(() => {
     try {
       const value = Number(
@@ -1018,6 +1051,28 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
   }, [lineMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.metadataPresentation.v1",
+        metadataPresentation,
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [metadataPresentation]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.fieldEmphasis.v1",
+        fieldEmphasis,
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [fieldEmphasis]);
 
   useEffect(() => {
     try {
@@ -3544,6 +3599,8 @@ export function LogExplorer({ corpusId }: Props) {
       data-breakpoint={breakpoint}
       data-density={density}
       data-line-mode={lineMode}
+      data-metadata-presentation={metadataPresentation}
+      data-field-emphasis={fieldEmphasis}
       data-lane-count={laneCount}
       data-max-lane-count={maxLaneCount}
       data-usable-evidence-width={Math.floor(usableEvidenceWidth)}
@@ -3697,6 +3754,13 @@ export function LogExplorer({ corpusId }: Props) {
           <ToolbarPicker
             label="Rows"
             value={lineMode}
+            valueLabel={`${
+              lineMode === "compact"
+                ? "Single line"
+                : lineMode === "wrap"
+                  ? "Preview"
+                  : "Deep"
+            } · ${metadataPresentation === "compact" ? "Tokens" : "Full metadata"}`}
             testId="row-mode-picker"
             options={[
               {
@@ -3719,6 +3783,43 @@ export function LogExplorer({ corpusId }: Props) {
             onChange={setLineMode}
             footer={
               <>
+                <label className="log-explorer__picker-setting">
+                  Metadata
+                  <select
+                    value={metadataPresentation}
+                    aria-label="Row metadata presentation"
+                    data-testid="row-metadata-presentation"
+                    onChange={(event) =>
+                      setMetadataPresentation(
+                        event.target.value as RowMetadataPresentation,
+                      )
+                    }
+                  >
+                    <option value="standard">Full labels</option>
+                    <option value="compact">Compact tokens</option>
+                  </select>
+                </label>
+                <label className="log-explorer__picker-setting">
+                  Focus
+                  <select
+                    value={fieldEmphasis}
+                    aria-label="Row field emphasis"
+                    data-testid="row-field-emphasis"
+                    onChange={(event) =>
+                      setFieldEmphasis(
+                        event.target.value as RowFieldEmphasis,
+                      )
+                    }
+                  >
+                    <option value="balanced">Balanced</option>
+                    <option value="payload">Payload</option>
+                    <option value="metadata">Metadata</option>
+                  </select>
+                </label>
+                <p className="log-explorer__picker-note">
+                  Tokens change presentation only. Focus a token for its
+                  complete level and provenance.
+                </p>
                 <label className="log-explorer__picker-setting">
                   Preview depth
                   <select
@@ -4933,6 +5034,8 @@ export function LogExplorer({ corpusId }: Props) {
                     filterKeyword={filters.keyword}
                     density={density}
                     lineMode={lineMode}
+                    metadataPresentation={metadataPresentation}
+                    fieldEmphasis={fieldEmphasis}
                     previewLines={previewLines}
                     colWidths={colWidths}
                     expandedSeqs={expandedSeqs}

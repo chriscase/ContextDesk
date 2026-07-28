@@ -27,6 +27,7 @@ import {
   formatEventTimeTitle,
 } from "../../lib/logExplorer/types";
 import type { AlignedLaneRow } from "../../lib/logExplorer/alignment";
+import "./VirtualizedEventList.css";
 
 const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
@@ -35,6 +36,15 @@ const PREVIEW_VERTICAL_CHROME = 12;
 const APPROX_PREVIEW_CHARS_PER_LINE = 80;
 
 export type LineMode = "compact" | "wrap" | "full";
+export type RowMetadataPresentation = "standard" | "compact";
+export type RowFieldEmphasis = "balanced" | "payload" | "metadata";
+
+type CompactMetadataLabels = {
+  levels: Map<string, string>;
+  sources: Map<string, string>;
+  services: Map<string, string>;
+  hosts: Map<string, string>;
+};
 
 type Props = {
   events: ExplorerEventDto[];
@@ -47,6 +57,10 @@ type Props = {
   filterKeyword?: string | null;
   density: "comfortable" | "compact";
   lineMode?: LineMode;
+  /** Presentation-only metadata density. Authoritative event values are unchanged. */
+  metadataPresentation?: RowMetadataPresentation;
+  /** Presentation-only emphasis. Search, copy, evidence, and inspector data are unchanged. */
+  fieldEmphasis?: RowFieldEmphasis;
   /** User-selected bounded preview depth; inspector always shows the complete event. */
   previewLines?: number;
   /** Column widths in rem: [ts, level, source, message]. */
@@ -74,8 +88,155 @@ type Props = {
 };
 
 function levelClass(level: string): string {
-  const l = level.toLowerCase();
-  return `log-explorer__level log-explorer__level--${l}`;
+  const semantic = semanticLevel(level);
+  return `log-explorer__level log-explorer__level--${semantic.cssClass}`;
+}
+
+function semanticLevel(level: string): {
+  token: string;
+  cssClass: string;
+  collisionKey: string;
+} {
+  const normalized = level.trim().toLowerCase();
+  switch (normalized) {
+    case "trace":
+      return { token: "T", cssClass: "trace", collisionKey: "trace" };
+    case "debug":
+      return { token: "D", cssClass: "debug", collisionKey: "debug" };
+    case "info":
+    case "information":
+      return { token: "I", cssClass: "info", collisionKey: "info" };
+    case "notice":
+      return { token: "N", cssClass: "info", collisionKey: "notice" };
+    case "warn":
+    case "warning":
+      return { token: "W", cssClass: "warn", collisionKey: "warn" };
+    case "error":
+    case "err":
+      return { token: "E", cssClass: "error", collisionKey: "error" };
+    case "fatal":
+      return { token: "F", cssClass: "fatal", collisionKey: "fatal" };
+    case "critical":
+    case "crit":
+      return { token: "C", cssClass: "error", collisionKey: "critical" };
+    default: {
+      const first = Array.from(normalized)[0]?.toUpperCase() ?? "?";
+      return {
+        token: `${first}?`,
+        cssClass: "other",
+        collisionKey: `other:${normalized}`,
+      };
+    }
+  }
+}
+
+function middleEllipsis(value: string, maxCodePoints: number): string {
+  const codePoints = Array.from(value.normalize("NFC"));
+  if (codePoints.length <= maxCodePoints) return codePoints.join("");
+  const available = maxCodePoints - 1;
+  const head = Math.ceil(available / 2);
+  const tail = Math.floor(available / 2);
+  return `${codePoints.slice(0, head).join("")}…${codePoints
+    .slice(codePoints.length - tail)
+    .join("")}`;
+}
+
+function preferredMetadataLabel(
+  value: string,
+  kind: "source" | "service" | "host",
+): string {
+  if (kind === "source") {
+    const segments = value.replaceAll("\\", "/").split("/");
+    const basename = segments.filter(Boolean).at(-1) ?? value;
+    return middleEllipsis(basename, 18);
+  }
+  return middleEllipsis(value, 12);
+}
+
+/**
+ * Produce stable, resident-set-local labels. Values that shorten to the same
+ * visible text receive deterministic suffixes sorted by their authoritative
+ * value; generated suffixes are checked against every preferred label.
+ */
+function collisionSafeLabels(
+  values: Iterable<string>,
+  preferred: (value: string) => string,
+): Map<string, string> {
+  const distinct = Array.from(new Set(values)).sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  const groups = new Map<string, string[]>();
+  const preferredByValue = new Map<string, string>();
+  for (const value of distinct) {
+    const label = preferred(value);
+    preferredByValue.set(value, label);
+    const collisionKey = label.toLowerCase();
+    const group = groups.get(collisionKey);
+    if (group) group.push(value);
+    else groups.set(collisionKey, [value]);
+  }
+
+  const reserved = new Set(groups.keys());
+  const used = new Set<string>();
+  const labels = new Map<string, string>();
+  for (const [, group] of Array.from(groups.entries()).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  )) {
+    for (let index = 0; index < group.length; index += 1) {
+      const value = group[index]!;
+      const preferredLabel = preferredByValue.get(value)!;
+      let label = preferredLabel;
+      if (group.length > 1 || used.has(label.toLowerCase())) {
+        let suffix = index + 1;
+        do {
+          label = `${preferredLabel}·${suffix}`;
+          suffix += 1;
+        } while (
+          used.has(label.toLowerCase()) ||
+          reserved.has(label.toLowerCase())
+        );
+      }
+      labels.set(value, label);
+      used.add(label.toLowerCase());
+    }
+  }
+  return labels;
+}
+
+function compactMetadataLabels(
+  events: ExplorerEventDto[],
+): CompactMetadataLabels {
+  const levelSemantics = new Map(
+    events.map((event) => {
+      const semantic = semanticLevel(event.level);
+      return [semantic.collisionKey, semantic] as const;
+    }),
+  );
+  const levelTokensBySemantic = collisionSafeLabels(
+    levelSemantics.keys(),
+    (key) => levelSemantics.get(key)!.token,
+  );
+  const levels = new Map(
+    events.map((event) => {
+      const semantic = semanticLevel(event.level);
+      return [event.level, levelTokensBySemantic.get(semantic.collisionKey)!];
+    }),
+  );
+  return {
+    levels,
+    sources: collisionSafeLabels(
+      events.map((event) => event.source),
+      (value) => preferredMetadataLabel(value, "source"),
+    ),
+    services: collisionSafeLabels(
+      events.flatMap((event) => (event.service ? [event.service] : [])),
+      (value) => preferredMetadataLabel(value, "service"),
+    ),
+    hosts: collisionSafeLabels(
+      events.flatMap((event) => (event.host ? [event.host] : [])),
+      (value) => preferredMetadataLabel(value, "host"),
+    ),
+  };
 }
 
 export function eventRowHeight(
@@ -133,6 +294,8 @@ export function VirtualizedEventList({
   filterKeyword,
   density,
   lineMode = "compact",
+  metadataPresentation = "standard",
+  fieldEmphasis = "balanced",
   previewLines = 4,
   colWidths = [7.5, 3.5, 8, 1],
   alignedRows,
@@ -153,6 +316,7 @@ export function VirtualizedEventList({
   const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
   const compactH = baseRowH;
   const boundedPreviewLines = Math.min(12, Math.max(2, previewLines));
+  const compactLabels = useMemo(() => compactMetadataLabels(events), [events]);
   const maxPreviewLines =
     lineMode === "full"
       ? Math.min(24, boundedPreviewLines * 2)
@@ -423,7 +587,12 @@ export function VirtualizedEventList({
   return (
     <div
       ref={setRef}
-      className="log-explorer__rows log-explorer__rows--virtual"
+      className={[
+        "log-explorer__rows",
+        "log-explorer__rows--virtual",
+        `virtualized-event-list--metadata-${metadataPresentation}`,
+        `virtualized-event-list--emphasis-${fieldEmphasis}`,
+      ].join(" ")}
       role="list"
       aria-label={ariaLabel}
       data-testid="virtualized-event-list"
@@ -433,6 +602,8 @@ export function VirtualizedEventList({
       data-rendered={slice.length}
       data-total-height={totalH}
       data-edge-trigger-rows={EDGE_TRIGGER_ROWS}
+      data-metadata-presentation={metadataPresentation}
+      data-field-emphasis={fieldEmphasis}
       onScroll={onScroll}
     >
       <div
@@ -479,6 +650,26 @@ export function VirtualizedEventList({
               : null;
           const visibleMessage = matchExcerpt ?? filterExcerpt ?? e.message;
           const excerpted = visibleMessage !== e.message;
+          const levelToken = compactLabels.levels.get(e.level) ?? "?";
+          const sourceToken = compactLabels.sources.get(e.source) ?? e.source;
+          const serviceToken = e.service
+            ? compactLabels.services.get(e.service)
+            : null;
+          const hostToken = e.host ? compactLabels.hosts.get(e.host) : null;
+          const provenanceLabel = [
+            `Source ${e.source}`,
+            e.service ? `Service ${e.service}` : null,
+            e.host ? `Host ${e.host}` : null,
+          ]
+            .filter(Boolean)
+            .join("; ");
+          const provenanceTitle = [
+            `Source: ${e.source}`,
+            e.service ? `Service: ${e.service}` : null,
+            e.host ? `Host: ${e.host}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n");
           const previewTruncated = !wrapText
             ? long
             : e.message.split(/\r?\n/).length > visiblePreviewLines ||
@@ -534,10 +725,61 @@ export function VirtualizedEventList({
               >
                 {formatEventTime(e.ts, tq, timeRange)}
               </span>
-              <span className={levelClass(e.level)}>{e.level}</span>
-              <span className="log-explorer__source" title={e.source}>
-                {e.source}
-              </span>
+              {metadataPresentation === "compact" ? (
+                <span
+                  className={`${levelClass(e.level)} virtualized-event-list__level-token`}
+                  title={`Level: ${e.level}`}
+                  aria-label={`Level ${e.level}; compact token ${levelToken}`}
+                  tabIndex={0}
+                  data-level-token={levelToken}
+                  data-full-level={e.level}
+                >
+                  {levelToken}
+                </span>
+              ) : (
+                <span className={levelClass(e.level)}>{e.level}</span>
+              )}
+              {metadataPresentation === "compact" ? (
+                <span
+                  className="log-explorer__source virtualized-event-list__provenance"
+                  title={provenanceTitle}
+                  aria-label={provenanceLabel}
+                  tabIndex={0}
+                  data-full-source={e.source}
+                  data-full-service={e.service ?? undefined}
+                  data-full-host={e.host ?? undefined}
+                  data-source-token={sourceToken}
+                  data-service-token={serviceToken ?? undefined}
+                  data-host-token={hostToken ?? undefined}
+                >
+                  <span
+                    className="virtualized-event-list__provenance-token"
+                    aria-hidden="true"
+                  >
+                    {sourceToken}
+                  </span>
+                  {serviceToken ? (
+                    <span
+                      className="virtualized-event-list__provenance-token virtualized-event-list__provenance-token--secondary"
+                      aria-hidden="true"
+                    >
+                      svc:{serviceToken}
+                    </span>
+                  ) : null}
+                  {hostToken ? (
+                    <span
+                      className="virtualized-event-list__provenance-token virtualized-event-list__provenance-token--secondary"
+                      aria-hidden="true"
+                    >
+                      host:{hostToken}
+                    </span>
+                  ) : null}
+                </span>
+              ) : (
+                <span className="log-explorer__source" title={e.source}>
+                  {e.source}
+                </span>
+              )}
               <span className="log-explorer__msg-cell">
                 <span
                   className={

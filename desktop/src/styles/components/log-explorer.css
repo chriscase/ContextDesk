@@ -243,10 +243,19 @@
   align-items: center;
   border-top: 1px solid var(--border-subtle, #2a2d33);
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   justify-content: space-between;
   margin-top: 0.15rem;
   padding: 0.5rem;
+}
+
+.log-explorer__picker-note {
+  color: var(--fg-muted, #9aa0a6);
+  flex: 1 0 100%;
+  font-size: 0.67rem;
+  line-height: 1.35;
+  margin: 0;
 }
 
 .log-explorer__picker-setting {
