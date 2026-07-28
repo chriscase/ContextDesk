@@ -477,6 +477,7 @@ export function VirtualizedEventList({
 
   const previousLayout = useRef<{
     keys: string[];
+    eventSeqs: Array<number | null>;
     offsets: number[];
     heights: number[];
   } | null>(null);
@@ -495,22 +496,52 @@ export function VirtualizedEventList({
         }
       }
       const anchorKey = prior.keys[anchorIndex];
-      const nextIndex = displayRows.findIndex((row) => row.key === anchorKey);
-      if (nextIndex >= 0) {
-        const withinRow = oldTop - (prior.offsets[anchorIndex] ?? 0);
-        const nextTop = Math.max(0, (offsets[nextIndex] ?? 0) + withinRow);
-        if (nextTop !== oldTop) {
-          el.scrollTop = nextTop;
-          setScrollTop(nextTop);
+      let nextIndex = displayRows.findIndex((row) => row.key === anchorKey);
+      if (nextIndex < 0) {
+        // Align mode uses shared slot keys while Independent mode uses event
+        // keys. Preserve the nearest logical event when crossing that layout
+        // boundary instead of retaining an invalid slot-sized pixel offset.
+        let anchorSeq = prior.eventSeqs[anchorIndex] ?? null;
+        for (
+          let distance = 1;
+          anchorSeq == null &&
+          (anchorIndex - distance >= 0 ||
+            anchorIndex + distance < prior.eventSeqs.length);
+          distance += 1
+        ) {
+          anchorSeq =
+            prior.eventSeqs[anchorIndex - distance] ??
+            prior.eventSeqs[anchorIndex + distance] ??
+            null;
+        }
+        if (anchorSeq != null) {
+          nextIndex = displayRows.findIndex(
+            (row) => row.event?.seq === anchorSeq,
+          );
         }
       }
+      let nextTop = oldTop;
+      if (nextIndex >= 0) {
+        const withinRow = oldTop - (prior.offsets[anchorIndex] ?? 0);
+        nextTop = Math.max(0, (offsets[nextIndex] ?? 0) + withinRow);
+      }
+      const maxTop = Math.max(0, totalH - Math.max(0, el.clientHeight));
+      nextTop = Math.min(nextTop, maxTop);
+      if (nextTop !== el.scrollTop) {
+        el.scrollTop = nextTop;
+      }
+      // Browsers may clamp scrollTop when the virtual spacer shrinks without
+      // dispatching a scroll event. Keep React's windowing coordinate in sync
+      // with the actual element so a populated lane cannot paint blank.
+      setScrollTop(el.scrollTop);
     }
     previousLayout.current = {
       keys: displayRows.map((row) => row.key),
+      eventSeqs: displayRows.map((row) => row.event?.seq ?? null),
       offsets: [...offsets],
       heights: [...heights],
     };
-  }, [displayRows, offsets, heights, compactH]);
+  }, [displayRows, offsets, heights, compactH, totalH]);
 
   useLayoutEffect(() => {
     const el = parentRef.current;

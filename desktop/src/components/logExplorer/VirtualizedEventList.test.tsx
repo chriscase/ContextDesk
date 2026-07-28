@@ -80,6 +80,45 @@ describe("VirtualizedEventList", () => {
     expect(screen.queryByText("No events match filters")).toBeNull();
   });
 
+  it("keeps populated rows painted when a shared alignment axis becomes lane-local", () => {
+    const events = makeEvents(200);
+    const alignedRows = Array.from({ length: 10_000 }, (_, index) => ({
+      key: `slot-${index}`,
+      ts: 1_700_000_000 + index,
+      event: index % 50 === 0 ? events[index / 50] : null,
+      height: 28,
+    }));
+    const props = {
+      events,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList
+        {...props}
+        alignedRows={alignedRows}
+        linkedScrollTop={140_000}
+      />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, writable: true, value: 140_000 },
+    });
+    fireEvent.scroll(list);
+
+    act(() => {
+      rerender(<VirtualizedEventList {...props} />);
+    });
+
+    expect((list as HTMLDivElement).scrollTop).toBeLessThanOrEqual(5_200);
+    expect(Number(list.getAttribute("data-rendered"))).toBeGreaterThan(0);
+    expect(list.querySelector("[data-seq]")).toBeTruthy();
+  });
+
   it("preserves a stable event pixel anchor across prepend and head eviction", () => {
     const events = makeEvents(12).slice(2);
     const props = {
