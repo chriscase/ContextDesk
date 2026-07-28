@@ -1,8 +1,10 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type CSSProperties,
 } from "react";
 import {
@@ -20,9 +22,18 @@ import {
 } from "../../lib/logExplorer/types";
 import { HELP_TIMELINE_NAVIGATOR } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
+import { OperationalMetricTracks } from "./OperationalMetricTracks";
+import {
+  metricDocumentTimeRange,
+  validateOperationalMetricsDocument,
+  type OperationalMetricsDocumentV1,
+} from "../../lib/logExplorer/operationalMetrics";
 import "./TimelineNavigator.css";
 
 const NAVIGATOR_BUCKETS = 96;
+const MAX_SESSION_METRIC_BYTES = 8 * 1_048_576;
+const MAX_SESSION_METRIC_SERIES = 32;
+const MAX_SESSION_METRIC_POINTS = 250_000;
 
 type Props = {
   corpusId: string;
@@ -153,8 +164,17 @@ export function TimelineNavigator({
   const [previewIndex, setPreviewIndex] = useState(0);
   const [detailIndex, setDetailIndex] = useState<number | null>(null);
   const [committedIndex, setCommittedIndex] = useState<number | null>(null);
+  const [sharedCursorTimestamp, setSharedCursorTimestamp] = useState<
+    number | null
+  >(null);
+  const [metricDocument, setMetricDocument] =
+    useState<OperationalMetricsDocumentV1 | null>(null);
+  const [metricFileName, setMetricFileName] = useState<string | null>(null);
+  const [metricError, setMetricError] = useState<string | null>(null);
+  const [metricsOpen, setMetricsOpen] = useState(false);
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const metricInputRef = useRef<HTMLInputElement>(null);
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
   const filterKey = JSON.stringify(filter);
@@ -203,6 +223,7 @@ export function TimelineNavigator({
         if (request !== summaryRequest.current) return;
         setSummary(next);
         setPreviewIndex(0);
+        setSharedCursorTimestamp(next.spanFrom);
         setLaneSummaries(
           lanes.length > 1
             ? lanes.slice(0, 4).map((lane, index) => {
@@ -274,11 +295,104 @@ export function TimelineNavigator({
     };
   }, [residentIndexes, summary]);
 
+  const previewTimestamp = useCallback(
+    (timestamp: number) => {
+      if (
+        !summary ||
+        summary.spanFrom == null ||
+        summary.bucketCount === 0 ||
+        summary.bucketWidth <= 0
+      ) {
+        return null;
+      }
+      const index = Math.max(
+        0,
+        Math.min(
+          summary.bucketCount - 1,
+          Math.floor((timestamp - summary.spanFrom) / summary.bucketWidth),
+        ),
+      );
+      setSharedCursorTimestamp(timestamp);
+      setPreviewIndex(index);
+      return index;
+    },
+    [summary],
+  );
+
+  const importSessionMetrics = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setMetricError(null);
+    if (file.size > MAX_SESSION_METRIC_BYTES) {
+      setMetricError("Metric bundle exceeds the 8 MB session import limit.");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const validated = validateOperationalMetricsDocument(parsed);
+      if (!validated.ok) {
+        throw new Error(
+          validated.issues
+            .slice(0, 3)
+            .map((issue) => `${issue.path}: ${issue.message}`)
+            .join("; "),
+        );
+      }
+      const pointCount = validated.data.series.reduce(
+        (total, series) => total + series.points.length,
+        0,
+      );
+      if (validated.data.series.length > MAX_SESSION_METRIC_SERIES) {
+        throw new Error(
+          `Metric bundle has more than ${MAX_SESSION_METRIC_SERIES} series.`,
+        );
+      }
+      if (pointCount > MAX_SESSION_METRIC_POINTS) {
+        throw new Error(
+          `Metric bundle has more than ${MAX_SESSION_METRIC_POINTS.toLocaleString()} points.`,
+        );
+      }
+      if (validated.data.series.some((series) => series.timeQuality !== "wall")) {
+        throw new Error(
+          "Session metric alignment requires explicit wall-clock timestamps for every series.",
+        );
+      }
+      const metricRange = metricDocumentTimeRange(validated.data);
+      if (
+        summary?.timeQuality !== "wall" ||
+        summary.spanFrom == null ||
+        summary.spanTo == null
+      ) {
+        throw new Error(
+          "The current log view does not have a reliable wall-clock axis.",
+        );
+      }
+      if (
+        metricRange.to < summary.spanFrom ||
+        metricRange.from > summary.spanTo
+      ) {
+        throw new Error(
+          "Metric timestamps do not overlap the current log timeline.",
+        );
+      }
+      setMetricDocument(validated.data);
+      setMetricFileName(file.name);
+      setMetricsOpen(true);
+      previewTimestamp(metricRange.from);
+    } catch (cause) {
+      setMetricDocument(null);
+      setMetricFileName(null);
+      setMetricError(`Metric bundle not loaded: ${String(cause)}`);
+    }
+  };
+
   const seekBucket = async (index: number) => {
     if (!summary || summary.bucketCount === 0) return;
     const request = ++seekRequest.current;
     const { start, end } = bucketBounds(summary, index);
     setPreviewIndex(index);
+    setSharedCursorTimestamp(start);
     setError(null);
     setStatus(`Seeking ${compactBucketRange(summary, index)}…`);
     try {
@@ -310,6 +424,11 @@ export function TimelineNavigator({
       setError(String(cause));
       setStatus("Could not move to that timeline position");
     }
+  };
+
+  const seekTimestamp = (timestamp: number) => {
+    const index = previewTimestamp(timestamp);
+    if (index != null) void seekBucket(index);
   };
 
   const toggleTimeline = (
@@ -393,6 +512,47 @@ export function TimelineNavigator({
                     · {counts[previewIndex] ?? 0} events
                   </span>
                   <div className="timeline-navigator__actions">
+                    <input
+                      ref={metricInputRef}
+                      className="timeline-navigator__metric-input"
+                      data-testid="timeline-metric-input"
+                      type="file"
+                      accept="application/json,.json"
+                      aria-label="Choose operational metric bundle"
+                      onChange={(event) => void importSessionMetrics(event)}
+                    />
+                    <button
+                      type="button"
+                      className="timeline-navigator__metric-action"
+                      onClick={() => metricInputRef.current?.click()}
+                    >
+                      {metricDocument ? "Replace metrics" : "Load metrics…"}
+                    </button>
+                    {metricDocument ? (
+                      <>
+                        <button
+                          type="button"
+                          className="timeline-navigator__metric-action"
+                          aria-expanded={metricsOpen}
+                          aria-controls="timeline-session-metrics"
+                          onClick={() => setMetricsOpen((value) => !value)}
+                        >
+                          {metricsOpen ? "Hide tracks" : "Show tracks"}
+                        </button>
+                        <button
+                          type="button"
+                          className="timeline-navigator__metric-action"
+                          onClick={() => {
+                            setMetricDocument(null);
+                            setMetricFileName(null);
+                            setMetricError(null);
+                            setMetricsOpen(false);
+                          }}
+                        >
+                          Clear
+                        </button>
+                      </>
+                    ) : null}
                     <HelpTip
                       label="Investigation timeline help"
                       title="Investigation timeline"
@@ -464,12 +624,12 @@ export function TimelineNavigator({
                           } as CSSProperties
                         }
                         onPointerEnter={() => {
-                          setPreviewIndex(index);
+                          previewTimestamp(bucketBounds(summary, index).start);
                           setDetailIndex(index);
                         }}
                         onPointerLeave={() => setDetailIndex(null)}
                         onFocus={() => {
-                          setPreviewIndex(index);
+                          previewTimestamp(bucketBounds(summary, index).start);
                           setDetailIndex(index);
                         }}
                         onBlur={() => setDetailIndex(null)}
@@ -521,7 +681,7 @@ export function TimelineNavigator({
                     onBlur={() => setDetailIndex(null)}
                     onChange={(event) => {
                       const next = Number(event.target.value);
-                      setPreviewIndex(next);
+                      previewTimestamp(bucketBounds(summary, next).start);
                       setDetailIndex(next);
                     }}
                     onPointerUp={(event) =>
@@ -593,6 +753,40 @@ export function TimelineNavigator({
                   </span>
                 </div>
               </div>
+              {metricError ? (
+                <div
+                  role="alert"
+                  className="timeline-navigator__metric-error"
+                >
+                  {metricError}
+                </div>
+              ) : null}
+              {metricDocument && metricsOpen ? (
+                <section
+                  id="timeline-session-metrics"
+                  className="timeline-navigator__session-metrics"
+                  data-testid="timeline-session-metrics"
+                >
+                  <div className="timeline-navigator__session-metrics-note">
+                    <strong>Session metrics</strong>
+                    <span title={metricFileName ?? undefined}>
+                      {metricFileName} · session only · not persisted
+                    </span>
+                  </div>
+                  <OperationalMetricTracks
+                    document={metricDocument}
+                    cursorTimestamp={
+                      sharedCursorTimestamp ??
+                      summary.spanFrom ??
+                      metricDocumentTimeRange(metricDocument).from
+                    }
+                    onCursorChange={(timestamp) => {
+                      previewTimestamp(timestamp);
+                    }}
+                    onSeekTimestamp={seekTimestamp}
+                  />
+                </section>
+              ) : null}
               {laneSummaries.length > 0 ? (
                 <div
                   className="log-explorer__navigator-lane-coverage"

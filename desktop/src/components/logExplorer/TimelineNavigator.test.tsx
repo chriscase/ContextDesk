@@ -51,6 +51,57 @@ const target: host.ExplorerEventDto = {
   source: "api.log",
 };
 
+const sessionMetrics = {
+  schemaVersion: 1,
+  id: "performance-run",
+  name: "Performance run",
+  series: [
+    {
+      id: "cpu-percent",
+      name: "CPU",
+      unit: "%",
+      timeQuality: "wall",
+      provenance: { source: "synthetic test" },
+      points: [
+        { timestamp: 1_700_000_000, value: 20 },
+        { timestamp: 1_700_000_040, value: 95 },
+      ],
+    },
+    {
+      id: "heap-bytes",
+      name: "Heap",
+      unit: "bytes",
+      timeQuality: "wall",
+      provenance: { source: "synthetic test" },
+      points: [
+        { timestamp: 1_700_000_000, value: 400_000_000 },
+        { timestamp: 1_700_000_040, value: 800_000_000 },
+      ],
+    },
+    {
+      id: "clients",
+      name: "Concurrent clients",
+      unit: "clients",
+      timeQuality: "wall",
+      provenance: { source: "synthetic test" },
+      points: [
+        { timestamp: 1_700_000_000, value: 10 },
+        { timestamp: 1_700_000_040, value: 120 },
+      ],
+    },
+  ],
+};
+
+function metricFile(value: unknown, name = "metrics.json") {
+  const json = JSON.stringify(value);
+  const file = new File([json], name, { type: "application/json" });
+  Object.defineProperty(file, "text", {
+    configurable: true,
+    value: async () => json,
+  });
+  return file;
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -308,6 +359,86 @@ describe("TimelineNavigator", () => {
     expect(
       screen.getByTestId("timeline-bucket-3").getAttribute("aria-label"),
     ).toContain("Error 12");
+  });
+
+  it("loads bounded session metrics and shares their committed cursor with log seeking", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+
+    const panel = await screen.findByTestId("timeline-session-metrics");
+    expect(panel.textContent).toContain("session only · not persisted");
+    expect(screen.getAllByRole("slider")).toHaveLength(4);
+    expect(
+      screen.getByTestId("operational-metric-track-cpu-percent"),
+    ).toBeTruthy();
+
+    const cpu = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    Object.defineProperty(cpu, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    fireEvent.pointerDown(cpu, { clientX: 75, pointerId: 1 });
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+    fireEvent.pointerUp(cpu, { clientX: 75, pointerId: 1 });
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({
+          timeFrom: 1_700_000_030,
+          timeTo: 1_700_000_040,
+          limit: 1,
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide tracks" }));
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show tracks" }));
+    expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
+  });
+
+  it("fails closed when session metric time cannot align honestly", async () => {
+    const invalid = structuredClone(sessionMetrics);
+    invalid.series[1]!.timeQuality = "order_only";
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(invalid, "ambiguous.json")] },
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "requires explicit wall-clock timestamps",
+    );
+    expect(screen.queryByTestId("timeline-session-metrics")).toBeNull();
   });
 
   it("commits keyboard seeks only after a navigation key is released", async () => {

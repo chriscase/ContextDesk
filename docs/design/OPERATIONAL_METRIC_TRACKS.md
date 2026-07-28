@@ -1,7 +1,8 @@
 # Operational metric tracks
 
-Status: **standalone rendering and validation slice implemented; product import,
-attachment, persistence, and Log Explorer integration remain residual work.**
+Status: **standalone rendering, validation, deterministic fixtures, and bounded
+Log Explorer session import are implemented; durable attachment, persistence,
+and incident-bundle import remain residual work.**
 
 This design adds generic operational measurements beside logs without pretending
 that unlike units are directly comparable. CPU percentage, heap bytes, concurrent
@@ -56,6 +57,21 @@ are outside this slice.
 Folder coincidence is never an attachment. A metric document becomes relevant
 to logs only through an explicit corpus or investigation attachment and
 compatible normalized time.
+
+### Current bounded session import
+
+The Timeline Navigator can load one v1 JSON metric document into the current
+Explorer session. It accepts at most 8 MB, 32 series, and 250,000 source points;
+the renderer then applies its separate per-track point bound. Every series must
+have explicit wall-clock quality and the document must overlap the current
+reliable log timeline. Validation fails closed and reports JSON paths.
+
+The loaded filename and **session only · not persisted** state stay visible.
+Closing the Explorer loses the attachment. Hiding the tracks unmounts their
+renderer while retaining the session document; collapsing the Timeline prevents
+timeline and metric rendering work. Pointer release or Enter/Space maps the
+shared metric cursor to one bounded timeline bucket seek and delegates the
+existing nearby-log load.
 
 ### 1. Separately imported metric bundle
 
@@ -290,11 +306,11 @@ integration resolves the release timestamp to nearby events, allows a user to
 approve view changes, and keeps metric rendering inactive while its panel is
 closed.
 
-The following are **not shipped by this standalone slice**:
+The following are **not shipped by the current session slice**:
 
-- file picker, archive, or incident-bundle metric import;
+- archive or incident-bundle metric import;
 - host-side validation, persistence, attachment, or detachment;
-- Log Explorer panel wiring and nearby-event seek resolution;
+- durable reopening of a prior metric attachment;
 - metric context packaging for chat;
 - arbitrary customer adapter execution or adapter sandboxing;
 - persisted track visibility, ordering, or user-authored thresholds.
