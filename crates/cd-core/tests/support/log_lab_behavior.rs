@@ -444,8 +444,7 @@ pub fn generate_behavior(
                 "requested_time_span_secs": controls.span_secs,
                 "traffic_shape": controls.traffic_shape,
                 "profile": controls.profile,
-                "requested_events": controls.event_count,
-                "hashes": file_hashes
+                "requested_events": controls.event_count
             },
             "investigation": investigation
         }),

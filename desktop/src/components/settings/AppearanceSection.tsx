@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { SelectField } from "../forms";
 import { SKINS, type SkinId } from "../../lib/skins";
 
@@ -16,73 +17,60 @@ export function AppearanceSection({
   uiScale,
   onUiScaleChange,
 }: AppearanceSectionProps) {
-  const active = SKINS.find((s) => s.id === theme);
+  const active = SKINS.find((skin) => skin.id === theme) ?? SKINS[0];
+  const previewStyle = {
+    "--theme-preview-app": active.swatches.app,
+    "--theme-preview-panel": active.swatches.panel,
+    "--theme-preview-elevated": active.swatches.elevated,
+    "--theme-preview-accent": active.swatches.accent,
+  } as CSSProperties;
+
   return (
     <div>
       <p className="section-lead">
-        Skins recolor the whole shell via design tokens (
-        <code>docs/SKINS.md</code>). Applies immediately — no Save required.
+        Choose the theme used throughout ContextDesk. Changes apply immediately
+        — no Save required.
       </p>
 
-      <div className="field">
-        <div className="field__label-row">
-          <label className="field__label" id={`${baseId}-skin-label`}>
-            Skin
-          </label>
-        </div>
-        <div
-          className="skin-grid"
-          role="radiogroup"
-          aria-labelledby={`${baseId}-skin-label`}
-        >
-          {SKINS.map((s) => {
-            const selected = s.id === theme;
-            const { swatches: w } = s;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                role="radio"
-                className="skin-card"
-                data-selected={selected ? "true" : "false"}
-                aria-checked={selected}
-                onClick={() => onThemeChange(s.id)}
-              >
-                <div
-                  className="skin-card__preview"
-                  aria-hidden
-                  style={{ background: w.app, borderColor: w.panel }}
-                >
-                  <div
-                    className="skin-card__chrome"
-                    style={{ background: w.panel }}
-                  />
-                  <div className="skin-card__body">
-                    <div
-                      className="skin-card__rail"
-                      style={{ background: w.panel }}
-                    />
-                    <div className="skin-card__main">
-                      <div
-                        className="skin-card__bubble"
-                        style={{ background: w.elevated, color: w.text }}
-                      />
-                      <div
-                        className="skin-card__accent"
-                        style={{ background: w.accent }}
-                      />
-                    </div>
-                  </div>
-                </div>
-                <span className="skin-card__label">{s.label}</span>
-                <span className="skin-card__desc">{s.description}</span>
-              </button>
+      <div className="appearance-theme-picker">
+        <SelectField
+          id={`${baseId}-theme`}
+          label="Theme"
+          hint="The selected theme is applied and persisted immediately."
+          value={theme}
+          onChange={(event) => {
+            const next = SKINS.find(
+              (skin) => skin.id === event.currentTarget.value,
             );
-          })}
+            if (next) onThemeChange(next.id);
+          }}
+        >
+          {SKINS.map((skin) => (
+            <option key={skin.id} value={skin.id}>
+              {skin.label}
+            </option>
+          ))}
+        </SelectField>
+
+        <div
+          className="appearance-theme-preview"
+          role="status"
+          aria-label="Selected theme preview"
+          aria-live="polite"
+          aria-atomic="true"
+          style={previewStyle}
+        >
+          <span className="appearance-theme-preview__palette" aria-hidden="true">
+            <span data-tone="app" />
+            <span data-tone="panel" />
+            <span data-tone="elevated" />
+            <span data-tone="accent" />
+          </span>
+          <span className="appearance-theme-preview__copy">
+            <strong>{active.label}</strong>
+            <span>{active.description}</span>
+          </span>
         </div>
-        {active ? (
-          <p className="field__hint">{active.description}</p>
-        ) : null}
       </div>
 
       <SelectField

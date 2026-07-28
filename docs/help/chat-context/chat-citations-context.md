@@ -11,6 +11,7 @@ tags:
   - process
 order: 10
 related:
+  - context-selection-model-boundary
   - first-run
   - memory-overview
   - skills-context-packs
@@ -20,7 +21,8 @@ related:
 A chat turn combines recent conversation, a compacted summary when needed,
 selected skill or session context, and bounded results from tools. ContextDesk
 fits that material to the active model's context budget before calling the
-provider.
+provider. For the complete ordinary-versus-linked source and model-boundary
+flow, read help://context-selection-model-boundary.
 
 ![Chat grounding flow from question through bounded retrieval and model context to an answer with trail and citations](../assets/chat-grounding-flow.svg)
 

@@ -160,6 +160,9 @@ permission-blocked sources remain visible rather than becoming silent success.
 Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
 source paths are not inserted wholesale.
 
+The complete cross-source and provider-boundary explanation is available at
+help://context-selection-model-boundary.
+
 Agent navigation remains a proposal: ContextDesk validates it against the
 linked corpus and applies it only after the user activates the suggested action.
 

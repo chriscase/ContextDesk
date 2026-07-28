@@ -34,7 +34,12 @@ fn generated_subset_hashes(root: &Path) -> BTreeMap<String, String> {
     let mut hashes = tree_hashes(root).unwrap();
     hashes.remove(".gitignore");
     hashes.remove("README.md");
+    hashes.retain(|path, _| !path.starts_with("acceptance/"));
     hashes
+}
+
+fn pinned_seven_day_root() -> PathBuf {
+    fixture_root().join("acceptance/seven-day-25k")
 }
 
 #[derive(Debug)]
@@ -463,6 +468,74 @@ fn log_lab_behavior_profiles_are_deterministic_with_rich_manifests() {
             first_summary.tree_sha256
         );
     }
+}
+
+#[test]
+fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
+    let pinned_root = pinned_seven_day_root();
+    verify_safety(&pinned_root).unwrap();
+
+    let controls = BehaviorControls::for_profile(SEVEN_DAY_PROFILE, None).unwrap();
+    let generated = tempfile::tempdir().unwrap();
+    let generated_root = generated.path().join("seven-day-25k");
+    let summary = generate_behavior(&generated_root, &controls).unwrap();
+
+    assert_eq!(summary.events, 25_000);
+    assert_eq!(summary.files, 11);
+    assert_eq!(summary.bytes, 4_209_626);
+    assert_eq!(
+        summary.tree_sha256,
+        "d5908dbe2b41d925d49066e397d3bfdecaa0168c1340ea6de8d5c79603ddaea1"
+    );
+    assert_eq!(
+        tree_hashes(&generated_root).unwrap(),
+        tree_hashes(&pinned_root).unwrap(),
+        "checked-in seven-day acceptance corpus drifted from the deterministic generator"
+    );
+
+    let manifest = load_behavior_manifest(&pinned_root).unwrap();
+    assert_eq!(manifest["scenario_version"], 2);
+    assert_eq!(manifest["expected"]["profile"], SEVEN_DAY_PROFILE);
+    assert_eq!(manifest["expected"]["events"], 25_000);
+    assert_eq!(manifest["expected"]["files"], 10);
+    assert_eq!(manifest["expected"]["bytes"], 4_201_238);
+    assert_eq!(manifest["expected"]["time_span_secs"], 604_800);
+    assert_eq!(manifest["expected"]["severities"]["error"], 119);
+
+    let rows = parse_behavior_rows(&pinned_root);
+    assert_eq!(rows.len(), 25_000);
+    assert_eq!(rows.first().unwrap().generation_index, 0);
+    assert_eq!(rows.last().unwrap().generation_index, 24_999);
+    assert_eq!(
+        rows.iter().map(|row| row.ts).max().unwrap() - rows.iter().map(|row| row.ts).min().unwrap(),
+        604_800
+    );
+
+    let import_root = pinned_root.join("scenarios/behavior-scale/import");
+    let mut import_blob = String::new();
+    for path in walkdir_files(&import_root) {
+        import_blob.push_str(&fs::read_to_string(path).unwrap());
+    }
+    for token in [
+        "FIND_RARE_BEYOND_PAGE",
+        "FIND_RARE_BEYOND_4K",
+        "FIND_RARE_DEEP",
+        "BOOKMARK_PAGE_BOUNDARY",
+        "BOOKMARK_EVICT_WINDOW",
+        "BOOKMARK_NEAR_END",
+        "STACK_TRACE_SENTINEL",
+        "UTF8_café_λ",
+    ] {
+        assert!(
+            import_blob.contains(token),
+            "pinned seven-day import tree missing {token}"
+        );
+    }
+
+    eprintln!(
+        "PASS pinned seven-day events={} files={} bytes={} tree_sha256={}",
+        summary.events, summary.files, summary.bytes, summary.tree_sha256
+    );
 }
 
 #[test]

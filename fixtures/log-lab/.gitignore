@@ -1,1 +1,4 @@
 /generated/
+
+# Golden acceptance corpora intentionally include raw `.log` sources.
+!/acceptance/**/*.log
