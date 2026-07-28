@@ -798,17 +798,7 @@ impl OllamaClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
     ) -> CoreResult<ChatCompletion> {
-        let omsgs: Vec<Value> = messages.iter().map(message_to_ollama).collect();
-        let mut body = json!({
-            "model": self.model,
-            "messages": omsgs,
-            "stream": false,
-        });
-        if let Some(specs) = tools {
-            if !specs.is_empty() {
-                body["tools"] = tools_to_openai(specs);
-            }
-        }
+        let body = ollama_chat_body(&self.model, messages, tools);
         let url = format!("{}/api/chat", self.base_url);
         let resp = self
             .http
@@ -879,6 +869,26 @@ impl OllamaClient {
         }
         Ok(out)
     }
+}
+
+fn ollama_chat_body(model: &str, messages: &[ChatMessage], tools: Option<&[ToolSpec]>) -> Value {
+    let omsgs: Vec<Value> = messages.iter().map(message_to_ollama).collect();
+    let mut body = json!({
+        "model": model,
+        "messages": omsgs,
+        "stream": false,
+    });
+    if let Some(specs) = tools {
+        if !specs.is_empty() {
+            body["tools"] = tools_to_openai(specs);
+            // Tool routing should be reproducible. A nonzero default sampling
+            // temperature makes smaller local models alternate between native
+            // calls and narrated/fabricated call-shaped prose for the same
+            // request. Plain Ollama chat retains the model's normal defaults.
+            body["options"] = json!({ "temperature": 0 });
+        }
+    }
+    body
 }
 
 /// Serialize a chat message for Ollama `/api/chat` (includes tool_calls).
@@ -1609,6 +1619,36 @@ mod tests {
         assert_eq!(c.finish_reason, "tool_calls");
         let args: Value = serde_json::from_str(&c.tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["query"], "latest rust release");
+    }
+
+    #[test]
+    fn ollama_tool_requests_use_deterministic_sampling_only_when_tools_are_present() {
+        let messages = vec![ChatMessage {
+            role: Role::User,
+            content: "Investigate the linked corpus.".into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let specs = vec![ToolSpec {
+            name: "search_logs".into(),
+            description: "Search logs".into(),
+            side_effect: crate::tools::ToolSideEffect::Read,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+        }];
+
+        let with_tools = ollama_chat_body("mistral", &messages, Some(&specs));
+        assert_eq!(with_tools["options"]["temperature"], 0);
+        assert_eq!(with_tools["tools"][0]["function"]["name"], "search_logs");
+
+        let plain = ollama_chat_body("mistral", &messages, None);
+        assert!(
+            plain.get("options").is_none(),
+            "plain chat must preserve provider defaults"
+        );
     }
 
     #[test]

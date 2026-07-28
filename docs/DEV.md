@@ -207,6 +207,26 @@ Settings → Connectors → Postgres: host / database / user / sslmode (non-secr
 - **Offline tests.** Unit tests select the stack per mode and assert the built DSN actually parses as a `tokio_postgres::Config` (proving `verify-full` no longer dies at DSN parse) — no live DB needed. Run `cargo test -p cd-core sql_ro`.
 - **Opt-in live check.** Set `CD_PG_TEST_DSN` (libpq URL `postgresql://user:pass@host:5432/db?sslmode=prefer` or key=value `host=… dbname=… user=… password=… sslmode=verify-full`) and run `cargo test -p cd-core live_postgres -- --ignored --nocapture`. The test skips cleanly (stays `ignored`) when the env var is unset.
 
+## Live self-hosted linked-tool acceptance (opt-in)
+
+The ignored live-provider test exercises the production linked-agent loop
+against a tools-enabled local Ollama model. It creates only temporary synthetic
+workspace and log evidence, requires successful `search_logs` and `search_kb`
+calls, and refuses non-loopback provider URLs.
+
+```sh
+CONTEXTDESK_LIVE_OLLAMA=1 \
+  cargo test -p cd-core --test live_provider \
+  live_ollama_linked_turn_uses_logs_and_workspace -- \
+  --ignored --exact --nocapture
+```
+
+Defaults are `http://127.0.0.1:11434` and model `mistral`. Override them with
+`CONTEXTDESK_LIVE_OLLAMA_URL` (loopback HTTP only) and
+`CONTEXTDESK_LIVE_OLLAMA_MODEL`. This check reads no provider credential and
+does not modify desktop configuration. Ordinary deterministic CI keeps it
+ignored.
+
 ## Grok Build session (opt-in)
 
 After **explicit user opt-in**, the desktop host may load `~/.grok/auth.json` **in Rust only** (`cd_core::grok_auth`). Webview never receives tokens.
