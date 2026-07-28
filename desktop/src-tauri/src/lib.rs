@@ -138,6 +138,8 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// Serializes one-process Investigation selection/create/mutation across windows.
+    investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// At most one trusted workspace backup is active.
@@ -163,6 +165,15 @@ fn session_store(state: &AppState) -> Result<SessionStore, String> {
         .map_err(|e| e.to_string())?
         .join("sessions");
     Ok(SessionStore::new(dir))
+}
+
+fn investigation_store(
+    state: &AppState,
+) -> Result<cd_core::investigations::InvestigationStore, String> {
+    let dir = ensure_config_dir(&state.branding)
+        .map_err(|e| e.to_string())?
+        .join("investigations");
+    Ok(cd_core::investigations::InvestigationStore::new(dir))
 }
 
 fn seed_history_from_session(state: &AppState, session: &Session) {
@@ -5376,6 +5387,112 @@ fn log_delete_bookmark(
     cd_core::log_analysis::delete_bookmark(&c, &bookmark_id).map_err(|e| e.to_string())
 }
 
+fn active_investigation_for_corpus(
+    store: &cd_core::investigations::InvestigationStore,
+    corpus_id: &str,
+) -> Result<Option<cd_core::investigations::InvestigationSummary>, String> {
+    store.list().map_err(|e| e.to_string()).map(|summaries| {
+        summaries.into_iter().find(|summary| {
+            summary.status == cd_core::investigations::InvestigationStatus::Active
+                && summary
+                    .corpus_links
+                    .iter()
+                    .any(|link| link.corpus_id == corpus_id)
+        })
+    })
+}
+
+/// Load the newest active durable Investigation linked to a corpus.
+#[tauri::command]
+fn log_load_active_investigation(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
+    let store = investigation_store(&state)?;
+    let Some(summary) = active_investigation_for_corpus(&store, &corpus_id)? else {
+        return Ok(None);
+    };
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    store
+        .load(&summary.id, &corpus)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogAddInvestigationEvidenceArgs {
+    corpus_id: String,
+    investigation_id: Option<String>,
+    expected_revision: Option<u64>,
+    title: String,
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
+}
+
+/// Save exact selected identities into the corpus's durable Investigation.
+#[tauri::command]
+fn log_add_investigation_evidence(
+    state: State<'_, AppState>,
+    args: LogAddInvestigationEvidenceArgs,
+) -> Result<cd_core::investigations::ResolvedInvestigationDocument, String> {
+    let _mutation = state
+        .investigation_mutation
+        .lock()
+        .map_err(|_| "Investigation storage is temporarily unavailable".to_string())?;
+    let cache = log_cache_dir(&state)?;
+    let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
+        .map_err(|e| e.to_string())?;
+    let store = investigation_store(&state)?;
+
+    let (investigation_id, expected_revision) =
+        match (args.investigation_id, args.expected_revision) {
+            (Some(id), Some(revision)) => (id, revision),
+            (None, None) => {
+                if let Some(summary) = active_investigation_for_corpus(&store, &args.corpus_id)? {
+                    (summary.id, summary.revision)
+                } else {
+                    let created = store
+                        .create(format!("Investigation · {}", corpus.name()), &corpus)
+                        .map_err(|e| e.to_string())?;
+                    (created.id, created.revision)
+                }
+            }
+            _ => {
+                return Err(
+                    "Investigation identity and expected revision must be supplied together".into(),
+                )
+            }
+        };
+
+    store
+        .add_exact_evidence(
+            &investigation_id,
+            expected_revision,
+            args.title,
+            &corpus,
+            args.event_refs,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve a bounded evidence item for preview without mutating Explorer state.
+#[tauri::command]
+fn log_preview_investigation_evidence(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    investigation_id: String,
+    evidence_id: String,
+) -> Result<cd_core::investigations::EvidencePreview, String> {
+    let cache = log_cache_dir(&state)?;
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    investigation_store(&state)?
+        .preview_evidence(&investigation_id, &evidence_id, &corpus)
+        .map_err(|e| e.to_string())
+}
+
 /// List chat sessions linked to a corpus (any chat may link).
 #[tauri::command]
 fn list_chat_sessions_for_corpus(
@@ -6173,6 +6290,7 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
@@ -6318,6 +6436,9 @@ pub fn run() {
             log_list_bookmarks,
             log_add_bookmark,
             log_delete_bookmark,
+            log_load_active_investigation,
+            log_add_investigation_evidence,
+            log_preview_investigation_evidence,
             list_chat_sessions_for_corpus,
             set_chat_linked_corpus,
             open_log_explorer,

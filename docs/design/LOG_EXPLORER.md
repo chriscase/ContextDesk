@@ -170,6 +170,36 @@ UI renders as clickable chips; user opt-in applies filters / opens lane / scroll
 - Persist under corpus (e.g. `bookmarks.json` sidecar, package-export later).
 - Keyboard: `b` bookmark selection; list panel in explorer.
 
+### Durable Investigation evidence
+
+The first Investigation vertical slice complements bookmarks without silently
+rewriting them:
+
+- Row selection reveals contextual **Ask about selection** and **Save evidence**
+  actions. Ask prepares a bounded identity-only chat prompt; it never pastes
+  selected messages into the chat context.
+- Evidence persists in an append-only, versioned store under the durable
+  application configuration root, never under the disposable corpus cache.
+- One evidence item contains a human-authored redacted title, human provenance,
+  and the same exact noncontiguous event identities validated for bookmarks.
+  Messages, parameters, excerpts, and payload snapshots are not serialized.
+- Writes require the expected revision. A competing Explorer window wins
+  cleanly and a stale writer receives a visible conflict instead of overwriting
+  the newer revision.
+- The right-side **Investigation** rail switches compactly between Evidence and
+  Chat while the hidden chat remains mounted with its draft, model, transcript,
+  and scroll state intact.
+- Evidence Preview re-resolves a bounded set of rows from DuckDB without
+  mutating the active Explorer. Reveal is explicit, requires every identity to
+  remain verified, and reuses bookmark reveal/restore navigation.
+- Missing and changed identities remain listed honestly. Future document
+  schemas fail closed.
+
+This foundation intentionally does not claim the remaining Investigation
+workflow: manual Observation/Inference/Hypothesis records, cited notes,
+complete proposed-view recipes, full logical viewport restoration, model
+finding proposals, or report assembly.
+
 ## 7. Search / filter matrix
 
 | Mode | Mechanism | v1 |

@@ -156,6 +156,122 @@ describe("LinkedChatRail", () => {
     );
   });
 
+  it("keeps a prepared investigation prompt mounted across rail mode changes", async () => {
+    const view = render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        visible={false}
+        externalDraftRequest={{
+          id: 1,
+          text: "Investigate selected seq 2 and 9",
+        }}
+        modeControl={<button type="button">Evidence or chat</button>}
+      />,
+    );
+
+    expect(
+      screen
+        .getByLabelText("Chat message")
+        .closest("aside")
+        ?.hasAttribute("hidden"),
+    ).toBe(true);
+    view.rerender(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        visible
+        externalDraftRequest={{
+          id: 1,
+          text: "Investigate selected seq 2 and 9",
+        }}
+        modeControl={<button type="button">Evidence or chat</button>}
+      />,
+    );
+
+    const composer = await screen.findByLabelText("Chat message");
+    await waitFor(() => {
+      expect((composer as HTMLTextAreaElement).value).toBe(
+        "Investigate selected seq 2 and 9",
+      );
+      expect(document.activeElement).toBe(composer);
+    });
+    expect(
+      screen.getByRole("button", { name: "Evidence or chat" }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+    const thread = screen.getByTestId("log-explorer-chat-thread");
+    Object.defineProperties(thread, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 37 },
+    });
+    fireEvent.scroll(thread);
+
+    fireEvent.change(composer, { target: { value: "Keep this draft" } });
+    view.rerender(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        visible
+        externalDraftRequest={{
+          id: 2,
+          text: "Investigate selected seq 10",
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect((composer as HTMLTextAreaElement).value).toBe(
+        "Keep this draft\n\nSelected evidence:\nInvestigate selected seq 10",
+      ),
+    );
+    view.rerender(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        visible={false}
+        externalDraftRequest={{
+          id: 2,
+          text: "Investigate selected seq 10",
+        }}
+      />,
+    );
+    view.rerender(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        visible
+        externalDraftRequest={{
+          id: 2,
+          text: "Investigate selected seq 10",
+        }}
+      />,
+    );
+
+    expect(
+      ((await screen.findByLabelText("Chat message")) as HTMLTextAreaElement)
+        .value,
+    ).toBe(
+      "Keep this draft\n\nSelected evidence:\nInvestigate selected seq 10",
+    );
+    expect(screen.getByTestId("log-explorer-chat-thread").scrollTop).toBe(37);
+  });
+
   it("shows the configured model, persists a per-chat change, and sends explicit provider arguments", async () => {
     const models: host.ModelOptionDto[] = [
       defaultModels[0]!,

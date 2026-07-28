@@ -20,6 +20,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import {
   agentTurn,
@@ -79,8 +80,17 @@ type Props = {
   compactLayout?: boolean;
   /** Normal/wide layout: retain state while presenting only a reopen strip. */
   collapsed?: boolean;
+  /** Keep chat state mounted while another Investigation mode is visible. */
+  visible?: boolean;
   /** Explicit desktop grid track so optional splitters cannot shift the rail. */
   desktopGridColumn?: number;
+  /** Shared Investigation mode control rendered above the chat header. */
+  modeControl?: ReactNode;
+  /** Prepare and focus a privacy-safe prompt from an Explorer action. */
+  externalDraftRequest?: {
+    id: number;
+    text: string;
+  } | null;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
   /** Compact parent indicator without duplicating chat/session state. */
@@ -234,7 +244,10 @@ export function LinkedChatRail({
   onApplyNav,
   compactLayout = false,
   collapsed = false,
+  visible = true,
   desktopGridColumn,
+  modeControl,
+  externalDraftRequest,
   developerMode = false,
   onRailSummary,
   onRequestClose,
@@ -298,6 +311,7 @@ export function LinkedChatRail({
   const previousCollapsedRef = useRef(collapsed);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const focusComposerAfterTurnRef = useRef<string | null>(null);
+  const appliedExternalDraftRequestRef = useRef<number | null>(null);
   const sendingChatsRef = useRef<Set<string>>(new Set());
   const detachedByChatRef = useRef(detachedByChat);
   detachedByChatRef.current = detachedByChat;
@@ -345,12 +359,21 @@ export function LinkedChatRail({
   }, [collapsed, compactLayout]);
 
   useLayoutEffect(() => {
-    if (collapsed || compactLayout || !activeChatId) return;
+    if (!visible || collapsed || compactLayout || !activeChatId) return;
     const savedScroll = scrollByChatRef.current[activeChatId];
     const thread = threadRef.current;
     if (savedScroll == null || !thread) return;
     thread.scrollTop = savedScroll;
-  }, [activeChatId, collapsed, compactLayout]);
+  }, [activeChatId, collapsed, compactLayout, visible]);
+
+  useLayoutEffect(() => {
+    if (!visible || !activeChatId) return;
+    return () => {
+      if (threadRef.current) {
+        scrollByChatRef.current[activeChatId] = threadRef.current.scrollTop;
+      }
+    };
+  }, [activeChatId, visible]);
 
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
@@ -391,12 +414,33 @@ export function LinkedChatRail({
 
   useEffect(() => {
     const target = focusComposerAfterTurnRef.current;
-    if (!target || busy || collapsed) return;
+    if (!target || busy || collapsed || !visible) return;
     if (activeChatId === target) {
       composerRef.current?.focus();
     }
     focusComposerAfterTurnRef.current = null;
-  }, [activeChatId, busy, collapsed]);
+  }, [activeChatId, busy, collapsed, visible]);
+
+  useEffect(() => {
+    if (
+      !visible ||
+      !externalDraftRequest ||
+      appliedExternalDraftRequestRef.current === externalDraftRequest.id
+    ) {
+      return;
+    }
+    appliedExternalDraftRequestRef.current = externalDraftRequest.id;
+    setDraft((current) => {
+      const next = current.trim()
+        ? `${current.trimEnd()}\n\nSelected evidence:\n${externalDraftRequest.text}`
+        : externalDraftRequest.text;
+      if (activeChatId) {
+        draftsRef.current[activeChatId] = next;
+      }
+      return next;
+    });
+    queueMicrotask(() => composerRef.current?.focus());
+  }, [activeChatId, externalDraftRequest, visible]);
 
   const refreshChats = useCallback(async () => {
     try {
@@ -420,11 +464,11 @@ export function LinkedChatRail({
 
   /** Follow new content when this chat is in follow mode. */
   useEffect(() => {
-    if (!activeChatId || !followActive) return;
+    if (!visible || !activeChatId || !followActive) return;
     // Instant on first paint / chat switch; smooth for streaming appends.
     const behavior: ScrollBehavior = messages.length <= 2 ? "auto" : "smooth";
     requestAnimationFrame(() => scrollToLatest(behavior));
-  }, [messages, activeChatId, followActive, scrollToLatest, busy]);
+  }, [messages, activeChatId, followActive, scrollToLatest, busy, visible]);
 
   const onThreadScroll = () => {
     const el = threadRef.current;
@@ -968,10 +1012,10 @@ export function LinkedChatRail({
     }
   };
 
-  if (collapsed && !compactLayout) {
+  if (visible && collapsed && !compactLayout) {
     return (
       <aside
-        id="log-explorer-chat-panel"
+        id="log-explorer-investigation-panel"
         className="log-explorer__chat log-explorer__chat--rail log-explorer__chat--collapsed"
         data-testid="log-explorer-chat"
         data-collapsed="true"
@@ -1006,11 +1050,12 @@ export function LinkedChatRail({
 
   return (
     <aside
-      id="log-explorer-chat-panel"
+      id={visible ? "log-explorer-investigation-panel" : undefined}
       className={`log-explorer__chat log-explorer__chat--rail${
         compactLayout ? " log-explorer__chat--compact-layout" : ""
-      }`}
+      }${visible ? "" : " log-explorer__chat--mode-hidden"}`}
       data-testid="log-explorer-chat"
+      hidden={!visible}
       style={
         desktopGridColumn == null
           ? undefined
@@ -1019,6 +1064,11 @@ export function LinkedChatRail({
       role={compactLayout ? "dialog" : undefined}
       aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
+      {modeControl ? (
+        <div className="log-explorer__investigation-mode-control">
+          {modeControl}
+        </div>
+      ) : null}
       <header
         className="log-explorer__chat-header"
         data-testid="linked-chat-header"

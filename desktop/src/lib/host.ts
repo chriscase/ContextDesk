@@ -1884,17 +1884,64 @@ export type LogBookmarkEventRefDto = {
 };
 
 export type LogBookmarkEvidenceStatus =
-  | "legacy_range"
-  | "verified"
-  | "missing"
-  | "stale";
+  "legacy_range" | "verified" | "missing" | "stale";
+
+export type InvestigationEvidenceItemDto = {
+  id: string;
+  title: string;
+  provenance: "human";
+  corpusId: string;
+  eventRefs: LogBookmarkEventRefDto[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type InvestigationDocumentDto = {
+  schemaVersion: number;
+  id: string;
+  revision: number;
+  title: string;
+  status: "active" | "archived";
+  corpusLinks: { corpusId: string }[];
+  evidence: InvestigationEvidenceItemDto[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type InvestigationEvidenceReferenceDto = {
+  eventRef: LogBookmarkEventRefDto;
+  status: "verified" | "missing" | "stale";
+  event?: ExplorerEventDto | null;
+};
+
+export type ResolvedInvestigationEvidenceDto = {
+  item: InvestigationEvidenceItemDto;
+  references: InvestigationEvidenceReferenceDto[];
+};
+
+export type ResolvedInvestigationDocumentDto = {
+  document: InvestigationDocumentDto;
+  evidence: ResolvedInvestigationEvidenceDto[];
+};
+
+export type InvestigationEvidencePreviewDto = {
+  investigationId: string;
+  revision: number;
+  item: InvestigationEvidenceItemDto;
+  references: InvestigationEvidenceReferenceDto[];
+};
 
 export async function hostLogQueryEvents(
   corpusId: string,
   query: EventQueryDto = {},
 ): Promise<EventPageDto> {
   if (!isTauri()) {
-    return { events: [], nextCursor: null, totalMatched: 0, timeQuality: "order_only" };
+    return {
+      events: [],
+      nextCursor: null,
+      totalMatched: 0,
+      timeQuality: "order_only",
+    };
   }
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
 }
@@ -2080,6 +2127,54 @@ export async function hostLogDeleteBookmark(
 ): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("log_delete_bookmark", { corpusId, bookmarkId });
+}
+
+export async function hostLogLoadActiveInvestigation(
+  corpusId: string,
+): Promise<ResolvedInvestigationDocumentDto | null> {
+  if (!isTauri()) return null;
+  return invoke<ResolvedInvestigationDocumentDto | null>(
+    "log_load_active_investigation",
+    { corpusId },
+  );
+}
+
+export async function hostLogAddInvestigationEvidence(
+  corpusId: string,
+  args: {
+    investigationId?: string | null;
+    expectedRevision?: number | null;
+    title: string;
+    eventRefs: LogBookmarkEventRefDto[];
+  },
+): Promise<ResolvedInvestigationDocumentDto> {
+  if (!isTauri()) throw new Error("Investigation evidence requires Tauri host");
+  return invoke<ResolvedInvestigationDocumentDto>(
+    "log_add_investigation_evidence",
+    {
+      args: {
+        corpusId,
+        investigationId: args.investigationId ?? null,
+        expectedRevision: args.expectedRevision ?? null,
+        title: args.title,
+        eventRefs: args.eventRefs,
+      },
+    },
+  );
+}
+
+export async function hostLogPreviewInvestigationEvidence(
+  corpusId: string,
+  investigationId: string,
+  evidenceId: string,
+): Promise<InvestigationEvidencePreviewDto> {
+  if (!isTauri()) {
+    throw new Error("Investigation evidence preview requires Tauri host");
+  }
+  return invoke<InvestigationEvidencePreviewDto>(
+    "log_preview_investigation_evidence",
+    { corpusId, investigationId, evidenceId },
+  );
 }
 
 export async function hostListChatSessionsForCorpus(
