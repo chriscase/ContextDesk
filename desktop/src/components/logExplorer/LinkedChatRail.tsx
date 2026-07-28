@@ -30,6 +30,7 @@ import {
   hostPinChatSession,
   hostRenameChatSession,
   hostSaveChatSession,
+  hostSetModelToolsEnabled,
   modelSelectionKey,
   parseModelSelectionKey,
   type ModelOptionDto,
@@ -249,6 +250,7 @@ export function LinkedChatRail({
     Record<string, string>
   >({});
   const [modelLoadError, setModelLoadError] = useState<string | null>(null);
+  const [modelRetrying, setModelRetrying] = useState(false);
   const modelHelpId = useId();
   const composerHelpId = useId();
   /**
@@ -643,7 +645,10 @@ export function LinkedChatRail({
       return;
     }
     if (!turnModel.tools_enabled) {
-      const message = `${turnModel.provider_label} · ${turnModel.label} cannot investigate linked logs because its provider has tools disabled. Choose another tools-enabled model or configure one in Settings → AI.`;
+      const message =
+        turnModel.tools_disabled_reason === "model"
+          ? `${turnModel.provider_label} · ${turnModel.label} previously rejected native tools. Retry tools for this model or choose another tools-enabled model.`
+          : `${turnModel.provider_label} · ${turnModel.label} cannot investigate linked logs because its provider has tools disabled. Choose another tools-enabled model or configure one in Settings → AI.`;
       if (activeChatId) {
         setErrorByChat((current) => ({
           ...current,
@@ -812,6 +817,39 @@ export function LinkedChatRail({
         focusComposerAfterTurnRef.current = sessionId;
       }
       setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
+    }
+  };
+
+  const retrySelectedModelTools = async () => {
+    if (
+      !selectedModel ||
+      selectedModel.tools_disabled_reason !== "model" ||
+      modelRetrying
+    ) {
+      return;
+    }
+    setModelRetrying(true);
+    setRailError(null);
+    try {
+      await hostSetModelToolsEnabled({
+        providerId: selectedModel.provider_id,
+        modelId: selectedModel.id,
+        toolsEnabled: true,
+      });
+      await loadModels();
+      const message = `Native tools will be retried for ${selectedModel.provider_label} · ${selectedModel.label}.`;
+      if (activeChatId) {
+        setStatusByChat((current) => ({
+          ...current,
+          [activeChatId]: message,
+        }));
+      } else {
+        setRailError(null);
+      }
+    } catch (error) {
+      setRailError(`Could not re-enable this model's tools: ${String(error)}`);
+    } finally {
+      setModelRetrying(false);
     }
   };
 
@@ -1086,7 +1124,10 @@ export function LinkedChatRail({
                     <option
                       key={option.selection_key}
                       value={option.selection_key}
-                      disabled={!option.tools_enabled}
+                      disabled={
+                        !option.tools_enabled &&
+                        option.tools_disabled_reason === "profile"
+                      }
                     >
                       {option.label}
                       {option.is_default ? " · default" : ""}
@@ -1115,6 +1156,19 @@ export function LinkedChatRail({
                     : "linked tools unavailable"
                 }`
               : "Configure a tools-enabled provider in Settings → AI."}
+          {selectedModel?.tools_disabled_reason === "model" ? (
+            <>
+              {" · "}
+              <button
+                type="button"
+                className="log-explorer__chat-model-retry"
+                disabled={busy || modelRetrying}
+                onClick={() => void retrySelectedModelTools()}
+              >
+                {modelRetrying ? "Retrying…" : "Retry tools"}
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
 

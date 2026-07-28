@@ -34,6 +34,7 @@ vi.mock("../../lib/host", () => ({
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostSaveChatSession: vi.fn(),
+  hostSetModelToolsEnabled: vi.fn(async () => true),
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
   hostArchiveChatSession: vi.fn(),
@@ -60,6 +61,7 @@ const defaultModels: host.ModelOptionDto[] = [
     group: "Chat-only Provider",
     is_default: false,
     tools_enabled: false,
+    tools_disabled_reason: "profile",
   },
 ];
 
@@ -117,6 +119,7 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostSetModelToolsEnabled).mockResolvedValue(true);
     vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
     vi.mocked(host.hostPinChatSession).mockResolvedValue(null);
     vi.mocked(host.hostArchiveChatSession).mockResolvedValue(null);
@@ -309,6 +312,46 @@ describe("LinkedChatRail", () => {
       ),
     ).toBeTruthy();
     expect(host.agentTurn).not.toHaveBeenCalled();
+  });
+
+  it("retries a learned model-specific tool rejection without changing the provider", async () => {
+    const learnedDisabled: host.ModelOptionDto = {
+      ...defaultModels[0]!,
+      tools_enabled: false,
+      tools_disabled_reason: "model",
+    };
+    const reenabled: host.ModelOptionDto = {
+      ...learnedDisabled,
+      tools_enabled: true,
+      tools_disabled_reason: null,
+    };
+    vi.mocked(host.hostListChatModels)
+      .mockResolvedValueOnce([learnedDisabled])
+      .mockResolvedValue([reenabled]);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    expect(selector.options[0]?.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Retry tools" }));
+
+    await waitFor(() =>
+      expect(host.hostSetModelToolsEnabled).toHaveBeenCalledWith({
+        providerId: "tools-provider",
+        modelId: "triage-1",
+        toolsEnabled: true,
+      }),
+    );
+    expect(await screen.findByText(/linked tools available/i)).toBeTruthy();
   });
 
   it("sends with Return, preserves Shift+Return and IME composition, and blocks rapid duplicates", async () => {

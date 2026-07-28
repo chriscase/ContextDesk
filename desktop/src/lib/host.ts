@@ -873,8 +873,10 @@ export type ModelOptionDto = {
   provider_label: string;
   group: string;
   is_default: boolean;
-  /** Whether this provider profile can execute native tools. */
+  /** Whether this exact provider/model pair can execute native tools. */
   tools_enabled: boolean;
+  /** Why tools are disabled, when known. */
+  tools_disabled_reason?: "profile" | "model" | null;
 };
 
 export function parseModelSelectionKey(key: string): {
@@ -898,6 +900,20 @@ export function modelSelectionKey(providerId: string, modelId: string): string {
 export async function hostListChatModels(): Promise<ModelOptionDto[]> {
   if (!isTauri()) return [];
   return invoke<ModelOptionDto[]>("list_chat_models");
+}
+
+/** Retry or disable native tools for one exact provider/model pair (#650). */
+export async function hostSetModelToolsEnabled(args: {
+  providerId: string;
+  modelId: string;
+  toolsEnabled: boolean;
+}): Promise<boolean> {
+  if (!isTauri()) return args.toolsEnabled;
+  return invoke<boolean>("set_model_tools_enabled", {
+    providerId: args.providerId,
+    modelId: args.modelId,
+    toolsEnabled: args.toolsEnabled,
+  });
 }
 
 /**

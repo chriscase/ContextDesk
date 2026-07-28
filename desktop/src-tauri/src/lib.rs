@@ -3004,6 +3004,7 @@ async fn agent_turn(
     {
         profile.chat_model = m.to_string();
     }
+    profile.capabilities.tools = model_tools_enabled(&cfg, &profile, profile.chat_model.as_str());
     let api_key = profile
         .api_key_ref
         .as_ref()
@@ -3128,18 +3129,19 @@ async fn agent_turn(
         *host_guard = Some(host);
     }
 
-    // #327: gateway rejected tools — persist chat-only so next turns skip tools.
+    // #327/#650: a gateway/model rejected tools. Persist the exact model as
+    // chat-only without poisoning tools-capable siblings behind the profile.
     // Also persist per-model context budgets learned from context-length failures.
     if let Ok(ref events) = result {
         if cd_core::providers::events_indicate_tools_unsupported(events)
             && profile.capabilities.tools
         {
             let mut cfg = state.config.lock().expect("config").clone();
-            if cfg.providers.set_profile_tools_enabled(&profile.id, false) {
-                if let Ok(path) = config_path(&state.branding) {
-                    let _ = save_config(&path, &cfg);
-                    *state.config.lock().expect("config") = cfg;
-                }
+            cfg.model_tools_enabled
+                .insert(model_selection_key(&profile.id, &profile.chat_model), false);
+            if let Ok(path) = config_path(&state.branding) {
+                let _ = save_config(&path, &cfg);
+                *state.config.lock().expect("config") = cfg;
             }
         }
         let mut learned_any = false;
@@ -3372,8 +3374,11 @@ struct ModelOptionDto {
     group: String,
     /// True when this is the app default for new chats.
     is_default: bool,
-    /// Whether this provider profile can execute native tools.
+    /// Whether this exact provider/model pair can execute native tools.
     tools_enabled: bool,
+    /// `profile` for explicit profile disablement or `model` for a learned
+    /// provider/model rejection. `None` means tools are enabled.
+    tools_disabled_reason: Option<String>,
 }
 
 fn model_selection_key(provider_id: &str, model_id: &str) -> String {
@@ -3387,6 +3392,28 @@ fn parse_selection_key(key: &str) -> (Option<String>, String) {
         }
     }
     (None, key.to_string())
+}
+
+fn model_tools_disabled_reason(
+    cfg: &AppConfig,
+    profile: &ProviderProfile,
+    model_id: &str,
+) -> Option<&'static str> {
+    if !profile.capabilities.tools {
+        return Some("profile");
+    }
+    if cfg
+        .model_tools_enabled
+        .get(&model_selection_key(&profile.id, model_id))
+        == Some(&false)
+    {
+        return Some("model");
+    }
+    None
+}
+
+fn model_tools_enabled(cfg: &AppConfig, profile: &ProviderProfile, model_id: &str) -> bool {
+    model_tools_disabled_reason(cfg, profile, model_id).is_none()
 }
 
 fn provider_group_label(p: &ProviderProfile) -> String {
@@ -3687,6 +3714,11 @@ fn set_provider_tools_enabled(
     if !cfg.providers.set_profile_tools_enabled(&id, tools_enabled) {
         return Err(format!("unknown provider profile: {id}"));
     }
+    if tools_enabled {
+        let prefix = format!("{id}::");
+        cfg.model_tools_enabled
+            .retain(|selection, _| !selection.starts_with(&prefix));
+    }
     let path = config_path(&state.branding).map_err(|e| e.to_string())?;
     save_config(&path, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock().expect("config") = cfg.clone();
@@ -3709,6 +3741,41 @@ fn set_provider_tools_enabled(
                 .unwrap_or(false)
     };
     Ok(provider_to_dto(p, has_key))
+}
+
+/// Retry or disable native tools for one exact provider/model pair (#650).
+#[tauri::command]
+fn set_model_tools_enabled(
+    state: State<'_, AppState>,
+    provider_id: String,
+    model_id: String,
+    tools_enabled: bool,
+) -> Result<bool, String> {
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Err("provider and model are required".into());
+    }
+    let mut cfg = state.config.lock().expect("config").clone();
+    let profile = cfg
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == provider_id)
+        .ok_or_else(|| format!("unknown provider profile: {provider_id}"))?;
+    if !profile.capabilities.tools && tools_enabled {
+        return Err(format!("profile “{}” has tools disabled", profile.label));
+    }
+    let key = model_selection_key(provider_id, model_id);
+    if tools_enabled {
+        cfg.model_tools_enabled.remove(&key);
+    } else {
+        cfg.model_tools_enabled.insert(key, false);
+    }
+    let path = config_path(&state.branding).map_err(|e| e.to_string())?;
+    save_config(&path, &cfg).map_err(|e| e.to_string())?;
+    *state.config.lock().expect("config") = cfg;
+    Ok(tools_enabled)
 }
 
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
@@ -3855,7 +3922,9 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
             out.push(ModelOptionDto {
                 is_default: selection_key == default_key
                     || (id == default_model && profile.id == default_pid),
-                tools_enabled: profile.capabilities.tools,
+                tools_enabled: model_tools_enabled(&cfg, profile, &id),
+                tools_disabled_reason: model_tools_disabled_reason(&cfg, profile, &id)
+                    .map(str::to_string),
                 label: id.clone(),
                 selection_key,
                 id,
@@ -3886,8 +3955,11 @@ async fn list_chat_models(state: State<'_, AppState>) -> Result<Vec<ModelOptionD
                 tools_enabled: cfg
                     .providers
                     .active()
-                    .map(|profile| profile.capabilities.tools)
+                    .map(|profile| model_tools_enabled(&cfg, profile, &default_model))
                     .unwrap_or(true),
+                tools_disabled_reason: cfg.providers.active().and_then(|profile| {
+                    model_tools_disabled_reason(&cfg, profile, &default_model).map(str::to_string)
+                }),
             },
         );
     }
@@ -5891,6 +5963,7 @@ pub fn run() {
             probe_ai_gateway_cmd,
             get_active_provider,
             set_provider_tools_enabled,
+            set_model_tools_enabled,
             set_default_chat_model,
             get_default_chat_model,
             suggest_chat_title,
@@ -6457,6 +6530,32 @@ mod startup_host_tests {
 #[cfg(test)]
 mod chat_session_host_tests {
     use super::*;
+
+    #[test]
+    fn learned_tool_rejection_is_scoped_to_one_provider_model() {
+        let mut cfg = AppConfig::default();
+        cfg.providers = ProviderConfig::with_local_ollama();
+        let profile = cfg.providers.active().expect("local profile").clone();
+
+        assert!(model_tools_enabled(&cfg, &profile, "mistral:latest"));
+        assert!(model_tools_enabled(&cfg, &profile, "dolphin-llama3:8b"));
+
+        cfg.model_tools_enabled
+            .insert(model_selection_key(&profile.id, "dolphin-llama3:8b"), false);
+        assert!(!model_tools_enabled(&cfg, &profile, "dolphin-llama3:8b"));
+        assert_eq!(
+            model_tools_disabled_reason(&cfg, &profile, "dolphin-llama3:8b"),
+            Some("model")
+        );
+        assert!(model_tools_enabled(&cfg, &profile, "mistral:latest"));
+
+        let mut profile_disabled = profile;
+        profile_disabled.capabilities.tools = false;
+        assert_eq!(
+            model_tools_disabled_reason(&cfg, &profile_disabled, "mistral:latest"),
+            Some("profile")
+        );
+    }
 
     #[test]
     fn linked_empty_chat_is_durable_but_ordinary_empty_draft_is_not() {

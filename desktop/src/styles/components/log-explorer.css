@@ -584,6 +584,30 @@
   color: var(--danger, #c45c5c);
 }
 
+.log-explorer__chat-model-retry {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
+.log-explorer__chat-model-retry:focus-visible {
+  border-radius: 2px;
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: 2px;
+}
+
+.log-explorer__chat-model-retry:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .log-explorer__chat-switcher {
   flex-shrink: 0;
   max-height: 11rem;
