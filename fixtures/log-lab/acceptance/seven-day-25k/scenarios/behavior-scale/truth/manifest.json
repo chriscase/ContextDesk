@@ -1,0 +1,273 @@
+{
+  "expected": {
+    "bytes": 4201238,
+    "events": 25000,
+    "files": 10,
+    "files_by_path": {
+      "scenarios/behavior-scale/import/api/app.jsonl": {
+        "sha256": "7e446a99a7b41823c1b1ee86427a0d023d723eef9d545358aaebbc1643b41216"
+      },
+      "scenarios/behavior-scale/import/auth/auth.jsonl": {
+        "sha256": "3bea5018f0d2da542af63e771f3a5734e13b1f8b5f4acbed016318c91e01409a"
+      },
+      "scenarios/behavior-scale/import/db/database.log": {
+        "sha256": "e68576a45b5546b1945d8fdb4c1fbf0509860c11c553f0cc32b321ee6e7ef162"
+      },
+      "scenarios/behavior-scale/import/db/database.log.1": {
+        "sha256": "84039ec216e0eb76eaaa8d6ac553f98ac453c61497b74f91877c04e2f6a6914d"
+      },
+      "scenarios/behavior-scale/import/edge/access.jsonl": {
+        "sha256": "881cf5b91a9e2a2d916e82912e0be256a0ba5900d7a7ec616a073edde7388c6a"
+      },
+      "scenarios/behavior-scale/import/queue/events.jsonl": {
+        "sha256": "caba82f363e9d5a2f21359a42d4320df30ef43a63efb92b14fafbdc6aeae5c31"
+      },
+      "scenarios/behavior-scale/import/region-a/app.jsonl": {
+        "sha256": "0da6c5c35088d4d1def1eab72e54b18e0f86efb7a4f82a2f69eb7988a5a0c8a0"
+      },
+      "scenarios/behavior-scale/import/region-b/app.jsonl": {
+        "sha256": "89af33bd53001bb2b8e41ccd715ed95d124ea536cd8541da04979afddd81d260"
+      },
+      "scenarios/behavior-scale/import/worker/worker.log": {
+        "sha256": "cfbbd40f0289ca5598bf9d70a3f8351e10f8c4308f6910ed5e7a6e5aa6db6649"
+      },
+      "scenarios/behavior-scale/import/worker/worker.log.1": {
+        "sha256": "94222d1ffa4ad30680762d910bf90fb72949c904e37bb55eb5f2cae74489fb93"
+      }
+    },
+    "profile": "seven-day",
+    "requested_events": 25000,
+    "requested_time_span_secs": 604800,
+    "severities": {
+      "debug": 460,
+      "error": 119,
+      "info": 24165,
+      "warn": 256
+    },
+    "source_count": 10,
+    "sources": {
+      "api/app.jsonl": 7661,
+      "auth/auth.jsonl": 388,
+      "db/database.log": 2107,
+      "db/database.log.1": 323,
+      "edge/access.jsonl": 9804,
+      "queue/events.jsonl": 400,
+      "region-a/app.jsonl": 440,
+      "region-b/app.jsonl": 310,
+      "worker/worker.log": 3092,
+      "worker/worker.log.1": 475
+    },
+    "time_quality": "wall",
+    "time_span_secs": 604800,
+    "traffic_shape": "sparse_burst"
+  },
+  "generator_version": "contextdesk.log_lab.generator.v1",
+  "investigation": {
+    "aligned_intervals": [
+      {
+        "description": "Two events share one wall timestamp across sources for alignment proof.",
+        "id": "shared-ts-pair",
+        "indices": [
+          500,
+          501
+        ],
+        "ts": 1735744896
+      }
+    ],
+    "burst_windows": [
+      {
+        "affected_sources": [
+          "api/app.jsonl",
+          "db/database.log",
+          "edge/access.jsonl",
+          "queue/events.jsonl",
+          "region-a/app.jsonl",
+          "region-b/app.jsonl",
+          "worker/worker.log"
+        ],
+        "description": "All events in this deterministic generation window share one wall-clock second.",
+        "event_count": 40,
+        "from_generation_index": 5000,
+        "id": "same-second-burst",
+        "to_generation_index": 5039,
+        "ts": 1735853764
+      }
+    ],
+    "controls": {
+      "event_count": 25000,
+      "long_line_percent": 4,
+      "rotation_every": 8000,
+      "source_count": 8,
+      "span_secs": 604800,
+      "time_quality": "wall"
+    },
+    "disk_estimate_bytes": 8500000,
+    "equal_timestamp_markers": 2,
+    "expected_bookmark_targets": [
+      "BOOKMARK_PAGE_BOUNDARY",
+      "BOOKMARK_EVICT_WINDOW",
+      "BOOKMARK_NEAR_END"
+    ],
+    "expected_queries": [
+      {
+        "kind": "find",
+        "min_hits": 1,
+        "placement": "beyond_first_page",
+        "text": "FIND_RARE_BEYOND_PAGE"
+      },
+      {
+        "kind": "find",
+        "min_hits": 1,
+        "placement": "beyond_4000",
+        "text": "FIND_RARE_BEYOND_4K"
+      },
+      {
+        "kind": "find",
+        "min_hits": 1,
+        "placement": "deep",
+        "text": "FIND_RARE_DEEP"
+      },
+      {
+        "kind": "filter",
+        "min_hits": 1,
+        "text": "BOOKMARK_EVICT_WINDOW"
+      },
+      {
+        "kind": "literal",
+        "notes": "long multiline sample",
+        "text": "STACK_TRACE_SENTINEL"
+      },
+      {
+        "kind": "literal",
+        "notes": "unicode sample",
+        "text": "UTF8_café_λ"
+      },
+      {
+        "kind": "level",
+        "level": "error"
+      }
+    ],
+    "formats": [
+      "json",
+      "logfmt",
+      "multiline_stack",
+      "utf8",
+      "long_json"
+    ],
+    "lane_gaps": [
+      {
+        "affected_sources": [
+          "auth/auth.jsonl",
+          "db/database.log",
+          "db/database.log.1",
+          "queue/events.jsonl",
+          "region-a/app.jsonl",
+          "region-b/app.jsonl",
+          "worker/worker.log",
+          "worker/worker.log.1"
+        ],
+        "description": "Sources listed in affected_sources emit no events inside this generated wall-time interval.",
+        "duration_secs": 100795,
+        "from_generation_index": 8333,
+        "from_ts": 1735934375,
+        "id": "primary-source-quiet-gap",
+        "to_generation_index": 12500,
+        "to_ts": 1736035170
+      }
+    ],
+    "late_arrivals": {
+      "count": 3086,
+      "event_generation_index": 15000,
+      "event_ts": 1736095580,
+      "lead_generation_index": 14999,
+      "lead_ts": 1736095670,
+      "seconds_behind_previous": 90
+    },
+    "long_line_count": 1030,
+    "misaligned_intervals": [
+      {
+        "affected_sources": [
+          "api/app.jsonl",
+          "auth/auth.jsonl",
+          "db/database.log",
+          "db/database.log.1",
+          "region-b/app.jsonl"
+        ],
+        "applied_event_count": 3862,
+        "description": "Odd-indexed affected sources are exactly 90 seconds behind their nominal generated timestamps.",
+        "from_generation_index": 8333,
+        "id": "source-skew-window",
+        "late_arrival_event_index": 15000,
+        "offset_secs": -90,
+        "to_generation_index": 16665
+      }
+    ],
+    "multiline_count": 364,
+    "performance_claim_policy": "Record machine/OS/build mode, elapsed times, resident counts, and peak memory/CPU when available. Do not treat one host as a universal threshold.",
+    "profile": "seven-day",
+    "rotations": [
+      {
+        "every": 8000,
+        "pattern": "*.log.1"
+      }
+    ],
+    "safety": "Entirely synthetic; hosts use .example; no current-clock, home paths, or real credentials.",
+    "sentinels": {
+      "bookmark_evict_window": {
+        "generation_index": 2500,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "BOOKMARK_EVICT_WINDOW",
+        "token": "BOOKMARK_EVICT_WINDOW",
+        "ts": 1735793282
+      },
+      "bookmark_near_end": {
+        "generation_index": 24949,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "BOOKMARK_NEAR_END",
+        "token": "BOOKMARK_NEAR_END",
+        "ts": 1736336390
+      },
+      "bookmark_page_boundary": {
+        "generation_index": 100,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "BOOKMARK_PAGE_BOUNDARY",
+        "token": "BOOKMARK_PAGE_BOUNDARY",
+        "ts": 1735735219
+      },
+      "find_beyond_4k": {
+        "generation_index": 4500,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "FIND_RARE_BEYOND_4K",
+        "token": "FIND_RARE_BEYOND_4K",
+        "ts": 1735841668
+      },
+      "find_beyond_first_page": {
+        "generation_index": 250,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "FIND_RARE_BEYOND_PAGE",
+        "token": "FIND_RARE_BEYOND_PAGE",
+        "ts": 1735738848
+      },
+      "find_deep": {
+        "generation_index": 20000,
+        "source": "edge/access.jsonl",
+        "stable_message_token": "FIND_RARE_DEEP",
+        "token": "FIND_RARE_DEEP",
+        "ts": 1736216659
+      }
+    },
+    "time_span": {
+      "from_ts": 1735732800,
+      "requested_span_secs": 604800,
+      "span_days": 7.0,
+      "span_secs": 604800,
+      "to_ts": 1736337600
+    },
+    "traffic_shape": "sparse_burst"
+  },
+  "provenance": "Entirely synthetic and generated by the ContextDesk repository; no third-party or production log material.",
+  "scenario_id": "behavior-scale",
+  "scenario_version": 2,
+  "schema_version": 1,
+  "seed": 52620260725
+}

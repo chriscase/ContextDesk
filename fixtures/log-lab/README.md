@@ -20,6 +20,11 @@ The generator also produces scale and **behavior-rich** profiles outside Git:
 Event count, wall-clock span, source count, and traffic shape are **independent**
 controls on behavior profiles (`--events`, `--span-secs`, `--sources`).
 
+The default `seven-day` output is also pinned under
+`acceptance/seven-day-25k/` as a long-lived golden acceptance corpus. The
+100,000-event and million-event profiles remain generated on demand so Git
+history stays bounded.
+
 ## Safety and provenance
 
 - All hosts use `.example`; any IP fixture must use the RFC 5737 documentation
@@ -173,6 +178,57 @@ Import root: `scenarios/behavior-scale/import/` (never the scenario parent).
 Canonical sentinel tokens include `FIND_RARE_BEYOND_PAGE`,
 `FIND_RARE_BEYOND_4K`, `FIND_RARE_DEEP`, `BOOKMARK_PAGE_BOUNDARY`,
 `BOOKMARK_EVICT_WINDOW`, and `BOOKMARK_NEAR_END`.
+
+## Pinned seven-day golden acceptance corpus
+
+For repeatable manual, packaged-app, and provider testing, select this exact
+directory in **Logs → Import**:
+
+```text
+fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/
+```
+
+Do not select its parent. The authoritative expected results are deliberately
+outside the import root:
+
+```text
+fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/truth/manifest.json
+```
+
+Pinned identity:
+
+| Property | Expected |
+| --- | --- |
+| Import events | 25,000 |
+| Import files | 10 |
+| Import source bytes | 4,201,238 |
+| Time span | 2025-01-01 12:00:00Z–2025-01-08 12:00:00Z (exactly 7 days) |
+| Time quality | Wall clock |
+| Levels | 24,165 INFO · 460 DEBUG · 256 WARN · 119 ERROR |
+| Generated tree SHA-256 | `d5908dbe2b41d925d49066e397d3bfdecaa0168c1340ea6de8d5c79603ddaea1` |
+
+Long-term golden checks:
+
+| Action | Expected result |
+| --- | --- |
+| Find `FIND_RARE_BEYOND_PAGE` | Finds the event at generation index 250 in `edge/access.jsonl` |
+| Find `FIND_RARE_BEYOND_4K` | Finds the event at generation index 4,500 in `edge/access.jsonl` |
+| Find `FIND_RARE_DEEP` | Finds the event at generation index 20,000 in `edge/access.jsonl` |
+| Bookmark `BOOKMARK_PAGE_BOUNDARY` | Reopens the source event at index 100 |
+| Bookmark `BOOKMARK_EVICT_WINDOW` | Reopens the source event at index 2,500 after residency eviction |
+| Bookmark `BOOKMARK_NEAR_END` | Reopens the source event at index 24,949 |
+| Filter level ERROR | Reports 119 matching events |
+| Search `STACK_TRACE_SENTINEL` | Returns a long multiline stack sample |
+| Search `UTF8_café_λ` | Returns the deterministic UTF-8 sample |
+| Align sources around indices 500/501 | Shows the exact shared timestamp without fabricating a log row |
+| Inspect the primary quiet gap | Affected sources have no events for exactly 100,795 seconds |
+| Seek the final Navigator bucket | Loads a bounded near-end page with the selected row visibly mounted |
+
+The truth manifest additionally records all source counts and hashes, the
+same-second 40-event burst, the exact 90-second skew/late-arrival window,
+rotations, long-line counts, expected lane gaps, and canonical queries. Tests
+regenerate the default profile and compare every checked-in byte, so fixture
+or generator drift fails offline.
 
 ## Import and investigate
 
