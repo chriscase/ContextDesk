@@ -126,6 +126,9 @@ vi.mock("../../lib/host", () => ({
   })),
   hostLogAddBookmark: vi.fn(),
   hostLogDeleteBookmark: vi.fn(),
+  hostLogLoadActiveInvestigation: vi.fn(async () => null),
+  hostLogAddInvestigationEvidence: vi.fn(),
+  hostLogPreviewInvestigationEvidence: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
   agentTurn: vi.fn(async () => []),
@@ -192,6 +195,38 @@ function defaultEventPage(): host.EventPageDto {
     nextCursor: null,
     totalMatched: 2,
     timeQuality: "wall",
+  };
+}
+
+function resolvedInvestigation(
+  item: host.InvestigationEvidenceItemDto,
+  event: host.ExplorerEventDto,
+  status: "verified" | "missing" | "stale" = "verified",
+): host.ResolvedInvestigationDocumentDto {
+  return {
+    document: {
+      schemaVersion: 1,
+      id: "019fa8d0-0000-7000-8000-000000000001",
+      revision: 2,
+      title: "Investigation · fixture",
+      status: "active",
+      corpusLinks: [{ corpusId: "c1" }],
+      evidence: [item],
+      createdAt: 1,
+      updatedAt: 2,
+    },
+    evidence: [
+      {
+        item,
+        references: [
+          {
+            eventRef: item.eventRefs[0]!,
+            status,
+            event: status === "missing" ? null : event,
+          },
+        ],
+      },
+    ],
   };
 }
 
@@ -333,6 +368,7 @@ describe("LogExplorer shell", () => {
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(null);
     vi.mocked(host.hostListChatModels).mockResolvedValue([
       {
         id: "triage-1",
@@ -1590,6 +1626,237 @@ describe("LogExplorer shell", () => {
         .querySelector<HTMLElement>('[data-seq="12"]')
         ?.classList.contains("log-explorer__row--highlight"),
     ).toBe(true);
+  });
+
+  it("prepares a governed chat question from exact selected identities without pasting payloads", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("auth failure"));
+
+    const strip = screen.getByTestId("selection-action-strip");
+    expect(strip.textContent).toContain("1selected");
+    fireEvent.click(
+      within(strip).getByRole("button", { name: "Ask about selection" }),
+    );
+
+    const composer = await screen.findByLabelText("Chat message");
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+    const prompt = (composer as HTMLTextAreaElement).value;
+    expect(prompt).toContain("seq 1 (api.log)");
+    expect(prompt).toContain("governed log tools");
+    expect(prompt).not.toContain("auth failure");
+    expect(screen.getByRole("status").textContent).toContain(
+      "Prepared a governed chat question",
+    );
+  });
+
+  it("saves, reloads, previews, and explicitly reveals durable exact evidence", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const item: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000002",
+      title: "Authentication failure boundary",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [eventRef],
+      createdAt: 2,
+      updatedAt: 2,
+    };
+    const saved = resolvedInvestigation(item, event);
+    vi.mocked(host.hostLogAddInvestigationEvidence).mockResolvedValue(saved);
+    vi.mocked(host.hostLogPreviewInvestigationEvidence).mockResolvedValue({
+      investigationId: saved.document.id,
+      revision: saved.document.revision,
+      item,
+      references: [
+        {
+          eventRef,
+          status: "verified",
+          event,
+        },
+      ],
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(event),
+    );
+
+    const first = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("auth failure"));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Save evidence",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Save selected evidence",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Evidence title"), {
+      target: { value: item.title },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save evidence" }),
+    );
+
+    await waitFor(() =>
+      expect(host.hostLogAddInvestigationEvidence).toHaveBeenCalledWith("c1", {
+        investigationId: null,
+        expectedRevision: null,
+        title: item.title,
+        eventRefs: [eventRef],
+      }),
+    );
+    const evidencePanel = await screen.findByTestId("log-explorer-evidence");
+    expect(evidencePanel.textContent).toContain(item.title);
+    expect(evidencePanel.textContent).toContain("1 event · 1 source");
+
+    fireEvent.click(
+      within(evidencePanel).getByRole("button", { name: "Preview" }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogPreviewInvestigationEvidence).toHaveBeenCalledWith(
+        "c1",
+        saved.document.id,
+        item.id,
+      ),
+    );
+    const preview = screen.getByTestId("evidence-preview");
+    expect(preview.textContent).toContain("current view unchanged");
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="1"]')
+        ?.classList.contains("log-explorer__row--selected"),
+    ).toBe(true);
+
+    fireEvent.click(
+      within(preview).getByRole("button", { name: "Reveal in Explorer" }),
+    );
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: 1 }),
+      ),
+    );
+
+    first.unmount();
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(saved);
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Evidence 1 saved evidence item/,
+      }),
+    );
+    expect(await screen.findByText(item.title)).toBeTruthy();
+  });
+
+  it("revalidates every evidence identity at Reveal time and blocks a changed corpus", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const item: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000003",
+      title: "Evidence changed after load",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [eventRef],
+      createdAt: 2,
+      updatedAt: 2,
+    };
+    const loaded = resolvedInvestigation(item, event);
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(loaded);
+    vi.mocked(host.hostLogPreviewInvestigationEvidence).mockResolvedValue({
+      investigationId: loaded.document.id,
+      revision: loaded.document.revision,
+      item,
+      references: [
+        {
+          eventRef,
+          status: "stale",
+          event: { ...event, source: "moved/api.log" },
+        },
+      ],
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /Evidence 1 saved evidence item/,
+      }),
+    );
+    fireEvent.click(
+      within(await screen.findByTestId(`evidence-item-${item.id}`)).getByRole(
+        "button",
+        { name: "Reveal" },
+      ),
+    );
+
+    expect(
+      await screen.findByText(
+        /Reveal was blocked because the authoritative evidence changed/,
+      ),
+    ).toBeTruthy();
+    expect(screen.getByTestId("evidence-preview").textContent).toContain(
+      "1 changed",
+    );
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+  });
+
+  it("does not let an older Investigation metadata load overwrite a newer save", async () => {
+    const event = defaultEventPage().events[0]!;
+    const eventRef: host.LogBookmarkEventRefDto = {
+      corpusId: "c1",
+      seq: event.seq,
+      source: event.source,
+      timestampHint: event.ts,
+      timeQualityHint: event.timeQuality,
+    };
+    const item: host.InvestigationEvidenceItemDto = {
+      id: "019fa8d0-0000-7000-8000-000000000004",
+      title: "Newly saved evidence wins",
+      provenance: "human",
+      corpusId: "c1",
+      eventRefs: [eventRef],
+      createdAt: 2,
+      updatedAt: 2,
+    };
+    const staleLoad =
+      deferred<host.ResolvedInvestigationDocumentDto | null>();
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockReturnValue(
+      staleLoad.promise,
+    );
+    vi.mocked(host.hostLogAddInvestigationEvidence).mockResolvedValue(
+      resolvedInvestigation(item, event),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("auth failure"));
+    fireEvent.click(screen.getByRole("button", { name: "Save evidence" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Save selected evidence",
+    });
+    fireEvent.change(within(dialog).getByLabelText("Evidence title"), {
+      target: { value: item.title },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save evidence" }),
+    );
+    expect(await screen.findByText(item.title)).toBeTruthy();
+
+    await act(async () => {
+      staleLoad.resolve(null);
+      await staleLoad.promise;
+    });
+    expect(screen.getByText(item.title)).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-evidence")).toBeTruthy();
   });
 
   it.each([

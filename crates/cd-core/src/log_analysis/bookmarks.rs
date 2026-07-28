@@ -430,7 +430,14 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
     add_range_bookmark_to_root(corpus.root(), new)
 }
 
-fn canonicalize_event_refs(
+/// Resolve a bounded exact event set against authoritative corpus rows.
+///
+/// The returned identities are payload-free, sorted, and deduplicated. Every
+/// requested identity must belong to `corpus` and still match its source, time,
+/// and time-quality hints. This function never reads or writes bookmark
+/// serialization; durable investigation evidence reuses it as a trusted
+/// validation boundary.
+pub fn canonicalize_exact_event_refs(
     corpus: &LogCorpus,
     requested: Vec<BookmarkEventRef>,
 ) -> CoreResult<Vec<BookmarkEventRef>> {
@@ -516,7 +523,7 @@ fn exact_sets_equal(left: &[BookmarkEventRef], right: &[BookmarkEventRef]) -> bo
 
 /// Create an exact evidence bookmark after trusted-core identity validation.
 pub fn add_evidence_bookmark(corpus: &LogCorpus, new: NewEvidenceBookmark) -> CoreResult<Bookmark> {
-    let event_refs = canonicalize_event_refs(corpus, new.event_refs)?;
+    let event_refs = canonicalize_exact_event_refs(corpus, new.event_refs)?;
     let _guard = mutation_guard()?;
     let mut all = list_bookmarks(corpus)?;
     if let Some(existing) = all

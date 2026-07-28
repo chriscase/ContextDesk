@@ -18,9 +18,12 @@ import {
   hostCancelLogSearch,
   hostGetLogCorpus,
   hostLogAddBookmark,
+  hostLogAddInvestigationEvidence,
   hostLogDeleteBookmark,
   hostLogFacets,
+  hostLogLoadActiveInvestigation,
   hostLogListBookmarks,
+  hostLogPreviewInvestigationEvidence,
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
@@ -30,8 +33,10 @@ import {
   type EventQueryDto,
   type ExplorerEventDto,
   type LogBookmarkDto,
+  type LogBookmarkEventRefDto,
   type LogCorpusSummaryDto,
   type LogFacetsDto,
+  type ResolvedInvestigationDocumentDto,
   type TimeQuality,
 } from "../../lib/host";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
@@ -95,6 +100,14 @@ import {
   HELP_TIME_LINK,
 } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
+import {
+  EvidencePanel,
+  InvestigationModeControl,
+  type EvidenceItemView,
+  type EvidencePreviewView,
+  type InvestigationRailMode,
+} from "./EvidencePanel";
+import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
 import {
   centeredLiteralExcerpt,
@@ -587,6 +600,30 @@ function utcDraft(value: number | null): string {
   return new Date(value * 1000).toISOString();
 }
 
+function investigationEvidenceViews(
+  resolved: ResolvedInvestigationDocumentDto | null,
+): EvidenceItemView[] {
+  if (!resolved) return [];
+  return resolved.evidence.map(({ item, references }) => {
+    const evidenceStatus = references.some(
+      (reference) => reference.status === "missing",
+    )
+      ? "missing"
+      : references.some((reference) => reference.status === "stale")
+        ? "stale"
+        : "verified";
+    return {
+      id: item.id,
+      title: item.title,
+      eventRefs: item.eventRefs,
+      evidenceStatus,
+      createdAt: item.createdAt,
+      provenanceLabel:
+        item.provenance === "human" ? "Saved manually" : "Saved evidence",
+    };
+  });
+}
+
 export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
@@ -667,6 +704,21 @@ export function LogExplorer({ corpusId }: Props) {
   const [alignedScrollTop, setAlignedScrollTop] = useState(0);
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
+  const [investigation, setInvestigation] =
+    useState<ResolvedInvestigationDocumentDto | null>(null);
+  const [investigationMode, setInvestigationMode] =
+    useState<InvestigationRailMode>("chat");
+  const [investigationBusy, setInvestigationBusy] = useState(false);
+  const [investigationError, setInvestigationError] = useState<string | null>(
+    null,
+  );
+  const [evidencePreview, setEvidencePreview] =
+    useState<EvidencePreviewView | null>(null);
+  const [saveEvidenceOpen, setSaveEvidenceOpen] = useState(false);
+  const [chatDraftRequest, setChatDraftRequest] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
   const [findDraft, setFindDraft] = useState("");
   const [findMatchMode, setFindMatchMode] =
     useState<SearchMatchMode>("literal");
@@ -766,11 +818,14 @@ export function LogExplorer({ corpusId }: Props) {
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
   const filtersCollapseRef = useRef<HTMLButtonElement>(null);
   const filtersReopenRef = useRef<HTMLButtonElement>(null);
+  const saveEvidenceTriggerRef = useRef<HTMLButtonElement>(null);
+  const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const laneSourceRequestRef = useRef(0);
   const eventsRequestRef = useRef(0);
+  const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
   const activeFindRequestRef = useRef<string | null>(null);
   const findActiveRef = useRef(false);
@@ -937,9 +992,13 @@ export function LogExplorer({ corpusId }: Props) {
       queueMicrotask(() => findInputRef.current?.focus());
     } else if (narrowChatOpen) {
       queueMicrotask(() => {
-        rootRef.current
-          ?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]')
-          ?.focus();
+        const root = rootRef.current;
+        (
+          root?.querySelector<HTMLElement>('[data-testid="new-linked-chat"]') ??
+          root?.querySelector<HTMLElement>(
+            '.log-explorer__investigation-mode-option[aria-pressed="true"]',
+          )
+        )?.focus();
       });
     }
   }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
@@ -1089,6 +1148,7 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const refreshMeta = useCallback(async () => {
+    const investigationRequest = ++investigationLoadRequestRef.current;
     try {
       const s = await hostGetLogCorpus(corpusId);
       setSummary(s);
@@ -1096,6 +1156,17 @@ export function LogExplorer({ corpusId }: Props) {
       await hostSetActiveLogCorpus(corpusId);
       const bms = await hostLogListBookmarks(corpusId);
       setBookmarks(bms ?? []);
+      try {
+        const activeInvestigation =
+          await hostLogLoadActiveInvestigation(corpusId);
+        if (investigationRequest !== investigationLoadRequestRef.current) {
+          return;
+        }
+        setInvestigation(activeInvestigation);
+        setInvestigationError(null);
+      } catch (investigationLoadError) {
+        setInvestigationError(String(investigationLoadError));
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -1936,15 +2007,15 @@ export function LogExplorer({ corpusId }: Props) {
     }
   };
 
-  const bookmarkSelection = async () => {
+  const selectedEvidenceRefs = (): {
+    seqs: number[];
+    eventRefs: LogBookmarkEventRefDto[];
+  } | null => {
     const seqs = [...selected].sort((a, b) => a - b);
     if (seqs.length === 0 && detail) seqs.push(detail.seq);
     if (seqs.length === 0) {
-      setStatus("Select a row (or focus detail) then press B to bookmark");
-      return;
+      return null;
     }
-    const from = seqs[0]!;
-    const to = seqs[seqs.length - 1]!;
     const residentBySeq = new Map(
       Object.values(laneEvents)
         .flat()
@@ -1952,18 +2023,31 @@ export function LogExplorer({ corpusId }: Props) {
     );
     const selectedEvents = seqs.map((seq) => residentBySeq.get(seq));
     if (selectedEvents.some((event) => !event)) {
-      setStatus(
-        "Selection changed before it could be saved — reselect the evidence",
-      );
-      return;
+      return null;
     }
-    const eventRefs = selectedEvents.map((event) => ({
+    const eventRefs: LogBookmarkEventRefDto[] = selectedEvents.map((event) => ({
       corpusId,
       seq: event!.seq,
       source: event!.source,
       timestampHint: event!.ts,
       timeQualityHint: event!.timeQuality,
     }));
+    return { seqs, eventRefs };
+  };
+
+  const bookmarkSelection = async () => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setStatus(
+        selected.size === 0 && !detail
+          ? "Select a row (or focus detail) then press B to bookmark"
+          : "Selection changed before it could be bookmarked — reselect the evidence",
+      );
+      return;
+    }
+    const { seqs, eventRefs } = selection;
+    const from = seqs[0]!;
+    const to = seqs[seqs.length - 1]!;
     const contiguous = seqs.every(
       (seq, index) => index === 0 || seq === seqs[index - 1]! + 1,
     );
@@ -2017,6 +2101,116 @@ export function LogExplorer({ corpusId }: Props) {
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  const openSaveEvidence = () => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setStatus(
+        selected.size === 0 && !detail
+          ? "Select one or more visible rows before saving evidence"
+          : "Selection changed before it could be saved — reselect the evidence",
+      );
+      return;
+    }
+    setInvestigationError(null);
+    setSaveEvidenceOpen(true);
+  };
+
+  const saveSelectedEvidence = async (title: string) => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setSaveEvidenceOpen(false);
+      return;
+    }
+    const priorEvidenceCount = investigation?.document.evidence.length ?? 0;
+    // A slower metadata request must not replace the revision returned here.
+    investigationLoadRequestRef.current += 1;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const updated = await hostLogAddInvestigationEvidence(corpusId, {
+        investigationId: investigation?.document.id ?? null,
+        expectedRevision: investigation?.document.revision ?? null,
+        title,
+        eventRefs: selection.eventRefs,
+      });
+      setInvestigation(updated);
+      setEvidencePreview(null);
+      setSaveEvidenceOpen(false);
+      setInvestigationMode("evidence");
+      setChatCollapsed(false);
+      window.setTimeout(() => {
+        rootRef.current
+          ?.querySelector<HTMLElement>(
+            '.log-explorer__investigation-mode-option[aria-pressed="true"]',
+          )
+          ?.focus();
+      }, 0);
+      if (breakpoint === "narrow") {
+        setNarrowFiltersOpen(false);
+        setNarrowChatOpen(true);
+      }
+      const nextEvidenceCount = updated.document.evidence.length;
+      setStatus(
+        nextEvidenceCount === priorEvidenceCount
+          ? "That exact evidence set is already saved"
+          : `Saved ${selection.eventRefs.length} exact event ${
+              selection.eventRefs.length === 1 ? "identity" : "identities"
+            } to Investigation`,
+      );
+    } catch (saveError) {
+      const message = String(saveError);
+      setInvestigationError(message);
+      if (message.toLowerCase().includes("stale investigation revision")) {
+        try {
+          setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        } catch {
+          // Keep the original optimistic-concurrency error visible.
+        }
+      }
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const askAboutSelection = () => {
+    const selection = selectedEvidenceRefs();
+    if (!selection) {
+      setStatus(
+        selected.size === 0 && !detail
+          ? "Select one or more visible rows before asking about them"
+          : "Selection changed before it could be investigated — reselect the evidence",
+      );
+      return;
+    }
+    const promptRefs = selection.eventRefs.slice(0, 32);
+    const identities = promptRefs
+      .map((eventRef) => `seq ${eventRef.seq} (${eventRef.source})`)
+      .join(", ");
+    const boundedNotice =
+      promptRefs.length < selection.eventRefs.length
+        ? ` This prompt names the first ${promptRefs.length} of ${selection.eventRefs.length} selected identities to keep context bounded; ask me to narrow the selection before claiming anything about the remainder.`
+        : "";
+    chatDraftRequestIdRef.current += 1;
+    setChatDraftRequest({
+      id: chatDraftRequestIdRef.current,
+      text:
+        `Investigate these selected log event identities: ${identities}. ` +
+        "Retrieve the authoritative events with governed log tools, explain the strongest supported relationship or anomaly, and cite exact seq, source, and timestamp evidence. Do not infer beyond retrieved evidence." +
+        boundedNotice,
+    });
+    setInvestigationMode("chat");
+    setChatCollapsed(false);
+    if (breakpoint === "narrow") {
+      setNarrowFiltersOpen(false);
+      setNarrowChatOpen(true);
+    }
+    setStatus(
+      `Prepared a governed chat question for ${selection.eventRefs.length} selected ${
+        selection.eventRefs.length === 1 ? "event" : "events"
+      }`,
+    );
   };
 
   const onKeyDown = (ev: ReactKeyboardEvent) => {
@@ -2257,6 +2451,105 @@ export function LogExplorer({ corpusId }: Props) {
       setRevealRestore(null);
       setBookmarkRevealState("idle");
       setStatus("Restored prior Explorer view");
+    }
+  };
+
+  const previewInvestigationEvidence = async (item: EvidenceItemView) => {
+    if (!investigation) return;
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      const preview = await hostLogPreviewInvestigationEvidence(
+        corpusId,
+        investigation.document.id,
+        item.id,
+      );
+      const events = preview.references.flatMap((reference) =>
+        reference.event ? [reference.event] : [],
+      );
+      setEvidencePreview({
+        evidenceId: item.id,
+        events,
+        missingCount: preview.references.filter(
+          (reference) => reference.status === "missing",
+        ).length,
+        staleCount: preview.references.filter(
+          (reference) => reference.status === "stale",
+        ).length,
+      });
+      setStatus(
+        `Previewed ${events.length} authoritative event${
+          events.length === 1 ? "" : "s"
+        } without changing the Explorer view`,
+      );
+    } catch (previewError) {
+      setInvestigationError(String(previewError));
+    } finally {
+      setInvestigationBusy(false);
+    }
+  };
+
+  const revealInvestigationEvidence = async (item: EvidenceItemView) => {
+    if (
+      !investigation ||
+      item.evidenceStatus !== "verified" ||
+      item.eventRefs.length === 0
+    ) {
+      setInvestigationError(
+        "Evidence must have fully verified event identities before it can change the Explorer view",
+      );
+      return;
+    }
+    setInvestigationBusy(true);
+    setInvestigationError(null);
+    try {
+      // Apply is a fresh trust-boundary check, not a promise based on the
+      // status observed when the rail first loaded.
+      const current = await hostLogPreviewInvestigationEvidence(
+        corpusId,
+        investigation.document.id,
+        item.id,
+      );
+      const missingCount = current.references.filter(
+        (reference) => reference.status === "missing",
+      ).length;
+      const staleCount = current.references.filter(
+        (reference) => reference.status === "stale",
+      ).length;
+      if (missingCount > 0 || staleCount > 0) {
+        setEvidencePreview({
+          evidenceId: item.id,
+          events: current.references.flatMap((reference) =>
+            reference.event ? [reference.event] : [],
+          ),
+          missingCount,
+          staleCount,
+        });
+        setInvestigationError(
+          "Reveal was blocked because the authoritative evidence changed after the rail loaded",
+        );
+        setInvestigation(await hostLogLoadActiveInvestigation(corpusId));
+        return;
+      }
+      const eventRefs = current.item.eventRefs;
+      if (eventRefs.length === 0) {
+        throw new Error("Authoritative evidence preview returned no identities");
+      }
+      const seqs = eventRefs.map((eventRef) => eventRef.seq);
+      await activateBookmark({
+        id: item.id,
+        label: item.title,
+        seqFrom: Math.min(...seqs),
+        seqTo: Math.max(...seqs),
+        eventRefs,
+        evidenceStatus: "verified",
+        createdAt: item.createdAt,
+        updatedAt: item.createdAt,
+      });
+    } catch (revealError) {
+      setInvestigationError(String(revealError));
+    } finally {
+      setInvestigationBusy(false);
     }
   };
 
@@ -2655,6 +2948,26 @@ export function LogExplorer({ corpusId }: Props) {
     filters,
   );
   const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
+  const evidenceItems = investigationEvidenceViews(investigation);
+  const chooseInvestigationMode = (mode: InvestigationRailMode) => {
+    setInvestigationMode(mode);
+    setInvestigationError(null);
+    queueMicrotask(() => {
+      rootRef.current
+        ?.querySelector<HTMLElement>(
+          `.log-explorer__investigation-mode-option[aria-pressed="true"]`,
+        )
+        ?.focus();
+    });
+  };
+  const investigationModeControl = (
+    <InvestigationModeControl
+      mode={investigationMode}
+      evidenceCount={evidenceItems.length}
+      chatCount={chatSummary.chatCount}
+      onChange={chooseInvestigationMode}
+    />
+  );
 
   return (
     <div
@@ -3043,15 +3356,22 @@ export function LogExplorer({ corpusId }: Props) {
             className={`log-explorer__btn ${narrowChatOpen ? "log-explorer__btn--active" : ""}`}
             data-testid="narrow-chat-toggle"
             aria-expanded={narrowChatOpen}
-            aria-controls="log-explorer-chat-panel"
+            aria-controls="log-explorer-investigation-panel"
             onClick={() => {
               setNarrowChatOpen((o) => !o);
               setNarrowFiltersOpen(false);
             }}
           >
-            Chat
-            {chatSummary.chatCount > 0 ? ` (${chatSummary.chatCount})` : ""}
-            {chatSummary.hasActiveChat ? " · active" : ""}
+            Investigation ·{" "}
+            {investigationMode === "evidence" ? "Evidence" : "Chat"}
+            {investigationMode === "evidence" && evidenceItems.length > 0
+              ? ` (${evidenceItems.length})`
+              : investigationMode === "chat" && chatSummary.chatCount > 0
+                ? ` (${chatSummary.chatCount})`
+                : ""}
+            {investigationMode === "chat" && chatSummary.hasActiveChat
+              ? " · active"
+              : ""}
             {chatSummary.busy ? " · working" : ""}
           </button>
         </div>
@@ -3747,6 +4067,39 @@ export function LogExplorer({ corpusId }: Props) {
           data-testid="log-explorer-lanes"
           style={breakpoint === "narrow" ? undefined : { gridColumn: 3 }}
         >
+          {selected.size > 0 ? (
+            <div
+              className="log-explorer__selection-strip"
+              data-testid="selection-action-strip"
+              aria-label={`${selected.size} selected log ${
+                selected.size === 1 ? "event" : "events"
+              }`}
+            >
+              <div className="log-explorer__selection-summary">
+                <span className="log-explorer__selection-count">
+                  {selected.size}
+                </span>
+                selected
+              </div>
+              <div className="log-explorer__selection-actions">
+                <button
+                  type="button"
+                  className="log-explorer__btn"
+                  onClick={askAboutSelection}
+                >
+                  Ask about selection
+                </button>
+                <button
+                  ref={saveEvidenceTriggerRef}
+                  type="button"
+                  className="log-explorer__btn log-explorer__btn--active"
+                  onClick={openSaveEvidence}
+                >
+                  Save evidence
+                </button>
+              </div>
+            </div>
+          ) : null}
           <div className="log-explorer__lane-strip">
             <TimelineNavigator
               corpusId={corpusId}
@@ -4185,6 +4538,9 @@ export function LogExplorer({ corpusId }: Props) {
           corpusName={summary?.name ?? corpusId.slice(0, 8)}
           agentContext={agentContext}
           onApplyNav={applyNav}
+          visible={investigationMode === "chat"}
+          modeControl={investigationModeControl}
+          externalDraftRequest={chatDraftRequest}
           compactLayout={breakpoint === "narrow"}
           collapsed={breakpoint !== "narrow" && chatCollapsed}
           desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
@@ -4196,7 +4552,52 @@ export function LogExplorer({ corpusId }: Props) {
             queueMicrotask(() => narrowChatToggleRef.current?.focus());
           }}
         />
+        {investigationMode === "evidence" ? (
+          <EvidencePanel
+            modeControl={investigationModeControl}
+            items={evidenceItems}
+            preview={evidencePreview}
+            busy={investigationBusy}
+            error={investigationError}
+            compactLayout={breakpoint === "narrow"}
+            collapsed={breakpoint !== "narrow" && chatCollapsed}
+            desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
+            onPreview={(item) => void previewInvestigationEvidence(item)}
+            onReveal={(item) => void revealInvestigationEvidence(item)}
+            onClearPreview={() => setEvidencePreview(null)}
+            onToggleCollapsed={() =>
+              setChatCollapsed((collapsed) => !collapsed)
+            }
+            onRequestClose={() => {
+              setNarrowChatOpen(false);
+              queueMicrotask(() => narrowChatToggleRef.current?.focus());
+            }}
+          />
+        ) : null}
       </div>
+
+      {saveEvidenceOpen ? (
+        <SaveEvidenceDialog
+          eventCount={selectedEvidenceRefs()?.eventRefs.length ?? 0}
+          sourceCount={
+            new Set(
+              (selectedEvidenceRefs()?.eventRefs ?? []).map(
+                (eventRef) => eventRef.source,
+              ),
+            ).size
+          }
+          defaultTitle={
+            selected.size === 1
+              ? `Evidence · seq ${[...selected][0]}`
+              : `Evidence · ${selected.size} selected events`
+          }
+          busy={investigationBusy}
+          error={investigationError}
+          triggerRef={saveEvidenceTriggerRef}
+          onSave={(title) => void saveSelectedEvidence(title)}
+          onDismiss={() => setSaveEvidenceOpen(false)}
+        />
+      ) : null}
 
       <div className="log-explorer__status" role="status">
         {error ? `Error: ${error}` : status}

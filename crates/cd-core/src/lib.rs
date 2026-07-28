@@ -31,6 +31,7 @@ pub mod http_preset;
 pub mod index;
 pub mod index_watch;
 pub mod injection;
+pub mod investigations;
 /// Keychain / in-memory credential store (module name avoids gitignore `*secret*`).
 pub mod keychain_store;
 pub mod log_analysis;

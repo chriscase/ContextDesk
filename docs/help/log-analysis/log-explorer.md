@@ -1,7 +1,7 @@
 ---
 id: log-explorer
 title: Log Explorer investigation workspace
-summary: Open a multi-window (or in-app) explorer on a DuckDB corpus for filters, lanes, bookmarks, and corpus-linked chat.
+summary: Open a multi-window (or in-app) explorer on a DuckDB corpus for filters, lanes, durable evidence, bookmarks, and corpus-linked chat.
 section: log-analysis
 tags:
   - logs
@@ -33,11 +33,12 @@ import/export, and open investigation. It is not a million-row browser.
 | Find vs Filter | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist |
 | Counts | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total |
 | Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
+| Investigation evidence | Selecting rows reveals **Ask about selection** and **Save evidence**. Saved exact identities live outside disposable corpus caches, survive chat deletion, and can be previewed without changing the Explorer before an explicit reveal |
 | Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; a local **Retry** appears only after a page failure |
 | Timestamps | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time |
 | Columns | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally |
 | Long lines | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event |
-| Narrow layout | Logs remain primary and single-lane. Filters and Chat open intentionally as keyboard-safe drawers with state summaries and focus restoration |
+| Narrow layout | Logs remain primary and single-lane. Filters and Investigation (Evidence/Chat) open intentionally as keyboard-safe drawers with state summaries and focus restoration |
 | Evidence lanes | 1–4 user-composed source groups. The same source may appear in more than one lane |
 | Time-link modes | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets |
 | Timeline navigator | Closed by default and does no work until opened. A hard-capped backend summary shows the full filtered span; click a bar or release the position slider to load one bounded event neighborhood |
@@ -133,6 +134,39 @@ A bookmark points to a stable event or range. Activating it resolves the target
 directly. If current filters or lane membership hide it, Explorer clearly
 offers a temporary reveal and a way to restore the prior view.
 
+## Investigation evidence
+
+Selecting one or more resident rows opens a small contextual action strip.
+**Ask about selection** prepares a tool-grounded chat prompt containing only
+stable event identities (sequence and relative source), not copied messages or
+raw payloads. You can edit the prompt before sending it.
+
+**Save evidence** creates or updates the corpus-linked Investigation. Give the
+selection a concise human title. The durable record stores exact payload-free
+event references and human provenance outside the disposable corpus cache.
+It does not depend on a chat and is not removed when chats are switched,
+archived, or deleted.
+
+Use the **Investigation** selector in the right rail to move between **Evidence**
+and **Chat**. Evidence cards report event/source counts and current identity
+health:
+
+- **Verified** means corpus, sequence, relative source, timestamp, and time
+  quality still match.
+- **Changed** means the sequence exists but its identity hints differ.
+- **Missing** means that sequence is no longer present.
+
+**Preview** reloads a bounded set of authoritative rows and does not change
+filters, lanes, selection, highlights, or scroll position. **Reveal in
+Explorer** is a separate explicit action and is blocked for changed or missing
+evidence. A reveal reuses the bookmark navigation contract, including
+**Restore prior view** when filters or lane composition must be temporarily
+broadened.
+
+This is the durable evidence foundation. Human findings, cited notes, richer
+finding lifecycles, and report assembly are still distinct follow-on
+investigation features; the Evidence rail does not claim they exist yet.
+
 ## Agent context
 
 Each linked-chat turn captures a small, immutable snapshot when the turn starts:
@@ -216,8 +250,11 @@ the Explorer then labels semantic search available.
 
 ## Bookmarks and packages
 
-Bookmarks live under the corpus cache as `bookmarks.json`. Portable package v1
-does **not** export bookmarks (by design). New selections retain exact event
+Bookmarks live under the corpus cache as `bookmarks.json`. Durable
+Investigation evidence lives under the application configuration root in a
+versioned `investigations` store; it is independent of bookmarks and chats.
+Portable package v1 does **not** export either artifact (by design). New
+selections retain exact event
 membership using payload-free corpus, sequence, source, and time-quality hints.
 ContextDesk revalidates those references when the corpus reopens and visibly
 marks missing or stale evidence instead of opening an unrelated row. Older range
