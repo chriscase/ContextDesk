@@ -74,6 +74,11 @@ pub use branding::{Branding, DEFAULT_PRODUCT_NAME, DEFAULT_SLUG};
 pub use build_identity::{BuildChannel, BuildIdentity};
 pub use error::{CoreError, CoreResult};
 pub use events::{StreamEvent, ToolPhase};
+pub use investigations::{
+    AddFindingInput, AddNoteInput, EditFindingInput, EditNoteInput, FindingItem, FindingKind,
+    FindingLifecycle, HumanProvenance, InvestigationDocument, InvestigationStore,
+    InvestigationSummary, NoteItem, ResolvedInvestigationDocument,
+};
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
 pub use providers::{
     descriptor_for, ProviderConfig, ProviderDescriptor, ProviderKind, ProviderProfile,
