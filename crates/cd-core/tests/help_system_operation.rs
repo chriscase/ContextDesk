@@ -46,7 +46,7 @@ fn system_operation_help_covers_model_boundaries_with_accessible_assets() {
     }
 
     for literal in [
-        "## Ordinary chat and linked Log Explorer chat",
+        "## Ordinary chat, attached log context, and linked Explorer chat",
         "## How each source can participate",
         "Workspace and Markdown",
         "SQLite or Postgres",
