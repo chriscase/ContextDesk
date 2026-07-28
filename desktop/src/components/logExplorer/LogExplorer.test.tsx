@@ -555,8 +555,14 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
     const body = screen.getByTestId("log-explorer-body");
+    const modeControl = screen
+      .getByTestId("log-explorer-chat")
+      .querySelector<HTMLElement>(
+        ":scope > .log-explorer__investigation-mode-control",
+      );
 
     expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    expect(modeControl!.style.paddingLeft).toBe("1.65rem");
     expect(screen.getByTestId("splitter-chat")).toBeTruthy();
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
 

@@ -1139,7 +1139,10 @@ export function LinkedChatRail({
       aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
       {modeControl ? (
-        <div className="log-explorer__investigation-mode-control">
+        <div
+          className="log-explorer__investigation-mode-control"
+          style={compactLayout ? undefined : { paddingLeft: "1.65rem" }}
+        >
           {modeControl}
         </div>
       ) : null}
