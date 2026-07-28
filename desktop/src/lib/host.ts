@@ -1867,11 +1867,27 @@ export type LogBookmarkDto = {
   seqTo: number;
   tsFrom?: number | null;
   tsTo?: number | null;
+  eventRefs?: LogBookmarkEventRefDto[];
+  evidenceStatus?: LogBookmarkEvidenceStatus;
   color?: string | null;
   note?: string | null;
   createdAt: number;
   updatedAt: number;
 };
+
+export type LogBookmarkEventRefDto = {
+  corpusId: string;
+  seq: number;
+  source: string;
+  timestampHint: number;
+  timeQualityHint: TimeQuality;
+};
+
+export type LogBookmarkEvidenceStatus =
+  | "legacy_range"
+  | "verified"
+  | "missing"
+  | "stale";
 
 export async function hostLogQueryEvents(
   corpusId: string,
@@ -2034,6 +2050,7 @@ export async function hostLogAddBookmark(
   args: {
     seqFrom: number;
     seqTo: number;
+    eventRefs?: LogBookmarkEventRefDto[];
     label: string;
     note?: string | null;
     color?: string | null;
@@ -2047,6 +2064,7 @@ export async function hostLogAddBookmark(
       corpusId,
       seqFrom: args.seqFrom,
       seqTo: args.seqTo,
+      eventRefs: args.eventRefs ?? [],
       label: args.label,
       note: args.note ?? null,
       color: args.color ?? null,

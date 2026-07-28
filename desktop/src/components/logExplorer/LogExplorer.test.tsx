@@ -1434,6 +1434,186 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByText(/Jumped bookmark/i)).toBeNull();
   });
 
+  it("saves and highlights an exact noncontiguous evidence set without intervening rows", async () => {
+    const sharedTs = 1_700_000_100;
+    const events: host.ExplorerEventDto[] = [
+      {
+        seq: 10,
+        ts: sharedTs,
+        timeQuality: "wall",
+        level: "error",
+        service: "api",
+        host: null,
+        templateId: 10,
+        traceId: null,
+        message: "first selected clue",
+        source: "api.log",
+      },
+      {
+        seq: 11,
+        ts: sharedTs + 1,
+        timeQuality: "wall",
+        level: "info",
+        service: "api",
+        host: null,
+        templateId: 11,
+        traceId: null,
+        message: "intervening unselected event",
+        source: "api.log",
+      },
+      {
+        seq: 12,
+        ts: sharedTs,
+        timeQuality: "wall",
+        level: "warn",
+        service: "worker",
+        host: null,
+        templateId: 12,
+        traceId: null,
+        message: "second selected clue at duplicate timestamp",
+        source: "worker.log",
+      },
+    ];
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: { "api.log": 2, "worker.log": 1 },
+      levels: { error: 1, info: 1, warn: 1 },
+      services: { api: 2, worker: 1 },
+      hosts: {},
+      timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue({
+      ...defaultEventPage(),
+      events,
+      totalMatched: events.length,
+    });
+    const eventRefs: host.LogBookmarkEventRefDto[] = [events[0]!, events[2]!].map(
+      (event) => ({
+        corpusId: "c1",
+        seq: event.seq,
+        source: event.source,
+        timestampHint: event.ts,
+        timeQualityHint: event.timeQuality,
+      }),
+    );
+    vi.mocked(host.hostLogAddBookmark).mockResolvedValue({
+      id: "bm-exact",
+      label: "2 selected events",
+      seqFrom: 10,
+      seqTo: 12,
+      eventRefs,
+      evidenceStatus: "verified",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockResolvedValue(
+      eventNeighborhood(events[0]!),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByText("first selected clue"));
+    fireEvent.click(
+      screen.getByText("second selected clue at duplicate timestamp"),
+      { metaKey: true },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+
+    await waitFor(() =>
+      expect(host.hostLogAddBookmark).toHaveBeenCalledWith("c1", {
+        seqFrom: 10,
+        seqTo: 12,
+        eventRefs,
+        label: "2 selected events",
+      }),
+    );
+    expect(
+      vi.mocked(host.hostLogAddBookmark).mock.calls[0]![1].eventRefs?.map(
+        (eventRef) => eventRef.seq,
+      ),
+    ).toEqual([10, 12]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    await screen.findByText("Already bookmarked: 2 selected events");
+    expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(await screen.findByTestId("bookmark-activate-bm-exact"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: 10 }),
+      ),
+    );
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="10"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="11"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(false);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="12"]')
+        ?.classList.contains("log-explorer__row--highlight"),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      evidenceStatus: "missing" as const,
+      visibleStatus: "Missing",
+      message: "Bookmark evidence is missing from this corpus",
+    },
+    {
+      evidenceStatus: "stale" as const,
+      visibleStatus: "Stale",
+      message: "Bookmark evidence identity no longer matches this corpus",
+    },
+  ])(
+    "keeps $evidenceStatus exact evidence visible and refuses unrelated navigation",
+    async ({ evidenceStatus, visibleStatus, message }) => {
+      const target = defaultEventPage().events[0]!;
+      vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+        {
+          id: `bm-${evidenceStatus}`,
+          label: "durable exact clue",
+          seqFrom: target.seq,
+          seqTo: target.seq,
+          eventRefs: [
+            {
+              corpusId: "c1",
+              seq: target.seq,
+              source: target.source,
+              timestampHint: target.ts,
+              timeQualityHint: target.timeQuality,
+            },
+          ],
+          evidenceStatus,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ]);
+
+      render(<LogExplorer corpusId="c1" />);
+      expect(
+        (
+          await screen.findByTestId(
+            `bookmark-evidence-status-bm-${evidenceStatus}`,
+          )
+        ).textContent,
+      ).toContain(visibleStatus);
+      fireEvent.click(
+        screen.getByTestId(`bookmark-activate-bm-${evidenceStatus}`),
+      );
+      expect(screen.getByRole("status").textContent).toContain(message);
+      expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+      expect(
+        screen.getByTestId(`bookmark-activate-bm-${evidenceStatus}`),
+      ).toBeTruthy();
+    },
+  );
+
   it("temporarily composes the correct lane for a bookmark outside all visible lanes", async () => {
     const target: host.ExplorerEventDto = {
       seq: 77,

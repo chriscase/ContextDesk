@@ -1942,9 +1942,49 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const from = seqs[0]!;
     const to = seqs[seqs.length - 1]!;
-    const existing = bookmarks.find(
-      (bookmark) => bookmark.seqFrom === from && bookmark.seqTo === to,
+    const residentBySeq = new Map(
+      Object.values(laneEvents)
+        .flat()
+        .map((event) => [event.seq, event] as const),
     );
+    const selectedEvents = seqs.map((seq) => residentBySeq.get(seq));
+    if (selectedEvents.some((event) => !event)) {
+      setStatus(
+        "Selection changed before it could be saved — reselect the evidence",
+      );
+      return;
+    }
+    const eventRefs = selectedEvents.map((event) => ({
+      corpusId,
+      seq: event!.seq,
+      source: event!.source,
+      timestampHint: event!.ts,
+      timeQualityHint: event!.timeQuality,
+    }));
+    const contiguous = seqs.every(
+      (seq, index) => index === 0 || seq === seqs[index - 1]! + 1,
+    );
+    const oneSource = new Set(eventRefs.map((event) => event.source)).size === 1;
+    const exactKey = (refs: typeof eventRefs) =>
+      refs
+        .map(
+          (event) =>
+            `${event.corpusId}\u0000${event.seq}\u0000${event.source}\u0000${event.timestampHint}\u0000${event.timeQualityHint}`,
+        )
+        .sort()
+        .join("\u0001");
+    const selectedKey = exactKey(eventRefs);
+    const existing = bookmarks.find((bookmark) => {
+      if (bookmark.eventRefs?.length) {
+        return exactKey(bookmark.eventRefs) === selectedKey;
+      }
+      return (
+        contiguous &&
+        oneSource &&
+        bookmark.seqFrom === from &&
+        bookmark.seqTo === to
+      );
+    });
     if (existing) {
       setStatus(`Already bookmarked: ${existing.label}`);
       return;
@@ -1953,9 +1993,13 @@ export function LogExplorer({ corpusId }: Props) {
       const bm = await hostLogAddBookmark(corpusId, {
         seqFrom: from,
         seqTo: to,
-        label: from === to ? `seq ${from}` : `seq ${from}–${to}`,
-        tsFrom: detail?.ts ?? null,
-        tsTo: detail?.ts ?? null,
+        eventRefs,
+        label:
+          from === to
+            ? `seq ${from}`
+            : contiguous
+              ? `seq ${from}–${to}`
+              : `${seqs.length} selected events`,
       });
       setBookmarks((current) =>
         current.some((bookmark) => bookmark.id === bm.id)
@@ -2037,13 +2081,26 @@ export function LogExplorer({ corpusId }: Props) {
 
   /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
   const activateBookmark = async (b: LogBookmarkDto) => {
-    const seq = b.seqFrom;
+    if (b.evidenceStatus === "missing" || b.evidenceStatus === "stale") {
+      setBookmarkRevealState("missing");
+      setStatus(
+        b.evidenceStatus === "missing"
+          ? `Bookmark evidence is missing from this corpus: ${b.label}`
+          : `Bookmark evidence identity no longer matches this corpus: ${b.label}`,
+      );
+      return;
+    }
+    const exactRefs = b.eventRefs ?? [];
+    const targetRef = exactRefs[0];
+    const seq = targetRef?.seq ?? b.seqFrom;
     setHighlight(
       new Set(
-        Array.from(
-          { length: Math.max(1, b.seqTo - b.seqFrom + 1) },
-          (_, i) => b.seqFrom + i,
-        ),
+        exactRefs.length > 0
+          ? exactRefs.map((eventRef) => eventRef.seq)
+          : Array.from(
+              { length: Math.max(1, b.seqTo - b.seqFrom + 1) },
+              (_, i) => b.seqFrom + i,
+            ),
       ),
     );
 
@@ -2064,6 +2121,18 @@ export function LogExplorer({ corpusId }: Props) {
         setBookmarkRevealState("missing");
         setStatus(
           `Bookmark target seq ${seq} not found in corpus (source may have changed)`,
+        );
+        return;
+      }
+      if (
+        targetRef &&
+        (resolved.target.source !== targetRef.source ||
+          resolved.target.ts !== targetRef.timestampHint ||
+          resolved.target.timeQuality !== targetRef.timeQualityHint)
+      ) {
+        setBookmarkRevealState("missing");
+        setStatus(
+          `Bookmark evidence identity no longer matches this corpus: ${b.label}`,
         );
         return;
       }
@@ -3629,6 +3698,15 @@ export function LogExplorer({ corpusId }: Props) {
                   >
                     {b.label}
                   </button>
+                  {b.evidenceStatus === "missing" ||
+                  b.evidenceStatus === "stale" ? (
+                    <span
+                      className="log-explorer__chat-preview"
+                      data-testid={`bookmark-evidence-status-${b.id}`}
+                    >
+                      {b.evidenceStatus === "missing" ? "Missing" : "Stale"}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     className="log-explorer__btn"

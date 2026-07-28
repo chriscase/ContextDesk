@@ -5024,11 +5024,11 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
 fn log_list_bookmarks(
     state: State<'_, AppState>,
     corpus_id: String,
-) -> Result<Vec<cd_core::log_analysis::Bookmark>, String> {
+) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
     let cache = log_cache_dir(&state)?;
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::list_bookmarks(&c).map_err(|e| e.to_string())
+    cd_core::log_analysis::list_resolved_bookmarks(&c).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5037,6 +5037,8 @@ struct LogAddBookmarkArgs {
     corpus_id: String,
     seq_from: u64,
     seq_to: u64,
+    #[serde(default)]
+    event_refs: Vec<cd_core::log_analysis::BookmarkEventRef>,
     label: String,
     note: Option<String>,
     color: Option<String>,
@@ -5049,23 +5051,36 @@ struct LogAddBookmarkArgs {
 fn log_add_bookmark(
     state: State<'_, AppState>,
     args: LogAddBookmarkArgs,
-) -> Result<cd_core::log_analysis::Bookmark, String> {
+) -> Result<cd_core::log_analysis::ResolvedBookmark, String> {
     let cache = log_cache_dir(&state)?;
     let c = cd_core::log_analysis::LogCorpus::open(&cache, &args.corpus_id)
         .map_err(|e| e.to_string())?;
-    cd_core::log_analysis::add_range_bookmark(
-        &c,
-        cd_core::log_analysis::NewBookmark {
-            seq_from: args.seq_from,
-            seq_to: args.seq_to,
-            label: args.label,
-            note: args.note,
-            color: args.color,
-            ts_from: args.ts_from,
-            ts_to: args.ts_to,
-        },
-    )
-    .map_err(|e| e.to_string())
+    let bookmark = if args.event_refs.is_empty() {
+        cd_core::log_analysis::add_range_bookmark(
+            &c,
+            cd_core::log_analysis::NewBookmark {
+                seq_from: args.seq_from,
+                seq_to: args.seq_to,
+                label: args.label,
+                note: args.note,
+                color: args.color,
+                ts_from: args.ts_from,
+                ts_to: args.ts_to,
+            },
+        )
+    } else {
+        cd_core::log_analysis::add_evidence_bookmark(
+            &c,
+            cd_core::log_analysis::NewEvidenceBookmark {
+                event_refs: args.event_refs,
+                label: args.label,
+                note: args.note,
+                color: args.color,
+            },
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    cd_core::log_analysis::resolve_bookmark(&c, bookmark).map_err(|e| e.to_string())
 }
 
 /// Delete a bookmark by id.

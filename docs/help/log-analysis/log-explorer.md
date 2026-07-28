@@ -217,8 +217,13 @@ the Explorer then labels semantic search available.
 ## Bookmarks and packages
 
 Bookmarks live under the corpus cache as `bookmarks.json`. Portable package v1
-does **not** export bookmarks (by design). Export packages for events/templates
-only; re-create bookmarks after import if needed.
+does **not** export bookmarks (by design). New selections retain exact event
+membership using payload-free corpus, sequence, source, and time-quality hints.
+ContextDesk revalidates those references when the corpus reopens and visibly
+marks missing or stale evidence instead of opening an unrelated row. Older range
+bookmarks remain readable; their saved timestamps are hints rather than
+authoritative event identity. Export packages contain events/templates only;
+re-create bookmarks after import if needed.
 
 ## Limits
 

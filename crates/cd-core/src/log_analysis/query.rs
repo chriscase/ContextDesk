@@ -1424,7 +1424,10 @@ pub fn query_event_neighborhood(
     })
 }
 
-fn fetch_event_by_seq(corpus: &LogCorpus, seq: u64) -> CoreResult<Option<ExplorerEvent>> {
+pub(crate) fn fetch_event_by_seq(
+    corpus: &LogCorpus,
+    seq: u64,
+) -> CoreResult<Option<ExplorerEvent>> {
     corpus.with_connection(|conn| {
         let sql =
             "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
