@@ -332,6 +332,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
   const [chatSummary, setChatSummary] = useState({
     chatCount: 0,
     hasActiveChat: false,
@@ -2036,7 +2037,9 @@ export function LogExplorer({ corpusId }: Props) {
     breakpoint === "narrow"
       ? undefined
       : ({
-          gridTemplateColumns: `${filterW}px 6px 1fr 6px ${chatW}px`,
+          gridTemplateColumns: chatCollapsed
+            ? `${filterW}px 6px 1fr 0px 42px`
+            : `${filterW}px 6px 1fr 6px ${chatW}px`,
         } as React.CSSProperties);
 
   const toggleExpand = (seq: number) => {
@@ -2084,6 +2087,7 @@ export function LogExplorer({ corpusId }: Props) {
       data-link-mode={linkMode}
       data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
+      data-chat-collapsed={chatCollapsed ? "true" : "false"}
       data-resizable="true"
       onKeyDown={onKeyDown}
     >
@@ -3424,7 +3428,7 @@ export function LogExplorer({ corpusId }: Props) {
           )}
         </main>
 
-        {breakpoint !== "narrow" && (
+        {breakpoint !== "narrow" && !chatCollapsed && (
           <div
             className="log-explorer__splitter"
             data-testid="splitter-chat"
@@ -3441,8 +3445,10 @@ export function LogExplorer({ corpusId }: Props) {
           agentContext={agentContext}
           onApplyNav={applyNav}
           compactLayout={breakpoint === "narrow"}
+          collapsed={breakpoint !== "narrow" && chatCollapsed}
           developerMode={import.meta.env.MODE === "development"}
           onRailSummary={handleRailSummary}
+          onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}
           onRequestClose={() => {
             setNarrowChatOpen(false);
             queueMicrotask(() => narrowChatToggleRef.current?.focus());

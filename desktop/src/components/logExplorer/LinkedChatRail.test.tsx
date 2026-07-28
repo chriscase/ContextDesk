@@ -117,6 +117,61 @@ describe("LinkedChatRail", () => {
     );
   });
 
+  it("collapses to an accessible reopen strip without losing the active draft", async () => {
+    const active = sessionDto("chat-a", "Chat A");
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: active.id,
+        title: active.title,
+        archived: false,
+        pinned: false,
+        created_at: active.created_at,
+        updated_at: active.updated_at,
+        message_count: 0,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(active);
+    const onToggleCollapsed = vi.fn();
+    const renderRail = (collapsed: boolean) => (
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        collapsed={collapsed}
+        onToggleCollapsed={onToggleCollapsed}
+      />
+    );
+    const { rerender } = render(renderRail(false));
+
+    const composer = await screen.findByLabelText("Chat message");
+    fireEvent.change(composer, { target: { value: "keep this draft" } });
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
+
+    rerender(renderRail(true));
+    expect(screen.queryByLabelText("Chat message")).toBeNull();
+    const reopen = screen.getByTestId("expand-linked-chat");
+    expect(reopen.getAttribute("aria-label")).toBe(
+      "Expand linked chat rail, 1 chat",
+    );
+    await waitFor(() => expect(document.activeElement).toBe(reopen));
+    fireEvent.click(reopen);
+    expect(onToggleCollapsed).toHaveBeenCalledTimes(2);
+
+    rerender(renderRail(false));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("collapse-linked-chat"),
+      ),
+    );
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).value,
+    ).toBe("keep this draft");
+  });
+
   it("keeps governed cross-source tools and citations visible with the linked answer", async () => {
     let stored: host.ChatSessionDto | null = null;
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
