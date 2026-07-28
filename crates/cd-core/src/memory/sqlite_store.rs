@@ -500,8 +500,11 @@ impl SqliteMemoryStore {
     }
 }
 
-/// Block on embed with a realistic timeout (write + query path). #346
-pub fn embed_blocking(backend: &dyn EmbedBackend, text: &str, timeout_ms: u64) -> Option<Vec<f32>> {
+fn embed_on_fresh_runtime(
+    backend: &dyn EmbedBackend,
+    text: &str,
+    timeout_ms: u64,
+) -> Option<Vec<f32>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -517,6 +520,23 @@ pub fn embed_blocking(backend: &dyn EmbedBackend, text: &str, timeout_ms: u64) -
         Ok(Ok(mut v)) if !v.is_empty() => v.pop(),
         _ => None,
     }
+}
+
+/// Block on embed with a realistic timeout (write + query path). #346
+///
+/// This synchronous facade is also called from async agent turns. Entering a
+/// newly built runtime on a Tokio worker aborts the packaged app, so isolate
+/// that runtime on a scoped OS thread whenever a caller is already in Tokio.
+pub fn embed_blocking(backend: &dyn EmbedBackend, text: &str, timeout_ms: u64) -> Option<Vec<f32>> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(|| embed_on_fresh_runtime(backend, text, timeout_ms))
+                .join()
+                .unwrap_or(None)
+        });
+    }
+    embed_on_fresh_runtime(backend, text, timeout_ms)
 }
 
 impl MemoryStore for SqliteMemoryStore {
@@ -1109,10 +1129,19 @@ fn _schema_version_export() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::MockHashEmbedBackend;
     use crate::memory::MemoryStore;
 
     fn draft(content: &str) -> MemoryDraft {
         MemoryDraft::new(Kind::Fact, content)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embed_blocking_is_safe_inside_tokio_runtime() {
+        let backend = MockHashEmbedBackend::new(16);
+        let vector = embed_blocking(&backend, "ambient memory query", 1_000)
+            .expect("embedding should complete without entering the caller runtime");
+        assert_eq!(vector.len(), 16);
     }
 
     #[test]
