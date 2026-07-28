@@ -117,6 +117,42 @@ export function IconClose({ className }: IconProps) {
   );
 }
 
+export function IconChevronLeft({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m15 18-6-6 6-6" />
+    </Svg>
+  );
+}
+
+export function IconChevronRight({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m9 18 6-6-6-6" />
+    </Svg>
+  );
+}
+
+export function IconChevronDown({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m6 9 6 6 6-6" />
+    </Svg>
+  );
+}
+
+/** Log Explorer — event traces under a focused inspection lens. */
+export function IconLogExplorer({ className, title }: IconProps) {
+  return (
+    <Svg className={className} title={title}>
+      <path d="M3 6h8M3 10h5M3 14h6M3 18h5" />
+      <circle cx="15" cy="12" r="5" />
+      <path d="m18.5 15.5 3 3" />
+      <path d="M12 12h1.5l1.25-2.25L16.5 14l1-2H18" />
+    </Svg>
+  );
+}
+
 /** Circle question mark — setup help / popover trigger. */
 export function IconHelp({ className }: IconProps) {
   return (

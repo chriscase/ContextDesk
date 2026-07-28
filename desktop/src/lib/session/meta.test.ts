@@ -53,6 +53,7 @@ describe("snapshotMessageMeta (#146)", () => {
           provider_label: "Ollama",
           group: "Local",
           is_default: true,
+          tools_enabled: true,
         },
       ],
       defaultModelKey: "ollama::mistral",

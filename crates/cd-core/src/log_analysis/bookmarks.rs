@@ -165,6 +165,13 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
     } else {
         (seq_to, seq_from)
     };
+    let mut all = list_bookmarks(corpus)?;
+    if let Some(existing) = all
+        .iter()
+        .find(|bookmark| bookmark.seq_from == from && bookmark.seq_to == to)
+    {
+        return Ok(existing.clone());
+    }
     let now = crate::embed::now_unix_secs();
     let bm = Bookmark {
         id: Uuid::now_v7().to_string(),
@@ -178,7 +185,6 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
         created_at: now,
         updated_at: now,
     };
-    let mut all = list_bookmarks(corpus)?;
     all.push(bm.clone());
     write_all(corpus, all)?;
     Ok(bm)
@@ -244,18 +250,32 @@ mod tests {
     fn bookmark_crud_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let c = LogCorpus::create(dir.path(), "bm").unwrap();
-        c.push_events(&[LogEvent {
-            seq: 1,
-            ts: 1_700_000_000,
-            level: "error".into(),
-            service: None,
-            host: None,
-            template_id: 1,
-            params: vec![],
-            trace_id: None,
-            message: "a".into(),
-            source: "a.log".into(),
-        }])
+        c.push_events(&[
+            LogEvent {
+                seq: 1,
+                ts: 1_700_000_000,
+                level: "error".into(),
+                service: None,
+                host: None,
+                template_id: 1,
+                params: vec![],
+                trace_id: None,
+                message: "a".into(),
+                source: "a.log".into(),
+            },
+            LogEvent {
+                seq: 2,
+                ts: 1_700_000_001,
+                level: "info".into(),
+                service: None,
+                host: None,
+                template_id: 2,
+                params: vec![],
+                trace_id: None,
+                message: "b".into(),
+                source: "a.log".into(),
+            },
+        ])
         .unwrap();
         c.flush().unwrap();
         let id = c.id().to_string();
@@ -273,7 +293,7 @@ mod tests {
             &c,
             NewBookmark {
                 seq_from: 1,
-                seq_to: 1,
+                seq_to: 2,
                 label: "range".into(),
                 note: None,
                 color: Some("red".into()),
@@ -305,5 +325,88 @@ mod tests {
         );
         assert!(delete_bookmark(&c2, &b1.id).unwrap());
         assert_eq!(list_bookmarks(&c2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repeated_and_reversed_ranges_are_idempotent_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = LogCorpus::create(dir.path(), "bm-idempotent").unwrap();
+        let id = c.id().to_string();
+
+        let first = add_range_bookmark(
+            &c,
+            NewBookmark {
+                seq_from: 4,
+                seq_to: 9,
+                label: "first".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+        let repeated = add_range_bookmark(
+            &c,
+            NewBookmark {
+                seq_from: 4,
+                seq_to: 9,
+                label: "repeated".into(),
+                note: Some("must not overwrite".into()),
+                color: Some("red".into()),
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+        let reversed = add_range_bookmark(
+            &c,
+            NewBookmark {
+                seq_from: 9,
+                seq_to: 4,
+                label: "reversed".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+        let distinct = add_range_bookmark(
+            &c,
+            NewBookmark {
+                seq_from: 4,
+                seq_to: 10,
+                label: "distinct".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(repeated.id, first.id);
+        assert_eq!(reversed.id, first.id);
+        assert_ne!(distinct.id, first.id);
+        assert_eq!(list_bookmarks(&c).unwrap().len(), 2);
+
+        drop(c);
+        let reopened = LogCorpus::open(dir.path(), &id).unwrap();
+        let after_reopen = add_range_bookmark(
+            &reopened,
+            NewBookmark {
+                seq_from: 9,
+                seq_to: 4,
+                label: "after reopen".into(),
+                note: None,
+                color: None,
+                ts_from: None,
+                ts_to: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(after_reopen.id, first.id);
+        assert_eq!(list_bookmarks(&reopened).unwrap().len(), 2);
     }
 }

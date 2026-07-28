@@ -14,6 +14,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -23,11 +24,16 @@ import {
 import {
   agentTurn,
   hostArchiveChatSession,
+  hostListChatModels,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
   hostPinChatSession,
   hostRenameChatSession,
   hostSaveChatSession,
+  hostSetModelToolsEnabled,
+  modelSelectionKey,
+  parseModelSelectionKey,
+  type ModelOptionDto,
   type SessionMetaDto,
 } from "../../lib/host";
 import {
@@ -45,6 +51,8 @@ import {
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
+import { IconChevronRight } from "../icons";
+import { MarkdownBody } from "../MarkdownBody";
 import { SourceCitations } from "../SourceCitations";
 import { ToolCallList } from "../ToolCallList";
 
@@ -71,6 +79,8 @@ type Props = {
   compactLayout?: boolean;
   /** Normal/wide layout: retain state while presenting only a reopen strip. */
   collapsed?: boolean;
+  /** Explicit desktop grid track so optional splitters cannot shift the rail. */
+  desktopGridColumn?: number;
   /** When true, expose collapsed technical diagnostics (dev). */
   developerMode?: boolean;
   /** Compact parent indicator without duplicating chat/session state. */
@@ -118,6 +128,26 @@ function mapSessionMessages(session: {
     citations: m.citations,
     trail: m.trail,
   }));
+}
+
+function selectionForSession(
+  session: {
+    chatModel: string | null;
+    providerProfileId: string | null;
+  },
+  options: ModelOptionDto[],
+  fallback: string,
+): string {
+  if (session.chatModel && session.providerProfileId) {
+    return modelSelectionKey(session.providerProfileId, session.chatModel);
+  }
+  if (session.chatModel) {
+    return (
+      options.find((option) => option.id === session.chatModel)
+        ?.selection_key ?? session.chatModel
+    );
+  }
+  return fallback;
 }
 
 function LinkedChatBubble({
@@ -184,11 +214,14 @@ function LinkedChatBubble({
       {message.citations && message.citations.length > 0 ? (
         <SourceCitations citations={message.citations} />
       ) : null}
-      <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
+      <MarkdownBody text={message.content} streaming={message.streaming} />
       {message.trail && message.trail.length > 0 && developerMode ? (
-        <div className="log-explorer__chat-trail" aria-label="Search trail">
-          {message.trail.join(" → ")}
-        </div>
+        <details className="log-explorer__chat-technical">
+          <summary>Technical details</summary>
+          <div className="log-explorer__chat-trail" aria-label="Search trail">
+            {message.trail.join(" → ")}
+          </div>
+        </details>
       ) : null}
     </div>
   );
@@ -201,6 +234,7 @@ export function LinkedChatRail({
   onApplyNav,
   compactLayout = false,
   collapsed = false,
+  desktopGridColumn,
   developerMode = false,
   onRailSummary,
   onRequestClose,
@@ -210,14 +244,23 @@ export function LinkedChatRail({
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [draft, setDraft] = useState("");
+  const [modelOptions, setModelOptions] = useState<ModelOptionDto[]>([]);
+  const [newChatSelection, setNewChatSelection] = useState("");
+  const [selectionByChat, setSelectionByChat] = useState<
+    Record<string, string>
+  >({});
+  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
+  const [modelRetrying, setModelRetrying] = useState(false);
+  const modelHelpId = useId();
+  const composerHelpId = useId();
   /**
    * Turn-owned UI state is keyed by chat. A pending/error/completed turn for
    * chat A must not leak into chat B when the user switches mid-turn (#543).
    */
   const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
-  const [errorByChat, setErrorByChat] = useState<
-    Record<string, string | null>
-  >({});
+  const [errorByChat, setErrorByChat] = useState<Record<string, string | null>>(
+    {},
+  );
   const [statusByChat, setStatusByChat] = useState<
     Record<string, string | null>
   >({});
@@ -235,12 +278,13 @@ export function LinkedChatRail({
   const [devOpen, setDevOpen] = useState(false);
   const [devJson, setDevJson] = useState("");
   /** Per-chat follow mode; default true for new chats. */
-  const [followByChat, setFollowByChat] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [followByChat, setFollowByChat] = useState<Record<string, boolean>>({});
   const [detachedByChat, setDetachedByChat] = useState<Record<string, boolean>>(
     {},
   );
+  const [newContentByChat, setNewContentByChat] = useState<
+    Record<string, boolean>
+  >({});
   /** Per-chat drafts so switching chats does not lose unsent text. */
   const draftsRef = useRef<Record<string, string>>({});
   /** Per-chat scroll offsets so returning to a chat restores position. */
@@ -252,6 +296,11 @@ export function LinkedChatRail({
   const collapseToggleRef = useRef<HTMLButtonElement>(null);
   const reopenRef = useRef<HTMLButtonElement>(null);
   const previousCollapsedRef = useRef(collapsed);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusComposerAfterTurnRef = useRef<string | null>(null);
+  const sendingChatsRef = useRef<Set<string>>(new Set());
+  const detachedByChatRef = useRef(detachedByChat);
+  detachedByChatRef.current = detachedByChat;
 
   const threadRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -259,6 +308,31 @@ export function LinkedChatRail({
   activeChatIdRef.current = activeChatId;
 
   const windowed = useMessageWindow(messages, threadRef);
+
+  const rememberModels = useCallback((options: ModelOptionDto[]) => {
+    setModelOptions(options);
+    const preferred =
+      options.find((option) => option.is_default) ?? options[0] ?? null;
+    if (preferred) {
+      setNewChatSelection((current) => current || preferred.selection_key);
+    }
+    return options;
+  }, []);
+
+  const loadModels = useCallback(async () => {
+    try {
+      const options = await hostListChatModels();
+      setModelLoadError(null);
+      return rememberModels(options);
+    } catch (error) {
+      setModelLoadError(String(error));
+      return [];
+    }
+  }, [rememberModels]);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
 
   useEffect(() => {
     const previous = previousCollapsedRef.current;
@@ -270,6 +344,14 @@ export function LinkedChatRail({
     });
   }, [collapsed, compactLayout]);
 
+  useLayoutEffect(() => {
+    if (collapsed || compactLayout || !activeChatId) return;
+    const savedScroll = scrollByChatRef.current[activeChatId];
+    const thread = threadRef.current;
+    if (savedScroll == null || !thread) return;
+    thread.scrollTop = savedScroll;
+  }, [activeChatId, collapsed, compactLayout]);
+
   const followActive = activeChatId
     ? (followByChat[activeChatId] ?? true)
     : true;
@@ -277,15 +359,44 @@ export function LinkedChatRail({
   const error = activeChatId
     ? (errorByChat[activeChatId] ?? railError)
     : railError;
-  const status = activeChatId
-    ? (statusByChat[activeChatId] ?? null)
-    : null;
-  const navChips = activeChatId
-    ? (navChipsByChat[activeChatId] ?? [])
-    : [];
+  const status = activeChatId ? (statusByChat[activeChatId] ?? null) : null;
+  const navChips = activeChatId ? (navChipsByChat[activeChatId] ?? []) : [];
+  const defaultSelection =
+    modelOptions.find((option) => option.is_default)?.selection_key ??
+    modelOptions[0]?.selection_key ??
+    "";
+  const selectedModelKey = activeChatId
+    ? (selectionByChat[activeChatId] ?? defaultSelection)
+    : newChatSelection || defaultSelection;
+  const selectedModel =
+    modelOptions.find((option) => option.selection_key === selectedModelKey) ??
+    modelOptions.find(
+      (option) =>
+        option.id === parseModelSelectionKey(selectedModelKey).modelId,
+    ) ??
+    null;
+  const modelGroups = useMemo(() => {
+    const groups = new Map<string, ModelOptionDto[]>();
+    for (const option of modelOptions) {
+      const group = option.group || option.provider_label || "Other";
+      groups.set(group, [...(groups.get(group) ?? []), option]);
+    }
+    return [...groups.entries()];
+  }, [modelOptions]);
   const showJump =
-    Boolean(activeChatId) &&
-    (detachedByChat[activeChatId!] || !followActive);
+    Boolean(activeChatId) && (detachedByChat[activeChatId!] || !followActive);
+  const hasNewContent = activeChatId
+    ? (newContentByChat[activeChatId] ?? false)
+    : false;
+
+  useEffect(() => {
+    const target = focusComposerAfterTurnRef.current;
+    if (!target || busy || collapsed) return;
+    if (activeChatId === target) {
+      composerRef.current?.focus();
+    }
+    focusComposerAfterTurnRef.current = null;
+  }, [activeChatId, busy, collapsed]);
 
   const refreshChats = useCallback(async () => {
     try {
@@ -311,8 +422,7 @@ export function LinkedChatRail({
   useEffect(() => {
     if (!activeChatId || !followActive) return;
     // Instant on first paint / chat switch; smooth for streaming appends.
-    const behavior: ScrollBehavior =
-      messages.length <= 2 ? "auto" : "smooth";
+    const behavior: ScrollBehavior = messages.length <= 2 ? "auto" : "smooth";
     requestAnimationFrame(() => scrollToLatest(behavior));
   }, [messages, activeChatId, followActive, scrollToLatest, busy]);
 
@@ -322,13 +432,30 @@ export function LinkedChatRail({
     const near = isNearBottom(el);
     setFollowByChat((m) => ({ ...m, [activeChatId]: near }));
     setDetachedByChat((m) => ({ ...m, [activeChatId]: !near }));
+    if (near) {
+      setNewContentByChat((current) => ({
+        ...current,
+        [activeChatId]: false,
+      }));
+    }
   };
 
   const jumpToLatest = () => {
     if (!activeChatId) return;
     setFollowByChat((m) => ({ ...m, [activeChatId]: true }));
     setDetachedByChat((m) => ({ ...m, [activeChatId]: false }));
+    setNewContentByChat((current) => ({
+      ...current,
+      [activeChatId]: false,
+    }));
     scrollToLatest("smooth");
+  };
+
+  const toggleCollapsed = () => {
+    if (!collapsed && activeChatId && threadRef.current) {
+      scrollByChatRef.current[activeChatId] = threadRef.current.scrollTop;
+    }
+    onToggleCollapsed?.();
   };
 
   const openChat = async (id: string) => {
@@ -367,6 +494,14 @@ export function LinkedChatRail({
       }
       if (full) {
         const s = sessionFromDto(full);
+        const selection = selectionForSession(
+          s,
+          modelOptions,
+          defaultSelection || newChatSelection,
+        );
+        if (selection) {
+          setSelectionByChat((current) => ({ ...current, [id]: selection }));
+        }
         setMessages(mapSessionMessages(s));
       } else {
         setMessages([]);
@@ -416,10 +551,29 @@ export function LinkedChatRail({
   const createLinkedChat = async (): Promise<string | null> => {
     setRailError(null);
     try {
+      const options =
+        modelOptions.length > 0 ? modelOptions : await loadModels();
+      const preferredKey =
+        newChatSelection ||
+        options.find((option) => option.is_default)?.selection_key ||
+        options[0]?.selection_key ||
+        "";
+      const preferred =
+        options.find((option) => option.selection_key === preferredKey) ?? null;
       const s = newSession(`Logs · ${corpusName || corpusId.slice(0, 8)}`);
       s.linkedCorpusId = corpusId;
+      if (preferred) {
+        s.chatModel = preferred.id;
+        s.providerProfileId = preferred.provider_id;
+      }
       const saved = await hostSaveChatSession(sessionToDto(s));
       if (saved) {
+        if (preferred) {
+          setSelectionByChat((current) => ({
+            ...current,
+            [saved.id]: preferred.selection_key,
+          }));
+        }
         await refreshChats();
         await openChat(saved.id);
         setStatusByChat((m) => ({
@@ -436,15 +590,82 @@ export function LinkedChatRail({
     return null;
   };
 
+  const changeModel = async (selectionKey: string) => {
+    const option = modelOptions.find(
+      (candidate) => candidate.selection_key === selectionKey,
+    );
+    if (!option || busy) return;
+    setModelLoadError(null);
+    if (!activeChatId) {
+      setNewChatSelection(selectionKey);
+      return;
+    }
+    const id = activeChatId;
+    setSelectionByChat((current) => ({ ...current, [id]: selectionKey }));
+    setStatusByChat((current) => ({
+      ...current,
+      [id]: `Model changed to ${option.provider_label} · ${option.label}`,
+    }));
+    try {
+      const full = await hostLoadChatSession(id);
+      if (!full) throw new Error("Linked chat could not be loaded");
+      const session = sessionFromDto(full);
+      session.chatModel = option.id;
+      session.providerProfileId = option.provider_id;
+      session.updatedAt = nowIso();
+      const saved = await hostSaveChatSession(sessionToDto(session));
+      if (!saved) throw new Error("Linked chat model was not persisted");
+      await refreshChats();
+    } catch (error) {
+      setErrorByChat((current) => ({
+        ...current,
+        [id]: `Could not save linked-chat model: ${String(error)}`,
+      }));
+    }
+  };
+
   const sendChat = async () => {
     const text = draft.trim();
     if (!text || busy) return;
+    let turnModel = selectedModel;
+    if (!turnModel) {
+      const options = await loadModels();
+      const key =
+        selectedModelKey ||
+        options.find((option) => option.is_default)?.selection_key ||
+        options[0]?.selection_key ||
+        "";
+      turnModel =
+        options.find((option) => option.selection_key === key) ?? null;
+    }
+    if (!turnModel) {
+      setRailError(
+        "No chat model is configured. Configure a tools-enabled provider in Settings → AI.",
+      );
+      return;
+    }
+    if (!turnModel.tools_enabled) {
+      const message =
+        turnModel.tools_disabled_reason === "model"
+          ? `${turnModel.provider_label} · ${turnModel.label} previously rejected native tools. Retry tools for this model or choose another tools-enabled model.`
+          : `${turnModel.provider_label} · ${turnModel.label} cannot investigate linked logs because its provider has tools disabled. Choose another tools-enabled model or configure one in Settings → AI.`;
+      if (activeChatId) {
+        setErrorByChat((current) => ({
+          ...current,
+          [activeChatId]: message,
+        }));
+      } else {
+        setRailError(message);
+      }
+      return;
+    }
     let sessionId = activeChatId;
     if (!sessionId) {
       sessionId = await createLinkedChat();
       if (!sessionId) return;
     }
-    if (busyByChat[sessionId]) return;
+    if (busyByChat[sessionId] || sendingChatsRef.current.has(sessionId)) return;
+    sendingChatsRef.current.add(sessionId);
     setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
     setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
     setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
@@ -453,6 +674,10 @@ export function LinkedChatRail({
     // Sending always re-engages follow for this chat (#529).
     setFollowByChat((m) => ({ ...m, [sessionId!]: true }));
     setDetachedByChat((m) => ({ ...m, [sessionId!]: false }));
+    setNewContentByChat((current) => ({
+      ...current,
+      [sessionId!]: false,
+    }));
 
     const userMsg: ChatMsg = {
       id: crypto.randomUUID(),
@@ -473,11 +698,20 @@ export function LinkedChatRail({
         sessionId,
         text,
         false,
-        null,
-        null,
+        turnModel.id,
+        turnModel.provider_id,
         (ev) => {
           // Only update if still viewing this chat.
           if (activeChatIdRef.current !== sessionId) return;
+          if (
+            ev.kind === "text_delta" &&
+            detachedByChatRef.current[sessionId!]
+          ) {
+            setNewContentByChat((current) => ({
+              ...current,
+              [sessionId!]: true,
+            }));
+          }
           setMessages((msgs) => {
             const base =
               msgs.find((x) => x.id === assistantId) ??
@@ -488,9 +722,7 @@ export function LinkedChatRail({
               } satisfies ChatMsg);
             const folded = applyEventsToMessage(base, [ev]).msg;
             return msgs.map((x) =>
-              x.id === assistantId
-                ? { ...folded, streaming: true }
-                : x,
+              x.id === assistantId ? { ...folded, streaming: true } : x,
             );
           });
         },
@@ -518,6 +750,8 @@ export function LinkedChatRail({
       const updated = {
         ...session,
         messages: [...session.messages, userMsg, assistant],
+        chatModel: turnModel.id,
+        providerProfileId: turnModel.provider_id,
         lastReadMessageId: assistantId,
         updatedAt: nowIso(),
       };
@@ -554,11 +788,14 @@ export function LinkedChatRail({
       setStatusByChat((m) => ({
         ...m,
         [sessionId!]: endedWithError
-          ? "Linked investigation stopped before completion; review the visible error and retry"
+          ? `Linked investigation stopped with ${turnModel.provider_label} · ${turnModel.label}. Retry, choose another tools-enabled model above, or configure one in Settings → AI.`
           : usedTools
             ? "Linked investigation completed with governed evidence tools"
             : "Linked chat response saved",
       }));
+      if (endedWithError) {
+        void loadModels();
+      }
     } catch (e) {
       setErrorByChat((m) => ({ ...m, [sessionId!]: String(e) }));
       if (activeChatIdRef.current === sessionId) {
@@ -575,7 +812,44 @@ export function LinkedChatRail({
         );
       }
     } finally {
+      sendingChatsRef.current.delete(sessionId);
+      if (activeChatIdRef.current === sessionId) {
+        focusComposerAfterTurnRef.current = sessionId;
+      }
       setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
+    }
+  };
+
+  const retrySelectedModelTools = async () => {
+    if (
+      !selectedModel ||
+      selectedModel.tools_disabled_reason !== "model" ||
+      modelRetrying
+    ) {
+      return;
+    }
+    setModelRetrying(true);
+    setRailError(null);
+    try {
+      await hostSetModelToolsEnabled({
+        providerId: selectedModel.provider_id,
+        modelId: selectedModel.id,
+        toolsEnabled: true,
+      });
+      await loadModels();
+      const message = `Native tools will be retried for ${selectedModel.provider_label} · ${selectedModel.label}.`;
+      if (activeChatId) {
+        setStatusByChat((current) => ({
+          ...current,
+          [activeChatId]: message,
+        }));
+      } else {
+        setRailError(null);
+      }
+    } catch (error) {
+      setRailError(`Could not re-enable this model's tools: ${String(error)}`);
+    } finally {
+      setModelRetrying(false);
     }
   };
 
@@ -591,8 +865,7 @@ export function LinkedChatRail({
 
   const activeMeta = chats.find((c) => c.id === activeChatId);
   const activeTitle =
-    activeMeta?.title ??
-    (activeChatId ? "Linked chat" : "No chat selected");
+    activeMeta?.title ?? (activeChatId ? "Linked chat" : "No chat selected");
 
   useEffect(() => {
     onRailSummary?.({
@@ -629,10 +902,9 @@ export function LinkedChatRail({
   };
 
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      void sendChat();
-    }
+    if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    if (!busy && draft.trim()) void sendChat();
   };
 
   const onSwitcherKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -704,6 +976,11 @@ export function LinkedChatRail({
         data-testid="log-explorer-chat"
         data-collapsed="true"
         aria-label="Linked corpus chat collapsed"
+        style={
+          desktopGridColumn == null
+            ? undefined
+            : { gridColumn: desktopGridColumn }
+        }
       >
         <button
           ref={reopenRef}
@@ -711,7 +988,7 @@ export function LinkedChatRail({
           className="log-explorer__chat-reopen"
           data-testid="expand-linked-chat"
           aria-label={`Expand linked chat rail${chats.length > 0 ? `, ${chats.length} chat${chats.length === 1 ? "" : "s"}` : ""}`}
-          onClick={onToggleCollapsed}
+          onClick={toggleCollapsed}
         >
           <span aria-hidden="true">Chat</span>
           {chats.length > 0 ? (
@@ -734,10 +1011,18 @@ export function LinkedChatRail({
         compactLayout ? " log-explorer__chat--compact-layout" : ""
       }`}
       data-testid="log-explorer-chat"
+      style={
+        desktopGridColumn == null
+          ? undefined
+          : { gridColumn: desktopGridColumn }
+      }
       role={compactLayout ? "dialog" : undefined}
       aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
-      <header className="log-explorer__chat-header" data-testid="linked-chat-header">
+      <header
+        className="log-explorer__chat-header"
+        data-testid="linked-chat-header"
+      >
         <div className="log-explorer__chat-header-main">
           <div className="log-explorer__chat-header-title" title={activeTitle}>
             {activeTitle}
@@ -756,12 +1041,13 @@ export function LinkedChatRail({
             <button
               ref={collapseToggleRef}
               type="button"
-              className="log-explorer__btn"
+              className="log-explorer__rail-collapse log-explorer__rail-collapse--chat"
               aria-label="Collapse linked chat rail"
+              title="Collapse chat"
               data-testid="collapse-linked-chat"
-              onClick={onToggleCollapsed}
+              onClick={toggleCollapsed}
             >
-              Hide
+              <IconChevronRight />
             </button>
           ) : null}
           {compactLayout && onRequestClose ? (
@@ -811,6 +1097,81 @@ export function LinkedChatRail({
         </div>
       </header>
 
+      <div
+        className="log-explorer__chat-model"
+        data-testid="linked-chat-model-control"
+      >
+        <label className="log-explorer__chat-model-field">
+          <span>Model</span>
+          <select
+            className="log-explorer__chat-model-select"
+            value={selectedModelKey}
+            disabled={busy || modelOptions.length === 0}
+            aria-label="Linked chat model"
+            aria-describedby={modelHelpId}
+            onChange={(event) => void changeModel(event.target.value)}
+          >
+            {modelGroups.length === 0 ? (
+              <option value="">
+                {modelLoadError
+                  ? "Models unavailable"
+                  : "Loading configured models…"}
+              </option>
+            ) : (
+              modelGroups.map(([group, options]) => (
+                <optgroup key={group} label={group}>
+                  {options.map((option) => (
+                    <option
+                      key={option.selection_key}
+                      value={option.selection_key}
+                      disabled={
+                        !option.tools_enabled &&
+                        option.tools_disabled_reason === "profile"
+                      }
+                    >
+                      {option.label}
+                      {option.is_default ? " · default" : ""}
+                      {!option.tools_enabled ? " · tools unavailable" : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ))
+            )}
+          </select>
+        </label>
+        <div
+          id={modelHelpId}
+          className={`log-explorer__chat-model-note${
+            selectedModel && !selectedModel.tools_enabled
+              ? " log-explorer__chat-model-note--error"
+              : ""
+          }`}
+        >
+          {modelLoadError
+            ? "Could not list configured models. Check Settings → AI."
+            : selectedModel
+              ? `${selectedModel.provider_label} · ${
+                  selectedModel.tools_enabled
+                    ? "linked tools available"
+                    : "linked tools unavailable"
+                }`
+              : "Configure a tools-enabled provider in Settings → AI."}
+          {selectedModel?.tools_disabled_reason === "model" ? (
+            <>
+              {" · "}
+              <button
+                type="button"
+                className="log-explorer__chat-model-retry"
+                disabled={busy || modelRetrying}
+                onClick={() => void retrySelectedModelTools()}
+              >
+                {modelRetrying ? "Retrying…" : "Retry tools"}
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
+
       {switcherOpen && (
         <div
           className="log-explorer__chat-switcher"
@@ -857,7 +1218,9 @@ export function LinkedChatRail({
                     }`}
                     onClick={() => void openChat(c.id)}
                   >
-                    <div className="log-explorer__chat-item-title">{c.title}</div>
+                    <div className="log-explorer__chat-item-title">
+                      {c.title}
+                    </div>
                     <div className="log-explorer__chat-preview">
                       {busyByChat[c.id] ? "Investigating… · " : ""}
                       {c.preview}
@@ -920,9 +1283,10 @@ export function LinkedChatRail({
               aria-pressed={activeMeta.pinned}
               onClick={() =>
                 void finishManageMutation(
-                  () =>
-                    hostPinChatSession(activeMeta.id, !activeMeta.pinned),
-                  activeMeta.pinned ? "Linked chat unpinned" : "Linked chat pinned",
+                  () => hostPinChatSession(activeMeta.id, !activeMeta.pinned),
+                  activeMeta.pinned
+                    ? "Linked chat unpinned"
+                    : "Linked chat pinned",
                 )
               }
             >
@@ -936,10 +1300,7 @@ export function LinkedChatRail({
               onClick={() =>
                 void finishManageMutation(
                   () =>
-                    hostArchiveChatSession(
-                      activeMeta.id,
-                      !activeMeta.archived,
-                    ),
+                    hostArchiveChatSession(activeMeta.id, !activeMeta.archived),
                   activeMeta.archived
                     ? "Linked chat reopened"
                     : "Linked chat archived",
@@ -1011,7 +1372,7 @@ export function LinkedChatRail({
             data-testid="linked-chat-jump-latest"
             onClick={jumpToLatest}
           >
-            New messages · Jump to latest
+            {hasNewContent ? "New response · Jump to latest" : "Jump to latest"}
           </button>
         )}
       </div>
@@ -1021,6 +1382,7 @@ export function LinkedChatRail({
         data-testid="log-explorer-chat-composer"
       >
         <textarea
+          ref={composerRef}
           className="log-explorer__search"
           rows={compactLayout ? 2 : 3}
           placeholder="Ask about these logs…"
@@ -1034,7 +1396,13 @@ export function LinkedChatRail({
           }}
           onKeyDown={onComposerKey}
           aria-label="Chat message"
+          aria-describedby={composerHelpId}
+          aria-keyshortcuts="Enter Shift+Enter"
+          title="Return to send · Shift+Return for a newline"
         />
+        <span id={composerHelpId} className="sr-only">
+          Press Return to send. Press Shift and Return for a newline.
+        </span>
         <button
           type="button"
           className="log-explorer__btn log-explorer__btn--active"
@@ -1051,7 +1419,9 @@ export function LinkedChatRail({
           className="log-explorer__nav-chips"
           data-testid="linked-chat-nav-chips"
         >
-          <div className="log-explorer__section-title">Suggested navigation</div>
+          <div className="log-explorer__section-title">
+            Suggested navigation
+          </div>
           <div className="log-explorer__nav-chip-row">
             {navChips.map((chip, i) => {
               const wrong = chip.corpusId !== corpusId;
@@ -1106,9 +1476,7 @@ export function LinkedChatRail({
           </li>
           <li>
             <strong>Lanes</strong>{" "}
-            {agentContext.lanes.length
-              ? agentContext.lanes.join("; ")
-              : "none"}
+            {agentContext.lanes.length ? agentContext.lanes.join("; ") : "none"}
           </li>
           <li>
             <strong>Filters</strong>{" "}

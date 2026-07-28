@@ -12,6 +12,17 @@ import * as host from "../../lib/host";
 import { LogExplorer } from "./LogExplorer";
 
 vi.mock("../../lib/host", () => ({
+  modelSelectionKey: (providerId: string, modelId: string) =>
+    `${providerId}::${modelId}`,
+  parseModelSelectionKey: (key: string) => {
+    const split = key.indexOf("::");
+    return split > 0
+      ? {
+          providerId: key.slice(0, split),
+          modelId: key.slice(split + 2),
+        }
+      : { providerId: null, modelId: key };
+  },
   createLogSearchRequestId: vi.fn(() => "find-request"),
   hostCancelLogSearch: vi.fn(async () => true),
   hostGetLogCorpus: vi.fn(async () => ({
@@ -24,6 +35,18 @@ vi.mock("../../lib/host", () => ({
   })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
   hostLogListBookmarks: vi.fn(async () => []),
+  hostListChatModels: vi.fn(async () => [
+    {
+      id: "triage-1",
+      label: "triage-1",
+      selection_key: "tools-provider::triage-1",
+      provider_id: "tools-provider",
+      provider_label: "Tools Provider",
+      group: "Tools Provider",
+      is_default: true,
+      tools_enabled: true,
+    },
+  ]),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostLogFacets: vi.fn(async () => ({
@@ -234,6 +257,36 @@ function eventNeighborhood(
   };
 }
 
+function openToolbarPicker(testId: string) {
+  const trigger = screen.getByTestId(testId);
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(trigger);
+  }
+  return trigger;
+}
+
+function chooseToolbarOption(testId: string, name: RegExp) {
+  openToolbarPicker(testId);
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+}
+
+function chooseLaneCount(count: number) {
+  chooseToolbarOption(
+    "lane-count-picker",
+    new RegExp(`^${count} lane${count === 1 ? "\\b" : "s\\b"}`),
+  );
+}
+
+function chooseRowMode(mode: "Single line" | "Preview" | "Deep") {
+  chooseToolbarOption("row-mode-picker", new RegExp(`^${mode}\\b`));
+}
+
+function chooseTimeMode(
+  mode: "Independent" | "Follow selection" | "Align exact time",
+) {
+  chooseToolbarOption("time-link-picker", new RegExp(`^${mode}\\b`));
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -280,6 +333,18 @@ describe("LogExplorer shell", () => {
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
+    vi.mocked(host.hostListChatModels).mockResolvedValue([
+      {
+        id: "triage-1",
+        label: "triage-1",
+        selection_key: "tools-provider::triage-1",
+        provider_id: "tools-provider",
+        provider_label: "Tools Provider",
+        group: "Tools Provider",
+        is_default: true,
+        tools_enabled: true,
+      },
+    ]);
     vi.mocked(host.hostLogSearchEvents).mockResolvedValue([]);
     vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-request");
     vi.mocked(host.hostCancelLogSearch).mockResolvedValue(true);
@@ -306,6 +371,12 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     expect(root).toBeTruthy();
     expect(root.getAttribute("data-resizable")).toBe("true");
+    const identity = await screen.findByLabelText("Log Explorer for fixture");
+    expect(within(identity).getByText("Log Explorer")).toBeTruthy();
+    expect(within(identity).getByTitle("fixture")).toBeTruthy();
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).not.toContain("normal");
     expect(screen.getByTestId("log-explorer-filters")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-lanes")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat")).toBeTruthy();
@@ -326,6 +397,53 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("uses descriptive keyboard-accessible toolbar pickers with truthful dismissal", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    const timeTrigger = openToolbarPicker("time-link-picker");
+    const timeMenu = screen.getByRole("menu", { name: "Time options" });
+    expect(
+      within(timeMenu).getByText(
+        "Selecting an event seeks each lane to its nearest time.",
+      ),
+    ).toBeTruthy();
+    const independent = within(timeMenu).getByRole("menuitemradio", {
+      name: /^Independent\b/,
+    });
+    const follow = within(timeMenu).getByRole("menuitemradio", {
+      name: /^Follow selection\b/,
+    });
+    await waitFor(() => expect(document.activeElement).toBe(independent));
+    fireEvent.keyDown(independent, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(follow);
+    fireEvent.keyDown(follow, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(timeTrigger));
+    expect(screen.queryByRole("menu", { name: "Time options" })).toBeNull();
+
+    openToolbarPicker("row-mode-picker");
+    expect(screen.getByRole("menu", { name: "Rows options" })).toBeTruthy();
+    fireEvent.click(screen.getByTestId("log-explorer-lanes"));
+    expect(screen.queryByRole("menu", { name: "Rows options" })).toBeNull();
+
+    chooseRowMode("Deep");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain("Deep");
+
+    const columnsTrigger = screen.getByTestId("columns-menu");
+    fireEvent.click(columnsTrigger);
+    const autoFit = screen.getByRole("menuitem", {
+      name: /^Auto-fit columns\b/,
+    });
+    const reset = screen.getByRole("menuitem", {
+      name: /^Reset columns\b/,
+    });
+    await waitFor(() => expect(document.activeElement).toBe(autoFit));
+    fireEvent.keyDown(autoFit, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(reset);
+    fireEvent.keyDown(reset, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
+  });
+
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
@@ -344,6 +462,68 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-chat-collapsed")).toBe("false");
     expect(screen.getByTestId("splitter-chat")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
+  });
+
+  it("collapses either side rail, preserves active filters, and restores focus", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    const body = screen.getByTestId("log-explorer-body");
+    const filters = screen.getByTestId("log-explorer-filters");
+    const errorFilter = (await within(filters).findByRole("checkbox", {
+      name: /error/i,
+    })) as HTMLInputElement;
+
+    fireEvent.click(errorFilter);
+    expect(errorFilter.checked).toBe(true);
+    fireEvent.click(screen.getByTestId("collapse-log-filters"));
+
+    expect(root.getAttribute("data-filters-collapsed")).toBe("true");
+    expect(root.getAttribute("data-usable-evidence-width")).toBe("3492");
+    expect(screen.queryByTestId("splitter-filters")).toBeNull();
+    expect(body.style.gridTemplateColumns).toContain("42px 0px 1fr");
+    expect(screen.getByTestId("log-explorer-filters").style.gridColumn).toBe(
+      "1",
+    );
+    expect(screen.getByTestId("log-explorer-lanes").style.gridColumn).toBe("3");
+    expect(screen.getByTestId("splitter-chat").style.gridColumn).toBe("4");
+    expect(screen.getByTestId("log-explorer-chat").style.gridColumn).toBe("5");
+    expect(screen.getByText(/auth failure/)).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-chat-composer")).toBeTruthy();
+    const reopenFilters = screen.getByTestId("expand-log-filters");
+    expect(reopenFilters.getAttribute("aria-label")).toBe(
+      "Expand log filters, 1 active",
+    );
+    await waitFor(() => expect(document.activeElement).toBe(reopenFilters));
+
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    expect(root.getAttribute("data-chat-collapsed")).toBe("true");
+    expect(root.getAttribute("data-usable-evidence-width")).toBe("3756");
+    expect(body.style.gridTemplateColumns).toContain("1fr 0px 42px");
+
+    fireEvent.click(reopenFilters);
+    expect(root.getAttribute("data-filters-collapsed")).toBe("false");
+    expect(screen.getByTestId("splitter-filters")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("collapse-log-filters"),
+      ),
+    );
+    expect(
+      (
+        within(screen.getByTestId("log-explorer-filters")).getByRole(
+          "checkbox",
+          { name: /error/i },
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("expand-linked-chat"));
+    expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByTestId("collapse-linked-chat"),
+      ),
+    );
   });
 
   it("gates lane counts by usable evidence width and restores the preferred composed lanes", async () => {
@@ -369,14 +549,20 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-max-lane-count")).toBe("1");
     });
 
-    const twoLUnavailable = screen.getByRole("button", { name: "2L" });
+    const lanePicker = openToolbarPicker("lane-count-picker");
+    const twoLUnavailable = screen.getByRole("menuitemradio", {
+      name: /^2 lanes\b/,
+    });
     expect((twoLUnavailable as HTMLButtonElement).disabled).toBe(true);
     expect(twoLUnavailable.title).toMatch(
-      /need 840px of usable evidence width; 748px available/,
+      /Needs 840px of usable evidence width; 748px available/,
     );
     expect(
-      (screen.getByRole("button", { name: "1L" }) as HTMLButtonElement)
-        .disabled,
+      (
+        screen.getByRole("menuitemradio", {
+          name: /^1 lane\b/,
+        }) as HTMLButtonElement
+      ).disabled,
     ).toBe(false);
 
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
@@ -384,7 +570,10 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-usable-evidence-width")).toBe("1012");
       expect(root.getAttribute("data-max-lane-count")).toBe("2");
     });
-    const twoL = screen.getByRole("button", { name: "2L" });
+    openToolbarPicker("lane-count-picker");
+    const twoL = screen.getByRole("menuitemradio", {
+      name: /^2 lanes\b/,
+    });
     expect((twoL as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(twoL);
     await waitFor(() =>
@@ -425,15 +614,17 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(root.getAttribute("data-max-lane-count")).toBe("4"),
     );
-    const fourL = screen.getByRole("button", { name: "4L" });
+    openToolbarPicker("lane-count-picker");
+    const fourL = screen.getByRole("menuitemradio", {
+      name: /^4 lanes\b/,
+    });
     expect((fourL as HTMLButtonElement).disabled).toBe(false);
     fourL.focus();
-    fireEvent.keyDown(fourL, { key: "Enter" });
     fireEvent.click(fourL);
     await waitFor(() =>
       expect(root.getAttribute("data-lane-count")).toBe("4"),
     );
-    expect(document.activeElement).toBe(fourL);
+    await waitFor(() => expect(document.activeElement).toBe(lanePicker));
   });
 
   it("focuses Find with the platform find shortcut", async () => {
@@ -474,10 +665,12 @@ describe("LogExplorer shell", () => {
       expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
     );
 
+    fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-autofit"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("40rem"),
     );
+    fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-reset"));
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("12rem"),
@@ -487,10 +680,11 @@ describe("LogExplorer shell", () => {
     expect(eventTime.tabIndex).toBe(0);
     expect(eventTime.getAttribute("aria-label")).toMatch(/wall clock.*UTC/);
 
+    openToolbarPicker("row-mode-picker");
     fireEvent.change(screen.getByTestId("preview-lines"), {
       target: { value: "12" },
     });
-    fireEvent.click(screen.getByTestId("line-mode-wrap"));
+    chooseRowMode("Preview");
     await waitFor(() =>
       expect(
         screen
@@ -529,8 +723,8 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-lane-count")).toBe("1");
       expect(screen.queryByTestId("collapse-linked-chat")).toBeNull();
       expect(screen.queryByTestId("expand-linked-chat")).toBeNull();
-      expect(screen.queryByTitle("2 evidence lanes")).toBeNull();
-      fireEvent.click(screen.getByTestId("line-mode-full"));
+      expect(screen.queryByTestId("lane-count-picker")).toBeNull();
+      chooseRowMode("Deep");
       await waitFor(() =>
         expect(
           screen
@@ -1226,7 +1420,8 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    await screen.findAllByTitle("worker.log");
+    chooseLaneCount(2);
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = screen.getByTestId("lane-editor");
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -1326,9 +1521,7 @@ describe("LogExplorer shell", () => {
       );
       render(<LogExplorer corpusId="c1" />);
       await screen.findByTitle(sources[lanes - 1]!);
-      fireEvent.click(
-        screen.getByTitle(`${lanes} evidence lane${lanes === 1 ? "" : "s"}`),
-      );
+      chooseLaneCount(lanes);
 
       const root = await screen.findByTestId("log-explorer");
       await waitFor(() => {
@@ -1347,11 +1540,9 @@ describe("LogExplorer shell", () => {
     async (laneCount) => {
       render(<LogExplorer corpusId="c1" />);
       if (laneCount > 1) {
-        fireEvent.click(
-          await screen.findByTitle(`${laneCount} evidence lanes`),
-        );
+        chooseLaneCount(laneCount);
       }
-      fireEvent.click(screen.getByTestId("line-mode-full"));
+      chooseRowMode("Deep");
 
       await waitFor(() =>
         expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(
@@ -1413,7 +1604,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("audit.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
 
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
@@ -1492,7 +1683,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("paged.log");
-    fireEvent.click(screen.getByTitle("4 evidence lanes"));
+    chooseLaneCount(4);
     await waitFor(() => expect(laneRequest).toBe(4));
 
     const shared = eventPage("shared.log", "wall", 2, 1_700_000_000, 6);
@@ -1560,7 +1751,7 @@ describe("LogExplorer shell", () => {
     );
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("db.log");
-    fireEvent.click(screen.getByTitle("3 evidence lanes"));
+    chooseLaneCount(3);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() => {
       expect(root.getAttribute("data-time-quality")).toBe("order_only");
@@ -1580,7 +1771,7 @@ describe("LogExplorer shell", () => {
       "matched unavailable",
     );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     // Order-only aggregate refuses wall-clock link.
     expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
@@ -1620,12 +1811,12 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("wall"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("align_time");
 
     fireEvent.change(screen.getByTestId("log-explorer-find"), {
@@ -1658,13 +1849,15 @@ describe("LogExplorer shell", () => {
     expect(
       screen.getByTestId("log-explorer-global-counts").textContent,
     ).not.toContain("order only");
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("independent");
-    expect(
-      screen.getByText(
-        "Align unavailable: every visible lane needs matching events",
-      ),
-    ).toBeTruthy();
+    const unavailableAlign = screen.getByRole("menuitemradio", {
+      name: /^Align exact time\b/,
+    }) as HTMLButtonElement;
+    expect(unavailableAlign.disabled).toBe(true);
+    expect(unavailableAlign.title).toBe(
+      "Every visible lane needs matching events.",
+    );
 
     fireEvent.click(
       screen.getByRole("button", { name: "keyword:no-shared-result ×" }),
@@ -1677,7 +1870,7 @@ describe("LogExplorer shell", () => {
           ?.getAttribute("data-time-status"),
       ).toBe("loaded");
     });
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("align_time");
   });
 
@@ -1714,13 +1907,15 @@ describe("LogExplorer shell", () => {
       expect(
         screen.getByText("time unavailable · no matching events"),
       ).toBeTruthy();
-      fireEvent.click(screen.getByTestId("time-link-align_time"));
+      chooseTimeMode("Align exact time");
       expect(root.getAttribute("data-link-mode")).toBe("independent");
-      expect(
-        screen.getByText(
-          "Align unavailable: every visible lane needs matching events",
-        ),
-      ).toBeTruthy();
+      const unavailableAlign = screen.getByRole("menuitemradio", {
+        name: /^Align exact time\b/,
+      }) as HTMLButtonElement;
+      expect(unavailableAlign.disabled).toBe(true);
+      expect(unavailableAlign.title).toBe(
+        "Every visible lane needs matching events.",
+      );
     },
   );
 
@@ -1782,12 +1977,12 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("wall"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("align_time"),
     );
@@ -1837,16 +2032,22 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     const root = screen.getByTestId("log-explorer");
     await waitFor(() =>
       expect(root.getAttribute("data-time-quality")).toBe("mixed"),
     );
-    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    chooseTimeMode("Align exact time");
     expect(root.getAttribute("data-link-mode")).toBe("independent");
-    expect(screen.getByText(/Align unavailable: mixed time/)).toBeTruthy();
+    const unavailableAlign = screen.getByRole("menuitemradio", {
+      name: /^Align exact time\b/,
+    }) as HTMLButtonElement;
+    expect(unavailableAlign.disabled).toBe(true);
+    expect(unavailableAlign.title).toMatch(
+      /mixed time quality.*not a reliable shared wall clock/,
+    );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     expect(root.getAttribute("data-link-mode")).toBe("follow_cursor");
     expect(screen.queryByTestId("aligned-time-axis")).toBeNull();
   });
@@ -1871,7 +2072,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByTitle("worker.log");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     // New behavior: both lanes start as All sources — not auto-split by first-N.
     fireEvent.click(screen.getByTestId("lane-editor-toggle"));
     const editor = await screen.findByTestId("lane-editor");
@@ -1887,7 +2088,7 @@ describe("LogExplorer shell", () => {
       expect(root.getAttribute("data-time-quality")).toBe("mixed"),
     );
 
-    fireEvent.click(screen.getByTestId("time-link-follow_cursor"));
+    chooseTimeMode("Follow selection");
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("follow_cursor"),
     );
@@ -1964,7 +2165,7 @@ describe("LogExplorer shell", () => {
   it("opens the compact lane composer, assigns sources independently, and restores focus on Done", async () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     fireEvent.click(toggle);
 
     const editor = await screen.findByTestId("lane-editor");
@@ -2015,7 +2216,7 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const toggle = await screen.findByTestId("lane-editor-toggle");
 
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     fireEvent.click(toggle);
     let editor = await screen.findByTestId("lane-editor");
     let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -2033,8 +2234,8 @@ describe("LogExplorer shell", () => {
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
 
-    fireEvent.click(screen.getByTitle("1 evidence lane"));
-    fireEvent.click(screen.getByTitle("2 evidence lanes"));
+    chooseLaneCount(1);
+    chooseLaneCount(2);
     fireEvent.click(toggle);
     editor = await screen.findByTestId("lane-editor");
     laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
@@ -2296,6 +2497,34 @@ describe("LogExplorer shell", () => {
     clock.mockRestore();
   });
 
+  it("labels exact matched-range boundaries without inert paging controls", async () => {
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) =>
+        query?.keyword === "nothing-here"
+          ? eventPage("api.log", "wall", 0, 1_700_000_000, 0)
+          : eventPage("api.log", "wall", 2, 1_700_000_000, 2),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const loaded = await screen.findByText("All matched logs loaded");
+    expect(loaded.title).toBe(
+      "All 2 events matching this lane are in the resident window.",
+    );
+    expect(screen.queryByText("Beginning")).toBeNull();
+    expect(screen.queryByText("End")).toBeNull();
+    expect(screen.queryByText("Load older")).toBeNull();
+    expect(screen.queryByText("Load newer")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "nothing-here" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    const empty = await screen.findByText("No matching logs");
+    expect(empty.title).toBe(
+      "No events match this lane's sources and active filters.",
+    );
+  });
+
   it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
     let newerAttempts = 0;
     const middle = defaultEventPage();
@@ -2387,7 +2616,7 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() =>
       expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(2),
     );
@@ -2401,7 +2630,7 @@ describe("LogExplorer shell", () => {
     scrollLaneToEdge("newer", 1);
     await waitFor(() =>
       expect(screen.getByTestId("lane-paging-lane-1").textContent).toContain(
-        "End",
+        "All matched logs loaded",
       ),
     );
     expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
@@ -2421,7 +2650,7 @@ describe("LogExplorer shell", () => {
     });
     await waitFor(() =>
       expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
-        "End",
+        "All matched logs loaded",
       ),
     );
   });
@@ -2844,7 +3073,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
         "13 matched",
@@ -2973,7 +3202,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTitle("2 evidence lanes"));
+    chooseLaneCount(2);
     await waitFor(() => {
       expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
         "13 matched",
@@ -2986,6 +3215,20 @@ describe("LogExplorer shell", () => {
     fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
 
+    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        sources: ["api.log", "worker.log", "queue.log", "db.log"],
+      }),
+      96,
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        sources: ["api.log", "worker.log", "queue.log", "db.log"],
+        limit: 1,
+      }),
+    );
     await waitFor(() =>
       expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
         "c1",
@@ -3380,8 +3623,8 @@ describe("LogExplorer shell", () => {
         stored?.id,
         "What failed?",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({
@@ -3395,6 +3638,8 @@ describe("LogExplorer shell", () => {
       ]);
       expect(stored?.messages[0]?.content).toBe("What failed?");
       expect(stored?.messages[1]?.content).toBe("The API failed first.");
+      expect(stored?.chat_model).toBe("triage-1");
+      expect(stored?.provider_profile_id).toBe("tools-provider");
     });
 
     fireEvent.click(screen.getByTestId("linked-chat-switcher-toggle"));
@@ -3557,6 +3802,13 @@ describe("LogExplorer shell", () => {
         }),
       ),
     );
+    expect(
+      await screen.findByTestId("bookmark-activate-log-lab-bookmark"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    fireEvent.keyDown(root, { key: "b" });
+    await screen.findByText("Already bookmarked: seq 101");
+    expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId("new-linked-chat"));
     await waitFor(() =>
@@ -3647,8 +3899,8 @@ describe("LogExplorer shell", () => {
         expect.any(String),
         "Question A",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({
@@ -3680,8 +3932,8 @@ describe("LogExplorer shell", () => {
         expect.any(String),
         "Question B",
         false,
-        null,
-        null,
+        "triage-1",
+        "tools-provider",
         expect.any(Function),
         null,
         expect.objectContaining({

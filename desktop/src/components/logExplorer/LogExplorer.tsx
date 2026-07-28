@@ -5,11 +5,13 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import {
   createLogSearchRequestId,
@@ -80,6 +82,11 @@ import {
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
 import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconLogExplorer,
+} from "../icons";
+import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
   HELP_LANE_COMPOSE,
@@ -112,6 +119,7 @@ const FIND_PAGE_SIZE = 50;
 // evidence grid, after the live Filters/Chat rail widths and splitters.
 const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
 const SPLITTER_WIDTH_PX = 6;
+const COLLAPSED_FILTER_WIDTH_PX = 42;
 const COLLAPSED_CHAT_WIDTH_PX = 42;
 
 type FindCursor = {
@@ -123,6 +131,330 @@ type FindPageHistory = {
   start: FindCursor | null;
   base: number;
 };
+
+type ToolbarPickerOption<T extends string> = {
+  value: T;
+  label: string;
+  description: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  visual?: ReactNode;
+};
+
+function ToolbarPicker<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  testId,
+  footer,
+}: {
+  label: string;
+  value: T;
+  options: ToolbarPickerOption<T>[];
+  onChange: (value: T) => void;
+  testId: string;
+  footer?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const selected = options.find((option) => option.value === value);
+
+  const close = useCallback((restoreFocus = true) => {
+    setOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => triggerRef.current?.focus());
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && !rootRef.current?.contains(target)) close(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    queueMicrotask(() => {
+      rootRef.current
+        ?.querySelector<HTMLElement>(
+          '[role="menuitemradio"][aria-checked="true"]:not(:disabled)',
+        )
+        ?.focus();
+    });
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [close, open]);
+
+  const moveOptionFocus = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const buttons = Array.from(
+      rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitemradio"]:not(:disabled)',
+      ) ?? [],
+    );
+    if (buttons.length === 0) return;
+    const current = buttons.indexOf(event.currentTarget);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? buttons.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+            buttons.length;
+    buttons[next]?.focus();
+  };
+
+  return (
+    <div className="log-explorer__toolbar-picker" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
+        data-testid={testId}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="log-explorer__picker-label">{label}</span>
+        <span className="log-explorer__picker-value">
+          {selected?.label ?? value}
+        </span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div
+          id={id}
+          className="log-explorer__picker-menu"
+          role="menu"
+          aria-label={`${label} options`}
+        >
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className="log-explorer__picker-option"
+              role="menuitemradio"
+              aria-checked={option.value === value}
+              disabled={option.disabled}
+              title={option.disabledReason}
+              data-value={option.value}
+              onKeyDown={moveOptionFocus}
+              onClick={() => {
+                onChange(option.value);
+                close();
+              }}
+            >
+              {option.visual ? (
+                <span className="log-explorer__picker-visual">
+                  {option.visual}
+                </span>
+              ) : null}
+              <span className="log-explorer__picker-copy">
+                <span className="log-explorer__picker-option-title">
+                  {option.label}
+                  {option.value === value ? (
+                    <span aria-hidden="true"> ✓</span>
+                  ) : null}
+                </span>
+                <span className="log-explorer__picker-description">
+                  {option.disabledReason ?? option.description}
+                </span>
+              </span>
+            </button>
+          ))}
+          {footer ? (
+            <div className="log-explorer__picker-footer">{footer}</div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolbarActionMenu({
+  label,
+  testId,
+  actions,
+}: {
+  label: string;
+  testId: string;
+  actions: {
+    id: string;
+    label: string;
+    description: string;
+    testId?: string;
+    run: () => void;
+  }[];
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const close = useCallback((restoreFocus = true) => {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => triggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && !rootRef.current?.contains(target)) close(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    queueMicrotask(() =>
+      rootRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus(),
+    );
+    return () => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [close, open]);
+
+  const moveFocus = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (
+      event.key !== "ArrowDown" &&
+      event.key !== "ArrowUp" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const items = Array.from(
+      rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]',
+      ) ?? [],
+    );
+    if (items.length === 0) return;
+    const current = items.indexOf(event.currentTarget);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) %
+            items.length;
+    items[next]?.focus();
+  };
+
+  return (
+    <div className="log-explorer__toolbar-picker" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={`log-explorer__picker-trigger ${open ? "log-explorer__picker-trigger--open" : ""}`}
+        data-testid={testId}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="log-explorer__picker-value">{label}</span>
+        <IconChevronDown />
+      </button>
+      {open ? (
+        <div
+          id={id}
+          className="log-explorer__picker-menu log-explorer__picker-menu--actions"
+          role="menu"
+          aria-label={`${label} actions`}
+        >
+          {actions.map((action) => (
+            <button
+              key={action.id}
+              type="button"
+              className="log-explorer__picker-option"
+              role="menuitem"
+              data-testid={action.testId}
+              onKeyDown={moveFocus}
+              onClick={() => {
+                action.run();
+                close();
+              }}
+            >
+              <span className="log-explorer__picker-copy">
+                <span className="log-explorer__picker-option-title">
+                  {action.label}
+                </span>
+                <span className="log-explorer__picker-description">
+                  {action.description}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimeLinkVisual({ mode }: { mode: TimeLinkMode }) {
+  return (
+    <svg
+      viewBox="0 0 76 32"
+      aria-hidden="true"
+      className={`log-explorer__time-link-visual log-explorer__time-link-visual--${mode}`}
+    >
+      <path d="M4 9h68M4 23h68" />
+      {mode === "independent" ? (
+        <>
+          <circle cx="18" cy="9" r="2.5" />
+          <circle cx="51" cy="9" r="2.5" />
+          <circle cx="31" cy="23" r="2.5" />
+          <circle cx="65" cy="23" r="2.5" />
+        </>
+      ) : null}
+      {mode === "follow_cursor" ? (
+        <>
+          <path d="M39 3v26" className="log-explorer__time-link-cursor" />
+          <circle cx="34" cy="9" r="2.5" />
+          <circle cx="43" cy="23" r="2.5" />
+          <path d="m34 14 5 4 4-4" />
+        </>
+      ) : null}
+      {mode === "align_time" ? (
+        <>
+          <path d="M23 4v23M54 4v23" className="log-explorer__time-link-cursor" />
+          <circle cx="23" cy="9" r="2.5" />
+          <circle cx="23" cy="23" r="2.5" />
+          <circle cx="54" cy="9" r="2.5" />
+          <path d="M48 19h12v8H48z" className="log-explorer__time-link-gap" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
 
 function filtersToQuery(
   f: ExplorerFilters,
@@ -189,6 +521,25 @@ function effectiveLaneSources(
   filters: ExplorerFilters,
 ): string[] | undefined {
   return composeLaneSources(lane?.sources ?? [], filters.sources);
+}
+
+/**
+ * The primary Navigator can only summarize sources that at least one visible
+ * lane can actually reveal. Otherwise a valid bucket can choose an event that
+ * the fail-closed seek contract must reject as outside the visible lanes.
+ */
+function visibleLaneSourceScope(
+  lanes: LaneConfig[],
+  laneCount: number,
+  filters: ExplorerFilters,
+): string[] | undefined {
+  const ordered = new Set<string>();
+  for (const lane of lanes.slice(0, laneCount)) {
+    const sources = effectiveLaneSources(lane, filters);
+    if (sources == null) return undefined;
+    for (const source of sources) ordered.add(source);
+  }
+  return [...ordered];
 }
 
 function levelClass(level: string): string {
@@ -370,6 +721,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths());
   const [narrowFiltersOpen, setNarrowFiltersOpen] = useState(false);
   const [narrowChatOpen, setNarrowChatOpen] = useState(false);
+  const [filtersCollapsed, setFiltersCollapsed] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [chatSummary, setChatSummary] = useState({
     chatCount: 0,
@@ -403,6 +755,9 @@ export function LogExplorer({ corpusId }: Props) {
   const findInputRef = useRef<HTMLInputElement>(null);
   const narrowFiltersToggleRef = useRef<HTMLButtonElement>(null);
   const narrowChatToggleRef = useRef<HTMLButtonElement>(null);
+  const filtersCollapseRef = useRef<HTMLButtonElement>(null);
+  const filtersReopenRef = useRef<HTMLButtonElement>(null);
+  const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const laneSourceRequestRef = useRef(0);
@@ -581,6 +936,16 @@ export function LogExplorer({ corpusId }: Props) {
   }, [breakpoint, narrowChatOpen, narrowFiltersOpen]);
 
   useEffect(() => {
+    const previous = previousFiltersCollapsedRef.current;
+    previousFiltersCollapsedRef.current = filtersCollapsed;
+    if (breakpoint === "narrow" || previous === filtersCollapsed) return;
+    queueMicrotask(() => {
+      if (filtersCollapsed) filtersReopenRef.current?.focus();
+      else filtersCollapseRef.current?.focus();
+    });
+  }, [breakpoint, filtersCollapsed]);
+
+  useEffect(() => {
     try {
       localStorage.setItem(
         "contextdesk.logExplorer.detailH.v1",
@@ -657,8 +1022,9 @@ export function LogExplorer({ corpusId }: Props) {
       : Math.max(
           0,
           explorerWidth -
-            filterW -
-            SPLITTER_WIDTH_PX -
+            (filtersCollapsed
+              ? COLLAPSED_FILTER_WIDTH_PX
+              : filterW + SPLITTER_WIDTH_PX) -
             (chatCollapsed
               ? COLLAPSED_CHAT_WIDTH_PX
               : SPLITTER_WIDTH_PX + chatW),
@@ -1570,6 +1936,13 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const from = seqs[0]!;
     const to = seqs[seqs.length - 1]!;
+    const existing = bookmarks.find(
+      (bookmark) => bookmark.seqFrom === from && bookmark.seqTo === to,
+    );
+    if (existing) {
+      setStatus(`Already bookmarked: ${existing.label}`);
+      return;
+    }
     try {
       const bm = await hostLogAddBookmark(corpusId, {
         seqFrom: from,
@@ -1578,8 +1951,16 @@ export function LogExplorer({ corpusId }: Props) {
         tsFrom: detail?.ts ?? null,
         tsTo: detail?.ts ?? null,
       });
-      setBookmarks((b) => [...b, bm]);
-      setStatus(`Bookmarked ${bm.label}`);
+      setBookmarks((current) =>
+        current.some((bookmark) => bookmark.id === bm.id)
+          ? current
+          : [...current, bm],
+      );
+      setStatus(
+        bookmarks.some((bookmark) => bookmark.id === bm.id)
+          ? `Already bookmarked: ${bm.label}`
+          : `Bookmarked ${bm.label}`,
+      );
     } catch (e) {
       setError(String(e));
     }
@@ -2144,13 +2525,20 @@ export function LogExplorer({ corpusId }: Props) {
   ]
     .filter(Boolean)
     .join(" ");
+  const corpusLabel = summary?.name ?? corpusId.slice(0, 8);
   const bodyStyle =
     breakpoint === "narrow"
       ? undefined
       : ({
-          gridTemplateColumns: chatCollapsed
-            ? `${filterW}px 6px 1fr 0px 42px`
-            : `${filterW}px 6px 1fr 6px ${chatW}px`,
+          gridTemplateColumns: `${
+            filtersCollapsed
+              ? `${COLLAPSED_FILTER_WIDTH_PX}px 0px`
+              : `${filterW}px ${SPLITTER_WIDTH_PX}px`
+          } 1fr ${
+            chatCollapsed
+              ? `0px ${COLLAPSED_CHAT_WIDTH_PX}px`
+              : `${SPLITTER_WIDTH_PX}px ${chatW}px`
+          }`,
         } as React.CSSProperties);
 
   const toggleExpand = (seq: number) => {
@@ -2183,6 +2571,11 @@ export function LogExplorer({ corpusId }: Props) {
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
     return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
+  const navigatorSourceScope = visibleLaneSourceScope(
+    lanes,
+    laneCount,
+    filters,
+  );
 
   return (
     <div
@@ -2200,13 +2593,27 @@ export function LogExplorer({ corpusId }: Props) {
       data-link-mode={linkMode}
       data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
+      data-filters-collapsed={filtersCollapsed ? "true" : "false"}
       data-chat-collapsed={chatCollapsed ? "true" : "false"}
       data-resizable="true"
       onKeyDown={onKeyDown}
     >
       <header className="log-explorer__titlebar">
-        <div className="log-explorer__title">
-          Log Explorer · {summary?.name ?? corpusId.slice(0, 8)}
+        <div
+          className="log-explorer__identity"
+          data-testid="log-explorer-identity"
+          aria-label={`Log Explorer for ${corpusLabel}`}
+        >
+          <span className="log-explorer__mark" aria-hidden="true">
+            <IconLogExplorer />
+          </span>
+          <span className="log-explorer__title">Log Explorer</span>
+          <span className="log-explorer__identity-separator" aria-hidden="true">
+            /
+          </span>
+          <span className="log-explorer__corpus" title={corpusLabel}>
+            {corpusLabel}
+          </span>
         </div>
         <div
           className="log-explorer__meta"
@@ -2235,65 +2642,62 @@ export function LogExplorer({ corpusId }: Props) {
               {laneCount} lane queries
             </span>
           )}
-          <span className="log-explorer__badge">{breakpoint}</span>
         </div>
         <div className="log-explorer__toolbar">
-          {(
-            [
-              ["independent", "Indep"],
-              ["follow_cursor", "Follow"],
-              ["align_time", "Align"],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              className={`log-explorer__btn ${linkMode === mode ? "log-explorer__btn--active" : ""}`}
-              data-testid={`time-link-${mode}`}
-              title={
-                mode === "independent"
-                  ? "Lanes page and scroll independently"
-                  : mode === "follow_cursor"
-                    ? "Selecting an event seeks peers to nearest time (not row alignment)"
-                    : "Align lanes on a shared vertical time axis with explicit gap bands"
+          <ToolbarPicker
+            label="Time"
+            value={linkMode}
+            testId="time-link-picker"
+            options={[
+              {
+                value: "independent",
+                label: "Independent",
+                description: "Each lane pages and scrolls on its own.",
+                visual: <TimeLinkVisual mode="independent" />,
+              },
+              {
+                value: "follow_cursor",
+                label: "Follow selection",
+                description:
+                  "Selecting an event seeks each lane to its nearest time.",
+                disabled:
+                  !visibleLanesHaveEvents || timeQuality === "order_only",
+                disabledReason: !visibleLanesHaveEvents
+                  ? "Every visible lane needs matching events."
+                  : timeQuality === "order_only"
+                    ? "Order-only events cannot support time seeking."
+                    : undefined,
+                visual: <TimeLinkVisual mode="follow_cursor" />,
+              },
+              {
+                value: "align_time",
+                label: "Align exact time",
+                description:
+                  "Share a vertical wall-clock axis and show explicit gaps.",
+                disabled: !visibleLanesHaveEvents || timeQuality !== "wall",
+                disabledReason: !visibleLanesHaveEvents
+                  ? "Every visible lane needs matching events."
+                  : timeQuality !== "wall"
+                    ? `${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock.`
+                    : undefined,
+                visual: <TimeLinkVisual mode="align_time" />,
+              },
+            ]}
+            onChange={(mode) => {
+              if (mode === "follow_cursor" && timeQuality === "mixed") {
+                setStatus(
+                  "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
+                );
               }
-              onClick={() => {
-                if (
-                  mode !== "independent" &&
-                  !visibleLanesHaveEvents
-                ) {
-                  setStatus(
-                    `${label} unavailable: every visible lane needs matching events`,
-                  );
-                  return;
-                }
-                if (mode === "align_time" && timeQuality !== "wall") {
-                  setStatus(
-                    `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
-                  );
-                  return;
-                }
-                if (mode === "follow_cursor" && timeQuality === "order_only") {
-                  setStatus(
-                    "Time link unavailable: order-only time cannot claim wall-clock alignment",
-                  );
-                  return;
-                }
-                if (mode === "follow_cursor" && timeQuality === "mixed") {
-                  setStatus(
-                    "Follow uses mixed time quality only for approximate peer seeking; Align remains unavailable",
-                  );
-                }
-                setTimeLinkMode(mode);
-              }}
-            >
-              {label}
-            </button>
-          ))}
-          <HelpTip
-            label="Time-link modes"
-            title="Time-link modes"
-            content={HELP_TIME_LINK}
+              setTimeLinkMode(mode);
+            }}
+            footer={
+              <HelpTip
+                label="Time-link modes"
+                title="Time-link modes"
+                content={HELP_TIME_LINK}
+              />
+            }
           />
           <button
             ref={laneEditorToggleRef}
@@ -2309,109 +2713,130 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Lanes…
           </button>
-          <button
-            type="button"
-            className="log-explorer__btn"
-            onClick={() =>
-              setDensity((d) => (d === "compact" ? "comfortable" : "compact"))
+          {breakpoint !== "narrow" ? (
+            <ToolbarPicker
+              label="Lanes"
+              value={String(laneCount)}
+              testId="lane-count-picker"
+              options={[1, 2, 3, 4].map((count) => {
+                const unavailable = count > maxLaneCount;
+                const requiredWidth = count * MIN_EVIDENCE_LANE_WIDTH_PX;
+                return {
+                  value: String(count),
+                  label: `${count} ${count === 1 ? "lane" : "lanes"}`,
+                  description:
+                    count === 1
+                      ? "Use the full evidence canvas for one stream."
+                      : `Compare ${count} evidence streams side by side.`,
+                  disabled: unavailable,
+                  disabledReason: unavailable
+                    ? `Needs ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available.`
+                    : undefined,
+                };
+              })}
+              onChange={(count) => configureLanes(Number(count))}
+            />
+          ) : null}
+          <ToolbarPicker
+            label="Rows"
+            value={lineMode}
+            testId="row-mode-picker"
+            options={[
+              {
+                value: "compact",
+                label: "Single line",
+                description:
+                  "Maximum scan density; expand individual events as needed.",
+              },
+              {
+                value: "wrap",
+                label: "Preview",
+                description: `Show up to ${previewLines} lines in each row.`,
+              },
+              {
+                value: "full",
+                label: "Deep",
+                description: `Show up to ${Math.min(24, previewLines * 2)} lines; the inspector remains complete.`,
+              },
+            ]}
+            onChange={setLineMode}
+            footer={
+              <>
+                <label className="log-explorer__picker-setting">
+                  Preview depth
+                  <select
+                    value={previewLines}
+                    aria-label="Preview lines per event"
+                    data-testid="preview-lines"
+                    onChange={(event) =>
+                      setPreviewLines(Number(event.target.value))
+                    }
+                  >
+                    {[2, 4, 8, 12].map((lines) => (
+                      <option key={lines} value={lines}>
+                        {lines} lines
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <HelpTip
+                  label="Long-line reading help"
+                  title="Reading long events"
+                  content={HELP_LONG_LINES}
+                />
+              </>
             }
-          >
-            {density}
-          </button>
-          {breakpoint !== "narrow" &&
-            [1, 2, 3, 4].map((n) => {
-              const unavailable = n > maxLaneCount;
-              const requiredWidth = n * MIN_EVIDENCE_LANE_WIDTH_PX;
-              return (
-                <button
-                  key={n}
-                  type="button"
-                  className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
-                  disabled={unavailable}
-                  onClick={() => configureLanes(n)}
-                  title={
-                    unavailable
-                      ? `${n} evidence lanes need ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available`
-                      : `${n} evidence lane${n > 1 ? "s" : ""}`
-                  }
-                >
-                  {n}L
-                </button>
-              );
-            })}
-          {(
-            [
-              ["compact", "1 line"],
-              ["wrap", "Preview"],
-              ["full", "Deep"],
-            ] as const
-          ).map(([mode, label]) => (
-            <button
-              key={mode}
-              type="button"
-              className={`log-explorer__btn ${lineMode === mode ? "log-explorer__btn--active" : ""}`}
-              data-testid={`line-mode-${mode}`}
-              onClick={() => setLineMode(mode)}
-              title={
-                mode === "compact"
-                  ? "Dense single-line rows; expand an individual event or use the inspector"
-                  : mode === "wrap"
-                    ? `Show up to ${previewLines} lines per row`
-                    : `Show up to ${Math.min(24, previewLines * 2)} lines per row; inspector remains complete`
-              }
-            >
-              {label}
-            </button>
-          ))}
-          <label className="log-explorer__toolbar-field">
-            Preview
-            <select
-              value={previewLines}
-              aria-label="Preview lines per event"
-              data-testid="preview-lines"
-              onChange={(event) => setPreviewLines(Number(event.target.value))}
-            >
-              {[2, 4, 8, 12].map((lines) => (
-                <option key={lines} value={lines}>
-                  {lines} lines
-                </option>
-              ))}
-            </select>
-          </label>
-          <HelpTip
-            label="Long-line reading help"
-            title="Reading long events"
-            content={HELP_LONG_LINES}
           />
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="col-autofit"
-            title="Auto-fit columns to source lengths"
-            onClick={() => {
-              const sources = Object.keys(facets?.sources ?? {});
-              const messages = Object.values(laneEvents)
-                .flat()
-                .slice(0, 200)
-                .map((event) => event.message);
-              setColWidths(autoFitColWidths(sources, messages));
-              setStatus("Columns auto-fitted");
-            }}
-          >
-            Auto-fit cols
-          </button>
-          <button
-            type="button"
-            className="log-explorer__btn"
-            data-testid="col-reset"
-            title="Reset column widths to defaults"
-            onClick={() => {
-              setColWidths([...DEFAULT_COL_WIDTHS]);
-              setStatus("Column widths reset");
-            }}
-          >
-            Reset cols
-          </button>
+          <ToolbarPicker
+            label="Density"
+            value={density}
+            testId="density-picker"
+            options={[
+              {
+                value: "comfortable",
+                label: "Comfortable",
+                description: "More breathing room for focused reading.",
+              },
+              {
+                value: "compact",
+                label: "Compact",
+                description: "Fit more evidence on screen for rapid scanning.",
+              },
+            ]}
+            onChange={setDensity}
+          />
+          <ToolbarActionMenu
+            label="Columns"
+            testId="columns-menu"
+            actions={[
+              {
+                id: "auto-fit",
+                label: "Auto-fit columns",
+                description:
+                  "Fit source and message widths to the resident evidence.",
+                testId: "col-autofit",
+                run: () => {
+                  const sources = Object.keys(facets?.sources ?? {});
+                  const messages = Object.values(laneEvents)
+                    .flat()
+                    .slice(0, 200)
+                    .map((event) => event.message);
+                  setColWidths(autoFitColWidths(sources, messages));
+                  setStatus("Columns auto-fitted");
+                },
+              },
+              {
+                id: "reset",
+                label: "Reset columns",
+                description: "Restore the balanced default column widths.",
+                testId: "col-reset",
+                run: () => {
+                  setColWidths([...DEFAULT_COL_WIDTHS]);
+                  setStatus("Column widths reset");
+                },
+              },
+            ]}
+          />
           <button
             type="button"
             className="log-explorer__btn"
@@ -2606,39 +3031,95 @@ export function LogExplorer({ corpusId }: Props) {
       >
         <aside
           id="log-explorer-filter-panel"
-          className="log-explorer__filters"
+          className={`log-explorer__filters${
+            breakpoint !== "narrow" && filtersCollapsed
+              ? " log-explorer__filters--collapsed"
+              : ""
+          }`}
           data-testid="log-explorer-filters"
+          data-collapsed={
+            breakpoint !== "narrow" && filtersCollapsed ? "true" : "false"
+          }
           style={
             breakpoint === "narrow"
               ? ({ flexDirection: "column" } as React.CSSProperties)
-              : undefined
+              : ({ gridColumn: 1 } as React.CSSProperties)
           }
           role={breakpoint === "narrow" ? "dialog" : undefined}
           aria-label={
-            breakpoint === "narrow" ? "Log filters drawer" : undefined
+            breakpoint === "narrow"
+              ? "Log filters drawer"
+              : filtersCollapsed
+                ? "Log filters collapsed"
+                : "Log filters panel"
           }
         >
-          {breakpoint === "narrow" ? (
+          {breakpoint !== "narrow" && filtersCollapsed ? (
             <button
+              ref={filtersReopenRef}
               type="button"
-              className="log-explorer__btn log-explorer__drawer-close"
-              data-testid="close-filters-drawer"
-              onClick={() => {
-                setNarrowFiltersOpen(false);
-                queueMicrotask(() => narrowFiltersToggleRef.current?.focus());
-              }}
+              className="log-explorer__filters-reopen"
+              data-testid="expand-log-filters"
+              aria-label={`Expand log filters${activeFilterCount > 0 ? `, ${activeFilterCount} active` : ""}`}
+              onClick={() => setFiltersCollapsed(false)}
             >
-              Close filters
+              <span aria-hidden="true">Filters</span>
+              {activeFilterCount > 0 ? (
+                <span
+                  className="log-explorer__filters-reopen-count"
+                  aria-hidden="true"
+                >
+                  {activeFilterCount}
+                </span>
+              ) : null}
             </button>
-          ) : null}
-          <div className="log-explorer__section-title">
+          ) : (
+            <>
+              {breakpoint === "narrow" ? (
+                <button
+                  type="button"
+                  className="log-explorer__btn log-explorer__drawer-close"
+                  data-testid="close-filters-drawer"
+                  onClick={() => {
+                    setNarrowFiltersOpen(false);
+                    queueMicrotask(() =>
+                      narrowFiltersToggleRef.current?.focus(),
+                    );
+                  }}
+                >
+                  Close filters
+                </button>
+              ) : (
+                <header className="log-explorer__filters-header">
+                  <div>
+                    <strong>Filters</strong>
+                    <span>
+                      {activeFilterCount > 0
+                        ? `${activeFilterCount} active`
+                        : "All logs"}
+                    </span>
+                  </div>
+                  <button
+                    ref={filtersCollapseRef}
+                    type="button"
+                    className="log-explorer__rail-collapse log-explorer__rail-collapse--filters"
+                    data-testid="collapse-log-filters"
+                    aria-label="Collapse log filters panel"
+                    title="Collapse filters"
+                    onClick={() => setFiltersCollapsed(true)}
+                  >
+                    <IconChevronLeft />
+                  </button>
+                </header>
+              )}
+              <div className="log-explorer__section-title">
             Find{" "}
             <HelpTip
               label="Find vs Filter"
               title="Find vs Filter"
               content={HELP_FIND_VS_FILTER}
             />
-          </div>
+              </div>
           <input
             ref={findInputRef}
             className="log-explorer__search"
@@ -3203,20 +3684,27 @@ export function LogExplorer({ corpusId }: Props) {
               ))
             )}
           </div>
+            </>
+          )}
         </aside>
 
-        {breakpoint !== "narrow" && (
+        {breakpoint !== "narrow" && !filtersCollapsed && (
           <div
             className="log-explorer__splitter"
             data-testid="splitter-filters"
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize filters"
+            style={{ gridColumn: 2 }}
             onMouseDown={startDrag("filters")}
           />
         )}
 
-        <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
+        <main
+          className="log-explorer__lanes"
+          data-testid="log-explorer-lanes"
+          style={breakpoint === "narrow" ? undefined : { gridColumn: 3 }}
+        >
           <div className="log-explorer__lane-strip">
             <TimelineNavigator
               corpusId={corpusId}
@@ -3225,13 +3713,19 @@ export function LogExplorer({ corpusId }: Props) {
                 afterTs: null,
                 beforeSeq: null,
                 beforeTs: null,
+                sources: navigatorSourceScope,
               })}
+              emptySourceScope={navigatorSourceScope?.length === 0}
               residentEvents={Object.values(laneEvents).flat()}
-              lanes={lanes.slice(0, laneCount).map((lane) => ({
-                id: lane.id,
-                label: lane.label,
-                sources: lane.sources,
-              }))}
+              lanes={lanes.slice(0, laneCount).map((lane) => {
+                const sources = effectiveLaneSources(lane, filters);
+                return {
+                  id: lane.id,
+                  label: lane.label,
+                  sources: sources ?? [],
+                  emptySourceScope: sources?.length === 0,
+                };
+              })}
               onSeekSeq={async (seq, target) => {
                 const targetLane =
                   visibleLaneForSource(target?.source) ??
@@ -3290,6 +3784,37 @@ export function LogExplorer({ corpusId }: Props) {
                     : laneTime.status === "error"
                       ? "time unavailable · load failed"
                       : "time unavailable · loading";
+              const cursor = laneCursors[lane.id];
+              const paging = lanePaging[lane.id];
+              const matched = laneMatched[lane.id];
+              const boundaryLabel =
+                cursor == null || laneTime.status === "unloaded"
+                  ? null
+                  : laneTime.status === "error"
+                    ? "Paging unavailable"
+                    : !cursor.hasOlder && !cursor.hasNewer
+                      ? matched === 0
+                        ? "No matching logs"
+                        : "All matched logs loaded"
+                      : !cursor.hasOlder
+                        ? "Start of matched logs"
+                        : !cursor.hasNewer
+                          ? "End of matched logs"
+                          : null;
+              const boundaryTitle =
+                boundaryLabel === "Start of matched logs"
+                  ? "This lane is at the first event matching its sources and active filters."
+                  : boundaryLabel === "End of matched logs"
+                    ? "This lane is at the last event matching its sources and active filters."
+                    : boundaryLabel === "All matched logs loaded"
+                      ? matched == null
+                        ? "All matching events for this lane are in the resident window."
+                        : `All ${matched} events matching this lane are in the resident window.`
+                      : boundaryLabel === "No matching logs"
+                        ? "No events match this lane's sources and active filters."
+                        : boundaryLabel === "Paging unavailable"
+                          ? "This lane did not load, so its paging boundaries are unknown."
+                          : undefined;
               return (
                 <section
                   key={lane.id}
@@ -3367,7 +3892,7 @@ export function LogExplorer({ corpusId }: Props) {
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}
                   />
-                  {lanePaging[lane.id]?.error ? (
+                  {paging?.error ? (
                     <div
                       className="log-explorer__lane-page-error"
                       role="alert"
@@ -3375,14 +3900,14 @@ export function LogExplorer({ corpusId }: Props) {
                     >
                       <span>
                         Could not load{" "}
-                        {lanePaging[lane.id]?.failedDirection ?? "adjacent"}{" "}
-                        events: {lanePaging[lane.id]?.error}
+                        {paging.failedDirection ?? "adjacent"} events:{" "}
+                        {paging.error}
                       </span>
                       <button
                         type="button"
                         className="log-explorer__btn"
                         onClick={() =>
-                          lanePaging[lane.id]?.failedDirection === "older"
+                          paging.failedDirection === "older"
                             ? void loadOlderLane(lane.id)
                             : void loadMoreLane(lane.id)
                         }
@@ -3391,28 +3916,24 @@ export function LogExplorer({ corpusId }: Props) {
                       </button>
                     </div>
                   ) : null}
-                  {lanePaging[lane.id]?.loading ||
-                  !laneCursors[lane.id]?.hasOlder ||
-                  !laneCursors[lane.id]?.hasNewer ? (
+                  {paging?.loading || boundaryLabel ? (
                     <div
                       className="log-explorer__lane-paging"
                       data-testid={`lane-paging-${lane.id}`}
                       aria-live="polite"
                       aria-label={`${lane.label} paging status`}
                     >
-                      {!laneCursors[lane.id]?.hasOlder ? (
-                        <span className="log-explorer__paging-boundary">
-                          Beginning
+                      {boundaryLabel ? (
+                        <span
+                          className="log-explorer__paging-boundary"
+                          title={boundaryTitle}
+                        >
+                          {boundaryLabel}
                         </span>
                       ) : null}
-                      {lanePaging[lane.id]?.loading ? (
+                      {paging?.loading ? (
                         <span className="log-explorer__paging-loading">
-                          Loading {lanePaging[lane.id]?.loading}…
-                        </span>
-                      ) : null}
-                      {!laneCursors[lane.id]?.hasNewer ? (
-                        <span className="log-explorer__paging-boundary">
-                          End
+                          Loading {paging.loading}…
                         </span>
                       ) : null}
                     </div>
@@ -3550,6 +4071,7 @@ export function LogExplorer({ corpusId }: Props) {
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize chat"
+            style={{ gridColumn: 4 }}
             onMouseDown={startDrag("chat")}
           />
         )}
@@ -3561,6 +4083,7 @@ export function LogExplorer({ corpusId }: Props) {
           onApplyNav={applyNav}
           compactLayout={breakpoint === "narrow"}
           collapsed={breakpoint !== "narrow" && chatCollapsed}
+          desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
           developerMode={import.meta.env.MODE === "development"}
           onRailSummary={handleRailSummary}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}

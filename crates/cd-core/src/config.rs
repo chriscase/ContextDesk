@@ -174,6 +174,13 @@ pub struct AppConfig {
     /// Per-model context char budgets (declared from catalogs + learned from errors).
     #[serde(default)]
     pub model_context_budgets: crate::model_context::ModelContextBudgets,
+    /// Learned native-tool capability overrides keyed by `provider_id::model_id`.
+    ///
+    /// Provider-level capability remains authoritative. These entries only let
+    /// one model behind a multi-model gateway fail closed without disabling
+    /// proven sibling models.
+    #[serde(default)]
+    pub model_tools_enabled: std::collections::HashMap<String, bool>,
 }
 
 fn default_index_max_files() -> usize {
@@ -316,6 +323,10 @@ mod tests {
         let cfg = AppConfig {
             providers: ProviderConfig::with_local_ollama(),
             theme: "dark".into(),
+            model_tools_enabled: std::collections::HashMap::from([(
+                "ollama-local::chat-only".into(),
+                false,
+            )]),
             confluence: ConfluenceSettings {
                 enabled: true,
                 base_url: "https://wiki.example.com".into(),
@@ -345,6 +356,10 @@ mod tests {
         assert!(loaded.x.is_configured());
         assert_eq!(loaded.connectors.len(), 1);
         assert_eq!(loaded.connectors[0].kind, "files");
+        assert_eq!(
+            loaded.model_tools_enabled.get("ollama-local::chat-only"),
+            Some(&false)
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("ATATT"));

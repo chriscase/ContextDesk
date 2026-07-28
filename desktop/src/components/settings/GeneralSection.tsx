@@ -378,7 +378,7 @@ export function GeneralSection({
       <TextField
         id={`${baseId}-deadline`}
         label="Deadline (ms)"
-        hint="Wall-clock stop; TurnCompleted reason budget_time."
+        hint="Whole-turn stop across provider calls, tools, and synthesis. Cancel remains immediate."
         value={String(routerBudget.deadline_ms)}
         onChange={(e) =>
           setRouterBudget((b) => ({

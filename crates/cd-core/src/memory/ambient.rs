@@ -284,4 +284,40 @@ mod tests {
         assert_eq!(injection.count, 1);
         assert!(injection.context_block.contains("ambient-runtime-marker"));
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_ambient_recall_is_safe_on_tokio_blocking_worker() {
+        let injection = tokio::task::spawn_blocking(|| {
+            let store = TwoScopeMemory::open_in_memory("blocking-runtime-test").unwrap();
+            store
+                .put(
+                    MemoryWriteOp::Insert(MemoryDraft::new(
+                        Kind::Fact,
+                        "ambient-blocking-marker belongs in the incident runbook",
+                    )),
+                    100,
+                )
+                .unwrap();
+            let backend = MockHashEmbedBackend::new(16);
+            inject_memory_context_with_embed(
+                &store,
+                "ambient-blocking-marker",
+                "",
+                true,
+                AmbientBudget {
+                    min_score: 0.0,
+                    ..AmbientBudget::default()
+                },
+                HybridWeights::default(),
+                200,
+                Some(&backend),
+            )
+        })
+        .await
+        .expect("blocking ambient recall must not panic")
+        .expect("blocking ambient recall should degrade or return evidence safely");
+
+        assert_eq!(injection.count, 1);
+        assert!(injection.context_block.contains("ambient-blocking-marker"));
+    }
 }

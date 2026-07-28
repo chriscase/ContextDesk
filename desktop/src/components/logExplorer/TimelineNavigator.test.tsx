@@ -97,6 +97,26 @@ describe("TimelineNavigator", () => {
     expect(screen.getByText(/42 matching events summarized/)).toBeTruthy();
   });
 
+  it("does not broaden an empty visible-lane source intersection", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{ sources: [] }}
+        emptySourceScope
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
+
+    expect(
+      screen.getByText("No events match the visible lane sources"),
+    ).toBeTruthy();
+    expect(host.hostLogTimelineSummary).not.toHaveBeenCalled();
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+  });
+
   it("seeks one bounded bucket page then delegates stable neighborhood loading", async () => {
     const onSeekSeq = vi.fn(async () => {});
     render(

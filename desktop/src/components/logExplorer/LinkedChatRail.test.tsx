@@ -19,14 +19,51 @@ import {
 } from "./LinkedChatRail";
 
 vi.mock("../../lib/host", () => ({
+  modelSelectionKey: (providerId: string, modelId: string) =>
+    `${providerId}::${modelId}`,
+  parseModelSelectionKey: (key: string) => {
+    const split = key.indexOf("::");
+    return split > 0
+      ? {
+          providerId: key.slice(0, split),
+          modelId: key.slice(split + 2),
+        }
+      : { providerId: null, modelId: key };
+  },
+  hostListChatModels: vi.fn(async () => []),
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostSaveChatSession: vi.fn(),
+  hostSetModelToolsEnabled: vi.fn(async () => true),
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
   hostArchiveChatSession: vi.fn(),
   agentTurn: vi.fn(async () => []),
 }));
+
+const defaultModels: host.ModelOptionDto[] = [
+  {
+    id: "triage-1",
+    label: "triage-1",
+    selection_key: "tools-provider::triage-1",
+    provider_id: "tools-provider",
+    provider_label: "Tools Provider",
+    group: "Tools Provider",
+    is_default: true,
+    tools_enabled: true,
+  },
+  {
+    id: "chat-only",
+    label: "chat-only",
+    selection_key: "chat-provider::chat-only",
+    provider_id: "chat-provider",
+    provider_label: "Chat-only Provider",
+    group: "Chat-only Provider",
+    is_default: false,
+    tools_enabled: false,
+    tools_disabled_reason: "profile",
+  },
+];
 
 const baseContext: AgentContextSummary = {
   corpusId: "c1",
@@ -78,9 +115,11 @@ function sessionDto(
 describe("LinkedChatRail", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(host.hostListChatModels).mockResolvedValue(defaultModels);
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostSetModelToolsEnabled).mockResolvedValue(true);
     vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
     vi.mocked(host.hostPinChatSession).mockResolvedValue(null);
     vi.mocked(host.hostArchiveChatSession).mockResolvedValue(null);
@@ -117,6 +156,284 @@ describe("LinkedChatRail", () => {
     );
   });
 
+  it("shows the configured model, persists a per-chat change, and sends explicit provider arguments", async () => {
+    const models: host.ModelOptionDto[] = [
+      defaultModels[0]!,
+      {
+        id: "forensics-2",
+        label: "forensics-2",
+        selection_key: "forensics-provider::forensics-2",
+        provider_id: "forensics-provider",
+        provider_label: "Forensics Provider",
+        group: "Forensics Provider",
+        is_default: false,
+        tools_enabled: true,
+      },
+      defaultModels[1]!,
+    ];
+    vi.mocked(host.hostListChatModels).mockResolvedValue(models);
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: "c1",
+              },
+            ]
+          : [],
+    );
+
+    const first = render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    await waitFor(() =>
+      expect(selector.value).toBe("tools-provider::triage-1"),
+    );
+    expect(
+      (
+        within(selector).getByRole("option", {
+          name: "chat-only · tools unavailable",
+        }) as HTMLOptionElement
+      ).disabled,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => {
+      expect(stored?.chat_model).toBe("triage-1");
+      expect(stored?.provider_profile_id).toBe("tools-provider");
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("linked-chat-manage-toggle") as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
+
+    fireEvent.change(selector, {
+      target: { value: "forensics-provider::forensics-2" },
+    });
+    await waitFor(() => {
+      expect(stored?.chat_model).toBe("forensics-2");
+      expect(stored?.provider_profile_id).toBe("forensics-provider");
+    });
+
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "Investigate the failure" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
+    expect(host.agentTurn).toHaveBeenCalledWith(
+      expect.any(String),
+      "Investigate the failure",
+      false,
+      "forensics-2",
+      "forensics-provider",
+      expect.any(Function),
+      null,
+      expect.objectContaining({ corpus_id: "c1" }),
+    );
+
+    first.unmount();
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Logs · fixture",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Linked chat model") as HTMLSelectElement).value,
+      ).toBe("forensics-provider::forensics-2"),
+    );
+  });
+
+  it("blocks a chat-only provider from masquerading as a linked investigation model", async () => {
+    const chatOnly = {
+      ...defaultModels[1]!,
+      is_default: true,
+    };
+    vi.mocked(host.hostListChatModels).mockResolvedValue([chatOnly]);
+    let stored = sessionDto("chat-only-session", "Logs · fixture");
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    await waitFor(() =>
+      expect(selector.value).toBe("chat-provider::chat-only"),
+    );
+    expect(screen.getByText(/linked tools unavailable/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Pretend to investigate" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    expect(
+      await screen.findByText(
+        /cannot investigate linked logs because its provider has tools disabled/i,
+      ),
+    ).toBeTruthy();
+    expect(host.agentTurn).not.toHaveBeenCalled();
+  });
+
+  it("retries a learned model-specific tool rejection without changing the provider", async () => {
+    const learnedDisabled: host.ModelOptionDto = {
+      ...defaultModels[0]!,
+      tools_enabled: false,
+      tools_disabled_reason: "model",
+    };
+    const reenabled: host.ModelOptionDto = {
+      ...learnedDisabled,
+      tools_enabled: true,
+      tools_disabled_reason: null,
+    };
+    vi.mocked(host.hostListChatModels)
+      .mockResolvedValueOnce([learnedDisabled])
+      .mockResolvedValue([reenabled]);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const selector = (await screen.findByLabelText(
+      "Linked chat model",
+    )) as HTMLSelectElement;
+    expect(selector.options[0]?.disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Retry tools" }));
+
+    await waitFor(() =>
+      expect(host.hostSetModelToolsEnabled).toHaveBeenCalledWith({
+        providerId: "tools-provider",
+        modelId: "triage-1",
+        toolsEnabled: true,
+      }),
+    );
+    expect(await screen.findByText(/linked tools available/i)).toBeTruthy();
+  });
+
+  it("sends with Return, preserves Shift+Return and IME composition, and blocks rapid duplicates", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: false,
+                pinned: false,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: "c1",
+              },
+            ]
+          : [],
+    );
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    const composer = (await screen.findByLabelText(
+      "Chat message",
+    )) as HTMLTextAreaElement;
+
+    fireEvent.change(composer, { target: { value: "line one" } });
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(composer, { key: "Enter", isComposing: true });
+    expect(host.agentTurn).not.toHaveBeenCalled();
+    expect(composer.value).toBe("line one");
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
+    expect((screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled).toBe(
+      true,
+    );
+
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "Grounded response." } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+    expect(await screen.findByText("Grounded response.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Chat message")),
+    );
+  });
+
   it("collapses to an accessible reopen strip without losing the active draft", async () => {
     const active = sessionDto("chat-a", "Chat A");
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
@@ -146,8 +463,14 @@ describe("LinkedChatRail", () => {
     );
     const { rerender } = render(renderRail(false));
 
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText("Chat A"),
+    );
     const composer = await screen.findByLabelText("Chat message");
     fireEvent.change(composer, { target: { value: "keep this draft" } });
+    const thread = screen.getByTestId("log-explorer-chat-thread");
+    thread.scrollTop = 144;
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
     expect(onToggleCollapsed).toHaveBeenCalledTimes(1);
 
@@ -170,6 +493,7 @@ describe("LinkedChatRail", () => {
     expect(
       (screen.getByLabelText("Chat message") as HTMLTextAreaElement).value,
     ).toBe("keep this draft");
+    expect(screen.getByTestId("log-explorer-chat-thread").scrollTop).toBe(144);
   });
 
   it("keeps governed cross-source tools and citations visible with the linked answer", async () => {
@@ -181,22 +505,23 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
       stored?.id === id ? stored : null,
     );
-    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () =>
-      stored
-        ? [
-            {
-              id: stored.id,
-              title: stored.title,
-              archived: stored.archived,
-              pinned: stored.pinned,
-              created_at: stored.created_at,
-              updated_at: stored.updated_at,
-              message_count: stored.messages.length,
-              preview: stored.messages.at(-1)?.content ?? "",
-              linked_corpus_id: stored.linked_corpus_id,
-            },
-          ]
-        : [],
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () =>
+        stored
+          ? [
+              {
+                id: stored.id,
+                title: stored.title,
+                archived: stored.archived,
+                pinned: stored.pinned,
+                created_at: stored.created_at,
+                updated_at: stored.updated_at,
+                message_count: stored.messages.length,
+                preview: stored.messages.at(-1)?.content ?? "",
+                linked_corpus_id: stored.linked_corpus_id,
+              },
+            ]
+          : [],
     );
     vi.mocked(host.agentTurn).mockImplementation(
       async (_id, _text, _fl, _m, _p, onEvent) => {
@@ -279,6 +604,7 @@ describe("LinkedChatRail", () => {
         corpusName="fixture"
         agentContext={baseContext}
         onApplyNav={() => undefined}
+        developerMode
       />,
     );
     fireEvent.click(screen.getByTestId("new-linked-chat"));
@@ -297,9 +623,19 @@ describe("LinkedChatRail", () => {
     expect(screen.getByText("search_logs")).toBeTruthy();
     expect(screen.getByText("search_kb")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
-    expect(screen.getAllByText("checkout-runbook.md").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("checkout-runbook.md").length).toBeGreaterThan(
+      0,
+    );
     expect(screen.getAllByText("memory:decision-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("sql:incident-db").length).toBeGreaterThan(0);
+    const technicalSummary = screen.getByText("Technical details");
+    const technical = technicalSummary.closest("details");
+    expect(technical?.open).toBe(false);
+    fireEvent.click(technicalSummary);
+    expect(technical?.open).toBe(true);
+    expect(
+      within(technical!).getByLabelText("Search trail").textContent,
+    ).toContain("tool:search_logs");
 
     fireEvent.click(screen.getByText("Context shared with agent"));
     const context = screen.getByTestId("linked-chat-agent-context");
@@ -333,9 +669,9 @@ describe("LinkedChatRail", () => {
       preview: "",
       linked_corpus_id: "c1",
     });
-    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () => [
-      meta(),
-    ]);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [meta()],
+    );
     vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
     vi.mocked(host.hostRenameChatSession).mockImplementation(
       async (id, title) => {
@@ -397,7 +733,9 @@ describe("LinkedChatRail", () => {
       expect(host.hostPinChatSession).toHaveBeenCalledWith("s1", true),
     );
     await waitFor(() =>
-      expect(within(manage).getByRole("button", { name: "Unpin" })).toBeTruthy(),
+      expect(
+        within(manage).getByRole("button", { name: "Unpin" }),
+      ).toBeTruthy(),
     );
 
     fireEvent.click(within(manage).getByRole("button", { name: "Archive" }));
@@ -405,7 +743,9 @@ describe("LinkedChatRail", () => {
       expect(host.hostArchiveChatSession).toHaveBeenCalledWith("s1", true),
     );
     await waitFor(() =>
-      expect(within(manage).getByRole("button", { name: "Reopen" })).toBeTruthy(),
+      expect(
+        within(manage).getByRole("button", { name: "Reopen" }),
+      ).toBeTruthy(),
     );
     fireEvent.click(within(manage).getByRole("button", { name: "Reopen" }));
     await waitFor(() =>
@@ -569,6 +909,12 @@ describe("LinkedChatRail", () => {
       expect(screen.queryByTestId("linked-chat-jump-latest")).toBeNull(),
     );
 
+    // The user may scroll away again while the provider is still working.
+    thread.scrollTop = 0;
+    fireEvent.scroll(thread);
+    const existingJump = await screen.findByTestId("linked-chat-jump-latest");
+    expect(existingJump.textContent).toBe("Jump to latest");
+
     await act(async () => {
       resolveTurn?.([
         {
@@ -582,6 +928,13 @@ describe("LinkedChatRail", () => {
     expect(
       await within(thread).findByText("Fresh assistant evidence answer."),
     ).toBeTruthy();
+    expect(screen.getByTestId("linked-chat-jump-latest").textContent).toBe(
+      "New response · Jump to latest",
+    );
+    fireEvent.click(screen.getByTestId("linked-chat-jump-latest"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("linked-chat-jump-latest")).toBeNull(),
+    );
     expect(
       await within(thread).findByText("Continue investigation"),
     ).toBeTruthy();
@@ -648,9 +1001,13 @@ describe("LinkedChatRail", () => {
 
     const assistant = await screen.findByTestId("linked-chat-msg-assistant");
     expect(assistant.textContent).toContain(unavailable);
+    expect(assistant.textContent).not.toContain("**Error:**");
+    expect(
+      within(assistant).getByText("Error:", { selector: "strong" }),
+    ).toBeTruthy();
     expect(screen.queryByText(/I'll use .*log tool/i)).toBeNull();
     await screen.findByText(
-      "Linked investigation stopped before completion; review the visible error and retry",
+      /Linked investigation stopped with Tools Provider · triage-1/i,
     );
     await waitFor(() =>
       expect(
@@ -691,19 +1048,17 @@ describe("LinkedChatRail", () => {
           "Workspace access timed out before the linked investigation could start. Re-select or grant access to the workspace, then retry.",
         ),
       )
-      .mockImplementationOnce(
-        async (_id, _text, _fl, _m, _p, onEvent) => {
-          const events: host.EventDto[] = [
-            {
-              kind: "text_delta",
-              payload: { text: "Retry completed with workspace access." },
-            },
-            { kind: "turn_completed", payload: {} },
-          ];
-          for (const event of events) onEvent?.(event);
-          return events;
-        },
-      );
+      .mockImplementationOnce(async (_id, _text, _fl, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "text_delta",
+            payload: { text: "Retry completed with workspace access." },
+          },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      });
 
     render(
       <LinkedChatRail
@@ -808,12 +1163,12 @@ describe("LinkedChatRail", () => {
 
     const status = await screen.findByRole("status");
     expect(status.textContent).toContain(
-      "Linked investigation stopped before completion",
+      "Linked investigation stopped with Tools Provider · triage-1",
     );
     expect(status.textContent).not.toContain("completed with governed");
-    expect(screen.getByTestId("linked-chat-msg-assistant").textContent).toContain(
-      "This turn reached its 60000 ms deadline",
-    );
+    expect(
+      screen.getByTestId("linked-chat-msg-assistant").textContent,
+    ).toContain("This turn reached its 60000 ms deadline");
     expect(screen.getByText("search_logs")).toBeTruthy();
     expect(
       (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
@@ -881,6 +1236,7 @@ describe("LinkedChatRail", () => {
     fireEvent.scroll(thread);
 
     const jump = await screen.findByTestId("linked-chat-jump-latest");
+    expect(jump.textContent).toBe("Jump to latest");
     // Keyboard-accessible control.
     jump.focus();
     expect(document.activeElement).toBe(jump);
@@ -921,9 +1277,7 @@ describe("LinkedChatRail", () => {
       />,
     );
     fireEvent.click(screen.getByTestId("new-linked-chat"));
-    await waitFor(() =>
-      expect(host.hostSaveChatSession).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
     fireEvent.change(screen.getByLabelText("Chat message"), {
       target: { value: "nav please" },
     });
@@ -963,7 +1317,10 @@ describe("LinkedChatRail", () => {
     const chatB = sessionDto("b", "Chat B", [
       { id: "b1", role: "user", content: "message-from-B-only" },
     ]);
-    const resolvers = new Map<string, (value: host.ChatSessionDto | null) => void>();
+    const resolvers = new Map<
+      string,
+      (value: host.ChatSessionDto | null) => void
+    >();
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
       {
         id: "a",
@@ -1117,19 +1474,18 @@ describe("LinkedChatRail", () => {
       ["a", sessionDto("a", "Chat A")],
       ["b", sessionDto("b", "Chat B")],
     ]);
-    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
-      async () =>
-        [...sessions.values()].map((s) => ({
-          id: s.id,
-          title: s.title,
-          archived: false,
-          pinned: false,
-          created_at: s.created_at,
-          updated_at: s.updated_at,
-          message_count: s.messages.length,
-          preview: s.messages.at(-1)?.content ?? "",
-          linked_corpus_id: "c1",
-        })),
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () =>
+      [...sessions.values()].map((s) => ({
+        id: s.id,
+        title: s.title,
+        archived: false,
+        pinned: false,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+        message_count: s.messages.length,
+        preview: s.messages.at(-1)?.content ?? "",
+        linked_corpus_id: "c1",
+      })),
     );
     vi.mocked(host.hostLoadChatSession).mockImplementation(
       async (id) => sessions.get(id) ?? null,
@@ -1188,15 +1544,15 @@ describe("LinkedChatRail", () => {
 
     // Switching to B must expose B's independent composer while A is pending.
     await openNamedChat("Chat B");
-    expect((screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled).toBe(
-      false,
-    );
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
+    ).toBe(false);
     fireEvent.change(screen.getByLabelText("Chat message"), {
       target: { value: "investigate B" },
     });
-    expect((screen.getByTestId("send-linked-chat") as HTMLButtonElement).disabled).toBe(
-      false,
-    );
+    expect(
+      (screen.getByTestId("send-linked-chat") as HTMLButtonElement).disabled,
+    ).toBe(false);
     fireEvent.click(screen.getByTestId("send-linked-chat"));
     await screen.findByText("B completed normally.");
     await screen.findByText("Linked chat response saved");
