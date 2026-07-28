@@ -63,6 +63,30 @@ const CONTEXT_SAFE_STARTERS: Starter[] = [
   },
 ];
 
+export async function openPersistedLogCitation(
+  sourceId: string,
+  corpusId: string | undefined,
+  showUnavailable: (sourceId: string, message: string) => void,
+): Promise<void> {
+  if (!corpusId) {
+    showUnavailable(
+      sourceId,
+      "This older log citation does not record its original corpus. ContextDesk will not substitute the chat’s current corpus.",
+    );
+    return;
+  }
+  try {
+    await hostOpenLogExplorer(corpusId);
+  } catch (error) {
+    showUnavailable(
+      sourceId,
+      `The original log corpus for this citation is unavailable:\n${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 export type ChatPaneProps = {
   branding: BrandingDto;
   openChatSessions: ChatSession[];
@@ -112,6 +136,8 @@ export type ChatPaneProps = {
   onPinnedSkillChange?: (skillId: string | null) => void;
   /** One imported log corpus explicitly attached to this chat (#695). */
   linkedCorpusId?: string | null;
+  /** Host validation/persistence of a corpus attachment is in flight. */
+  contextMutationPending?: boolean;
   onLinkedCorpusChange?: (corpusId: string | null) => Promise<void> | void;
   /** Optional guided setup catalog (#447) — never required. */
   onOpenGuidedSetup?: () => void;
@@ -157,6 +183,7 @@ export function ChatPane(props: ChatPaneProps) {
     pinnedSkillId = null,
     onPinnedSkillChange,
     linkedCorpusId = null,
+    contextMutationPending = false,
     onLinkedCorpusChange,
     preflightBlocking,
     openSettings,
@@ -520,13 +547,17 @@ export function ChatPane(props: ChatPaneProps) {
                     setMemoryPath={setMemoryPath}
                     openCompositionFromMemoryId={openCompositionFromMemoryId}
                     onOpenHelpCitation={onOpenHelpCitation}
-                    onOpenLogCitation={
-                      linkedCorpusId
-                        ? () => {
-                            void hostOpenLogExplorer(linkedCorpusId);
-                          }
-                        : undefined
-                    }
+                    onOpenLogCitation={(sourceId, citationCorpusId) => {
+                      void openPersistedLogCitation(
+                        sourceId,
+                        citationCorpusId,
+                        (unavailableSourceId, message) => {
+                          setSourcePath(unavailableSourceId);
+                          setSourceContent(message);
+                          setPane("source");
+                        },
+                      );
+                    }}
                     onHeightChange={
                       windowed.virtualized ? windowed.onHeightChange : undefined
                     }
@@ -566,7 +597,8 @@ export function ChatPane(props: ChatPaneProps) {
       <div className="composer-dock">
         <SessionContextBar
           sessionId={resolvedSessionId || null}
-          disabled={busy}
+          disabled={busy || contextMutationPending}
+          updating={contextMutationPending}
           pinnedSkillId={pinnedSkillId}
           onPinnedSkillChange={onPinnedSkillChange}
           linkedCorpusId={linkedCorpusId}
@@ -574,7 +606,7 @@ export function ChatPane(props: ChatPaneProps) {
         />
         <Composer
           onSubmit={onSubmit}
-          disabled={busy}
+          disabled={busy || contextMutationPending}
           busy={busy}
           models={modelOptions}
           selectedModelKey={effectiveModelKey}

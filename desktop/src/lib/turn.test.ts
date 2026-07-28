@@ -33,6 +33,44 @@ describe("shortSourceLabel", () => {
 });
 
 describe("applyEventsToMessage", () => {
+  it("persists host-authored corpus provenance only on governed log citations", () => {
+    const { msg } = applyEventsToMessage(base(), [
+      {
+        kind: "citation",
+        payload: {
+          source_id: "log_event:42",
+          label: "event 42",
+          locator: null,
+          corpus_id: "corpus-original",
+        },
+      },
+      {
+        kind: "citation",
+        payload: {
+          source_id: "runbook.md",
+          label: "runbook",
+          locator: null,
+          corpus_id: "must-not-apply",
+        },
+      },
+    ]);
+
+    expect(msg.citations).toEqual([
+      {
+        id: "log_event:42",
+        label: "event 42",
+        title: undefined,
+        corpusId: "corpus-original",
+      },
+      {
+        id: "runbook.md",
+        label: "runbook",
+        title: undefined,
+        corpusId: undefined,
+      },
+    ]);
+  });
+
   it("persists the linked-log fallback notice alongside the grounded answer", () => {
     const events: EventDto[] = [
       {

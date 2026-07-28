@@ -100,6 +100,7 @@ describe("MessageRow Help citation routing (#439)", () => {
               id: "log_template:7",
               label: "api/app.log",
               title: "Template 7",
+              corpusId: "corpus-original",
             },
           ],
         }}
@@ -115,7 +116,10 @@ describe("MessageRow Help citation routing (#439)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
     fireEvent.click(screen.getByRole("button", { name: /Template 7/ }));
 
-    expect(openLog).toHaveBeenCalledWith("log_template:7");
+    expect(openLog).toHaveBeenCalledWith(
+      "log_template:7",
+      "corpus-original",
+    );
     expect(hostReadFile).not.toHaveBeenCalled();
     expect(setPane).not.toHaveBeenCalledWith("source");
   });

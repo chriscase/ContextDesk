@@ -218,4 +218,24 @@ describe("ChatPane first-chat home", () => {
       expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
     );
   });
+
+  it("blocks send while a governed context mutation is pending", () => {
+    render(
+      <ChatPane
+        {...baseProps({
+          contextMutationPending: true,
+        })}
+      />,
+    );
+    expect(
+      (screen.getByPlaceholderText(
+        "Message ContextDesk…",
+      ) as HTMLTextAreaElement).disabled,
+    ).toBe(true);
+    expect(
+      screen
+        .getByTestId("session-context-bar")
+        .getAttribute("aria-busy"),
+    ).toBe("true");
+  });
 });

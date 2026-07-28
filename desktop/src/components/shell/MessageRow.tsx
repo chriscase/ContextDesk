@@ -44,8 +44,8 @@ export type MessageRowProps = {
   openCompositionFromMemoryId?: (sourceId: string) => void;
   /** Open a canonical bundled Help citation without treating it as a file. */
   onOpenHelpCitation?: (locator: string) => void;
-  /** Open the session-attached corpus for a governed log citation. */
-  onOpenLogCitation?: (sourceId: string) => void;
+  /** Open the host-authored original corpus for governed log evidence. */
+  onOpenLogCitation?: (sourceId: string, corpusId?: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
 };
@@ -53,6 +53,18 @@ export type MessageRowProps = {
 function toolsSignature(tools: Msg["tools"]): string {
   if (!tools?.length) return "0";
   return `${tools.length}:${tools.map((t) => `${t.id}:${t.summary}:${t.ok}`).join("|")}`;
+}
+
+function citationsSignature(citations: Msg["citations"]): string {
+  if (!citations?.length) return "0";
+  return citations
+    .map(
+      (citation) =>
+        `${citation.id}:${citation.label}:${citation.title ?? ""}:${
+          citation.corpusId ?? ""
+        }`,
+    )
+    .join("|");
 }
 
 /** Equality for React.memo — settled rows equal when id/content/stream/tools stable. */
@@ -70,7 +82,10 @@ export function messageRowPropsEqual(
   if ((prev.msg.trail?.length ?? 0) !== (next.msg.trail?.length ?? 0)) {
     return false;
   }
-  if ((prev.msg.citations?.length ?? 0) !== (next.msg.citations?.length ?? 0)) {
+  if (
+    citationsSignature(prev.msg.citations) !==
+    citationsSignature(next.msg.citations)
+  ) {
     return false;
   }
   // Meta footer only on settled assistant rows
@@ -161,7 +176,10 @@ function MessageRowImpl({
               path.startsWith("log_template:") ||
               path.startsWith("log_event:")
             ) {
-              onOpenLogCitation?.(path);
+              onOpenLogCitation?.(
+                path,
+                m.citations?.find((citation) => citation.id === path)?.corpusId,
+              );
               return;
             }
             // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
@@ -224,7 +242,11 @@ function MessageRowImpl({
                     cite.startsWith("log_template:") ||
                     cite.startsWith("log_event:")
                   ) {
-                    onOpenLogCitation?.(cite);
+                    onOpenLogCitation?.(
+                      cite,
+                      m.citations?.find((citation) => citation.id === cite)
+                        ?.corpusId,
+                    );
                     return;
                   }
                   if (isHttpUrl(cite)) {

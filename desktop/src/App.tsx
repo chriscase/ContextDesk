@@ -24,13 +24,13 @@ import { Workspace } from "./components/shell/Workspace";
 import { useChatScroll } from "./hooks/useChatScroll";
 import { useChatSessions } from "./hooks/useChatSessions";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useLinkedCorpusAttachment } from "./hooks/useLinkedCorpusAttachment";
 import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
   hostGetDurableMemory,
   hostOpenExternalUrl,
   hostSaveCompositionDraft,
-  hostSetChatLinkedCorpus,
   hostSetDefaultChatModel,
   hostWriteMemory,
   modelSelectionKey,
@@ -46,8 +46,6 @@ import type { PaletteItem } from "./lib/commandPalette";
 import {
   foldPreview,
   nowIso,
-  sessionFromDto,
-  sessionToDto,
 } from "./lib/session";
 import {
   helpOpenRequest,
@@ -106,6 +104,12 @@ export function App() {
     setShowFullHistory,
     syncSessionsFromHost,
   } = sessionsApi;
+  const { pendingSessionIds, setSessionLinkedCorpus } =
+    useLinkedCorpusAttachment({
+      ensureActiveSession,
+      setSessions,
+    });
+  const linkedCorpusPending = pendingSessionIds.has(resolvedSessionId);
 
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [renameTarget, setRenameTarget] = useState<{
@@ -249,42 +253,6 @@ export function App() {
       );
     });
   };
-
-  const setSessionLinkedCorpus = useCallback(
-    async (corpusId: string | null) => {
-      const target = ensureActiveSession();
-      const next = {
-        ...target,
-        linkedCorpusId: corpusId,
-        updatedAt: nowIso(),
-      };
-      setSessions((all) => {
-        const exists = all.some((session) => session.id === target.id);
-        return exists
-          ? all.map((session) => (session.id === target.id ? next : session))
-          : [next, ...all];
-      });
-      try {
-        const confirmed = await hostSetChatLinkedCorpus(
-          target.id,
-          corpusId,
-          sessionToDto(target),
-        );
-        const resolved = confirmed ? sessionFromDto(confirmed) : next;
-        setSessions((all) =>
-          all.map((session) =>
-            session.id === resolved.id ? resolved : session,
-          ),
-        );
-      } catch (error) {
-        setSessions((all) =>
-          all.map((session) => (session.id === target.id ? target : session)),
-        );
-        throw error;
-      }
-    },
-    [ensureActiveSession, setSessions],
-  );
 
   const openChatCtxMenu = (e: ReactMouseEvent, id: string) => {
     e.preventDefault();
@@ -880,6 +848,7 @@ export function App() {
                   setSourceContent: shell.setSourceContent,
                   pinnedSkillId: activeSession?.pinnedSkillId ?? null,
                   linkedCorpusId: activeSession?.linkedCorpusId ?? null,
+                  contextMutationPending: linkedCorpusPending,
                   onLinkedCorpusChange: setSessionLinkedCorpus,
                   onPinnedSkillChange: (skillId) => {
                     if (!resolvedSessionId) return;

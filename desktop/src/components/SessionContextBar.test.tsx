@@ -49,6 +49,19 @@ describe("SessionContextBar compact disclosure", () => {
     ).toBeTruthy();
   });
 
+  it("discloses and disables context controls while host validation is pending", async () => {
+    render(<SessionContextBar sessionId="session-1" updating disabled />);
+
+    const context = screen.getByTestId("session-context-bar");
+    await waitFor(() => expect(host.list).toHaveBeenCalledWith("session-1"));
+    expect(context.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByText(/updating…/)).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: /Add context/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
   it("opens and summarizes material file and skill context without a path dump", async () => {
     host.list.mockResolvedValue([
       {

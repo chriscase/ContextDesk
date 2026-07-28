@@ -2637,12 +2637,14 @@ export async function hostSetChatLinkedCorpus(
   sessionId: string,
   corpusId: string | null,
   draftSession?: ChatSessionDto | null,
+  expectedUpdatedAt?: string | null,
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
   return invoke<ChatSessionDto>("set_chat_linked_corpus", {
     sessionId,
     corpusId,
     draftSession: draftSession ?? null,
+    expectedUpdatedAt: expectedUpdatedAt ?? null,
   });
 }
 

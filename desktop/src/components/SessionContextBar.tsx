@@ -26,6 +26,7 @@ import {
 type Props = {
   sessionId: string | null;
   disabled?: boolean;
+  updating?: boolean;
   /** Session-pinned skill id (#343). */
   pinnedSkillId?: string | null;
   onPinnedSkillChange?: (skillId: string | null) => void;
@@ -37,6 +38,7 @@ type Props = {
 export function SessionContextBar({
   sessionId,
   disabled,
+  updating = false,
   pinnedSkillId = null,
   onPinnedSkillChange,
   linkedCorpusId = null,
@@ -189,6 +191,7 @@ export function SessionContextBar({
         dragOver ? " is-dragover" : ""
       }`}
       data-testid="session-context-bar"
+      aria-busy={updating}
       open={expanded || dragOver}
       onToggle={(event) => setExpanded(event.currentTarget.open)}
       onDragEnter={(e) => {
@@ -214,6 +217,7 @@ export function SessionContextBar({
         <span className="session-context-bar__summary-state">
           {contextSummary}
           {importPhase ? ` · ${importPhase}` : ""}
+          {updating ? " · updating…" : ""}
         </span>
       </summary>
       <div className="session-context-bar__body">

@@ -141,6 +141,9 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// Serializes chat-session writes across windows so governed fields cannot
+    /// race ordinary transcript saves (#695).
+    chat_session_mutation: Mutex<()>,
     /// Serializes one-process Investigation selection/create/mutation across windows.
     investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
@@ -3229,6 +3232,27 @@ async fn propose_save_skill_cmd(
     Ok(events_to_dto(&result.events))
 }
 
+fn event_to_dto_with_linked_corpus(
+    event: &cd_core::events::StreamEvent,
+    linked_corpus_id: Option<&str>,
+) -> EventDto {
+    let mut dto = cd_core::research::event_to_dto(event);
+    let is_log_citation = matches!(
+        event,
+        cd_core::events::StreamEvent::Citation { source_id, .. }
+            if source_id.starts_with("log_template:") || source_id.starts_with("log_event:")
+    );
+    if is_log_citation {
+        if let (Some(corpus_id), Some(payload)) = (linked_corpus_id, dto.payload.as_object_mut()) {
+            payload.insert(
+                "corpus_id".into(),
+                serde_json::Value::String(corpus_id.to_string()),
+            );
+        }
+    }
+    dto
+}
+
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
@@ -3391,8 +3415,11 @@ async fn agent_turn(
     }
 
     let channel = on_event;
+    let linked_citation_corpus = log_explorer_context
+        .as_ref()
+        .map(|context| context.corpus_id.clone());
     let mut sink = |ev: cd_core::events::StreamEvent| {
-        let dto = cd_core::research::event_to_dto(&ev);
+        let dto = event_to_dto_with_linked_corpus(&ev, linked_citation_corpus.as_deref());
         let _ = channel.send(dto);
     };
 
@@ -3564,16 +3591,37 @@ fn should_persist_chat_session(session: &Session) -> bool {
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
 }
 
-#[tauri::command]
-fn save_chat_session(state: State<'_, AppState>, mut session: Session) -> Result<Session, String> {
+fn save_chat_session_at(
+    store: &cd_core::sessions::SessionStore,
+    mut session: Session,
+) -> Result<Session, String> {
+    // The renderer owns transcript/view fields, but never the governed corpus
+    // grant. Preserve the durable host value for an existing chat and strip an
+    // attempted grant from a new chat; only set_chat_linked_corpus may change it.
+    if store.exists(&session.id).map_err(|e| e.to_string())? {
+        let durable = store
+            .load(&session.id)
+            .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
+        session.linked_corpus_id = durable.linked_corpus_id;
+    } else {
+        session.linked_corpus_id = None;
+    }
     session.maybe_auto_title_from_first_user();
     session.touch();
-    // Do not persist empty never-messaged drafts under placeholder titles.
-    if !should_persist_chat_session(&session) {
-        return Ok(session);
+    if should_persist_chat_session(&session) {
+        store.save(&session).map_err(|e| e.to_string())?;
     }
+    Ok(session)
+}
+
+#[tauri::command]
+fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
-    store.save(&session).map_err(|e| e.to_string())?;
+    let session = save_chat_session_at(&store, session)?;
     seed_history_from_session(&state, &session);
     Ok(session)
 }
@@ -3585,6 +3633,10 @@ fn rename_chat_session(
     id: String,
     title: String,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     let title = title.trim().to_string();
@@ -3601,6 +3653,10 @@ fn rename_chat_session(
 /// Soft-delete: move session to trash (recoverable).
 #[tauri::command]
 fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let session = session_store(&state)?
         .trash(&id)
         .map_err(|e| e.to_string())?;
@@ -3612,6 +3668,10 @@ fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session,
 /// Restore a session from trash.
 #[tauri::command]
 fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     session_store(&state)?
         .restore_from_trash(&id)
         .map_err(|e| e.to_string())
@@ -3621,6 +3681,10 @@ fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Sessio
 /// Also purges session-scoped context pack files (#341).
 #[tauri::command]
 fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     // Best-effort purge of session context pack before removing session metadata (#341).
     if let Ok(base) = session_context_base(&state) {
         let _ = cd_core::session_context::purge_session_at(&base, &id);
@@ -3640,6 +3704,10 @@ fn pin_chat_session(
     id: String,
     pinned: bool,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     session.pinned = pinned;
@@ -3655,6 +3723,10 @@ fn archive_chat_session(
     id: String,
     archived: bool,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     session.archived = archived;
@@ -5848,18 +5920,47 @@ fn set_chat_linked_corpus_at(
     session_id: &str,
     corpus_id: Option<String>,
     draft_session: Option<Session>,
+    expected_updated_at: Option<String>,
 ) -> Result<Session, String> {
     let mut session = match store.load(session_id) {
-        Ok(session) => session,
+        Ok(session) => {
+            let durable_revision = serde_json::to_value(session.updated_at)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string));
+            if expected_updated_at != durable_revision {
+                return Err(
+                    "Chat changed in another window; reload it before changing log context".into(),
+                );
+            }
+            session
+        }
         Err(error) => {
             if store.exists(session_id).map_err(|e| e.to_string())? {
                 return Err(format!("chat session is unavailable or corrupt: {error}"));
             }
             let draft = draft_session.ok_or_else(|| "chat session does not exist".to_string())?;
-            if draft.id != session_id || draft.trashed {
+            if draft.id != session_id
+                || draft.trashed
+                || draft.archived
+                || !draft.messages.is_empty()
+                || expected_updated_at
+                    != serde_json::to_value(draft.updated_at)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+            {
                 return Err("draft chat identity is invalid".into());
             }
-            draft
+            // Construct a minimal host-owned draft. Do not trust renderer
+            // messages, lifecycle flags, linked corpus, or timestamps wholesale.
+            let mut safe = Session::new(draft.title);
+            safe.id = session_id.to_string();
+            safe.compact_keep_last = draft.compact_keep_last;
+            safe.show_full_history = draft.show_full_history;
+            safe.title_locked = draft.title_locked;
+            safe.chat_model = draft.chat_model;
+            safe.provider_profile_id = draft.provider_profile_id;
+            safe.pinned_skill_id = draft.pinned_skill_id;
+            safe
         }
     };
     let corpus_id = normalize_log_corpus_id(corpus_id);
@@ -5879,10 +5980,22 @@ fn set_chat_linked_corpus(
     session_id: String,
     corpus_id: Option<String>,
     draft_session: Option<Session>,
+    expected_updated_at: Option<String>,
 ) -> Result<cd_core::sessions::Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let cache = log_cache_dir(&state)?;
-    set_chat_linked_corpus_at(&store, &cache, &session_id, corpus_id, draft_session)
+    set_chat_linked_corpus_at(
+        &store,
+        &cache,
+        &session_id,
+        corpus_id,
+        draft_session,
+        expected_updated_at,
+    )
 }
 
 /// Build the SPA URL for a Log Explorer window.
@@ -6763,6 +6876,7 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
@@ -7147,9 +7261,10 @@ mod help_host_tests {
 mod startup_host_tests {
     use super::{
         build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
-        host_readiness_terminal_events, install_prepared_durable_memory,
-        linked_log_fallback_notice, linked_log_host_terminal_events, linked_log_preflight_at,
-        log_search_cancel_key, normalize_log_corpus_id, restore_host_if_generation_matches,
+        event_to_dto_with_linked_corpus, host_readiness_terminal_events,
+        install_prepared_durable_memory, linked_log_fallback_notice,
+        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
+        normalize_log_corpus_id, restore_host_if_generation_matches, save_chat_session_at,
         set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
         wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
     };
@@ -7161,6 +7276,47 @@ mod startup_host_tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::time::Duration;
+
+    fn wire_session_revision(session: &cd_core::sessions::Session) -> String {
+        serde_json::to_value(session.updated_at)
+            .expect("serialize revision")
+            .as_str()
+            .expect("revision string")
+            .to_string()
+    }
+
+    #[test]
+    fn linked_log_citation_dto_stamps_only_host_resolved_corpus_identity() {
+        let log = cd_core::events::StreamEvent::Citation {
+            source_id: "log_template:7".into(),
+            label: "template 7".into(),
+            locator: None,
+        };
+        let stamped = event_to_dto_with_linked_corpus(&log, Some("trusted-corpus"));
+        assert_eq!(
+            stamped
+                .payload
+                .get("corpus_id")
+                .and_then(|value| value.as_str()),
+            Some("trusted-corpus")
+        );
+
+        let file = cd_core::events::StreamEvent::Citation {
+            source_id: "runbook.md".into(),
+            label: "runbook".into(),
+            locator: None,
+        };
+        assert!(
+            event_to_dto_with_linked_corpus(&file, Some("trusted-corpus"))
+                .payload
+                .get("corpus_id")
+                .is_none()
+        );
+        assert!(event_to_dto_with_linked_corpus(&log, None)
+            .payload
+            .get("corpus_id")
+            .is_none());
+    }
 
     #[test]
     fn log_ingest_embed_plan_does_not_wait_for_the_workspace_host_lock() {
@@ -7464,6 +7620,7 @@ mod startup_host_tests {
             &existing.id,
             Some("missing-corpus".into()),
             None,
+            Some(wire_session_revision(&existing)),
         )
         .is_err());
         assert!(store
@@ -7479,6 +7636,7 @@ mod startup_host_tests {
             &draft.id,
             Some("missing-corpus".into()),
             Some(draft.clone()),
+            Some(wire_session_revision(&draft)),
         )
         .is_err());
         assert!(
@@ -7509,6 +7667,7 @@ mod startup_host_tests {
             &draft.id,
             Some(report.corpus_id.clone()),
             Some(draft.clone()),
+            Some(wire_session_revision(&draft)),
         )
         .expect("validated attach");
         assert!(saved.messages.is_empty());
@@ -7524,6 +7683,121 @@ mod startup_host_tests {
                 .as_deref(),
             Some(report.corpus_id.as_str())
         );
+    }
+
+    #[test]
+    fn generic_save_cannot_attach_detach_or_switch_governed_log_context() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Governed");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        store.save(&durable).expect("save governed session");
+
+        for attempted in [None, Some("other-corpus".to_string())] {
+            let mut renderer = durable.clone();
+            renderer.linked_corpus_id = attempted;
+            let saved = save_chat_session_at(&store, renderer).expect("generic save");
+            assert_eq!(saved.linked_corpus_id.as_deref(), Some("trusted-corpus"));
+            assert_eq!(
+                store
+                    .load(&durable.id)
+                    .expect("reopen governed session")
+                    .linked_corpus_id
+                    .as_deref(),
+                Some("trusted-corpus")
+            );
+        }
+
+        let mut new_renderer = cd_core::sessions::Session::new("New");
+        new_renderer.linked_corpus_id = Some("smuggled-corpus".into());
+        new_renderer
+            .messages
+            .push(cd_core::sessions::StoredMessage {
+                id: "user-1".into(),
+                role: "user".into(),
+                content: "hello".into(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        let saved = save_chat_session_at(&store, new_renderer).expect("save new session");
+        assert!(saved.linked_corpus_id.is_none());
+        assert!(store
+            .load(&saved.id)
+            .expect("reopen new session")
+            .linked_corpus_id
+            .is_none());
+    }
+
+    #[test]
+    fn linked_corpus_change_rejects_a_stale_session_revision() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+
+        let session = cd_core::sessions::Session::new("Concurrent");
+        let stale_revision = wire_session_revision(&session);
+        store.save(&session).expect("save session");
+        let mut newer = session.clone();
+        newer.title = "Changed elsewhere".into();
+        std::thread::sleep(Duration::from_millis(2));
+        newer.touch();
+        store.save(&newer).expect("save newer revision");
+
+        let error = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &session.id,
+            Some(report.corpus_id),
+            None,
+            Some(stale_revision),
+        )
+        .expect_err("stale mutation must fail");
+        assert!(error.contains("changed in another window"));
+        let reopened = store.load(&session.id).expect("reopen");
+        assert_eq!(reopened.title, "Changed elsewhere");
+        assert!(reopened.linked_corpus_id.is_none());
+    }
+
+    #[test]
+    fn linked_corpus_attach_rejects_renderer_supplied_nonempty_draft() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let mut draft = cd_core::sessions::Session::new("Unsafe draft");
+        draft.messages.push(cd_core::sessions::StoredMessage {
+            id: "user-1".into(),
+            role: "user".into(),
+            content: "renderer supplied".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        let draft_id = draft.id.clone();
+        let updated_at = wire_session_revision(&draft);
+
+        let error = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_id,
+            None,
+            Some(draft),
+            Some(updated_at),
+        )
+        .expect_err("nonempty draft must fail");
+        assert!(error.contains("draft chat identity is invalid"));
+        assert!(!store.exists(&draft_id).expect("draft existence"));
     }
 
     #[test]

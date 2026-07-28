@@ -2,7 +2,7 @@
 
 import type { ChatSessionDto } from "../host";
 import type { ToolCallView } from "../../components/ToolCallList";
-import type { ChatMsg } from "../turn";
+import type { ChatCitation, ChatMsg } from "../turn";
 import type { ChatSession } from "./types";
 
 export function nowIso(): string {
@@ -75,7 +75,7 @@ export function msgFromStored(
     content: m.content,
     tools: Array.isArray(m.tools) ? (m.tools as ToolCallView[]) : undefined,
     citations: Array.isArray(m.citations)
-      ? (m.citations as { id: string; label: string; title?: string }[])
+      ? (m.citations as ChatCitation[])
       : undefined,
     trail: m.trail ?? undefined,
     meta: m.meta ?? undefined,
