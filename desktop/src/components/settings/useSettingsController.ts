@@ -48,6 +48,7 @@ import {
 } from "../../lib/preflight";
 import { useDebouncedAsyncCheck } from "../forms";
 import type { WizardApplyPayload } from "./AiSetupWizard";
+import { pickWorkspaceDirectory } from "../../lib/workspacePicker";
 
 /** NAV section ids for SettingsModal shell (#147). */
 export type SettingsSection =
@@ -371,30 +372,23 @@ export function useSettingsController({
 
   const addRoot = async () => {
     // Prefer native folder dialog under Tauri; prompt fallback in plain browser.
-    let path: string | null = null;
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "Add workspace folder",
-      });
-      if (selected && typeof selected === "string") {
-        path = selected;
-      } else if (Array.isArray(selected) && selected[0]) {
-        path = selected[0];
-      }
-    } catch {
-      /* not in Tauri */
-    }
-    if (!path) {
-      const { dialogMessage } = await import("../../lib/dialogs");
-      await dialogMessage(
-        "Folder pick requires the desktop app. Use Browse… under Tauri, or paste a path is not available here — run npm run tauri:dev.",
-        { title: "Add folder", kind: "info" },
-      );
-      return;
-    }
+    const path = await pickWorkspaceDirectory(
+      async () => {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        return await open({
+          directory: true,
+          multiple: false,
+          title: "Add workspace folder",
+        });
+      },
+      async () => {
+        const { dialogMessage } = await import("../../lib/dialogs");
+        await dialogMessage(
+          "Folder picking is unavailable in this app session. Reopen ContextDesk and try again.",
+          { title: "Add folder", kind: "info" },
+        );
+      },
+    );
     if (!path?.trim()) return;
     const trimmed = path.trim();
     const check = await hostValidateWorkspacePath(trimmed);
