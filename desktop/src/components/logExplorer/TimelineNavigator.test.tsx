@@ -111,6 +111,23 @@ function deferred<T>() {
 }
 
 describe("TimelineNavigator", () => {
+  it("keeps the timeline on a full lane-strip row when adjacent disclosures can fit", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    const navigator = await screen.findByTestId("timeline-navigator");
+    const style = getComputedStyle(navigator);
+    expect(style.flexBasis).toBe("100%");
+    expect(style.flexShrink).toBe("0");
+    expect(style.maxWidth).toBe("100%");
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue(summary);

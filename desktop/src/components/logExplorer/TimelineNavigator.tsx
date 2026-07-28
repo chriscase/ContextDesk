@@ -459,6 +459,7 @@ export function TimelineNavigator({
       className="log-explorer__navigator timeline-navigator"
       data-testid="timeline-navigator"
       data-open={open ? "true" : "false"}
+      style={{ flexBasis: "100%", flexShrink: 0, maxWidth: "100%" }}
     >
       {toggleTimeline}
       {!open ? (
