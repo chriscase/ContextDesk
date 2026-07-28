@@ -18,12 +18,12 @@ ContextDesk is a **developer knowledge workbench**: multi-source retrieval, tool
 
 ## Language practices
 
-| Area | Practice |
-|------|----------|
-| Rust | Small crates/modules, `thiserror`/`anyhow` at edges, no `unwrap` in library paths, unit tests next to logic, `tracing` for logs |
-| TypeScript/React | Strict TS, function components, hooks for state, no business logic that belongs in Rust |
-| CSS | Files under `styles/`; tokens in `tokens.css`; themes in `themes/*.css`; components use semantic class names |
-| IPC | Serialize DTOs in core or shared types; never pass secrets to the webview |
+| Area             | Practice                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Rust             | Small crates/modules, `thiserror`/`anyhow` at edges, no `unwrap` in library paths, unit tests next to logic, `tracing` for logs |
+| TypeScript/React | Strict TS, function components, hooks for state, no business logic that belongs in Rust                                         |
+| CSS              | Files under `styles/`; tokens in `tokens.css`; themes in `themes/*.css`; components use semantic class names                    |
+| IPC              | Serialize DTOs in core or shared types; never pass secrets to the webview                                                       |
 
 ## Architecture pointers
 
@@ -82,6 +82,12 @@ On Linux, install keyring + WebKit deps before host check (see CI `tauri-host` j
 - [ ] Every acceptance criterion on the issue is **literally true** and proven (test name, command output, or screenshot) — see `docs/ISSUE_HONESTY.md`.
 - [ ] No secrets in commits; IPC DTOs never carry raw keys.
 - [ ] HardWrite / SoftWrite paths still require UI-originated confirmation.
+- [ ] Changes to architecture, trust boundaries, evidence/context flow, log
+      analysis, permissions, investigation state, Help delivery, or provider
+      lifecycle update the relevant
+      [`docs/design/PROVEN_METHODS.md`](docs/design/PROVEN_METHODS.md) handbook
+      chapter/status matrix. If no handbook change is warranted, the PR or
+      close proof says `Handbook impact: none — <reason>`.
 - [ ] Issue close comment (or PR body) pastes proof; partial work stays open with a Residual note.
 
 ## How to work issues
@@ -114,7 +120,7 @@ Before expanding permissions or shipping desktop changes, verify:
 3. **Dialog scope** — `dialog:allow-open` is OK for folder picker; do not add save/write dialogs that bypass host policy without review.
 4. **No secrets over IPC** — commands return DTOs/bools only (`provider_has_secret`, config with `api_key_ref`). Never add `get_provider_secret` to the webview.
 5. **CSP** — `tauri.conf.json` → `app.security.csp` stays restrictive; remote connect only to localhost for Ollama/dev, not `*`.
-6. **Capabilities JSON** — every new permission has a one-line comment in the capability file *why* it is required.
+6. **Capabilities JSON** — every new permission has a one-line comment in the capability file _why_ it is required.
 7. **Plugins** — new Tauri plugins require an issue + threat-model note; default is refuse.
 
 Current baseline (`capabilities/default.json`): `core:default` + `dialog:allow-open` only.

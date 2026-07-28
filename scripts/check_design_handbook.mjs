@@ -48,7 +48,9 @@ function assertFile(repositoryRoot, relativePath) {
 function validateMarkdownFile(repositoryRoot, relativePath, text) {
   const h1Count = (text.match(/^# [^\n]+$/gm) ?? []).length;
   if (h1Count !== 1) {
-    throw new Error(`${relativePath}: expected exactly one H1, found ${h1Count}`);
+    throw new Error(
+      `${relativePath}: expected exactly one H1, found ${h1Count}`,
+    );
   }
   if (/\/Users\/|[A-Za-z]:\\Users\\/.test(text)) {
     throw new Error(`${relativePath}: contains a private absolute user path`);
@@ -67,6 +69,28 @@ function validateMarkdownFile(repositoryRoot, relativePath, text) {
     }
   }
   if (open) throw new Error(`${relativePath}: unclosed Mermaid fence`);
+
+  const diagramBlocks = [
+    ...text.matchAll(/^```mermaid\s*\n([\s\S]*?)^```\s*$/gm),
+  ];
+  for (const [index, match] of diagramBlocks.entries()) {
+    const source = match[1];
+    if (!/^%%\s*title\s*:\s*\S.+$/im.test(source)) {
+      throw new Error(
+        `${relativePath}: Mermaid diagram ${index + 1} is missing a specific '%% title:'`,
+      );
+    }
+    if (
+      /^\s*(?:alt|else|opt|loop|par|and|critical|option|break|rect|subgraph|end)\b/im.test(
+        source,
+      ) ||
+      /-\.\s*["'][^"']+["']\s*\.-?>/m.test(source)
+    ) {
+      throw new Error(
+        `${relativePath}: Mermaid diagram ${index + 1} uses syntax the bundled renderer cannot represent faithfully`,
+      );
+    }
+  }
 
   for (const match of text.matchAll(/\[[^\]]*]\(([^)]+)\)/g)) {
     const target = match[1].split("#", 1)[0];
@@ -104,6 +128,9 @@ export function validateDesignHandbook(repositoryRoot) {
     if (!index.text.includes(`**${term}**`)) {
       throw new Error(`${INDEX}: missing status definition '${term}'`);
     }
+  }
+  if (!index.text.includes("## Handbook maintenance contract")) {
+    throw new Error(`${INDEX}: missing handbook maintenance contract`);
   }
 
   const requiredFiles = [...CHAPTERS, TEMPLATE];
@@ -163,7 +190,10 @@ function main() {
   );
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   try {
     main();
   } catch (error) {
