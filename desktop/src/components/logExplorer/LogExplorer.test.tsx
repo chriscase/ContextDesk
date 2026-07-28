@@ -469,9 +469,9 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     const body = screen.getByTestId("log-explorer-body");
     const filters = screen.getByTestId("log-explorer-filters");
-    const errorFilter = within(filters).getByRole("checkbox", {
+    const errorFilter = (await within(filters).findByRole("checkbox", {
       name: /error/i,
-    }) as HTMLInputElement;
+    })) as HTMLInputElement;
 
     fireEvent.click(errorFilter);
     expect(errorFilter.checked).toBe(true);
