@@ -174,7 +174,9 @@ fn select_ambient(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::MockHashEmbedBackend;
     use crate::memory::{Kind, MemoryDraft, MemoryWriteOp, SqliteMemoryStore};
+    use crate::memory::{MemoryStore, TwoScopeMemory};
 
     #[test]
     fn budget_and_toggle() {
@@ -248,5 +250,38 @@ mod tests {
             inj.count, 0,
             "title already in history must be echo-suppressed"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hybrid_ambient_recall_is_safe_inside_tokio_runtime() {
+        let store = TwoScopeMemory::open_in_memory("runtime-test").unwrap();
+        store
+            .put(
+                MemoryWriteOp::Insert(MemoryDraft::new(
+                    Kind::Fact,
+                    "ambient-runtime-marker belongs in the incident runbook",
+                )),
+                100,
+            )
+            .unwrap();
+        let backend = MockHashEmbedBackend::new(16);
+
+        let injection = inject_memory_context_with_embed(
+            &store,
+            "ambient-runtime-marker",
+            "",
+            true,
+            AmbientBudget {
+                min_score: 0.0,
+                ..AmbientBudget::default()
+            },
+            HybridWeights::default(),
+            200,
+            Some(&backend),
+        )
+        .expect("ambient hybrid recall must not enter a runtime on its Tokio worker");
+
+        assert_eq!(injection.count, 1);
+        assert!(injection.context_block.contains("ambient-runtime-marker"));
     }
 }
