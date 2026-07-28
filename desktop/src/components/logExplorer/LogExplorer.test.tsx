@@ -180,6 +180,24 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function scrollLaneToEdge(
+  edge: "older" | "newer",
+  laneIndex = 0,
+): HTMLElement {
+  const list = screen.getAllByTestId("virtualized-event-list")[laneIndex]!;
+  Object.defineProperties(list, {
+    clientHeight: { configurable: true, value: 400 },
+    scrollHeight: { configurable: true, value: 2_800 },
+    scrollTop: {
+      configurable: true,
+      writable: true,
+      value: edge === "older" ? 0 : 2_400,
+    },
+  });
+  fireEvent.scroll(list);
+  return list;
+}
+
 function bookmark(
   id: string,
   label: string,
@@ -1911,8 +1929,13 @@ describe("LogExplorer shell", () => {
       },
     );
 
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("load-older-lane-0"));
+    await screen.findByText("middle 101");
+    expect(screen.queryByText("Load older")).toBeNull();
+    expect(screen.queryByText("Load newer")).toBeNull();
+
+    scrollLaneToEdge("older");
     expect(await screen.findByText("older 99")).toBeTruthy();
     expect(screen.getByText("middle 101")).toBeTruthy();
     expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
@@ -1923,7 +1946,8 @@ describe("LogExplorer shell", () => {
       }),
     );
 
-    fireEvent.click(screen.getByTestId("load-more-lane-0"));
+    clock.mockReturnValue(1_300);
+    scrollLaneToEdge("newer");
     expect(await screen.findByText("newer 104")).toBeTruthy();
     expect(screen.getByText("older 100")).toBeTruthy();
     expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
@@ -1933,8 +1957,9 @@ describe("LogExplorer shell", () => {
         afterTs: 1_700_000_102,
       }),
     );
-    expect(screen.queryByTestId("load-older-lane-0")).toBeNull();
-    expect(screen.queryByTestId("load-more-lane-0")).toBeNull();
+    expect(screen.queryByText("Load older")).toBeNull();
+    expect(screen.queryByText("Load newer")).toBeNull();
+    clock.mockRestore();
   });
 
   it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
@@ -1967,7 +1992,8 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    await screen.findByText("auth failure");
+    scrollLaneToEdge("newer");
     const alert = await screen.findByTestId("lane-page-error-lane-0");
     expect(within(alert).getByText(/fixture page unavailable/)).toBeTruthy();
     expect(screen.getByText("auth failure")).toBeTruthy();
@@ -2028,18 +2054,25 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     fireEvent.click(await screen.findByTitle("2 evidence lanes"));
-    const apiMore = await screen.findByTestId("load-more-lane-0");
-    const workerMore = await screen.findByTestId("load-more-lane-1");
-    fireEvent.click(apiMore);
     await waitFor(() =>
-      expect((apiMore as HTMLButtonElement).disabled).toBe(true),
+      expect(screen.getAllByTestId("virtualized-event-list")).toHaveLength(2),
+    );
+    scrollLaneToEdge("newer", 0);
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
+        "Loading newer",
+      ),
     );
 
-    fireEvent.click(workerMore);
+    scrollLaneToEdge("newer", 1);
     await waitFor(() =>
-      expect(screen.queryByTestId("load-more-lane-1")).toBeNull(),
+      expect(screen.getByTestId("lane-paging-lane-1").textContent).toContain(
+        "End",
+      ),
     );
-    expect((apiMore as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
+      "Loading newer",
+    );
 
     await act(async () => {
       slowApi.resolve({
@@ -2053,7 +2086,9 @@ describe("LogExplorer shell", () => {
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(screen.queryByTestId("load-more-lane-0")).toBeNull(),
+      expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
+        "End",
+      ),
     );
   });
 
@@ -2073,7 +2108,8 @@ describe("LogExplorer shell", () => {
     );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("load-more-lane-0"));
+    await screen.findByText("auth failure");
+    scrollLaneToEdge("newer");
     fireEvent.change(screen.getByTestId("log-explorer-filter"), {
       target: { value: "fresh" },
     });

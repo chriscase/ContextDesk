@@ -25,7 +25,7 @@ blanket claim that every future product change is automatically documented.
 | #535 | Adaptive UTC time and resizable columns | Log Explorer feature table | Persistence scope, auto-fit sample cap, reset, and order-only honesty documented |
 | #536 | Narrow mode uses one lane and intentional Filters/Chat drawers | Log Explorer **Narrow layout** row | Focus restoration and primary log viewport behavior documented |
 | #537 | Bounded previews plus complete resizable event inspector | `log-explorer#long-lines` plus typed popover | Preview never claims to contain the full event |
-| #538 | Bidirectional keyset paging with bounded residency | Log Explorer **Bidirectional paging** row | Automatic edge paging and manual fallback documented |
+| #538 | Bidirectional keyset paging with bounded residency | Log Explorer **Bidirectional paging** row | Automatic edge paging and local error Retry documented; no routine paging buttons |
 | #539 | Responsive first-chat home and safe starters | `first-run` | Help avoids claiming workspace starters without authorized roots |
 | #540 | Help truth and diagram quality | This ledger and `help/assets/README.md` | Geometry gate/contact-sheet command added; packaged theme proof remains external |
 | #541 | Typed rich contextual help | `HELP_CENTER.md#contextual-help-decision-rule` | Portal, narrow sheet, canonical locator, and cross-window full-Help handoff documented |

@@ -3260,48 +3260,32 @@ export function LogExplorer({ corpusId }: Props) {
                       </button>
                     </div>
                   ) : null}
-                  <div
-                    className="log-explorer__lane-paging"
-                    aria-live="polite"
-                    aria-label={`${lane.label} paging status`}
-                  >
-                    {!laneCursors[lane.id]?.hasOlder ? (
-                      <span className="log-explorer__paging-boundary">
-                        Beginning
-                      </span>
-                    ) : null}
-                    {laneCursors[lane.id]?.hasOlder ? (
-                      <button
-                        type="button"
-                        className="log-explorer__btn"
-                        data-testid={`load-older-${lane.id}`}
-                        disabled={lanePaging[lane.id]?.loading != null}
-                        onClick={() => void loadOlderLane(lane.id)}
-                      >
-                        Load older
-                      </button>
-                    ) : null}
-                    {lanePaging[lane.id]?.loading ? (
-                      <span className="log-explorer__paging-loading">
-                        Loading {lanePaging[lane.id]?.loading}…
-                      </span>
-                    ) : null}
-                    {laneCursors[lane.id]?.hasNewer ? (
-                      <button
-                        type="button"
-                        className="log-explorer__btn"
-                        data-testid={`load-more-${lane.id}`}
-                        data-lane-load-more={lane.id}
-                        disabled={lanePaging[lane.id]?.loading != null}
-                        onClick={() => void loadMoreLane(lane.id)}
-                      >
-                        Load newer
-                      </button>
-                    ) : null}
-                    {!laneCursors[lane.id]?.hasNewer ? (
-                      <span className="log-explorer__paging-boundary">End</span>
-                    ) : null}
-                  </div>
+                  {lanePaging[lane.id]?.loading ||
+                  !laneCursors[lane.id]?.hasOlder ||
+                  !laneCursors[lane.id]?.hasNewer ? (
+                    <div
+                      className="log-explorer__lane-paging"
+                      data-testid={`lane-paging-${lane.id}`}
+                      aria-live="polite"
+                      aria-label={`${lane.label} paging status`}
+                    >
+                      {!laneCursors[lane.id]?.hasOlder ? (
+                        <span className="log-explorer__paging-boundary">
+                          Beginning
+                        </span>
+                      ) : null}
+                      {lanePaging[lane.id]?.loading ? (
+                        <span className="log-explorer__paging-loading">
+                          Loading {lanePaging[lane.id]?.loading}…
+                        </span>
+                      ) : null}
+                      {!laneCursors[lane.id]?.hasNewer ? (
+                        <span className="log-explorer__paging-boundary">
+                          End
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </section>
               );
             })}

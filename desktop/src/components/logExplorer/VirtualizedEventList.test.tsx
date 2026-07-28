@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   eventRowHeight,
@@ -256,5 +262,56 @@ describe("VirtualizedEventList", () => {
     });
     fireEvent.scroll(bottomList);
     expect(onNearBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefetches a newer page when the first page cannot fill the viewport", async () => {
+    const onNearBottom = vi.fn();
+    const renderList = (count: number) => (
+      <VirtualizedEventList
+        events={makeEvents(count)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearBottom={onNearBottom}
+      />
+    );
+    const { rerender } = render(renderList(10));
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 280 },
+    });
+
+    rerender(renderList(11));
+    await waitFor(() => expect(onNearBottom).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not silently retry an underfilled page after an unrelated rerender", async () => {
+    const firstRequest = vi.fn();
+    const replacementRequest = vi.fn();
+    const renderList = (count: number, onNearBottom: () => void) => (
+      <VirtualizedEventList
+        events={makeEvents(count)}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        onRowClick={vi.fn()}
+        onNearBottom={onNearBottom}
+      />
+    );
+    const { rerender } = render(renderList(10, firstRequest));
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 280 },
+    });
+
+    rerender(renderList(11, firstRequest));
+    await waitFor(() => expect(firstRequest).toHaveBeenCalledTimes(1));
+    rerender(renderList(11, replacementRequest));
+    expect(replacementRequest).not.toHaveBeenCalled();
   });
 });
