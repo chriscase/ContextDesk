@@ -13,6 +13,7 @@ related:
   - log-analysis-pipeline
   - log-portable-package
 ---
+
 # Log Explorer investigation workspace
 
 The **Logs** tab is a **library** only: import folder/file/zip, stats, package
@@ -28,25 +29,25 @@ import/export, and open investigation. It is not a million-row browser.
 
 ## What you can do
 
-| Feature | Notes |
-| --- | --- |
-| Find vs Filter | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist |
-| Counts | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total |
-| Bookmarks | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore |
-| Investigation evidence | Selecting rows reveals **Ask about selection** and **Save evidence**. Saved exact identities live outside disposable corpus caches, survive chat deletion, and can be previewed without changing the Explorer before an explicit reveal |
-| Bidirectional paging | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; a local **Retry** appears only after a page failure |
-| Timestamps | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time |
-| Columns | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally |
-| Long lines | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event |
-| Narrow layout | Logs remain primary and single-lane. Filters and Investigation (Evidence/Chat) open intentionally as keyboard-safe drawers with state summaries and focus restoration |
-| Evidence lanes | 1–4 user-composed source groups. The same source may appear in more than one lane |
-| Time-link modes | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets |
-| Timeline navigator | Closed by default and does no work until opened. A hard-capped backend summary shows the full filtered span; click a bar or release the position slider to load one bounded event neighborhood |
-| Time quality | Wall clock vs **order only** (seq is not unlabeled calendar time) |
-| Linked chat | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot, must get a successful result from a **bounded log tool**, and may consult other configured read-only sources before producing an evidence-based answer — not planning-only prose |
-| Follow latest | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow |
-| Agent context | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context |
-| Nav chips | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only |
+| Feature                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Find vs Filter         | **Find** pages chronological result identities and loads hit-centered context without removing surrounding rows. **Filter** reduces the table and intersects levels/sources/time. **Advanced** exposes literal vs bounded linear-time regex, case sensitivity, and optional template-semantic search when vectors exist                                                                                                                                              |
+| Counts                 | The filter rail labels **corpus total**, **matched** (global query/facets), and **resident** (currently loaded) separately — not a max-per-lane figure as a global total                                                                                                                                                                                                                                                                                             |
+| Bookmarks              | Activation resolves the stable target directly and loads a bounded neighborhood; filters may be temporarily cleared with an explicit restore                                                                                                                                                                                                                                                                                                                         |
+| Investigation evidence | Selecting rows reveals **Ask about selection** and **Save evidence**. Saved exact identities live outside disposable corpus caches, survive chat deletion, and can be previewed without changing the Explorer before an explicit reveal                                                                                                                                                                                                                              |
+| Bidirectional paging   | Scroll near the top or bottom to load older/newer backend pages with a bounded resident window; a local **Retry** appears only after a page failure                                                                                                                                                                                                                                                                                                                  |
+| Timestamps             | Adaptive UTC display prioritizes time of day for a single-day corpus and adds date/year when needed; the complete timestamp is keyboard-readable in the row and inspector; order-only never fabricates calendar time                                                                                                                                                                                                                                                 |
+| Columns                | Drag or keyboard-resize Time / Level / Source / Message; auto-fit samples at most 200 resident redacted events; reset restores defaults; widths persist locally                                                                                                                                                                                                                                                                                                      |
+| Long lines             | **1 line**, **Preview**, and **Deep** use a user-selected bounded depth. Expand one row or use the resizable inspector to read and copy the complete redacted event                                                                                                                                                                                                                                                                                                  |
+| Narrow layout          | Logs remain primary and single-lane. Filters and Investigation (Evidence/Chat) open intentionally as keyboard-safe drawers with state summaries and focus restoration                                                                                                                                                                                                                                                                                                |
+| Evidence lanes         | 1–4 user-composed source groups. The same source may appear in more than one lane                                                                                                                                                                                                                                                                                                                                                                                    |
+| Time-link modes        | **Independent** scrolls lanes separately. **Follow** seeks approximate timestamp peers. **Align** uses shared exact wall-clock rows and explicit blank cells; it is unavailable for mixed, order-only, empty, failed, or unloaded lane sets                                                                                                                                                                                                                          |
+| Investigation timeline | Visible by default on desktop and quietly collapsible. A hard-capped backend summary shows volume, canonical severity, honest gaps, preview/committed position, and the resident range; releasing the broad chart scrubber loads one bounded event neighborhood. While collapsed, filter changes perform no timeline work                                                                                                                                            |
+| Time quality           | Wall clock vs **order only** (seq is not unlabeled calendar time)                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Linked chat            | Compact rail with chat switcher; **New** creates a corpus-linked session. Switching chats is race-safe (a slow load cannot overwrite the active chat). Long threads use a bounded virtualized window; history stays persisted. The agent receives a privacy-safe viewport snapshot, must get a successful result from a **bounded log tool**, and may consult other configured read-only sources before producing an evidence-based answer — not planning-only prose |
+| Follow latest          | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow                                                                                                                                                                                                                                                                                                                     |
+| Agent context          | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context                                                                                                                                                                                                                                                                |
+| Nav chips              | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only                                                                                                                                                                                                                                                                                                                                        |
 
 ## Find vs Filter
 
@@ -102,21 +103,30 @@ Align is an event-time axis, not a proportional-duration chart. Mixed and
 order-only data cannot enter Align, and an empty/failed/unloaded lane cannot
 make the aggregate more trustworthy.
 
-## Timeline navigator
+## Investigation timeline
 
-Open **Navigator** to move across the entire filtered corpus without loading
-the intervening event bodies. The backend performs fixed-size SQL aggregation
-and returns at most 96 count buckets; empty spans stay empty. The shaded portion
-marks buckets represented in the current bounded resident window. With two to
-four lanes, compact coverage rows summarize each lane independently and retain
-its own wall/mixed/order-only label; one lane cannot make another's clock more
-trustworthy.
+The desktop timeline stays visible as a first-class overview so you can move
+across the entire filtered corpus without loading intervening event bodies. The
+backend performs fixed-size SQL aggregation and returns at most 96 count
+buckets. Empty spans remain visibly empty. Stacked, patterned severity segments
+distinguish Error, Warning, Info, Debug, and Other without relying on color
+alone. The highlighted range marks buckets represented in the current bounded
+resident window.
 
-Click a bar or move and release the position slider. Explorer requests one
-event in that bucket and then loads its bounded neighborhood. Slider movement
-alone performs no request. Wall-clock data uses UTC labels; order-only data is
-described as order and mixed data is labeled honestly. Closing Navigator
-returns it to zero background timeline work.
+Drag or click anywhere on the broad chart scrubber. Movement changes the
+preview marker without querying; releasing requests one event from that bucket
+and loads its bounded neighborhood, leaving a separate committed marker.
+Keyboard arrows, Home, and End use the same commit behavior. Compact UTC labels
+replace a long machine timestamp, while exact bucket bounds and a complete
+textual bucket list remain available through hover, focus, and **Timeline
+data**.
+
+With two to four lanes, compact coverage rows summarize each lane and retain
+its own wall/mixed/order-only label; one lane cannot make another clock more
+trustworthy. Wall-clock data uses UTC, order-only data is described as order,
+and mixed data is labeled honestly. Use the integrated **Timeline** disclosure
+or Escape to collapse it. While collapsed, filter changes perform no timeline
+summary work until it is reopened.
 
 ## Long lines
 
@@ -232,14 +242,14 @@ cargo test -p cd-core --test log_lab \
   --ignored --exact --nocapture
 ```
 
-| Profile | Use |
-| --- | --- |
-| `small` | Checked-in mystery scenarios |
-| `medium` | Legacy regular 100k smoke |
-| `ui-medium` | 100k, 8 sources, multi-day, Find/bookmark sentinels |
-| `seven-day` | Sparse/burst over seven days (event count independent of span) |
-| `paging-stress` | Boundary sentinels for paging/eviction |
-| `large` | Opt-in million-event stress (local only) |
+| Profile         | Use                                                            |
+| --------------- | -------------------------------------------------------------- |
+| `small`         | Checked-in mystery scenarios                                   |
+| `medium`        | Legacy regular 100k smoke                                      |
+| `ui-medium`     | 100k, 8 sources, multi-day, Find/bookmark sentinels            |
+| `seven-day`     | Sparse/burst over seven days (event count independent of span) |
+| `paging-stress` | Boundary sentinels for paging/eviction                         |
+| `large`         | Opt-in million-event stress (local only)                       |
 
 Import `scenarios/behavior-scale/import/` (or a compact scenario's `import/`),
 never the scenario parent. Performance numbers from `--record-perf` are
@@ -248,10 +258,10 @@ one-machine observations, not universal claims. Full generator docs:
 
 ## SoftWrite import vs session pack
 
-| Path | Limit | Use |
-| --- | --- | --- |
-| Logs SoftWrite ingest | Large dumps; streaming zip/lines | Analysis corpus for Explorer + tools |
-| Session context pack | max 200 files / 50 MiB | Chat attachments only — not huge dumps |
+| Path                  | Limit                            | Use                                    |
+| --------------------- | -------------------------------- | -------------------------------------- |
+| Logs SoftWrite ingest | Large dumps; streaming zip/lines | Analysis corpus for Explorer + tools   |
+| Session context pack  | max 200 files / 50 MiB           | Chat attachments only — not huge dumps |
 
 Cancel an in-progress SoftWrite with **Cancel ingest** on the progress panel.
 Keyword-only and deferred corpora remain searchable. Use **Re-analyze locally…**
