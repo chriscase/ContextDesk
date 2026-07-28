@@ -35,6 +35,8 @@ test("gen-tauri-conf writes productName/identifier/title from branding.toml", ()
     assert.equal(conf.productName, "Testbench");
     assert.equal(conf.identifier, "cc.chriscase.testbench");
     assert.equal(conf.app.windows[0].title, "Testbench");
+    assert.equal(conf.app.windows[0].minWidth, 720);
+    assert.equal(conf.app.windows[0].minHeight, 600);
   } finally {
     fs.writeFileSync(brandingPath, brandingBak, "utf8");
     fs.writeFileSync(confPath, confBak, "utf8");

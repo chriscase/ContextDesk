@@ -16,6 +16,8 @@
         "title": "ContextDesk",
         "width": 1100,
         "height": 760,
+        "minWidth": 720,
+        "minHeight": 600,
         "resizable": true,
         "decorations": true,
         "titleBarStyle": "Overlay",
