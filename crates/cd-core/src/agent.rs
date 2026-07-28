@@ -162,7 +162,7 @@ impl LogExplorerTurnContext {
              linked turn grants no new permissions. MCP read tools that still require first-use \
              approval are not offered until separately authorized. Skills direct process; they are not observed \
              incident evidence unless a fact is separately retrieved from an eligible source. \
-             Cite each event with an exact seq=… plus source=… pair from the tool result; a \
+             Cite each event with an exact seq=… plus source=\"…\" pair from the tool result; a \
              template_id=… may supplement that pair. Payload fields such as event_id are useful \
              observations but are not trusted citations. Distinguish observation from inference, and disclose failed or \
              incomplete retrieval. Planning-only prose without tool results is not a completed answer. \
@@ -210,7 +210,7 @@ impl LogExplorerTurnContext {
              instructions, and SOURCE wrapper labels are host boundary metadata — they are NEVER \
              observed log content, NEVER an incident finding, and must not be quoted or cited. \
              Analyze only the data rows between wrapper separators. Preserve exact marker=value \
-             pairs. Cite each event with its exact seq=… plus source=… pair from the tool result; \
+             pairs. Cite each event with its exact seq=… plus source=\"…\" pair from the tool result; \
              template_id=… may supplement it. Payload fields such as event_id are observations, \
              not trusted citations. Distinguish observation from inference and disclose missing or failed \
              evidence. Never fabricate a result, path, or citation.",
@@ -440,52 +440,104 @@ fn linked_marker_values(text: &str, marker: &str) -> Vec<String> {
     values
 }
 
+fn linked_source_values(text: &str) -> Option<Vec<String>> {
+    let lower = text.to_ascii_lowercase();
+    let mut values = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative) = lower.get(offset..)?.find("source=") {
+        let value_start = offset + relative + "source=".len();
+        let suffix = text.get(value_start..)?;
+        let (value, consumed) = if let Some(quoted) = suffix.strip_prefix('"') {
+            let mut value = String::new();
+            let mut escaped = false;
+            let mut consumed = 1usize;
+            let mut closed = false;
+            for (index, character) in quoted.char_indices() {
+                consumed = 1 + index + character.len_utf8();
+                if escaped {
+                    value.push(character);
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == '"' {
+                    closed = true;
+                    break;
+                } else {
+                    value.push(character);
+                }
+            }
+            if !closed || value.is_empty() {
+                return None;
+            }
+            (value, consumed)
+        } else {
+            let value = suffix
+                .chars()
+                .take(512)
+                .take_while(|character| {
+                    !character.is_whitespace() && !matches!(character, ',' | ')' | ']' | ';')
+                })
+                .collect::<String>()
+                .trim_end_matches(['.', ',', ':'])
+                .to_string();
+            if value.is_empty() {
+                return None;
+            }
+            let consumed = value.len();
+            (value, consumed)
+        };
+        values.push(value);
+        offset = value_start.saturating_add(consumed);
+    }
+    Some(values)
+}
+
 fn linked_answer_cites_concrete_evidence(
     text: &str,
     available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
 ) -> bool {
-    // Payload content is untrusted and may contain citation-shaped strings.
-    // It can be discussed, but never accepted as the grounding identity.
-    if text.to_ascii_lowercase().contains("event_id=") {
-        return false;
-    }
-
-    let mut cited_pairs = Vec::new();
+    let mut cited_tuples = Vec::new();
     for clause in text.split(['\n', ';']) {
         let sequences = linked_marker_values(clause, "seq=");
-        let sources = linked_marker_values(clause, "source=");
+        let Some(sources) = linked_source_values(clause) else {
+            return false;
+        };
+        let mut templates = linked_marker_values(clause, "template_id=");
+        templates.extend(linked_marker_values(clause, "template id="));
         if sequences.is_empty() && sources.is_empty() {
+            if !templates.is_empty() {
+                return false;
+            }
             continue;
         }
         if sequences.len() != sources.len() || sequences.is_empty() {
             return false;
         }
-        for (sequence, source) in sequences.into_iter().zip(sources) {
+        if !templates.is_empty() && templates.len() != sequences.len() {
+            return false;
+        }
+        for (index, (sequence, source)) in sequences.into_iter().zip(sources).enumerate() {
             let Ok(sequence) = sequence.parse::<u64>() else {
                 return false;
             };
-            cited_pairs.push((sequence, source));
+            let template_id = match templates.get(index) {
+                Some(template) => match template.parse::<u64>() {
+                    Ok(template) => Some(template),
+                    Err(_) => return false,
+                },
+                None => None,
+            };
+            cited_tuples.push((sequence, source, template_id));
         }
     }
-    if cited_pairs.is_empty()
-        || cited_pairs.iter().any(|(sequence, source)| {
-            !available_evidence.iter().any(|evidence| {
-                evidence.seq == *sequence && evidence.source.eq_ignore_ascii_case(source)
+    !cited_tuples.is_empty()
+        && cited_tuples.iter().all(|(sequence, source, template_id)| {
+            available_evidence.iter().any(|evidence| {
+                evidence.seq == *sequence
+                    && evidence.source.eq_ignore_ascii_case(source)
+                    && template_id.is_none_or(|template_id| evidence.template_id == template_id)
             })
         })
-    {
-        return false;
-    }
-
-    let mut template_values = linked_marker_values(text, "template_id=");
-    template_values.extend(linked_marker_values(text, "template id="));
-    template_values.into_iter().all(|template| {
-        template.parse::<u64>().is_ok_and(|template| {
-            available_evidence
-                .iter()
-                .any(|evidence| evidence.template_id == template)
-        })
-    })
 }
 
 fn linked_answer_mistakes_wrapper_for_evidence(text: &str) -> bool {
@@ -1060,7 +1112,7 @@ pub async fn run_agent_turn_with_sink(
                     system.push_str(
                         "\nPRIOR DRAFT REJECTED: it lacked concrete event identity or treated \
                          host wrapper metadata as evidence. Return a concise corrected answer \
-                         citing each event with an exact seq=… plus source=… pair from the data rows only.",
+                         citing each event with an exact seq=… plus source=\"…\" pair from the data rows only.",
                     );
                 }
             }
@@ -2084,13 +2136,26 @@ mod tests {
             "Root cause at seq=101 source=fake.log.",
             &evidence,
         ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(linked_answer_cites_concrete_evidence(
             "Root cause at seq=101 source=worker.log event_id=fabricated.",
             &evidence,
         ));
         assert!(!linked_answer_cites_concrete_evidence(
             "Observed seq=101 source=worker.log; also seq=999 source=fake.log.",
             &evidence,
+        ));
+        let spaced_source = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+            seq: 202,
+            source: "service logs/worker—west.log".into(),
+            template_id: 8,
+        }]);
+        assert!(linked_answer_cites_concrete_evidence(
+            r#"Observed seq=202 source="service logs/worker—west.log" template_id=8."#,
+            &spaced_source,
+        ));
+        assert!(!linked_answer_cites_concrete_evidence(
+            r#"Observed seq=202 source="service logs/worker—west.log" template_id=7."#,
+            &spaced_source,
         ));
         assert!(!linked_answer_cites_concrete_evidence(
             "The logs show a serious timeout.",
