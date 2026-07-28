@@ -8,6 +8,7 @@ use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -147,13 +148,17 @@ impl From<&Bookmark> for BookmarkSummary {
     }
 }
 
-fn bookmarks_path(corpus: &LogCorpus) -> std::path::PathBuf {
-    corpus.root().join("bookmarks.json")
+fn bookmarks_path_from_root(corpus_root: &Path) -> PathBuf {
+    corpus_root.join("bookmarks.json")
 }
 
-/// Load bookmarks (empty if missing).
-pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
-    let path = bookmarks_path(corpus);
+#[cfg(test)]
+fn bookmarks_path(corpus: &LogCorpus) -> PathBuf {
+    bookmarks_path_from_root(corpus.root())
+}
+
+fn list_bookmarks_from_root(corpus_root: &Path) -> CoreResult<Vec<Bookmark>> {
+    let path = bookmarks_path_from_root(corpus_root);
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -169,6 +174,11 @@ pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
     }
     validate_bookmark_bounds(&file.bookmarks)?;
     Ok(file.bookmarks)
+}
+
+/// Load bookmarks (empty if missing).
+pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
+    list_bookmarks_from_root(corpus.root())
 }
 
 fn validate_bookmark_bounds(bookmarks: &[Bookmark]) -> CoreResult<()> {
@@ -196,15 +206,15 @@ fn validate_bookmark_bounds(bookmarks: &[Bookmark]) -> CoreResult<()> {
     Ok(())
 }
 
-fn write_all(corpus: &LogCorpus, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
+fn write_all_to_root(corpus_root: &Path, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
     validate_bookmark_bounds(&bookmarks)?;
     let file = BookmarkFile {
         version: BOOKMARKS_VERSION,
         bookmarks,
     };
-    let path = bookmarks_path(corpus);
+    let path = bookmarks_path_from_root(corpus_root);
     let bytes = serde_json::to_vec_pretty(&file)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(corpus.root())
+    let mut temporary = tempfile::NamedTempFile::new_in(corpus_root)
         .map_err(|e| CoreError::Message(format!("create bookmark temporary file: {e}")))?;
     temporary
         .write_all(&bytes)
@@ -214,10 +224,14 @@ fn write_all(corpus: &LogCorpus, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
         .persist(&path)
         .map_err(|e| CoreError::Message(format!("publish bookmarks atomically: {}", e.error)))?;
     #[cfg(unix)]
-    std::fs::File::open(corpus.root())
+    std::fs::File::open(corpus_root)
         .and_then(|directory| directory.sync_all())
         .map_err(|e| CoreError::Message(format!("sync bookmark directory: {e}")))?;
     Ok(())
+}
+
+fn write_all(corpus: &LogCorpus, bookmarks: Vec<Bookmark>) -> CoreResult<()> {
+    write_all_to_root(corpus.root(), bookmarks)
 }
 
 fn mutation_guard() -> CoreResult<MutexGuard<'static, ()>> {
@@ -372,8 +386,7 @@ pub struct NewEvidenceBookmark {
     pub color: Option<String>,
 }
 
-/// Create a range bookmark (inclusive seq bounds).
-pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bookmark> {
+fn add_range_bookmark_to_root(corpus_root: &Path, new: NewBookmark) -> CoreResult<Bookmark> {
     let seq_from = new.seq_from;
     let seq_to = new.seq_to;
     let label = new.label;
@@ -387,7 +400,7 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
         (seq_to, seq_from)
     };
     let _guard = mutation_guard()?;
-    let mut all = list_bookmarks(corpus)?;
+    let mut all = list_bookmarks_from_root(corpus_root)?;
     if let Some(existing) = all.iter().find(|bookmark| {
         bookmark.event_refs.is_empty() && bookmark.seq_from == from && bookmark.seq_to == to
     }) {
@@ -408,8 +421,13 @@ pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bo
         updated_at: now,
     };
     all.push(bm.clone());
-    write_all(corpus, all)?;
+    write_all_to_root(corpus_root, all)?;
     Ok(bm)
+}
+
+/// Create a range bookmark (inclusive seq bounds).
+pub fn add_range_bookmark(corpus: &LogCorpus, new: NewBookmark) -> CoreResult<Bookmark> {
+    add_range_bookmark_to_root(corpus.root(), new)
 }
 
 fn canonicalize_event_refs(
@@ -1006,18 +1024,15 @@ mod tests {
     fn concurrent_mutations_publish_complete_readable_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let corpus = LogCorpus::create(dir.path(), "concurrent-bookmarks").unwrap();
-        let corpus_id = corpus.id().to_string();
-        let root = dir.path().to_path_buf();
+        let corpus_root = corpus.root().to_path_buf();
         drop(corpus);
 
         let writers = (0..16u64)
             .map(|seq| {
-                let root = root.clone();
-                let corpus_id = corpus_id.clone();
+                let corpus_root = corpus_root.clone();
                 std::thread::spawn(move || {
-                    let corpus = LogCorpus::open(&root, &corpus_id).unwrap();
-                    add_range_bookmark(
-                        &corpus,
+                    add_range_bookmark_to_root(
+                        &corpus_root,
                         NewBookmark {
                             seq_from: seq,
                             seq_to: seq,
@@ -1036,8 +1051,7 @@ mod tests {
             writer.join().unwrap();
         }
 
-        let reopened = LogCorpus::open(&root, &corpus_id).unwrap();
-        let all = list_bookmarks(&reopened).unwrap();
+        let all = list_bookmarks_from_root(&corpus_root).unwrap();
         assert_eq!(all.len(), 16);
         assert_eq!(
             all.iter()
@@ -1046,7 +1060,7 @@ mod tests {
                 .len(),
             16
         );
-        let raw = std::fs::read(bookmarks_path(&reopened)).unwrap();
+        let raw = std::fs::read(bookmarks_path_from_root(&corpus_root)).unwrap();
         let parsed: BookmarkFile = serde_json::from_slice(&raw).unwrap();
         assert_eq!(parsed.version, BOOKMARKS_VERSION);
         assert_eq!(parsed.bookmarks.len(), 16);
