@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "id": "behavior-scale-performance-patterns",
+  "name": "Operational metric pattern gallery",
+  "series": [
+    {
+      "id": "cpu-percent",
+      "name": "CPU",
+      "unit": "%",
+      "labels": {
+        "scenario": "isolated-and-overlapping-spikes"
+      },
+      "provenance": {
+        "source": "synthetic/patterns/cpu.csv",
+        "collector": "ContextDesk Log Lab"
+      },
+      "timeQuality": "wall",
+      "gaps": [
+        {
+          "from": 1736171100,
+          "to": 1736172000,
+          "reason": "one missing CPU sample"
+        }
+      ],
+      "points": [
+        { "timestamp": 1736164800, "value": 18 },
+        { "timestamp": 1736165700, "value": 19 },
+        { "timestamp": 1736166600, "value": 21 },
+        { "timestamp": 1736167500, "value": 91 },
+        { "timestamp": 1736168400, "value": 23 },
+        { "timestamp": 1736169300, "value": 20 },
+        { "timestamp": 1736170200, "value": 19 },
+        { "timestamp": 1736171100, "value": 18 },
+        { "timestamp": 1736172000, "value": 18 },
+        { "timestamp": 1736172900, "value": 22 },
+        { "timestamp": 1736173800, "value": 24 },
+        { "timestamp": 1736174700, "value": 21 },
+        { "timestamp": 1736175600, "value": 20 },
+        { "timestamp": 1736176500, "value": 96 },
+        { "timestamp": 1736177400, "value": 29 },
+        { "timestamp": 1736178300, "value": 22 },
+        { "timestamp": 1736179200, "value": 19 }
+      ]
+    },
+    {
+      "id": "heap-used-bytes",
+      "name": "Heap used",
+      "unit": "bytes",
+      "labels": {
+        "scenario": "isolated-and-overlapping-spikes"
+      },
+      "provenance": {
+        "source": "synthetic/patterns/heap.jsonl",
+        "collector": "ContextDesk Log Lab"
+      },
+      "timeQuality": "wall",
+      "gaps": [
+        {
+          "from": 1736178300,
+          "to": 1736179200,
+          "reason": "one missing heap sample"
+        }
+      ],
+      "points": [
+        { "timestamp": 1736164800, "value": 410000000 },
+        { "timestamp": 1736165700, "value": 418000000 },
+        { "timestamp": 1736166600, "value": 425000000 },
+        { "timestamp": 1736167500, "value": 430000000 },
+        { "timestamp": 1736168400, "value": 422000000 },
+        { "timestamp": 1736169300, "value": 419000000 },
+        { "timestamp": 1736170200, "value": 426000000 },
+        { "timestamp": 1736171100, "value": 880000000 },
+        { "timestamp": 1736172000, "value": 438000000 },
+        { "timestamp": 1736172900, "value": 431000000 },
+        { "timestamp": 1736173800, "value": 428000000 },
+        { "timestamp": 1736174700, "value": 424000000 },
+        { "timestamp": 1736175600, "value": 429000000 },
+        { "timestamp": 1736176500, "value": 910000000 },
+        { "timestamp": 1736177400, "value": 455000000 },
+        { "timestamp": 1736178300, "value": 439000000 },
+        { "timestamp": 1736179200, "value": 432000000 }
+      ]
+    },
+    {
+      "id": "concurrent-clients",
+      "name": "Concurrent clients",
+      "unit": "clients",
+      "labels": {
+        "scenario": "isolated-and-overlapping-spikes"
+      },
+      "provenance": {
+        "source": "synthetic/patterns/clients.csv",
+        "collector": "ContextDesk Log Lab"
+      },
+      "timeQuality": "wall",
+      "gaps": [
+        {
+          "from": 1736169300,
+          "to": 1736170200,
+          "reason": "one missing client-count sample"
+        }
+      ],
+      "points": [
+        { "timestamp": 1736164800, "value": 12 },
+        { "timestamp": 1736165700, "value": 12 },
+        { "timestamp": 1736166600, "value": 13 },
+        { "timestamp": 1736167500, "value": 14 },
+        { "timestamp": 1736168400, "value": 12 },
+        { "timestamp": 1736169300, "value": 12 },
+        { "timestamp": 1736170200, "value": 12 },
+        { "timestamp": 1736171100, "value": 13 },
+        { "timestamp": 1736172000, "value": 12 },
+        { "timestamp": 1736172900, "value": 14 },
+        { "timestamp": 1736173800, "value": 115 },
+        { "timestamp": 1736174700, "value": 15 },
+        { "timestamp": 1736175600, "value": 13 },
+        { "timestamp": 1736176500, "value": 140 },
+        { "timestamp": 1736177400, "value": 18 },
+        { "timestamp": 1736178300, "value": 14 },
+        { "timestamp": 1736179200, "value": 12 }
+      ]
+    }
+  ]
+}

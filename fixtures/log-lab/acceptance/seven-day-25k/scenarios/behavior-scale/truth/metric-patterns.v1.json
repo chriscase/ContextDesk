@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "behavior-scale-performance-patterns",
+  "evaluatorOnly": true,
+  "mustNotEnterProductChatContext": true,
+  "metricData": "../metrics/operational-metrics-patterns.v1.json",
+  "expectedPatterns": [
+    {
+      "timestamp": 1736167500,
+      "kind": "isolated_cpu_spike",
+      "description": "CPU rises while heap and clients remain near their own baselines."
+    },
+    {
+      "timestamp": 1736171100,
+      "kind": "isolated_heap_spike",
+      "description": "Heap rises while CPU and clients remain near their own baselines."
+    },
+    {
+      "timestamp": 1736173800,
+      "kind": "isolated_client_spike",
+      "description": "Client count rises while CPU and heap remain near their own baselines."
+    },
+    {
+      "timestamp": 1736176500,
+      "kind": "overlapping_spike",
+      "description": "CPU, heap, and clients rise together while retaining separate native-unit scales."
+    }
+  ],
+  "quietWindows": [
+    { "from": 1736164800, "to": 1736166600 },
+    { "from": 1736177400, "to": 1736179200 }
+  ],
+  "expectedMissingIntervals": 3,
+  "safety": "Expected pattern labels are evaluator truth and must never be added to product chat context."
+}
