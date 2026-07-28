@@ -152,6 +152,12 @@ pub fn list_bookmarks(corpus: &LogCorpus) -> CoreResult<Vec<Bookmark>> {
         .map_err(|e| CoreError::Message(format!("read bookmarks: {e}")))?;
     let file: BookmarkFile = serde_json::from_str(&raw)
         .map_err(|e| CoreError::Message(format!("parse bookmarks: {e}")))?;
+    if file.version > BOOKMARKS_VERSION {
+        return Err(CoreError::Message(format!(
+            "bookmarks schema version {} is newer than supported version {BOOKMARKS_VERSION}",
+            file.version
+        )));
+    }
     Ok(file.bookmarks)
 }
 
@@ -895,6 +901,27 @@ mod tests {
         assert_eq!(
             std::fs::read(bookmarks_path(&corpus)).unwrap(),
             legacy.as_slice()
+        );
+    }
+
+    #[test]
+    fn future_sidecar_version_fails_visible_without_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = evidence_corpus(&dir);
+        let future = br#"{
+  "version": 999,
+  "bookmarks": []
+}
+"#;
+        std::fs::write(bookmarks_path(&corpus), future).unwrap();
+
+        let error = list_resolved_bookmarks(&corpus).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("bookmarks schema version 999 is newer than supported version 2"));
+        assert_eq!(
+            std::fs::read(bookmarks_path(&corpus)).unwrap(),
+            future.as_slice()
         );
     }
 }
