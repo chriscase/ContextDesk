@@ -129,13 +129,18 @@ function MessageRowImpl({
       </div>
       {m.tools ? <ToolCallList tools={m.tools} /> : null}
       {m.trail?.length ? (
-        <div className="search-trail" aria-label="Search trail">
-          {m.trail.map((s) => (
-            <span key={s} className="search-trail__step">
-              {s}
-            </span>
-          ))}
-        </div>
+        <details className="message-activity">
+          <summary>
+            Activity · {m.trail.length} step{m.trail.length === 1 ? "" : "s"}
+          </summary>
+          <div className="search-trail" aria-label="Search trail">
+            {m.trail.map((s) => (
+              <span key={s} className="search-trail__step">
+                {s}
+              </span>
+            ))}
+          </div>
+        </details>
       ) : null}
       {m.citations?.length ? (
         <SourceCitations
@@ -255,19 +260,10 @@ function MessageRowImpl({
       m.meta &&
       !m.streaming &&
       formatMsgMetaFooter(m.meta) ? (
-        <footer
-          className="msg__meta"
-          title={[
-            m.meta.model,
-            m.meta.provider_label,
-            m.meta.provider_id,
-            m.meta.base_url,
-          ]
-            .filter(Boolean)
-            .join("\n")}
-        >
-          {formatMsgMetaFooter(m.meta)}
-        </footer>
+        <details className="msg__meta-details">
+          <summary>Response details</summary>
+          <footer className="msg__meta">{formatMsgMetaFooter(m.meta)}</footer>
+        </details>
       ) : null}
     </article>
   );

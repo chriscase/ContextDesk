@@ -256,7 +256,6 @@ export function useTurnController(args: Args) {
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
-        setAgentError(err);
         setSessions((all) => {
           const cur = all.find((s) => s.id === sid);
           if (!cur) return all;
@@ -391,9 +390,9 @@ export function useTurnController(args: Args) {
     }
     setBusy(false);
     setTurnStartedAt(null);
-    setAgentError(
-      "Stop requested — turn cancelled; partial answer kept when present.",
-    );
+    // Cancellation is an expected chat action, not an application-wide error.
+    // The partial assistant bubble remains in the originating conversation.
+    setAgentError(null);
   }, [sessionId, setSessions, persistSession]);
 
   return {

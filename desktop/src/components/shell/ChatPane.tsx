@@ -5,7 +5,6 @@ import {
 } from "react";
 import { Composer } from "../Composer";
 import { SessionContextBar } from "../SessionContextBar";
-import { nextRovingIndex } from "../../lib/a11y";
 import { useMessageWindow } from "../../hooks/useMessageWindow";
 import type { ChatSession, Msg } from "../../lib/session";
 import type { BrandingDto, ModelOptionDto } from "../../lib/host";
@@ -72,7 +71,6 @@ export type ChatPaneProps = {
   hiddenPreview: string;
   showFullHistory: boolean;
   setShowFullHistory: (v: boolean) => void;
-  setActiveSessionId: (id: string) => void;
   openChatCtxMenu: (e: ReactMouseEvent, id: string) => void;
   createSession: () => void;
   setPane: (
@@ -126,7 +124,6 @@ export function ChatPane(props: ChatPaneProps) {
     hiddenPreview,
     showFullHistory,
     setShowFullHistory,
-    setActiveSessionId,
     openChatCtxMenu,
     createSession,
     setPane,
@@ -173,6 +170,8 @@ export function ChatPane(props: ChatPaneProps) {
   const starters = hasAuthorizedWorkspaceContent
     ? WORKSPACE_STARTERS
     : CONTEXT_SAFE_STARTERS;
+  const activeSession =
+    openChatSessions.find((session) => session.id === resolvedSessionId) ?? null;
 
   const kbdMod =
     typeof navigator !== "undefined" &&
@@ -187,56 +186,21 @@ export function ChatPane(props: ChatPaneProps) {
               aria-labelledby="pane-tab-chat"
               className="pane-panel"
             >
-              <div
-                className="session-tabs"
-                role="tablist"
-                aria-label="Open chats"
-                onKeyDown={(e) => {
-                  const ids = openChatSessions.map((s) => s.id);
-                  if (ids.length === 0) return;
-                  const idx = Math.max(
-                    0,
-                    ids.indexOf(resolvedSessionId ?? ""),
-                  );
-                  const next = nextRovingIndex(idx, ids.length, e.key);
-                  if (next == null) return;
-                  e.preventDefault();
-                  setActiveSessionId(ids[next]);
-                  window.requestAnimationFrame(() => {
-                    document
-                      .getElementById(`session-tab-${ids[next]}`)
-                      ?.focus();
-                  });
-                }}
-              >
-                <div className="session-tabs__list">
-                  {openChatSessions.map((s) => (
-                    <button
-                      key={s.id}
-                      id={`session-tab-${s.id}`}
-                      type="button"
-                      role="tab"
-                      className="session-tab"
-                      data-active={
-                        s.id === resolvedSessionId ? "true" : "false"
-                      }
-                      aria-selected={s.id === resolvedSessionId}
-                      aria-controls="session-panel-chat"
-                      tabIndex={s.id === resolvedSessionId ? 0 : -1}
-                      title={`${s.title} — right-click for options`}
-                      onClick={() => setActiveSessionId(s.id)}
-                      onContextMenu={(e) => openChatCtxMenu(e, s.id)}
-                    >
-                      {s.pinned ? (
-                        <span className="session-tab__pin" aria-hidden title="Pinned">
-                          <IconPin />
-                        </span>
-                      ) : null}
-                      <span className="session-tab__title">{s.title}</span>
-                    </button>
-                  ))}
+              <header className="chat-header">
+                <div className="chat-header__identity">
+                  {activeSession?.pinned ? (
+                    <span className="chat-header__pin" aria-hidden title="Pinned">
+                      <IconPin />
+                    </span>
+                  ) : null}
+                  <div className="chat-header__title-wrap">
+                    <span className="chat-header__eyebrow">Conversation</span>
+                    <h2 className="chat-header__title">
+                      {activeSession?.title || "New chat"}
+                    </h2>
+                  </div>
                 </div>
-                <div className="session-tabs__actions">
+                <div className="chat-header__actions">
                   <div className="chat-new-split" title="New chat">
                     <button
                       type="button"
@@ -244,7 +208,7 @@ export function ChatPane(props: ChatPaneProps) {
                       title="New blank chat"
                       onClick={createSession}
                     >
-                      +
+                      New
                     </button>
                     {onOpenGuidedSetup ? (
                       <button
@@ -263,10 +227,23 @@ export function ChatPane(props: ChatPaneProps) {
                     title="Browse archive & trash"
                     onClick={() => setPane("archive")}
                   >
-                    Archive
-                  </button>
+                      Archive
+                    </button>
+                  {activeSession ? (
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--sm chat-header__more"
+                      aria-label={`Options for ${activeSession.title}`}
+                      title="Chat options"
+                      onClick={(event) =>
+                        openChatCtxMenu(event, activeSession.id)
+                      }
+                    >
+                      •••
+                    </button>
+                  ) : null}
                 </div>
-              </div>
+              </header>
               <div
                 id="session-panel-chat"
                 role="tabpanel"

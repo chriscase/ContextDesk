@@ -728,12 +728,18 @@ export function App() {
             onDismissError={() => turn.setAgentError(null)}
           />
           <div className="app-body">
-            <div className="main">
+            <div
+              className="main"
+              data-sidebar-collapsed={
+                shell.sidebarCollapsed ? "true" : undefined
+              }
+            >
               <SessionSidebar
                 sessionsReady={sessionsReady}
                 openChatSessions={openChatSessions}
                 activeSessionId={resolvedSessionId}
                 sidebarW={shell.sidebarW}
+                collapsed={shell.sidebarCollapsed}
                 onCreate={() => {
                   createSession();
                   shell.setPane("chat");
@@ -759,6 +765,9 @@ export function App() {
                   }
                 }}
                 onOpenArchive={() => shell.setPane("archive")}
+                onToggleCollapsed={() =>
+                  shell.setSidebarCollapsed((collapsed) => !collapsed)
+                }
                 archiveActive={shell.pane === "archive"}
               />
               <Workspace
@@ -788,7 +797,6 @@ export function App() {
                   hiddenPreview,
                   showFullHistory,
                   setShowFullHistory,
-                  setActiveSessionId,
                   openChatCtxMenu,
                   createSession: () => {
                     createSession();
@@ -973,7 +981,6 @@ export function App() {
             setupIncomplete={shell.preflight.hasBlocking}
             scopeLabel={shell.scopeLabel}
             egressLabel={shell.egressLabel}
-            effectiveChatModel={effectiveChatModel}
             onOpenPreflight={() =>
               shell.openSettings("health", chatScrollRef.current)
             }

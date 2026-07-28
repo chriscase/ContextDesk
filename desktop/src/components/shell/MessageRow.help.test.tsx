@@ -10,6 +10,44 @@ vi.mock("../../lib/host", () => ({
 }));
 
 describe("MessageRow Help citation routing (#439)", () => {
+  it("keeps raw activity and provider details collapsed by default", () => {
+    const { container } = render(
+      <MessageRow
+        msg={{
+          id: "details",
+          role: "assistant",
+          content: "Done.",
+          streaming: false,
+          trail: ["budget:rounds=12", "tool:save_memory"],
+          meta: {
+            model: "private-model",
+            host_confirmed: true,
+            provider_label: "Local provider",
+            base_url: "http://127.0.0.1:11434",
+          },
+        }}
+        turnStartedAt={null}
+        effectiveChatModel="private-model"
+        setSourcePath={vi.fn()}
+        setSourceContent={vi.fn()}
+        setPane={vi.fn()}
+      />,
+    );
+
+    const activity = screen.getByText("Activity · 2 steps").closest("details");
+    const responseDetails = screen
+      .getByText("Response details")
+      .closest("details");
+    expect(activity?.hasAttribute("open")).toBe(false);
+    expect(responseDetails?.hasAttribute("open")).toBe(false);
+    expect(container.querySelector(".msg__meta")?.textContent).toContain(
+      "private-model",
+    );
+
+    fireEvent.click(screen.getByText("Response details"));
+    expect(responseDetails?.hasAttribute("open")).toBe(true);
+  });
+
   it("opens help:// in the Help pane path and never reads it as a workspace file", () => {
     const openHelp = vi.fn();
     const setPane = vi.fn();
