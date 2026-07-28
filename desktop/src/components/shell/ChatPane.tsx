@@ -86,7 +86,13 @@ export type ChatPaneProps = {
   onOpenHelpCitation?: (locator: string) => void;
   chatScrollRef: RefObject<HTMLDivElement | null>;
   onChatScroll: () => void;
-  unreadBelow: number;
+  /**
+   * When true, the user is detached from the transcript bottom.
+   * Label is neutral unless `hasNewResponseBelow` is also true (#696).
+   */
+  showJumpToLatest: boolean;
+  /** True only when assistant content arrived while detached (#696). */
+  hasNewResponseBelow: boolean;
   scrollChatToBottom: (b?: ScrollBehavior) => void;
   busy: boolean;
   turnStartedAt: number | null;
@@ -136,7 +142,8 @@ export function ChatPane(props: ChatPaneProps) {
     setPane,
     chatScrollRef,
     onChatScroll,
-    unreadBelow,
+    showJumpToLatest,
+    hasNewResponseBelow,
     scrollChatToBottom,
     busy,
     turnStartedAt,
@@ -529,16 +536,27 @@ export function ChatPane(props: ChatPaneProps) {
             </div>
           )}
         </div>
-        {unreadBelow > 0 ? (
+        {showJumpToLatest ? (
           <button
             type="button"
-            className="chat-jump-unread"
+            className={
+              hasNewResponseBelow
+                ? "chat-jump-unread chat-jump-unread--new"
+                : "chat-jump-unread"
+            }
+            data-testid="chat-jump-latest"
             onClick={() => scrollChatToBottom("smooth")}
+            aria-label={
+              hasNewResponseBelow
+                ? "New response · Jump to latest"
+                : "Jump to latest"
+            }
           >
-            <span className="chat-jump-unread__count">
-              {unreadBelow > 99 ? "99+" : unreadBelow}
+            <span>
+              {hasNewResponseBelow
+                ? "New response · Jump to latest"
+                : "Jump to latest"}
             </span>
-            <span>new message{unreadBelow === 1 ? "" : "s"}</span>
             <span className="chat-jump-unread__arrow" aria-hidden>
               ↓
             </span>
