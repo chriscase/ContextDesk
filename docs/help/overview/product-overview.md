@@ -14,6 +14,7 @@ related:
   - workspace-indexing
   - provider-setup
   - chat-citations-context
+  - context-selection-model-boundary
   - permission-tiers
   - security-boundaries
 ---
@@ -72,3 +73,7 @@ Windows or Linux. The shortcut is ignored while a modal workflow owns focus.
 Start with help://first-run, then read help://chat-citations-context to
 understand how evidence appears in a conversation. For any proposed change,
 help://permission-tiers explains the confirmation step.
+
+For an end-to-end view of deterministic source eligibility, bounded retrieval,
+ordinary versus linked chat, and what can cross to a model, open
+help://context-selection-model-boundary.

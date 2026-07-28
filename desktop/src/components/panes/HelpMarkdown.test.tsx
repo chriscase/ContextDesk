@@ -34,6 +34,8 @@ describe("HelpMarkdown trusted static renderer (#438)", () => {
           "",
           "![Safe flow](../assets/flow.svg)",
           "",
+          "![Model context boundary](../assets/model-boundary.svg)",
+          "",
           "## Matrix",
           "",
           "| State | Meaning |",
@@ -48,8 +50,17 @@ describe("HelpMarkdown trusted static renderer (#438)", () => {
         toc={[{ level: 2, title: "Matrix", anchor: "matrix" }]}
         assets={[
           { path: "assets/flow.svg", alt: "Safe flow", mime: "image/svg+xml" },
+          {
+            path: "assets/model-boundary.svg",
+            alt: "Model context boundary",
+            mime: "image/svg+xml",
+          },
         ]}
-        assetUrls={{ "assets/flow.svg": "data:image/svg+xml;base64,PHN2Zy8+" }}
+        assetUrls={{
+          "assets/flow.svg": "data:image/svg+xml;base64,PHN2Zy8+",
+          "assets/model-boundary.svg":
+            "data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PScwIDAgMSAxJy8+",
+        }}
         onOpenHelp={onOpenHelp}
         titleRef={titleRef}
       />,
@@ -60,6 +71,9 @@ describe("HelpMarkdown trusted static renderer (#438)", () => {
     expect(
       screen.getByRole("img", { name: "Safe flow" }).getAttribute("src"),
     ).toBe("data:image/svg+xml;base64,PHN2Zy8+");
+    expect(
+      screen.getByRole("img", { name: "Model context boundary" }).getAttribute("src"),
+    ).toBe("data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PScwIDAgMSAxJy8+");
     expect(screen.getByLabelText("Important")).toBeTruthy();
     expect(document.querySelector("script")).toBeNull();
     expect(screen.getByText("<script>alert('no')</script>")).toBeTruthy();

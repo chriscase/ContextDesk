@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" role="img" aria-labelledby="retrieval-boundary-title retrieval-boundary-desc">
+  <title id="retrieval-boundary-title">Retrieval caps and the model boundary</title>
+  <desc id="retrieval-boundary-desc">Potential sources pass through eligibility, request validation, ranked retrieval caps, permission policy, and the final context and time budget. Only bounded selected content crosses to the configured model. Credentials, whole stores, excluded sources, and write authority remain outside.</desc>
+  <defs>
+    <marker id="retrieval-boundary-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="retrieval-boundary-green-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#34d399"/>
+    </marker>
+  </defs>
+  <rect x="20" y="20" width="1160" height="560" rx="22" fill="#0f172a" stroke="#475569" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif">
+    <text x="54" y="62" fill="#e5e7eb" font-size="21" font-weight="700">FROM AVAILABLE SOURCES TO THE MODEL-FACING TURN</text>
+
+    <rect x="50" y="92" width="212" height="292" rx="16" fill="#111827" stroke="#475569" stroke-width="2"/>
+    <text x="156" y="126" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Potential sources</text>
+    <text x="156" y="165" text-anchor="middle" fill="#9ca3af" font-size="13">Chat history</text>
+    <text x="156" y="192" text-anchor="middle" fill="#9ca3af" font-size="13">Workspace + Markdown</text>
+    <text x="156" y="219" text-anchor="middle" fill="#9ca3af" font-size="13">Session pack + skills</text>
+    <text x="156" y="246" text-anchor="middle" fill="#9ca3af" font-size="13">Logs + memory + Help</text>
+    <text x="156" y="273" text-anchor="middle" fill="#9ca3af" font-size="13">Databases + connectors</text>
+    <text x="156" y="315" text-anchor="middle" fill="#fbbf24" font-size="12">Configured does not mean</text>
+    <text x="156" y="336" text-anchor="middle" fill="#fbbf24" font-size="12">eligible for every turn</text>
+
+    <path d="M266 238H304" stroke="#38bdf8" stroke-width="4" marker-end="url(#retrieval-boundary-arrow)"/>
+
+    <rect x="314" y="92" width="190" height="292" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+    <text x="409" y="126" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Host gates</text>
+    <rect x="342" y="151" width="134" height="42" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+    <text x="409" y="177" text-anchor="middle" fill="#e5e7eb" font-size="13">1 · Eligibility</text>
+    <rect x="342" y="209" width="134" height="42" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+    <text x="409" y="235" text-anchor="middle" fill="#e5e7eb" font-size="13">2 · Validate</text>
+    <rect x="342" y="267" width="134" height="42" rx="9" fill="#1e293b" stroke="#9ca3af"/>
+    <text x="409" y="293" text-anchor="middle" fill="#e5e7eb" font-size="13">3 · Permission</text>
+    <rect x="342" y="325" width="134" height="42" rx="9" fill="#451a03" stroke="#fbbf24"/>
+    <text x="409" y="351" text-anchor="middle" fill="#fef3c7" font-size="13">Reject or pause</text>
+
+    <path d="M508 238H546" stroke="#38bdf8" stroke-width="4" marker-end="url(#retrieval-boundary-arrow)"/>
+
+    <rect x="556" y="92" width="210" height="292" rx="16" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+    <text x="661" y="126" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Bounded retrieval</text>
+    <text x="661" y="165" text-anchor="middle" fill="#9ca3af" font-size="13">Keyword or hybrid rank</text>
+    <text x="661" y="192" text-anchor="middle" fill="#9ca3af" font-size="13">Row + result limits</text>
+    <text x="661" y="219" text-anchor="middle" fill="#9ca3af" font-size="13">Byte + file limits</text>
+    <text x="661" y="246" text-anchor="middle" fill="#9ca3af" font-size="13">Read + query timeouts</text>
+    <rect x="590" y="274" width="142" height="54" rx="10" fill="#082f49" stroke="#38bdf8"/>
+    <text x="661" y="297" text-anchor="middle" fill="#e5e7eb" font-size="13" font-weight="700">Selected evidence</text>
+    <text x="661" y="317" text-anchor="middle" fill="#dbeafe" font-size="12">with provenance</text>
+    <text x="661" y="356" text-anchor="middle" fill="#fbbf24" font-size="12">Caps stay visible</text>
+
+    <path d="M770 238H808" stroke="#38bdf8" stroke-width="4" marker-end="url(#retrieval-boundary-arrow)"/>
+
+    <rect x="818" y="92" width="194" height="292" rx="16" fill="#082f49" stroke="#38bdf8" stroke-width="3"/>
+    <text x="915" y="126" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Turn budget</text>
+    <text x="915" y="165" text-anchor="middle" fill="#dbeafe" font-size="13">Fitted chat history</text>
+    <text x="915" y="192" text-anchor="middle" fill="#dbeafe" font-size="13">Selected instructions</text>
+    <text x="915" y="219" text-anchor="middle" fill="#dbeafe" font-size="13">Bounded tool evidence</text>
+    <text x="915" y="246" text-anchor="middle" fill="#dbeafe" font-size="13">Context character limit</text>
+    <text x="915" y="273" text-anchor="middle" fill="#dbeafe" font-size="13">Agent time deadline</text>
+    <rect x="851" y="302" width="128" height="48" rx="9" fill="#451a03" stroke="#fbbf24"/>
+    <text x="915" y="332" text-anchor="middle" fill="#fef3c7" font-size="13">Hard fit or stop</text>
+
+    <path d="M1016 238H1041" stroke="#34d399" stroke-width="4" marker-end="url(#retrieval-boundary-green-arrow)"/>
+
+    <rect x="1051" y="92" width="99" height="292" rx="16" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+    <text x="1101" y="129" text-anchor="middle" fill="#e5e7eb" font-size="15" font-weight="700">MODEL</text>
+    <text x="1101" y="173" text-anchor="middle" fill="#d1fae5" font-size="12">Only the</text>
+    <text x="1101" y="194" text-anchor="middle" fill="#d1fae5" font-size="12">fitted turn</text>
+    <text x="1101" y="240" text-anchor="middle" fill="#d1fae5" font-size="12">Tool choice</text>
+    <text x="1101" y="261" text-anchor="middle" fill="#d1fae5" font-size="12">Synthesis</text>
+    <text x="1101" y="307" text-anchor="middle" fill="#d1fae5" font-size="12">Local or</text>
+    <text x="1101" y="328" text-anchor="middle" fill="#d1fae5" font-size="12">remote</text>
+
+    <rect x="50" y="420" width="1100" height="122" rx="16" fill="#111827" stroke="#fb7185" stroke-width="2"/>
+    <text x="76" y="455" fill="#fb7185" font-size="17" font-weight="700">STAYS OUTSIDE THE MODEL PAYLOAD</text>
+    <text x="76" y="487" fill="#e5e7eb" font-size="13">Keychain credentials · excluded sources · unoffered tools · another chat's session context · write approval</text>
+    <text x="76" y="516" fill="#e5e7eb" font-size="13">Entire workspaces, corpora, memory stores, databases, and Help are not inserted wholesale by default.</text>
+  </g>
+</svg>

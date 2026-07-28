@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" role="img" aria-labelledby="ordinary-linked-title ordinary-linked-desc">
+  <title id="ordinary-linked-title">Ordinary and linked chat context paths</title>
+  <desc id="ordinary-linked-desc">An ordinary chat has no log corpus and uses only its eligible configured reads. A linked chat binds one corpus and immutable Explorer snapshot, then requires successful bounded log evidence. Both paths may use the same governed workspace, memory, Help, database, and connector reads before crossing the same bounded model boundary.</desc>
+  <defs>
+    <marker id="ordinary-linked-blue-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="ordinary-linked-green-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0 0 9 4.5 0 9Z" fill="#34d399"/>
+    </marker>
+  </defs>
+  <rect x="20" y="20" width="1160" height="580" rx="22" fill="#0f172a" stroke="#475569" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif">
+    <text x="54" y="62" fill="#e5e7eb" font-size="21" font-weight="700">ONE QUESTION · TWO CONTEXT CONTRACTS</text>
+
+    <rect x="52" y="92" width="455" height="292" rx="18" fill="#111827" stroke="#9ca3af" stroke-width="2"/>
+    <text x="280" y="130" text-anchor="middle" fill="#e5e7eb" font-size="20" font-weight="700">Ordinary chat</text>
+    <rect x="82" y="154" width="395" height="58" rx="12" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <text x="280" y="179" text-anchor="middle" fill="#e5e7eb" font-size="15" font-weight="700">Chat-owned direct context</text>
+    <text x="280" y="199" text-anchor="middle" fill="#9ca3af" font-size="12">history · selected skill · session pack</text>
+    <path d="M280 216V246" stroke="#38bdf8" stroke-width="4" marker-end="url(#ordinary-linked-blue-arrow)"/>
+    <rect x="82" y="256" width="395" height="92" rx="12" fill="#1e293b" stroke="#475569" stroke-width="2"/>
+    <text x="280" y="284" text-anchor="middle" fill="#e5e7eb" font-size="15" font-weight="700">Normal eligible read surface</text>
+    <text x="280" y="310" text-anchor="middle" fill="#9ca3af" font-size="12">Workspace · memory · Help</text>
+    <text x="280" y="331" text-anchor="middle" fill="#9ca3af" font-size="12">databases · enabled connectors</text>
+    <text x="280" y="372" text-anchor="middle" fill="#fb7185" font-size="13" font-weight="700">No inherited Log Explorer corpus</text>
+
+    <rect x="533" y="92" width="615" height="292" rx="18" fill="#111827" stroke="#38bdf8" stroke-width="3"/>
+    <text x="840" y="130" text-anchor="middle" fill="#e5e7eb" font-size="20" font-weight="700">Linked Log Explorer chat</text>
+    <rect x="563" y="154" width="250" height="84" rx="12" fill="#082f49" stroke="#38bdf8" stroke-width="2"/>
+    <text x="688" y="181" text-anchor="middle" fill="#e5e7eb" font-size="15" font-weight="700">Bound corpus identity</text>
+    <text x="688" y="205" text-anchor="middle" fill="#dbeafe" font-size="12">Immutable Explorer snapshot</text>
+    <text x="688" y="224" text-anchor="middle" fill="#dbeafe" font-size="12">orientation, not event dump</text>
+    <path d="M817 196H848" stroke="#38bdf8" stroke-width="4" marker-end="url(#ordinary-linked-blue-arrow)"/>
+    <rect x="858" y="154" width="260" height="84" rx="12" fill="#451a03" stroke="#fbbf24" stroke-width="2"/>
+    <text x="988" y="181" text-anchor="middle" fill="#fef3c7" font-size="15" font-weight="700">Required log grounding</text>
+    <text x="988" y="205" text-anchor="middle" fill="#fde68a" font-size="12">Successful bounded log read</text>
+    <text x="988" y="224" text-anchor="middle" fill="#fde68a" font-size="12">before a log conclusion</text>
+    <path d="M840 242V267" stroke="#38bdf8" stroke-width="4" marker-end="url(#ordinary-linked-blue-arrow)"/>
+    <rect x="563" y="277" width="555" height="72" rx="12" fill="#1e293b" stroke="#475569" stroke-width="2"/>
+    <text x="840" y="304" text-anchor="middle" fill="#e5e7eb" font-size="15" font-weight="700">Same governed supporting reads when eligible</text>
+    <text x="840" y="329" text-anchor="middle" fill="#9ca3af" font-size="12">Workspace · memory · Help · databases · enabled connectors</text>
+    <text x="840" y="372" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">Linking grants no source access and no write permission</text>
+
+    <path d="M280 389V431H562" fill="none" stroke="#34d399" stroke-width="4" marker-end="url(#ordinary-linked-green-arrow)"/>
+    <path d="M840 389V431H638" fill="none" stroke="#34d399" stroke-width="4" marker-end="url(#ordinary-linked-green-arrow)"/>
+    <rect x="572" y="408" width="250" height="84" rx="15" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+    <text x="697" y="438" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Bounded model turn</text>
+    <text x="697" y="463" text-anchor="middle" fill="#d1fae5" font-size="12">Same context and time budget</text>
+    <text x="697" y="482" text-anchor="middle" fill="#d1fae5" font-size="12">Same permission ownership</text>
+
+    <path d="M826 450H869" stroke="#34d399" stroke-width="4" marker-end="url(#ordinary-linked-green-arrow)"/>
+    <rect x="879" y="408" width="239" height="84" rx="15" fill="#064e3b" stroke="#34d399" stroke-width="3"/>
+    <text x="999" y="438" text-anchor="middle" fill="#e5e7eb" font-size="17" font-weight="700">Answer + evidence</text>
+    <text x="999" y="463" text-anchor="middle" fill="#d1fae5" font-size="12">Trail · citations · errors</text>
+    <text x="999" y="482" text-anchor="middle" fill="#d1fae5" font-size="12">Stay with the originating chat</text>
+
+    <rect x="52" y="520" width="1066" height="52" rx="12" fill="#111827" stroke="#fb7185" stroke-width="2"/>
+    <text x="585" y="552" text-anchor="middle" fill="#fecdd3" font-size="14" font-weight="700">A missing, blocked, capped, or failed required source remains visible; it never becomes silent success.</text>
+  </g>
+</svg>
