@@ -3550,6 +3550,14 @@ export function LogExplorer({ corpusId }: Props) {
       for (const lane of visibleLanes) {
         const row = estimated[lane.id]?.[index];
         if (!row?.event) continue;
+        const wraps =
+          lineMode === "full" ||
+          lineMode === "wrap" ||
+          expandedSeqs.has(row.event.seq);
+        if (!wraps) {
+          height = Math.max(height, baseRowH);
+          continue;
+        }
         const measured = alignedMeasuredHeights[lane.id]?.[reference.key];
         if (measured == null) {
           complete = false;

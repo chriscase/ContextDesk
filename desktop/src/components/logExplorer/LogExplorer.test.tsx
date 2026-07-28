@@ -3268,6 +3268,27 @@ describe("LogExplorer shell", () => {
       expect(lists[0]!.getAttribute("data-total-height")).toBe("158");
       expect(lists[1]!.getAttribute("data-total-height")).toBe("158");
     });
+    chooseRowMode("Single line");
+    fireEvent.click(screen.getByTestId("expand-row-11"));
+    const expandedMessage = document.querySelector<HTMLElement>(
+      '[data-row-message-seq="11"]',
+    );
+    expect(expandedMessage).toBeTruthy();
+    expect(
+      document.querySelector('[data-row-message-seq="21"]'),
+    ).toBeNull();
+    Object.defineProperty(expandedMessage!, "scrollHeight", {
+      configurable: true,
+      value: 90,
+    });
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "8" },
+    });
+    await waitFor(() => {
+      expect(lists[0]!.getAttribute("data-total-height")).toBe("158");
+      expect(lists[1]!.getAttribute("data-total-height")).toBe("158");
+    });
     expect(screen.getAllByTestId("aligned-gap")).toHaveLength(2);
     expect(
       (document.querySelector('[data-seq="11"]') as HTMLElement).style.top,
