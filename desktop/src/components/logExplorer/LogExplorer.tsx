@@ -79,6 +79,7 @@ import {
 } from "../../lib/logExplorer/laneCompose";
 import { buildAlignedLaneRows } from "../../lib/logExplorer/alignment";
 import { HelpTip } from "../HelpTip";
+import { IconChevronLeft } from "../icons";
 import {
   HELP_COUNTS,
   HELP_FIND_VS_FILTER,
@@ -2656,7 +2657,7 @@ export function LogExplorer({ corpusId }: Props) {
           style={
             breakpoint === "narrow"
               ? ({ flexDirection: "column" } as React.CSSProperties)
-              : undefined
+              : ({ gridColumn: 1 } as React.CSSProperties)
           }
           role={breakpoint === "narrow" ? "dialog" : undefined}
           aria-label={
@@ -2715,12 +2716,13 @@ export function LogExplorer({ corpusId }: Props) {
                   <button
                     ref={filtersCollapseRef}
                     type="button"
-                    className="log-explorer__btn"
+                    className="log-explorer__rail-collapse log-explorer__rail-collapse--filters"
                     data-testid="collapse-log-filters"
                     aria-label="Collapse log filters panel"
+                    title="Collapse filters"
                     onClick={() => setFiltersCollapsed(true)}
                   >
-                    Collapse filters
+                    <IconChevronLeft />
                   </button>
                 </header>
               )}
@@ -3307,11 +3309,16 @@ export function LogExplorer({ corpusId }: Props) {
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize filters"
+            style={{ gridColumn: 2 }}
             onMouseDown={startDrag("filters")}
           />
         )}
 
-        <main className="log-explorer__lanes" data-testid="log-explorer-lanes">
+        <main
+          className="log-explorer__lanes"
+          data-testid="log-explorer-lanes"
+          style={breakpoint === "narrow" ? undefined : { gridColumn: 3 }}
+        >
           <div className="log-explorer__lane-strip">
             <TimelineNavigator
               corpusId={corpusId}
@@ -3645,6 +3652,7 @@ export function LogExplorer({ corpusId }: Props) {
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize chat"
+            style={{ gridColumn: 4 }}
             onMouseDown={startDrag("chat")}
           />
         )}
@@ -3656,6 +3664,7 @@ export function LogExplorer({ corpusId }: Props) {
           onApplyNav={applyNav}
           compactLayout={breakpoint === "narrow"}
           collapsed={breakpoint !== "narrow" && chatCollapsed}
+          desktopGridColumn={breakpoint === "narrow" ? undefined : 5}
           developerMode={import.meta.env.MODE === "development"}
           onRailSummary={handleRailSummary}
           onToggleCollapsed={() => setChatCollapsed((collapsed) => !collapsed)}

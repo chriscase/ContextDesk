@@ -398,6 +398,14 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-usable-evidence-width")).toBe("3492");
     expect(screen.queryByTestId("splitter-filters")).toBeNull();
     expect(body.style.gridTemplateColumns).toContain("42px 0px 1fr");
+    expect(screen.getByTestId("log-explorer-filters").style.gridColumn).toBe(
+      "1",
+    );
+    expect(screen.getByTestId("log-explorer-lanes").style.gridColumn).toBe("3");
+    expect(screen.getByTestId("splitter-chat").style.gridColumn).toBe("4");
+    expect(screen.getByTestId("log-explorer-chat").style.gridColumn).toBe("5");
+    expect(screen.getByText(/auth failure/)).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-chat-composer")).toBeTruthy();
     const reopenFilters = screen.getByTestId("expand-log-filters");
     expect(reopenFilters.getAttribute("aria-label")).toBe(
       "Expand log filters, 1 active",

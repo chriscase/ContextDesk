@@ -117,6 +117,22 @@ export function IconClose({ className }: IconProps) {
   );
 }
 
+export function IconChevronLeft({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m15 18-6-6 6-6" />
+    </Svg>
+  );
+}
+
+export function IconChevronRight({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m9 18 6-6-6-6" />
+    </Svg>
+  );
+}
+
 /** Circle question mark — setup help / popover trigger. */
 export function IconHelp({ className }: IconProps) {
   return (
