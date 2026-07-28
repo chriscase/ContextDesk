@@ -4,7 +4,7 @@
 //! refuse non-loopback provider URLs.
 
 use cd_core::agent::LogExplorerTurnContext;
-use cd_core::chat::ChatMessage;
+use cd_core::chat::{ChatMessage, Role};
 use cd_core::events::{StreamEvent, ToolPhase};
 use cd_core::log_analysis::ingest_path;
 use cd_core::research::{build_host, research_turn_with_cancel_and_context};
@@ -23,6 +23,17 @@ const LOG_MARKER: &str = "LIVE_OLLAMA_LOG_MARKER";
 const RUNBOOK_MARKER: &str = "LIVE_OLLAMA_RUNBOOK_MARKER";
 const LOG_VALUE: &str = "job-live-7f3a";
 const RUNBOOK_VALUE: &str = "restart-worker-pool";
+
+fn describes_runbook_action(answer: &str) -> bool {
+    let words = answer
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    words.iter().any(|word| word.starts_with("restart"))
+        && words.iter().any(|word| word == "worker")
+        && words.iter().any(|word| word == "pool")
+}
 
 fn explicit_loopback_url() -> String {
     assert_eq!(
@@ -146,6 +157,23 @@ async fn live_ollama_linked_turn_uses_logs_and_workspace() {
             .any(|call| call.id.starts_with("fallback_")),
         "acceptance requires the provider's native function-call channel: {history:#?}"
     );
+    let tool_evidence = history
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        tool_evidence
+            .iter()
+            .any(|content| content.contains(&format!("{LOG_MARKER}={LOG_VALUE}"))),
+        "native tools did not return the exact log marker/value pair: {tool_evidence:#?}"
+    );
+    assert!(
+        tool_evidence
+            .iter()
+            .any(|content| content.contains(&format!("{RUNBOOK_MARKER}={RUNBOOK_VALUE}"))),
+        "native tools did not return the exact runbook marker/value pair: {tool_evidence:#?}"
+    );
 
     let answer = events
         .iter()
@@ -159,7 +187,7 @@ async fn live_ollama_linked_turn_uses_logs_and_workspace() {
         "answer={answer:?}\nhistory={history:#?}"
     );
     assert!(
-        answer.contains(RUNBOOK_VALUE),
+        describes_runbook_action(&answer),
         "answer={answer:?}\nhistory={history:#?}"
     );
     assert!(
@@ -205,4 +233,13 @@ async fn live_ollama_linked_turn_uses_logs_and_workspace() {
         completion.unwrap_or("missing"),
         answer.chars().count()
     );
+}
+
+#[test]
+fn live_acceptance_allows_equivalent_runbook_action_wording() {
+    assert!(describes_runbook_action("Use restart-worker-pool."));
+    assert!(describes_runbook_action(
+        "The runbook recommends restarting the worker pool."
+    ));
+    assert!(!describes_runbook_action("Review the recovery runbook."));
 }
