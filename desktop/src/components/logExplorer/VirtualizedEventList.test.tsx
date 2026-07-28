@@ -426,7 +426,7 @@ describe("VirtualizedEventList", () => {
     expect(replacementRequest).not.toHaveBeenCalled();
   });
 
-  it("keeps Standard and balanced presentation as the backward-compatible default", () => {
+  it("uses a compact payload-first default without hiding complete provenance", () => {
     const event = makeEvents(1)[0]!;
     event.service = "checkout-api";
     event.host = "worker-01";
@@ -444,14 +444,15 @@ describe("VirtualizedEventList", () => {
 
     const list = screen.getByTestId("virtualized-event-list");
     const row = list.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`)!;
-    expect(list.getAttribute("data-metadata-presentation")).toBe("standard");
-    expect(list.getAttribute("data-field-emphasis")).toBe("balanced");
+    expect(list.getAttribute("data-metadata-presentation")).toBe("compact");
+    expect(list.getAttribute("data-field-emphasis")).toBe("payload");
     expect(row.classList.contains("log-explorer__row--selected")).toBe(true);
     expect(row.classList.contains("log-explorer__row--highlight")).toBe(true);
-    expect(screen.getByText(event.source).getAttribute("title")).toBe(
-      event.source,
+    const provenance = list.querySelector<HTMLElement>("[data-source-token]")!;
+    expect(provenance.getAttribute("title")).toBe(
+      `Source: ${event.source}\nService: ${event.service}\nHost: ${event.host}`,
     );
-    expect(list.querySelector("[data-source-token]")).toBeNull();
+    expect(provenance.getAttribute("tabindex")).toBe("0");
 
     fireEvent.click(row);
     expect(onRowClick).toHaveBeenLastCalledWith(event, false);

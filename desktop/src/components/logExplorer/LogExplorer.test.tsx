@@ -487,23 +487,15 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
-  it("keeps compact metadata and field emphasis inside Rows and persists them", async () => {
-    const first = render(<LogExplorer corpusId="c1" />);
+  it("starts new investigations with compact payload-first rows", async () => {
+    render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
-
-    openToolbarPicker("row-mode-picker");
-    fireEvent.change(screen.getByLabelText("Row metadata presentation"), {
-      target: { value: "compact" },
-    });
-    fireEvent.change(screen.getByLabelText("Row field emphasis"), {
-      target: { value: "payload" },
-    });
 
     const root = screen.getByTestId("log-explorer");
     expect(root.getAttribute("data-metadata-presentation")).toBe("compact");
     expect(root.getAttribute("data-field-emphasis")).toBe("payload");
     expect(screen.getByTestId("row-mode-picker").textContent).toContain(
-      "Tokens",
+      "Payload",
     );
     const firstList = screen.getAllByTestId("virtualized-event-list")[0]!;
     expect(firstList.getAttribute("data-metadata-presentation")).toBe(
@@ -511,12 +503,38 @@ describe("LogExplorer shell", () => {
     );
     expect(firstList.getAttribute("data-field-emphasis")).toBe("payload");
     expect(firstList.querySelector("[data-level-token]")).toBeTruthy();
+  });
+
+  it("keeps explicit metadata and field-emphasis choices inside Rows and persists them", async () => {
+    const first = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByLabelText("Row metadata presentation"), {
+      target: { value: "standard" },
+    });
+    fireEvent.change(screen.getByLabelText("Row field emphasis"), {
+      target: { value: "metadata" },
+    });
+
+    const root = screen.getByTestId("log-explorer");
+    expect(root.getAttribute("data-metadata-presentation")).toBe("standard");
+    expect(root.getAttribute("data-field-emphasis")).toBe("metadata");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain(
+      "Metadata",
+    );
+    const firstList = screen.getAllByTestId("virtualized-event-list")[0]!;
+    expect(firstList.getAttribute("data-metadata-presentation")).toBe(
+      "standard",
+    );
+    expect(firstList.getAttribute("data-field-emphasis")).toBe("metadata");
+    expect(firstList.querySelector("[data-level-token]")).toBeNull();
     expect(
       localStorage.getItem("contextdesk.logExplorer.metadataPresentation.v1"),
-    ).toBe("compact");
+    ).toBe("standard");
     expect(
       localStorage.getItem("contextdesk.logExplorer.fieldEmphasis.v1"),
-    ).toBe("payload");
+    ).toBe("metadata");
 
     first.unmount();
     render(<LogExplorer corpusId="c1" />);
@@ -525,12 +543,12 @@ describe("LogExplorer shell", () => {
       screen
         .getByTestId("log-explorer")
         .getAttribute("data-metadata-presentation"),
-    ).toBe("compact");
+    ).toBe("standard");
     expect(
       screen
         .getAllByTestId("virtualized-event-list")[0]!
         .getAttribute("data-field-emphasis"),
-    ).toBe("payload");
+    ).toBe("metadata");
   });
 
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
@@ -734,7 +752,7 @@ describe("LogExplorer shell", () => {
     const headers = screen.getByRole("row", {
       name: "All sources column headings",
     });
-    expect(headers.style.gridTemplateColumns).toContain("12rem");
+    expect(headers.style.gridTemplateColumns).toContain("16rem");
     const messageResize = within(headers).getByRole("button", {
       name: "Resize Message column for All sources",
     });
@@ -743,7 +761,7 @@ describe("LogExplorer shell", () => {
     );
     fireEvent.keyDown(messageResize, { key: "ArrowRight" });
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
+      expect(headers.style.gridTemplateColumns).toContain("16.5rem"),
     );
 
     const timeResize = within(headers).getByRole("button", {
@@ -753,7 +771,7 @@ describe("LogExplorer shell", () => {
     fireEvent.mouseMove(window, { clientX: 132 });
     fireEvent.mouseUp(window);
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
+      expect(headers.style.gridTemplateColumns).toContain("9.25rem"),
     );
 
     fireEvent.click(screen.getByTestId("columns-menu"));
@@ -764,7 +782,7 @@ describe("LogExplorer shell", () => {
     fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-reset"));
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("12rem"),
+      expect(headers.style.gridTemplateColumns).toContain("16rem"),
     );
 
     const eventTime = screen.getByTestId("event-time-1");
@@ -1010,7 +1028,7 @@ describe("LogExplorer shell", () => {
 
     for (const heading of headings) {
       expect(within(heading).getAllByRole("columnheader")).toHaveLength(4);
-      expect(heading.style.gridTemplateColumns).toContain("12rem");
+      expect(heading.style.gridTemplateColumns).toContain("16rem");
     }
 
     const laneTwoHeading = screen.getByRole("row", {
@@ -1024,7 +1042,7 @@ describe("LogExplorer shell", () => {
     );
     await waitFor(() => {
       for (const heading of headings) {
-        expect(heading.style.gridTemplateColumns).toContain("12.5rem");
+        expect(heading.style.gridTemplateColumns).toContain("16.5rem");
       }
     });
 
@@ -5002,9 +5020,11 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     expect(root.getAttribute("data-time-quality")).toBe("wall");
     expect(
-      (await screen.findAllByText("audit/deploy.jsonl")).length,
-    ).toBeGreaterThan(1);
-    expect(screen.getAllByText("worker/worker.log").length).toBeGreaterThan(1);
+      (await screen.findAllByLabelText(/^Source audit\/deploy\.jsonl;/)).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByLabelText(/^Source worker\/worker\.log;/).length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("/Users/")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Find in logs"), {

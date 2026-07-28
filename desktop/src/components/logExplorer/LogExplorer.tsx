@@ -890,7 +890,7 @@ export function LogExplorer({ corpusId }: Props) {
       } catch {
         /* ignore */
       }
-      return "standard";
+      return "compact";
     });
   const [fieldEmphasis, setFieldEmphasis] = useState<RowFieldEmphasis>(() => {
     try {
@@ -903,7 +903,7 @@ export function LogExplorer({ corpusId }: Props) {
     } catch {
       /* ignore */
     }
-    return "balanced";
+    return "payload";
   });
   const [previewLines, setPreviewLines] = useState(() => {
     try {
@@ -3867,7 +3867,13 @@ export function LogExplorer({ corpusId }: Props) {
                 : lineMode === "wrap"
                   ? "Preview"
                   : "Deep"
-            } · ${metadataPresentation === "compact" ? "Tokens" : "Full metadata"}`}
+            } · ${
+              fieldEmphasis === "payload"
+                ? "Payload"
+                : fieldEmphasis === "metadata"
+                  ? "Metadata"
+                  : "Balanced"
+            }`}
             testId="row-mode-picker"
             options={[
               {
@@ -3991,7 +3997,7 @@ export function LogExplorer({ corpusId }: Props) {
               {
                 id: "reset",
                 label: "Reset columns",
-                description: "Restore the balanced default column widths.",
+                description: "Restore the payload-first default column widths.",
                 testId: "col-reset",
                 run: () => {
                   setColWidths([...DEFAULT_COL_WIDTHS]);

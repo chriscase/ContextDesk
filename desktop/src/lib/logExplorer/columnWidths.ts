@@ -7,7 +7,7 @@
 
 export type ColWidths = [number, number, number, number];
 
-export const DEFAULT_COL_WIDTHS: ColWidths = [7.5, 3.5, 8, 12];
+export const DEFAULT_COL_WIDTHS: ColWidths = [7.25, 2.5, 6, 16];
 export const MIN_COL_WIDTHS: ColWidths = [4, 2.5, 4, 8];
 export const MAX_COL_WIDTHS: ColWidths = [16, 6, 30, 80];
 
