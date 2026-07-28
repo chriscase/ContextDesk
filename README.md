@@ -2,17 +2,20 @@
 
 [![CI](https://github.com/chriscase/ContextDesk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/chriscase/ContextDesk/actions/workflows/ci.yml?query=branch%3Amain)
 
-**ContextDesk is a local-first evidence workbench for your files, memory,
-databases, connected sources, and incident logs. It gathers bounded context
-deterministically, lets an AI synthesize what the evidence means, and keeps the
-citations and investigation trail visible.**
+**ContextDesk is a local-first evidence workbench for understanding files,
+memory, databases, connected sources, and incident logs. It assembles concise
+context deterministically, lets an AI connect the evidence, and keeps the
+sources and investigation trail visible.**
 
 Allowlist a workspace, import a post-mortem log corpus, or connect a governed
-read source. ContextDesk searches and filters those sources on the host, fits
-the most relevant results into explicit context limits, and then asks the
-selected model to synthesize an answer. It does not paste an entire corpus into
-chat, silently grant a model access, or let model prose masquerade as a tool
-result. Every write still requires the appropriate confirmation.
+read source. ContextDesk searches, filters, ranks, and caps that material on
+the host before a model sees it. The model synthesizes bounded evidence rather
+than receiving an indiscriminate corpus dump. Ordinary chats stay separate
+from log investigations; corpus-linked chats must obtain a successful governed
+tool result before an answer is presented as log-grounded. If the selected
+profile cannot use tools, the application says so instead of treating model
+prose as retrieved evidence. Every write still requires the appropriate
+confirmation.
 
 Run it **fully local** with [Ollama](https://ollama.com) (no product account or
 API key), or connect an optional **Grok Build** session already authorized on
@@ -22,13 +25,13 @@ tool—not a code-editing agent—so pair it with your coding agent when you nee
 source changes. The name is a working title; the product remains rename-friendly
 through [`branding.toml`](branding.toml).
 
-| | |
-|--|--|
-| **Stack** | Rust core (`cd-core`) · Tauri 2 + React desktop · optional headless server (`cd-server`) |
-| **License** | [Apache-2.0](LICENSE) |
-| **Status** | Early development — desktop works today; team server is partial. See [Issues](https://github.com/chriscase/ContextDesk/issues) and the live CI badge above. |
-| **Identity** | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179)) |
-| **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md) |
+|                 |                                                                                                                                                             |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Stack**       | Rust core (`cd-core`) · Tauri 2 + React desktop · optional headless server (`cd-server`)                                                                    |
+| **License**     | [Apache-2.0](LICENSE)                                                                                                                                       |
+| **Status**      | Early development — desktop works today; team server is partial. See [Issues](https://github.com/chriscase/ContextDesk/issues) and the live CI badge above. |
+| **Identity**    | Rename via [`branding.toml`](branding.toml) (full runtime slug paths tracked in [#179](https://github.com/chriscase/ContextDesk/issues/179))                |
+| **Phase 1 DoD** | [Issue #65](https://github.com/chriscase/ContextDesk/issues/65) · [Roadmap](docs/ROADMAP.md) · [Backlog audit](docs/BACKLOG_AUDIT.md)                       |
 
 ![ContextDesk desktop — empty chat with starter prompts, session sidebar, and composer](docs/media/screenshot.png)
 
@@ -38,48 +41,52 @@ through [`branding.toml`](branding.toml).
 
 Real frames from the packaged macOS app on current `main` (see capture SHA in [`docs/media/README.md`](docs/media/README.md)). Not a substitute for owner Log Explorer GUI acceptance ([#525](https://github.com/chriscase/ContextDesk/issues/525)).
 
-| First-chat home | Help Center | Logs library |
-|-----------------|-------------|--------------|
+| First-chat home                                                            | Help Center                                             | Logs library                                         |
+| -------------------------------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------- |
 | ![First-chat home (normal)](docs/media/gallery/first-chat-home-normal.png) | ![Help Center (dark)](docs/media/gallery/help-dark.png) | ![Logs library](docs/media/gallery/logs-library.png) |
 
-| Help · Light | Help · Slate | Ordinary chat honesty |
-|--------------|--------------|------------------------|
+| Help · Light                                     | Help · Slate                                     | Ordinary chat honesty                                                      |
+| ------------------------------------------------ | ------------------------------------------------ | -------------------------------------------------------------------------- |
 | ![Help light](docs/media/gallery/help-light.png) | ![Help slate](docs/media/gallery/help-slate.png) | ![Session-only context](docs/media/gallery/ordinary-chat-session-only.png) |
 
 Narrow / practical 800×600 minimum (Chat → Logs → Help, no primary chrome clip):
 
-| 800×600 Chat (first-chat home) | 800×600 Logs | 800×600 Help |
-|--------------------------------|--------------|--------------|
+| 800×600 Chat (first-chat home)                          | 800×600 Logs                                            | 800×600 Help                                            |
+| ------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
 | ![Chat narrow](docs/media/gallery/nav-800x600-chat.png) | ![Logs narrow](docs/media/gallery/nav-800x600-logs.png) | ![Help narrow](docs/media/gallery/nav-800x600-help.png) |
 
 <p align="center"><img src="docs/media/gallery/main-nav-800x600.png" alt="800×600 contact strip: Chat, Logs, Help" width="900" /></p>
 <p align="center"><sub>Contact strip of the three 800×600 frames above. Wide first-chat is max width on the built-in Retina display (~1427 logical px), not an external ultrawide capture.</sub></p>
 
-### From raw evidence to a durable investigation
+### From raw logs to a durable investigation
 
-1. **Bring only authorized evidence.** Allowlist workspace folders, connect
-   read-only sources, or import a deterministic post-mortem log corpus. Import
-   preserves source provenance and labels time quality rather than inventing
-   certainty for malformed or order-only timestamps.
-2. **Narrow the question before asking the model.** Find highlights identities;
-   Filter reduces rows; composed lanes compare sources; the Navigator seeks
-   bounded regions. Newly imported logs can expose a separately stored
-   **Original (redacted)** record on explicit request without placing that
-   representation into ordinary rows or chat context.
-3. **Let governed tools gather evidence.** Ordinary chat and corpus-linked chat
-   have different scopes. A linked turn begins with bounded log retrieval and
-   may use other already-authorized read sources when the question calls for
-   them. A tools-disabled profile is reported honestly instead of pretending
-   that retrieval happened.
-4. **Keep the useful result.** Evidence selections, bookmarks, cited findings,
-   notes, and reversible saved views turn a promising chat answer into an
-   investigation that can be revisited and checked against the source.
+1. **Bring authorized evidence.** Import a deterministic post-mortem corpus or
+   connect an allowlisted read source. ContextDesk preserves provenance,
+   redacts secrets, and labels time quality rather than inventing certainty for
+   malformed, local-only, or order-only timestamps.
+2. **Explore at human scale.** Log Explorer keeps the event table primary while
+   a bounded severity timeline, one to four source-composed lanes, Find,
+   Filter, bookmarks, and exact-time alignment help an engineer move between
+   overview and source records. Gaps remain gaps. A separately stored
+   **Original (redacted)** record is available on explicit request when
+   formatting would otherwise hide useful structure.
+3. **Ask with governed context.** A linked chat receives a small viewport
+   snapshot and uses bounded evidence tools against the linked corpus. It may
+   also consult already-authorized workspace, memory, Help, or connector
+   sources when the question calls for them. Results retain evidence identities
+   and disclose caps, failures, and unavailable tool capability.
+4. **Keep what matters.** Stable bookmarks make events easy to revisit. Durable
+   investigations organize exact evidence, human-authored findings and notes,
+   and reversible saved views without silently changing the active log view.
 
-The bundled Help Center explains the complete context path, permission
-boundaries, and result caps with accessible diagrams. For a cautious first
-trial on real organizational data, use the
-[company log-data trial runbook](docs/COMPANY_LOG_DATA_TRIAL.md) and keep all
-truth/evaluation material outside the imported directory.
+The bundled **Help Center** explains product workflows, context boundaries, and
+result limits with accessible diagrams. A separate **Engineering handbook**
+window renders the bundled, read-only design and proven-methods documentation
+for teams that want to understand or adapt the architecture; it does not widen
+Help retrieval or chat context. For a cautious first trial on organizational
+data, follow the
+[company log-data trial runbook](docs/COMPANY_LOG_DATA_TRIAL.md) and keep
+evaluation truth outside the imported directory.
 
 ---
 
@@ -87,13 +94,13 @@ truth/evaluation material outside the imported directory.
 
 Open WebUI, LibreChat, AnythingLLM, and Jan are all capable general chat UIs. ContextDesk optimizes for a narrower thing: **local-first research over sources you control, with an explicit write gate on every action** — not multiplayer chat or an open plugin marketplace. Each row below maps to a real mechanism in this repository; planned work is called out separately.
 
-| Edge | ContextDesk | Open WebUI | LibreChat | AnythingLLM | Jan |
-|------|-------------|-----------|-----------|-------------|-----|
-| **Per-tool write gate** — reads run free; every write is classified `read` / `soft-write` / `hard-write` and a hard-write blocks on a UI-originated confirm | Yes — `crates/cd-core/src/permissions.rs` (`PermissionDecision`, `ToolSideEffect`) | — | — | — | — |
-| **SSRF-hardened outbound + FS allowlist** — DNS resolve-and-pin, block private / link-local / CGNAT / cloud-metadata IPs, redirects off; tool file access limited to allowlisted roots | Yes — `crates/cd-core/src/ssrf.rs` (`resolve_and_validate`, `build_pinned_client`) + `crates/cd-core/src/paths.rs` | — | — | — | — |
-| **Secret storage** — API keys live in the OS keychain and never cross IPC to the webview (commands return bools/refs only) | OS keychain; never sent to UI — `crates/cd-core/src/keychain_store.rs`, [AGENTS.md](AGENTS.md) #4 | Server env / DB | Server env / DB | Local app storage | Local app data |
-| **Embeddable core** — the logic is a reusable Rust library other hosts can build on; the desktop and server are thin | Yes — `cd-core` crate | App | App | App (+ chat-embed widget) | App |
-| **Local-first, no account** — default path is a local model on loopback with no product login | Yes — Ollama on `127.0.0.1:11434`, single-user desktop | Self-hosted; user accounts | Self-hosted; user accounts | Yes — local option | Yes — local-first |
+| Edge                                                                                                                                                                                   | ContextDesk                                                                                                        | Open WebUI                 | LibreChat                  | AnythingLLM               | Jan               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------- | -------------------------- | ------------------------- | ----------------- |
+| **Per-tool write gate** — reads run free; every write is classified `read` / `soft-write` / `hard-write` and a hard-write blocks on a UI-originated confirm                            | Yes — `crates/cd-core/src/permissions.rs` (`PermissionDecision`, `ToolSideEffect`)                                 | —                          | —                          | —                         | —                 |
+| **SSRF-hardened outbound + FS allowlist** — DNS resolve-and-pin, block private / link-local / CGNAT / cloud-metadata IPs, redirects off; tool file access limited to allowlisted roots | Yes — `crates/cd-core/src/ssrf.rs` (`resolve_and_validate`, `build_pinned_client`) + `crates/cd-core/src/paths.rs` | —                          | —                          | —                         | —                 |
+| **Secret storage** — API keys live in the OS keychain and never cross IPC to the webview (commands return bools/refs only)                                                             | OS keychain; never sent to UI — `crates/cd-core/src/keychain_store.rs`, [AGENTS.md](AGENTS.md) #4                  | Server env / DB            | Server env / DB            | Local app storage         | Local app data    |
+| **Embeddable core** — the logic is a reusable Rust library other hosts can build on; the desktop and server are thin                                                                   | Yes — `cd-core` crate                                                                                              | App                        | App                        | App (+ chat-embed widget) | App               |
+| **Local-first, no account** — default path is a local model on loopback with no product login                                                                                          | Yes — Ollama on `127.0.0.1:11434`, single-user desktop                                                             | Self-hosted; user accounts | Self-hosted; user accounts | Yes — local option        | Yes — local-first |
 
 <sub>Comparison reflects each project's default/primary design as of mid-2026; all four alternatives are actively developed and cover broader chat/RAG use cases. `—` means "not a first-class feature of that tool," not "impossible." Corrections welcome via an [issue](https://github.com/chriscase/ContextDesk/issues).</sub>
 
@@ -103,9 +110,10 @@ Open WebUI, LibreChat, AnythingLLM, and Jan are all capable general chat UIs. Co
 
 ## What it does (honest)
 
-Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so shipped rows name a real symbol on `main`. Nothing below is described as done unless it is.
+Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), whose shipped rows are
+machine-checked against production symbols. Partial work is listed separately.
 
-**Shipped on `main` (desktop-focused):**
+**Desktop capabilities represented by this release:**
 
 - **Launch surface:** animated ContextDesk splash → local identity stub → **pre-launch** (workspace → AI wizard → Ready with **work-context** health pills for files/memory/DBs/Confluence/MCP — not news/X) before main chrome; Settings demoted from first-run onboarding (`docs/design/LAUNCH.md`, #391–#397)
 - Allowlisted workspace files + markdown memory search, with **citations** and a **search trail** (`index.rs:KeywordIndex`, incremental SQLite)
@@ -115,6 +123,21 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
 - **Durable typed memory** with **hybrid semantic recall** (embed-on-write, cosine-on-read, ambient injection) — `memory/sqlite_store.rs`, `memory/recall.rs`, #346
 - **Effortless capture (honest):** after a chat turn, rule-based **CueExtractor** proposes facts/decisions/preferences into a **Review inbox** — never silent durable writes. You **Approve** (SoftWrite → store.put with redaction + embed) or **Discard**; batch approve above confidence needs type-to-confirm `APPROVE`. Salience vs confidence scores gate spam; near-dupes propose supersede (commit only on approve). **Edges** (`link_memories`) expand recall one hop; per-kind half-lives tune recency (tasks age faster than facts). **Bulk markdown import** is idempotent (`import_fp`); **GDPR purge** is type-to-confirm `PURGE` (content gone, tombstone kept — not retract). Memory pane → Store | Review inbox — `memory/cue.rs`, `candidates.rs`, `edges.rs`, #381–#385
 - **Log analysis** (post-mortem): point the **Logs** pane or `ingest_logs` at a dump → Drain templates → **DuckDB** event store → clusters / timeline / hybrid search → **why** tools (`correlate_logs`, `anomalies_logs`, `trace_logs`) — `log_analysis/*`, #358–#363
+- **Log Explorer investigation workspace:** keyset-paged and virtualized rows;
+  useful UTC timestamps; compact or full metadata; Find and Filter; resizable
+  columns; a bounded severity timeline; 1–4 source-composed lanes; explicit
+  Independent, Follow, and exact-time Align modes; honest blank gaps; stable
+  bookmarks; and redacted original-record inspection —
+  `desktop/src/components/logExplorer/LogExplorer.tsx`
+- **Durable log investigations:** selected rows become exact evidence;
+  human-authored findings and notes cite that evidence; saved view recipes can
+  be previewed, explicitly applied, and restored without hidden mutations —
+  `desktop/src/components/logExplorer/EvidencePanel.tsx`
+- **Governed linked chat:** a corpus link persists with the chat, each turn gets
+  a bounded privacy-safe view snapshot, and a linked answer requires successful
+  read-only log-tool evidence. Tools-disabled profiles and provider failures
+  remain visible; ordinary chats do not inherit a log corpus —
+  `crates/cd-core/src/agent.rs:run_agent_turn_with_sink`
 - **Log template embedding default (product):** local in-process ONNX via **fastembed** on the desktop host (`log-fastembed` feature on; `embed.rs:default_log_embed_backend`); cloud embed is per-corpus opt-in with a “log content leaves this machine” confirm. Offline `cargo test` stays hermetic (deterministic `ConceptEmbedBackend`, no model download)
 - Opt-in web research (`web_search` / `web_fetch`) behind SSRF gates
 - Read-only connectors: SQLite, Postgres, Confluence, X search
@@ -131,6 +154,11 @@ Status mirrors [`docs/CLAIMS.md`](docs/CLAIMS.md), which is machine-checked so s
   unchanged retries idempotent. Local roots remain authoritative (#292 Phase A).
 - **Skills:** pin a playbook on a chat (`examples/skills/log-triage`) or `/skill id` — never elevates SoftWrite/HardWrite — `docs/SKILLS.md`, #343
 - Chat UI **folds older turns** (full history retained); agent uses recompacted context (#33)
+- **In-app guidance:** the searchable offline Help Center documents product
+  workflows and trust boundaries. Its Engineering handbook action opens a
+  separately bundled, read-only technical reader; those design documents are
+  not added to user Help search or model context —
+  `desktop/src/components/panes/HelpPane.tsx`
 
 ### Log Explorer at scale
 
@@ -147,10 +175,10 @@ mockups; the event count is fixture data, not a universal performance claim.
 ![Log Explorer showing four composed evidence lanes over a deterministic 100,000-event corpus on an ultrawide display](docs/media/log-explorer-four-lanes-100k.jpeg)
 
 A separate seven-day synthetic corpus exercises deep time navigation rather
-than just row volume. Here the Navigator remains open after seeking its final
-time bucket, with the selected event and surrounding rows still mounted and
-the complete event inspector visible. The 25,000-event count is fixture data,
-not a production-size ceiling or throughput claim.
+than just row volume. Here the investigation timeline remains open after a
+bounded seek into its final time bucket, with the selected event and surrounding
+rows still mounted and the complete event inspector visible. The 25,000-event
+count is fixture data, not a production-size ceiling or throughput claim.
 
 ![Log Explorer keeping a deep seven-day Navigator seek visible with the final time bucket, surrounding rows, and selected event inspector](docs/media/log-explorer-seven-day-navigator.jpeg)
 
@@ -188,7 +216,7 @@ Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](http
 3. **Configure in the app (Settings-first, no config files):**
    - Preflight / Settings → pick a **workspace folder** to allowlist. Try the bundled [`fixtures/kb/`](fixtures/kb) folder (`auth.md`, `billing.md`, `deploy_runbook.md`, …).
    - Provider **Ollama (local)**, base `http://127.0.0.1:11434`, model `mistral` → Save.
-4. **Ask a question** grounded in that folder, e.g. *"How does authentication work in this codebase?"* Expect streaming markdown, a **search trail** showing where it looked, and **citations** back to `fixtures/kb/auth.md` / `auth_gateway.md` when retrieval hits.
+4. **Ask a question** grounded in that folder, e.g. _"How does authentication work in this codebase?"_ Expect streaming markdown, a **search trail** showing where it looked, and **citations** back to `fixtures/kb/auth.md` / `auth_gateway.md` when retrieval hits.
 
 ### Option B — Grok Build session (opt-in)
 
