@@ -299,13 +299,14 @@ impl From<LogEvent> for ExplorerEvent {
 pub struct EventPage {
     /// Rows (≤ limit), always in ascending display order (`ts`/`seq` ASC).
     pub events: Vec<ExplorerEvent>,
-    /// Pass as `after_seq` for the **newer** page. Set when a full forward page was returned.
+    /// Pass as `after_seq` for the **newer** page. Set only when newer matching
+    /// rows are known to exist (or this is a reverse page with a newer bound).
     pub next_cursor: Option<u64>,
-    /// Pass as `after_ts` with `next_cursor` when time-sorted. Only set on full page.
+    /// Pass as `after_ts` with `next_cursor` when time-sorted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_ts: Option<i64>,
-    /// Pass as `before_seq` for the **older** page. Set when a full reverse page was returned
-    /// (or when the first page is full and more older rows may exist before the window).
+    /// Pass as `before_seq` for the **older** page. Set only when older matching
+    /// rows are known to exist (or this is a forward page with an older bound).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_cursor: Option<u64>,
     /// Pass as `before_ts` with `prev_cursor` when time-sorted.
@@ -622,9 +623,12 @@ fn query_events_with_additional_keyword(
     }
 
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
+    // Fetch one lookahead row so an exact-limit final page is a known boundary
+    // instead of advertising a cursor that requires an empty probe (#640).
+    let fetch_limit = limit.saturating_add(1);
     let sql = format!(
         "SELECT seq, ts, level, service, host, template_id, params, trace_id, message, source \
-         FROM events WHERE {page_where} ORDER BY {order} LIMIT {limit}"
+         FROM events WHERE {page_where} ORDER BY {order} LIMIT {fetch_limit}"
     );
 
     let (total_matched, mut events) = corpus.with_connection(|conn| {
@@ -637,13 +641,32 @@ fn query_events_with_additional_keyword(
         Ok((total_matched, events))
     })?;
 
+    let has_more_in_query_direction = events.len() > limit;
     if reverse_page {
         events.reverse();
+        if has_more_in_query_direction {
+            // DESC fetched the adjacent window plus one older row. After
+            // reversing to display order, discard that oldest lookahead.
+            events.remove(0);
+        }
+    } else if has_more_in_query_direction {
+        events.truncate(limit);
     }
 
-    // Forward cursor: last row when this was a full forward (or initial) page.
-    let full = events.len() == limit;
-    let (next_cursor, next_ts) = if full && !reverse_page {
+    let has_older_bound = q.after_seq.is_some();
+    let has_newer_bound = q.before_seq.is_some();
+    let newer_available = if reverse_page {
+        has_newer_bound && !events.is_empty()
+    } else {
+        has_more_in_query_direction
+    };
+    let older_available = if reverse_page {
+        has_more_in_query_direction
+    } else {
+        has_older_bound && !events.is_empty()
+    };
+
+    let (next_cursor, next_ts) = if newer_available {
         let last = events.last();
         (
             last.map(|e| e.seq),
@@ -653,16 +676,10 @@ fn query_events_with_additional_keyword(
                 None
             },
         )
-    } else if full && reverse_page {
-        // Reverse page is full — newer side still has the original window; no
-        // new forward cursor from this response alone.
-        (None, None)
     } else {
         (None, None)
     };
-    // Older cursor: first row when reverse page was full, or first page full
-    // (more may exist before the window).
-    let (prev_cursor, prev_ts) = if full {
+    let (prev_cursor, prev_ts) = if older_available {
         let first = events.first();
         (
             first.map(|e| e.seq),
@@ -672,11 +689,6 @@ fn query_events_with_additional_keyword(
                 None
             },
         )
-    } else if reverse_page && !events.is_empty() {
-        // Partial reverse page — still expose first for clients that re-query,
-        // but mark exhausted by using None when not full? Prefer None so UI
-        // stops auto-paging older.
-        (None, None)
     } else {
         (None, None)
     };
@@ -1791,6 +1803,25 @@ mod tests {
             assert!(page.next_ts.is_some());
         }
 
+        let exact = query_events(
+            &corpus,
+            &EventQuery {
+                levels: vec!["error".into()],
+                limit: page.total_matched as usize,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.events.len() as u64, exact.total_matched);
+        assert!(
+            exact.next_cursor.is_none() && exact.next_ts.is_none(),
+            "an exact-limit final page must be a known boundary"
+        );
+        assert!(
+            exact.prev_cursor.is_none() && exact.prev_ts.is_none(),
+            "an initial page cannot have older matching rows"
+        );
+
         let next = query_events(
             &corpus,
             &EventQuery {
@@ -2055,11 +2086,16 @@ mod tests {
                     b.seq
                 );
             }
-            if page.events.len() < limit {
+            if page.next_cursor.is_none() {
                 assert!(page.next_cursor.is_none());
                 assert!(page.next_ts.is_none());
                 break;
             }
+            assert_eq!(
+                page.events.len(),
+                limit,
+                "a continuation cursor requires a full visible page"
+            );
             assert!(page.next_cursor.is_some() && page.next_ts.is_some());
             after_seq = page.next_cursor;
             after_ts = page.next_ts;
@@ -2107,7 +2143,10 @@ mod tests {
         .unwrap();
         assert_eq!(first.events.len(), 10);
         assert!(first.next_cursor.is_some() && first.next_ts.is_some());
-        assert!(first.prev_cursor.is_some() && first.prev_ts.is_some());
+        assert!(
+            first.prev_cursor.is_none() && first.prev_ts.is_none(),
+            "the initial page is the known start of the matched range"
+        );
 
         let second = query_events(
             &corpus,

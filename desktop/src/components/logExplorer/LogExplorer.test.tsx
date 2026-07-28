@@ -2481,6 +2481,34 @@ describe("LogExplorer shell", () => {
     clock.mockRestore();
   });
 
+  it("labels exact matched-range boundaries without inert paging controls", async () => {
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) =>
+        query?.keyword === "nothing-here"
+          ? eventPage("api.log", "wall", 0, 1_700_000_000, 0)
+          : eventPage("api.log", "wall", 2, 1_700_000_000, 2),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const loaded = await screen.findByText("All matched logs loaded");
+    expect(loaded.title).toBe(
+      "All 2 events matching this lane are in the resident window.",
+    );
+    expect(screen.queryByText("Beginning")).toBeNull();
+    expect(screen.queryByText("End")).toBeNull();
+    expect(screen.queryByText("Load older")).toBeNull();
+    expect(screen.queryByText("Load newer")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "nothing-here" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    const empty = await screen.findByText("No matching logs");
+    expect(empty.title).toBe(
+      "No events match this lane's sources and active filters.",
+    );
+  });
+
   it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
     let newerAttempts = 0;
     const middle = defaultEventPage();
@@ -2586,7 +2614,7 @@ describe("LogExplorer shell", () => {
     scrollLaneToEdge("newer", 1);
     await waitFor(() =>
       expect(screen.getByTestId("lane-paging-lane-1").textContent).toContain(
-        "End",
+        "All matched logs loaded",
       ),
     );
     expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
@@ -2606,7 +2634,7 @@ describe("LogExplorer shell", () => {
     });
     await waitFor(() =>
       expect(screen.getByTestId("lane-paging-lane-0").textContent).toContain(
-        "End",
+        "All matched logs loaded",
       ),
     );
   });

@@ -3625,6 +3625,37 @@ export function LogExplorer({ corpusId }: Props) {
                     : laneTime.status === "error"
                       ? "time unavailable · load failed"
                       : "time unavailable · loading";
+              const cursor = laneCursors[lane.id];
+              const paging = lanePaging[lane.id];
+              const matched = laneMatched[lane.id];
+              const boundaryLabel =
+                cursor == null || laneTime.status === "unloaded"
+                  ? null
+                  : laneTime.status === "error"
+                    ? "Paging unavailable"
+                    : !cursor.hasOlder && !cursor.hasNewer
+                      ? matched === 0
+                        ? "No matching logs"
+                        : "All matched logs loaded"
+                      : !cursor.hasOlder
+                        ? "Start of matched logs"
+                        : !cursor.hasNewer
+                          ? "End of matched logs"
+                          : null;
+              const boundaryTitle =
+                boundaryLabel === "Start of matched logs"
+                  ? "This lane is at the first event matching its sources and active filters."
+                  : boundaryLabel === "End of matched logs"
+                    ? "This lane is at the last event matching its sources and active filters."
+                    : boundaryLabel === "All matched logs loaded"
+                      ? matched == null
+                        ? "All matching events for this lane are in the resident window."
+                        : `All ${matched} events matching this lane are in the resident window.`
+                      : boundaryLabel === "No matching logs"
+                        ? "No events match this lane's sources and active filters."
+                        : boundaryLabel === "Paging unavailable"
+                          ? "This lane did not load, so its paging boundaries are unknown."
+                          : undefined;
               return (
                 <section
                   key={lane.id}
@@ -3702,7 +3733,7 @@ export function LogExplorer({ corpusId }: Props) {
                     onNearTop={() => void loadOlderLane(lane.id)}
                     onNearBottom={() => void loadMoreLane(lane.id)}
                   />
-                  {lanePaging[lane.id]?.error ? (
+                  {paging?.error ? (
                     <div
                       className="log-explorer__lane-page-error"
                       role="alert"
@@ -3710,14 +3741,14 @@ export function LogExplorer({ corpusId }: Props) {
                     >
                       <span>
                         Could not load{" "}
-                        {lanePaging[lane.id]?.failedDirection ?? "adjacent"}{" "}
-                        events: {lanePaging[lane.id]?.error}
+                        {paging.failedDirection ?? "adjacent"} events:{" "}
+                        {paging.error}
                       </span>
                       <button
                         type="button"
                         className="log-explorer__btn"
                         onClick={() =>
-                          lanePaging[lane.id]?.failedDirection === "older"
+                          paging.failedDirection === "older"
                             ? void loadOlderLane(lane.id)
                             : void loadMoreLane(lane.id)
                         }
@@ -3726,28 +3757,24 @@ export function LogExplorer({ corpusId }: Props) {
                       </button>
                     </div>
                   ) : null}
-                  {lanePaging[lane.id]?.loading ||
-                  !laneCursors[lane.id]?.hasOlder ||
-                  !laneCursors[lane.id]?.hasNewer ? (
+                  {paging?.loading || boundaryLabel ? (
                     <div
                       className="log-explorer__lane-paging"
                       data-testid={`lane-paging-${lane.id}`}
                       aria-live="polite"
                       aria-label={`${lane.label} paging status`}
                     >
-                      {!laneCursors[lane.id]?.hasOlder ? (
-                        <span className="log-explorer__paging-boundary">
-                          Beginning
+                      {boundaryLabel ? (
+                        <span
+                          className="log-explorer__paging-boundary"
+                          title={boundaryTitle}
+                        >
+                          {boundaryLabel}
                         </span>
                       ) : null}
-                      {lanePaging[lane.id]?.loading ? (
+                      {paging?.loading ? (
                         <span className="log-explorer__paging-loading">
-                          Loading {lanePaging[lane.id]?.loading}…
-                        </span>
-                      ) : null}
-                      {!laneCursors[lane.id]?.hasNewer ? (
-                        <span className="log-explorer__paging-boundary">
-                          End
+                          Loading {paging.loading}…
                         </span>
                       ) : null}
                     </div>
