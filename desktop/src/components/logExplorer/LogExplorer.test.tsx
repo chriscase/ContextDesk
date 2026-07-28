@@ -754,7 +754,7 @@ describe("LogExplorer shell", () => {
       .getByRole("row", { name: "Lane 2 column headings" })
       .closest<HTMLElement>("[data-lane-id]");
     expect(laneTwo).toBeTruthy();
-    const laneTwoRows = within(laneTwo!).getByTestId(
+    const laneTwoRows = await within(laneTwo!).findByTestId(
       "virtualized-event-list",
     );
     Object.defineProperty(laneTwoRows, "scrollLeft", {
