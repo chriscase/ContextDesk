@@ -260,6 +260,33 @@ describe("OperationalMetricTracks", () => {
     ]);
   });
 
+  it("plots irregularly timed samples without inventing a data gap", () => {
+    const irregular = structuredClone(patternFixture);
+    irregular.series = [
+      {
+        ...irregular.series[0],
+        gaps: undefined,
+        points: [
+          { timestamp: 1736164800, value: 20 },
+          { timestamp: 1736164867, value: 24 },
+          { timestamp: 1736168400, value: 80 },
+          { timestamp: 1736179200, value: 30 },
+        ],
+      },
+    ];
+
+    render(<OperationalMetricTracks document={irregular} />);
+
+    expect(screen.queryByText(/data gap/)).toBeNull();
+    expect(screen.queryByTestId(/operational-metric-gap-/)).toBeNull();
+    expect(
+      screen
+        .getByTestId("operational-metric-segment-cpu-percent")
+        .getAttribute("d")
+        ?.match(/[ML]/g),
+    ).toHaveLength(irregular.series[0].points.length);
+  });
+
   it("keeps SVG work bounded for dense inputs", () => {
     const dense = structuredClone(coherentFixture);
     dense.series[0].points = Array.from({ length: 2_000 }, (_, index) => ({
