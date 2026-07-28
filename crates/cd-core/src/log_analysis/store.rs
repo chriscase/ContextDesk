@@ -5,6 +5,7 @@
 //! the **event** store only, not the ANN backend.
 
 use super::drain::TemplateInfo;
+use super::redact_log::RedactedOriginal;
 use crate::error::{CoreError, CoreResult};
 use crate::vector_index::{backend_name, select_backend, VectorIndex};
 use duckdb::{params, Connection};
@@ -232,6 +233,16 @@ pub struct LogEvent {
     pub message: String,
     /// Source file relative path.
     pub source: String,
+}
+
+/// Ingest-only event envelope carrying the separately bounded source view.
+///
+/// Keeping this out of [`LogEvent`] prevents existing explorer/tool payloads
+/// from automatically gaining the authoritative source representation.
+#[derive(Debug, Clone)]
+pub(crate) struct IngestedLogEvent {
+    pub event: LogEvent,
+    pub original: RedactedOriginal,
 }
 
 /// Template row persisted with the corpus (plus optional embedding hash).
@@ -483,7 +494,25 @@ impl LogCorpus {
 
     /// Append events (streaming ingest) into DuckDB.
     pub fn push_events(&self, batch: &[LogEvent]) -> CoreResult<()> {
-        if batch.is_empty() {
+        self.push_event_rows(batch.iter().map(|event| (event, None)))
+    }
+
+    /// Append newly ingested events with their authoritative redacted source.
+    pub(crate) fn push_ingested_events(&self, batch: &[IngestedLogEvent]) -> CoreResult<()> {
+        self.push_event_rows(
+            batch
+                .iter()
+                .map(|entry| (&entry.event, Some(&entry.original))),
+        )
+    }
+
+    fn push_event_rows<'a>(
+        &self,
+        rows: impl Iterator<Item = (&'a LogEvent, Option<&'a RedactedOriginal>)>,
+    ) -> CoreResult<()> {
+        let rows = rows.collect::<Vec<_>>();
+        let batch_is_empty = rows.is_empty();
+        if batch_is_empty {
             return Ok(());
         }
         let conn = self.db.lock().map_err(|_| lock_err())?;
@@ -492,7 +521,7 @@ impl LogCorpus {
             let mut app = conn
                 .appender("events")
                 .map_err(|e| CoreError::Message(format!("duckdb appender: {e}")))?;
-            for e in batch {
+            for (e, original) in rows {
                 let params_json = serde_json::to_string(&e.params).unwrap_or_else(|_| "[]".into());
                 app.append_row(params![
                     e.seq as i64,
@@ -505,6 +534,12 @@ impl LogCorpus {
                     e.trace_id.as_deref(),
                     e.message.as_str(),
                     e.source.as_str(),
+                    original.map(|value| value.text.as_str()),
+                    original.map(|value| value.source_byte_count as i64),
+                    original.map(|value| value.redacted_char_count as i64),
+                    original.map(|value| value.truncated),
+                    original.map(|value| value.encoding_normalized),
+                    original.map(|value| value.redaction_applied),
                 ])
                 .map_err(|e| CoreError::Message(format!("duckdb append: {e}")))?;
             }
@@ -513,6 +548,24 @@ impl LogCorpus {
         }
         conn.execute_batch("COMMIT").map_err(duck_err)?;
         Ok(())
+    }
+
+    /// Whether this corpus contains at least one authoritative redacted source
+    /// representation. Legacy corpora return false after additive schema open.
+    pub fn has_original_representations(&self) -> CoreResult<bool> {
+        let conn = self.db.lock().map_err(|_| lock_err())?;
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM events
+                    WHERE original_redacted IS NOT NULL
+                    LIMIT 1
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(duck_err)?;
+        Ok(exists)
     }
 
     /// Upsert template rows (JSON sidecar; not in DuckDB).
@@ -847,8 +900,20 @@ fn init_schema(conn: &Connection) -> CoreResult<()> {
             params VARCHAR NOT NULL,
             trace_id VARCHAR,
             message VARCHAR NOT NULL,
-            source VARCHAR NOT NULL
+            source VARCHAR NOT NULL,
+            original_redacted VARCHAR,
+            original_source_bytes BIGINT,
+            original_redacted_chars BIGINT,
+            original_truncated BOOLEAN,
+            original_encoding_normalized BOOLEAN,
+            original_redaction_applied BOOLEAN
         );
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redacted VARCHAR;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_source_bytes BIGINT;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redacted_chars BIGINT;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_truncated BOOLEAN;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_encoding_normalized BOOLEAN;
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS original_redaction_applied BOOLEAN;
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
         CREATE INDEX IF NOT EXISTS idx_events_template ON events(template_id);
         CREATE INDEX IF NOT EXISTS idx_events_level ON events(level);

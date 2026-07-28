@@ -195,12 +195,13 @@ pub fn export_corpus_zip(
 ) -> CoreResult<PackageManifest> {
     // Open, flush, snapshot meta, then **drop** the handle before reading
     // `events.duckdb` — Windows exclusive-locks the DuckDB file while open.
-    let (root, meta) = {
+    let (root, meta, has_original_representations) = {
         let corpus = LogCorpus::open(cache_root, corpus_id)?;
         corpus.flush()?;
         let root = corpus.root().to_path_buf();
         let meta = corpus.meta()?;
-        (root, meta)
+        let has_original_representations = corpus.has_original_representations()?;
+        (root, meta, has_original_representations)
     };
 
     let payloads = ["meta.json", "events.duckdb", "templates.json"];
@@ -242,6 +243,11 @@ pub fn export_corpus_zip(
     }
     if meta.stats.is_some() {
         features.push("corpus_stats".into());
+    }
+    if has_original_representations {
+        // Additive v1 capability: old readers ignore the advisory tag and keep
+        // reading their explicit historical event columns.
+        features.push("original_redacted_v1".into());
     }
 
     let manifest = PackageManifest {
@@ -1520,6 +1526,12 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].template_id, 1);
         assert!(hits[0].pattern.contains("frozen upstream"));
+        assert_eq!(
+            crate::log_analysis::query::query_event_original(&corpus, 1).unwrap(),
+            crate::log_analysis::query::EventOriginalRepresentation::Unavailable {
+                reason: "Original representation unavailable for this corpus".into(),
+            }
+        );
     }
 
     #[test]
@@ -1575,6 +1587,7 @@ mod tests {
         let man = export_corpus_zip(&cache, &corpus_id, &out).unwrap();
         assert_eq!(man.format_version, PACKAGE_FORMAT_VERSION);
         assert_eq!(man.min_reader_version, PACKAGE_READER_VERSION);
+        assert!(man.features.contains(&"original_redacted_v1".to_string()));
         assert!(out.is_file());
 
         let cache2 = dir.path().join("cache2");
@@ -1589,6 +1602,19 @@ mod tests {
         assert_eq!(meta.origin_corpus_id.as_deref(), Some(corpus_id.as_str()));
         assert!(meta.stats.is_some());
         assert!(meta.stats.as_ref().unwrap().reduction_ratio > 1.0);
+        match crate::log_analysis::query::query_event_original(&c, 0).unwrap() {
+            crate::log_analysis::query::EventOriginalRepresentation::Available {
+                label,
+                text,
+                truncated,
+                ..
+            } => {
+                assert_eq!(label, "Original (redacted)");
+                assert!(text.contains(r#""service":"api""#));
+                assert!(!truncated);
+            }
+            other => panic!("package round-trip lost original representation: {other:?}"),
+        }
     }
 
     #[test]

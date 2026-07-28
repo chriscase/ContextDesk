@@ -293,6 +293,106 @@ impl From<LogEvent> for ExplorerEvent {
     }
 }
 
+/// Authoritative redacted source representation for one event.
+///
+/// This is deliberately separate from [`ExplorerEvent`]: normal pages, search,
+/// tools, and model context do not receive this content automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum EventOriginalRepresentation {
+    /// The corpus captured a bounded redacted source representation.
+    Available {
+        /// Honest UI label; this is not the unredacted source byte stream.
+        label: String,
+        /// Redacted source text after documented encoding/line-ending normalization.
+        text: String,
+        /// Source bytes after one trailing LF and optional CR were removed.
+        source_byte_count: u64,
+        /// Complete redacted character count before storage bounding.
+        redacted_char_count: u64,
+        /// Characters present in `text`.
+        stored_char_count: u64,
+        /// Whether a suffix is unavailable because of the storage bound.
+        truncated: bool,
+        /// Whether invalid UTF-8 was normalized to replacement characters.
+        encoding_normalized: bool,
+        /// Whether secret redaction changed or blocked the source record.
+        redaction_applied: bool,
+    },
+    /// Legacy or otherwise uncaptured event.
+    Unavailable {
+        /// Stable, honest explanation suitable for a future inspector.
+        reason: String,
+    },
+}
+
+/// Fetch the separately stored authoritative redacted source for one event.
+///
+/// A missing event remains an error. A valid event from an older corpus is a
+/// successful `Unavailable` result so clients never reconstruct or mislabel it.
+pub fn query_event_original(
+    corpus: &LogCorpus,
+    seq: u64,
+) -> CoreResult<EventOriginalRepresentation> {
+    corpus.with_connection(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT original_redacted, original_source_bytes, original_redacted_chars, \
+                        original_truncated, original_encoding_normalized, \
+                        original_redaction_applied \
+                 FROM events WHERE seq = ? LIMIT 1",
+            )
+            .map_err(duck_err)?;
+        let mut rows = stmt.query(duckdb::params![seq as i64]).map_err(duck_err)?;
+        let Some(row) = rows.next().map_err(duck_err)? else {
+            return Err(CoreError::Message(format!("event seq {seq} not found")));
+        };
+        let text: Option<String> = row.get(0).map_err(duck_err)?;
+        let source_byte_count: Option<i64> = row.get(1).map_err(duck_err)?;
+        let redacted_char_count: Option<i64> = row.get(2).map_err(duck_err)?;
+        let truncated: Option<bool> = row.get(3).map_err(duck_err)?;
+        let encoding_normalized: Option<bool> = row.get(4).map_err(duck_err)?;
+        let redaction_applied: Option<bool> = row.get(5).map_err(duck_err)?;
+
+        let (
+            Some(text),
+            Some(source_byte_count),
+            Some(redacted_char_count),
+            Some(truncated),
+            Some(encoding_normalized),
+            Some(redaction_applied),
+        ) = (
+            text,
+            source_byte_count,
+            redacted_char_count,
+            truncated,
+            encoding_normalized,
+            redaction_applied,
+        )
+        else {
+            return Ok(EventOriginalRepresentation::Unavailable {
+                reason: "Original representation unavailable for this corpus".into(),
+            });
+        };
+        if source_byte_count < 0 || redacted_char_count < 0 {
+            return Ok(EventOriginalRepresentation::Unavailable {
+                reason: "Original representation metadata is invalid for this event".into(),
+            });
+        }
+        let stored_char_count = text.chars().count() as u64;
+        Ok(EventOriginalRepresentation::Available {
+            label: "Original (redacted)".into(),
+            text,
+            source_byte_count: source_byte_count as u64,
+            redacted_char_count: redacted_char_count as u64,
+            stored_char_count,
+            truncated,
+            encoding_normalized,
+            redaction_applied,
+        })
+    })
+}
+
 /// Paged result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1725,6 +1825,129 @@ mod tests {
         let backend = ConceptEmbedBackend::new(64);
         let report = ingest_path(&cache, &logs, "fixture", Some(&backend), "c").unwrap();
         (dir, report.corpus_id)
+    }
+
+    #[test]
+    fn original_representation_preserves_formats_but_stays_out_of_event_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let secret = "sk-abcdefghijklmnop";
+        std::fs::write(
+            logs.join("json.jsonl"),
+            format!(
+                r#"{{"message":"visible-json","RAW_ONLY_SENTINEL":{{"order":[3,2,1]}},"token":"{secret}","unicode":"東京"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("logfmt.log"),
+            format!(r#"level=warn msg="visible logfmt" custom=kept token={secret}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("syslog.log"),
+            format!("<34>Oct 11 22:14:15 host app: visible syslog token={secret}"),
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join("plain.log"),
+            format!("ERROR visible plain punctuation!? token={secret}"),
+        )
+        .unwrap();
+        let invalid = b"level=info msg=visible-invalid custom=caf\xc3\xa9-\xff";
+        std::fs::write(logs.join("invalid.log"), invalid).unwrap();
+
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "originals", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let page = query_events(
+            &corpus,
+            &EventQuery {
+                sort_by_time: false,
+                limit: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 5);
+
+        let originals = page
+            .events
+            .iter()
+            .map(|event| {
+                (
+                    event.source.clone(),
+                    query_event_original(&corpus, event.seq).unwrap(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let available_text = |source: &str| match originals.get(source).unwrap() {
+            EventOriginalRepresentation::Available { text, .. } => text.as_str(),
+            other => panic!("{source} should have an original representation: {other:?}"),
+        };
+
+        let json = available_text("json.jsonl");
+        assert!(json.contains(r#""RAW_ONLY_SENTINEL":{"order":[3,2,1]}"#));
+        assert!(json.contains(r#""unicode":"東京""#));
+        assert!(!json.contains(secret));
+        assert!(available_text("logfmt.log").contains("custom=kept"));
+        assert!(available_text("syslog.log").contains("app: visible syslog"));
+        assert!(available_text("plain.log").contains("punctuation!?"));
+        assert!(!available_text("logfmt.log").contains(secret));
+        assert!(!available_text("syslog.log").contains(secret));
+        assert!(!available_text("plain.log").contains(secret));
+        match originals.get("invalid.log").unwrap() {
+            EventOriginalRepresentation::Available {
+                text,
+                source_byte_count,
+                encoding_normalized,
+                ..
+            } => {
+                assert!(text.contains("café-�"));
+                assert_eq!(*source_byte_count, invalid.len() as u64);
+                assert!(*encoding_normalized);
+            }
+            other => panic!("invalid UTF-8 source should be normalized: {other:?}"),
+        }
+
+        let ordinary_page_json = serde_json::to_string(&page).unwrap();
+        assert!(!ordinary_page_json.contains("RAW_ONLY_SENTINEL"));
+        assert!(!ordinary_page_json.contains("custom=kept"));
+        assert!(!ordinary_page_json.contains(secret));
+    }
+
+    #[test]
+    fn original_representation_exposes_oversized_record_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let line = format!(
+            "INFO {}",
+            "ordinary payload ".repeat(super::super::redact_log::MAX_ORIGINAL_REDACTED_BYTES / 8)
+        );
+        std::fs::write(logs.join("oversized.log"), &line).unwrap();
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &logs, "oversized-original", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+
+        match query_event_original(&corpus, 0).unwrap() {
+            EventOriginalRepresentation::Available {
+                text,
+                source_byte_count,
+                redacted_char_count,
+                stored_char_count,
+                truncated,
+                ..
+            } => {
+                assert!(truncated);
+                assert_eq!(source_byte_count, line.len() as u64);
+                assert_eq!(redacted_char_count, line.chars().count() as u64);
+                assert!(stored_char_count < redacted_char_count);
+                assert!(text.len() <= super::super::redact_log::MAX_ORIGINAL_REDACTED_BYTES);
+            }
+            other => panic!("oversized source should remain explicitly bounded: {other:?}"),
+        }
     }
 
     #[test]

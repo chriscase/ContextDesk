@@ -3,10 +3,10 @@
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
 use super::parse::{detect_format, parse_line, LogFormat};
-use super::redact_log::{redact_message, redact_params};
+use super::redact_log::{prepare_original_record, redact_message, redact_params};
 use super::store::{
-    template_content_hash, CorpusEmbeddingStatus, EmbeddingState, LogCorpus, LogEvent, TemplateRow,
-    TopTemplateSnapshot,
+    template_content_hash, CorpusEmbeddingStatus, EmbeddingState, IngestedLogEvent, LogCorpus,
+    LogEvent, TemplateRow, TopTemplateSnapshot,
 };
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
@@ -555,7 +555,7 @@ fn ingest_lines_from_reader(
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
     seq: &mut u64,
-    batch: &mut Vec<LogEvent>,
+    batch: &mut Vec<IngestedLogEvent>,
     format_hint: &mut Option<LogFormat>,
     files_done: u64,
     file_count: u64,
@@ -587,8 +587,8 @@ fn ingest_lines_from_reader(
             Err(_) => return Ok(false),
         };
         stats.source_bytes = stats.source_bytes.saturating_add(bytes as u64);
-        let line = String::from_utf8_lossy(&raw_line);
-        let line = line.trim_end_matches(['\r', '\n']);
+        let prepared_original = prepare_original_record(&raw_line);
+        let line = prepared_original.parser_text.as_str();
         if line.trim().is_empty() {
             continue;
         }
@@ -611,17 +611,20 @@ fn ingest_lines_from_reader(
         *stats.level_counts.entry(level_key).or_insert(0) += 1;
         let (tid, params) = miner.match_or_create(&msg, ts, &parsed.level);
         let params = redact_params(&params);
-        batch.push(LogEvent {
-            seq: *seq,
-            ts,
-            level: parsed.level,
-            service: parsed.service,
-            host: parsed.host,
-            template_id: tid,
-            params,
-            trace_id: parsed.trace_id,
-            message: msg,
-            source: source_label.to_string(),
+        batch.push(IngestedLogEvent {
+            event: LogEvent {
+                seq: *seq,
+                ts,
+                level: parsed.level,
+                service: parsed.service,
+                host: parsed.host,
+                template_id: tid,
+                params,
+                trace_id: parsed.trace_id,
+                message: msg,
+                source: source_label.to_string(),
+            },
+            original: prepared_original.stored,
         });
         *seq += 1;
         stats.lines += 1;
@@ -641,7 +644,7 @@ fn ingest_lines_from_reader(
                     .with_bytes(stats.source_bytes),
                 );
             }
-            corpus.push_events(batch)?;
+            corpus.push_ingested_events(batch)?;
             batch.clear();
         }
         if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
@@ -674,7 +677,7 @@ fn ingest_from_zip(
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
     seq: &mut u64,
-    batch: &mut Vec<LogEvent>,
+    batch: &mut Vec<IngestedLogEvent>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
     kind: ProcessProgressKind,
@@ -1192,7 +1195,7 @@ fn ingest_path_into_cache(
             .with_fraction(0.7)
             .with_lines(stats.lines),
         );
-        corpus.push_events(&batch)?;
+        corpus.push_ingested_events(&batch)?;
     }
     check_ingest_fault(fault, IngestCheckpoint::EventsStored)?;
 
