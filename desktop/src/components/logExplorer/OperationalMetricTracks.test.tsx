@@ -92,6 +92,36 @@ describe("OperationalMetricTracks", () => {
     expect(screen.getAllByRole("slider")).toHaveLength(3);
   });
 
+  it.each(["compact", "standard", "detailed"] as const)(
+    "exposes the %s density as a stable class and data attribute",
+    (density) => {
+      const { container } = render(
+        <OperationalMetricTracks
+          document={coherentFixture}
+          density={density}
+        />,
+      );
+
+      const root = container.querySelector(".operational-metric-tracks");
+      expect(root?.getAttribute("data-density")).toBe(density);
+      expect(
+        root?.classList.contains(
+          `operational-metric-tracks--density-${density}`,
+        ),
+      ).toBe(true);
+      expect(root?.getAttribute("data-shared-plot-alignment")).toBe(
+        density === "compact" ? "outer-content" : "inset",
+      );
+      expect(
+        screen
+          .getByRole("slider", {
+            name: "CPU shared time cursor",
+          })
+          .hasAttribute("aria-valuetext"),
+      ).toBe(true);
+    },
+  );
+
   it("previews one shared pointer crosshair across every track", () => {
     const onCursorChange = vi.fn();
     render(
@@ -285,6 +315,76 @@ describe("OperationalMetricTracks", () => {
         .getAttribute("d")
         ?.match(/[ML]/g),
     ).toHaveLength(irregular.series[0].points.length);
+  });
+
+  it("uses shared time bounds while preserving actual irregular sample positions", () => {
+    const irregular = structuredClone(patternFixture);
+    irregular.series = [
+      {
+        ...irregular.series[0],
+        gaps: undefined,
+        points: [
+          { timestamp: 100, value: 20 },
+          { timestamp: 110, value: 24 },
+          { timestamp: 190, value: 80 },
+          { timestamp: 200, value: 30 },
+        ],
+      },
+    ];
+
+    render(
+      <OperationalMetricTracks
+        document={irregular}
+        sharedTimeBounds={{ from: 0, to: 400 }}
+      />,
+    );
+
+    expect(
+      screen
+        .getByTestId("operational-metric-segment-cpu-percent")
+        .getAttribute("d"),
+    ).toBe("M 25.000 100.000 L 27.500 93.333 L 47.500 0.000 L 50.000 83.333");
+    expect(
+      screen
+        .getByRole("slider", {
+          name: "CPU shared time cursor",
+        })
+        .getAttribute("aria-valuemax"),
+    ).toBe("400");
+    expect(screen.queryByText(/data gap/)).toBeNull();
+  });
+
+  it("normalizes too-narrow reversed shared bounds without dropping samples", () => {
+    const irregular = structuredClone(patternFixture);
+    irregular.series = [
+      {
+        ...irregular.series[0],
+        gaps: undefined,
+        points: [
+          { timestamp: 100, value: 20 },
+          { timestamp: 110, value: 24 },
+          { timestamp: 190, value: 80 },
+          { timestamp: 200, value: 30 },
+        ],
+      },
+    ];
+
+    render(
+      <OperationalMetricTracks
+        document={irregular}
+        sharedTimeBounds={{ from: 190, to: 110 }}
+      />,
+    );
+
+    const path = screen.getByTestId("operational-metric-segment-cpu-percent");
+    expect(path.getAttribute("d")?.match(/[ML]/g)).toHaveLength(4);
+    expect(path.getAttribute("d")).toMatch(/^M 0\.000 /);
+    expect(path.getAttribute("d")).toContain("L 100.000 ");
+    const slider = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    expect(slider.getAttribute("aria-valuemin")).toBe("100");
+    expect(slider.getAttribute("aria-valuemax")).toBe("200");
   });
 
   it("keeps SVG work bounded for dense inputs", () => {

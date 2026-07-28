@@ -14,6 +14,8 @@
   --metric-gap: color-mix(in srgb, var(--text-muted, #aab4c3) 20%, transparent);
   --metric-warning: var(--warning, #e7b341);
   --metric-critical: var(--danger, #f36b7a);
+  --metric-plot-height: clamp(4.5rem, 10vh, 7rem);
+  --operational-metric-plot-inline-inset: var(--space-3, 12px);
 
   min-width: 0;
   color: var(--metric-text);
@@ -106,7 +108,7 @@
 }
 
 .operational-metric-track__plot {
-  height: clamp(4.5rem, 10vh, 7rem);
+  height: var(--metric-plot-height);
   margin-block: var(--space-1, 4px);
   background:
     linear-gradient(
@@ -255,7 +257,11 @@
 }
 
 .operational-metric-tracks--compact-side .operational-metric-track__plot {
-  height: clamp(3.75rem, 8vh, 5.5rem);
+  --metric-plot-height: clamp(3.75rem, 8vh, 5.5rem);
+}
+
+.operational-metric-tracks--compact-side {
+  --operational-metric-plot-inline-inset: var(--space-2, 8px);
 }
 
 .operational-metric-tracks--compact-side .operational-metric-track__reading,
@@ -263,6 +269,78 @@
   .operational-metric-tracks__header
   output {
   text-align: start;
+}
+
+.operational-metric-tracks--density-compact {
+  --metric-plot-height: clamp(2rem, 4vh, 2.75rem);
+  --operational-metric-plot-inline-inset: 0px;
+}
+
+.operational-metric-tracks--density-compact.operational-metric-tracks--compact-side
+  .operational-metric-track__plot {
+  --metric-plot-height: clamp(2rem, 4vh, 2.75rem);
+}
+
+.operational-metric-tracks--density-compact .operational-metric-tracks__header,
+.operational-metric-tracks--density-compact .operational-metric-track {
+  padding-block: var(--space-1, 4px);
+}
+
+.operational-metric-tracks--density-compact .operational-metric-tracks__header {
+  padding-inline: var(--space-2, 8px);
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track {
+  padding-inline: var(--operational-metric-plot-inline-inset);
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track__header,
+.operational-metric-tracks--density-compact .operational-metric-track__details {
+  padding-inline: var(--space-2, 8px);
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track__plot {
+  border-inline: 0;
+  border-radius: 0;
+}
+
+.operational-metric-tracks--density-compact
+  .operational-metric-tracks__header
+  p,
+.operational-metric-tracks--density-compact
+  .operational-metric-tracks__header
+  output,
+.operational-metric-tracks--density-compact .operational-metric-tracks__axis,
+.operational-metric-tracks--density-compact .operational-metric-track__reading,
+.operational-metric-tracks--density-compact
+  .operational-metric-track__details
+  > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track__header {
+  min-height: 1.25rem;
+}
+
+.operational-metric-tracks--density-compact .operational-metric-track__details {
+  min-height: 0;
+}
+
+.operational-metric-tracks--density-detailed {
+  --metric-plot-height: clamp(7.5rem, 18vh, 12rem);
+}
+
+.operational-metric-tracks--density-detailed.operational-metric-tracks--compact-side
+  .operational-metric-track__plot {
+  --metric-plot-height: clamp(7.5rem, 18vh, 12rem);
 }
 
 @media (max-width: 700px) {

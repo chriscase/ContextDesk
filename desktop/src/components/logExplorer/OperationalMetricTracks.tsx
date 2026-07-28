@@ -17,6 +17,8 @@ import {
 } from "../../lib/logExplorer/operationalMetrics";
 import "./OperationalMetricTracks.css";
 
+export type OperationalMetricDensity = "compact" | "standard" | "detailed";
+
 export type OperationalMetricTracksProps = {
   document: OperationalMetricsDocumentV1;
   /**
@@ -24,6 +26,13 @@ export type OperationalMetricTracksProps = {
    * shared interaction state; the parent owns docking/orientation.
    */
   presentation?: "stacked" | "compact-side";
+  /** Controls plot height and how much supporting metadata is shown inline. */
+  density?: OperationalMetricDensity;
+  /**
+   * Optional parent-owned time domain, such as the visible log timeline.
+   * The effective domain always includes every metric sample.
+   */
+  sharedTimeBounds?: OperationalMetricRange;
   cursorTimestamp?: number;
   selectedRange?: OperationalMetricRange | null;
   maxRenderedPointsPerTrack?: number;
@@ -91,6 +100,25 @@ function scaleTimestamp(
 ): number {
   if (bounds.to === bounds.from) return VIEWBOX_SIZE / 2;
   return ((timestamp - bounds.from) / (bounds.to - bounds.from)) * VIEWBOX_SIZE;
+}
+
+function resolveTimeBounds(
+  documentBounds: OperationalMetricRange,
+  sharedTimeBounds?: OperationalMetricRange,
+): OperationalMetricRange {
+  if (
+    sharedTimeBounds == null ||
+    !Number.isFinite(sharedTimeBounds.from) ||
+    !Number.isFinite(sharedTimeBounds.to)
+  ) {
+    return documentBounds;
+  }
+  const sharedFrom = Math.min(sharedTimeBounds.from, sharedTimeBounds.to);
+  const sharedTo = Math.max(sharedTimeBounds.from, sharedTimeBounds.to);
+  return {
+    from: Math.min(documentBounds.from, sharedFrom),
+    to: Math.max(documentBounds.to, sharedTo),
+  };
 }
 
 function yDomain(series: OperationalMetricSeries): {
@@ -417,7 +445,9 @@ function MetricTrack({
                   </li>
                 ))}
               </ul>
-              <p>The line stays broken; missing samples are not interpolated.</p>
+              <p>
+                The line stays broken; missing samples are not interpolated.
+              </p>
             </div>
           </details>
         ) : null}
@@ -429,6 +459,8 @@ function MetricTrack({
 export function OperationalMetricTracks({
   document,
   presentation = "stacked",
+  density = "standard",
+  sharedTimeBounds,
   cursorTimestamp,
   selectedRange,
   maxRenderedPointsPerTrack = 240,
@@ -436,7 +468,14 @@ export function OperationalMetricTracks({
   onRangeSelect,
   onSeekTimestamp,
 }: OperationalMetricTracksProps) {
-  const bounds = useMemo(() => metricDocumentTimeRange(document), [document]);
+  const documentBounds = useMemo(
+    () => metricDocumentTimeRange(document),
+    [document],
+  );
+  const bounds = useMemo(
+    () => resolveTimeBounds(documentBounds, sharedTimeBounds),
+    [documentBounds, sharedTimeBounds],
+  );
   const [internalCursor, setInternalCursor] = useState(bounds.from);
   const [internalSelection, setInternalSelection] =
     useState<OperationalMetricRange | null>(null);
@@ -500,10 +539,14 @@ export function OperationalMetricTracks({
 
   return (
     <section
-      className={`operational-metric-tracks operational-metric-tracks--${presentation}`}
+      className={`operational-metric-tracks operational-metric-tracks--${presentation} operational-metric-tracks--density-${density}`}
       aria-label={`${document.name} operational metrics`}
       data-schema-version={document.schemaVersion}
       data-presentation={presentation}
+      data-density={density}
+      data-shared-plot-alignment={
+        density === "compact" ? "outer-content" : "inset"
+      }
     >
       <header className="operational-metric-tracks__header">
         <div>
