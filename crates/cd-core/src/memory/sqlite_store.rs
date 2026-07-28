@@ -524,19 +524,17 @@ fn embed_on_fresh_runtime(
 
 /// Block on embed with a realistic timeout (write + query path). #346
 ///
-/// This synchronous facade is also called from async agent turns. Entering a
-/// newly built runtime on a Tokio worker aborts the packaged app, so isolate
-/// that runtime on a scoped OS thread whenever a caller is already in Tokio.
+/// This synchronous facade is also called from async agent turns and Tokio
+/// blocking workers. Runtime detection is not sufficient on every Tokio worker
+/// context, so always isolate the fresh runtime on a scoped OS thread. A panic
+/// in runtime construction/execution is contained and degrades to `None`.
 pub fn embed_blocking(backend: &dyn EmbedBackend, text: &str, timeout_ms: u64) -> Option<Vec<f32>> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return std::thread::scope(|scope| {
-            scope
-                .spawn(|| embed_on_fresh_runtime(backend, text, timeout_ms))
-                .join()
-                .unwrap_or(None)
-        });
-    }
-    embed_on_fresh_runtime(backend, text, timeout_ms)
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| embed_on_fresh_runtime(backend, text, timeout_ms))
+            .join()
+            .unwrap_or(None)
+    })
 }
 
 impl MemoryStore for SqliteMemoryStore {
@@ -1141,6 +1139,26 @@ mod tests {
         let backend = MockHashEmbedBackend::new(16);
         let vector = embed_blocking(&backend, "ambient memory query", 1_000)
             .expect("embedding should complete without entering the caller runtime");
+        assert_eq!(vector.len(), 16);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn embed_blocking_is_safe_on_tokio_blocking_worker() {
+        let vector = tokio::task::spawn_blocking(|| {
+            let backend = MockHashEmbedBackend::new(16);
+            embed_blocking(&backend, "blocking worker memory query", 1_000)
+        })
+        .await
+        .expect("blocking worker must not panic")
+        .expect("embedding should complete on an isolated runtime");
+        assert_eq!(vector.len(), 16);
+    }
+
+    #[test]
+    fn embed_blocking_is_safe_without_tokio_runtime() {
+        let backend = MockHashEmbedBackend::new(16);
+        let vector = embed_blocking(&backend, "synchronous memory query", 1_000)
+            .expect("embedding should complete for a synchronous caller");
         assert_eq!(vector.len(), 16);
     }
 
