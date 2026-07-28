@@ -61,21 +61,70 @@ describe("HandbookMarkdown", () => {
 
   it("presents Mermaid as an accessible semantic card and readable source", () => {
     const headings = collectHandbookHeadings(body);
-    render(
+    const { container } = render(
       <HandbookMarkdown body={body} headings={headings} onNavigate={vi.fn()} />,
     );
 
     const diagram = screen.getByRole("figure", {
-      name: "Architecture diagram",
+      name: "System flow",
     });
     expect(diagram.textContent).toContain("Source logs leads to Trusted host");
     expect(diagram.textContent).toContain(
       "Trusted host leads to Selected model",
     );
+    const svg = container.querySelector(".handbook-diagram__canvas svg");
+    expect(svg).toBeTruthy();
+    expect(svg?.getAttribute("aria-hidden")).toBe("true");
+    expect(svg?.textContent).toContain("Source logs");
+    expect(svg?.textContent).toContain("Trusted host");
+    expect(svg?.querySelectorAll(".handbook-diagram__svg-node").length).toBe(3);
+    expect(svg?.querySelectorAll(".handbook-diagram__svg-edge").length).toBe(2);
+    expect(
+      svg?.querySelector(".handbook-diagram__svg-node")?.getAttribute("fill"),
+    ).toBeNull();
+    expect(
+      svg?.querySelector(".handbook-diagram__svg-edge")?.getAttribute("stroke"),
+    ).toBeNull();
     expect(screen.getByText("Read diagram source")).toBeTruthy();
 
     fireEvent.click(screen.getByText("Read diagram source"));
     expect(screen.getByText(/flowchart LR/)).toBeTruthy();
+  });
+
+  it("renders a labeled sequence SVG and fails visibly for unsupported syntax", () => {
+    const sequence = [
+      "```mermaid",
+      "sequenceDiagram",
+      "  actor U as User",
+      "  participant H as Trusted host",
+      "  U->>H: Ask a bounded question",
+      "  H-->>U: Return cited evidence",
+      "```",
+      "",
+      "```mermaid",
+      "journey",
+      "  title Unsupported example",
+      "```",
+    ].join("\n");
+    const { container } = render(
+      <HandbookMarkdown body={sequence} headings={[]} onNavigate={vi.fn()} />,
+    );
+
+    expect(
+      screen.getByRole("figure", { name: "Context sequence" }).textContent,
+    ).toContain("User sends “Ask a bounded question” to Trusted host");
+    const sequenceSvg = container.querySelector(
+      ".handbook-diagram__canvas svg",
+    );
+    expect(sequenceSvg?.textContent).toContain("User");
+    expect(sequenceSvg?.textContent).toContain("Trusted host");
+    expect(sequenceSvg?.textContent).toContain("Ask a bounded question");
+
+    const unsupported = screen.getByText(/unsupported Mermaid syntax/i);
+    expect(unsupported).toBeTruthy();
+    expect(
+      unsupported.closest("figure")?.querySelector(".handbook-diagram__canvas"),
+    ).toBeNull();
   });
 
   it("builds stable unique heading ids and keyboard-operable local navigation", () => {
