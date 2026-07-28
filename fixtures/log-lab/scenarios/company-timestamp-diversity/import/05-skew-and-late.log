@@ -1,2 +1,2 @@
-ts=1735739820 level=warn service=edge-proxy host=edge-01.example trace_id=trace-company-ts-skew msg="event_id=ts-skew-behind known source clock skew_seconds=-180 no automatic correction claimed"
-ts=1735740030 level=info service=edge-proxy host=edge-01.example trace_id=trace-company-ts-late msg="event_id=ts-late late-arriving event wall time may disagree with ingest order"
+ts=1735737420 level=warn service=edge-proxy host=edge-01.example trace_id=trace-company-ts-skew msg="event_id=ts-skew-behind known source clock skew_seconds=-180 no automatic correction claimed"
+ts=1735737630 level=info service=edge-proxy host=edge-01.example trace_id=trace-company-ts-late msg="event_id=ts-late late-arriving event wall time may disagree with ingest order"

@@ -872,12 +872,14 @@ fn redaction_truth(files: &[ImportFile]) -> Value {
 /// Shared wall-clock instant used by company-timestamp-diversity encodings.
 /// 2025-01-01T13:20:00Z (Unix seconds). String forms below must represent this
 /// instant when they carry a complete offset; epoch and fractional forms match it.
-const COMPANY_TS_SHARED_INSTANT_SECS: i64 = 1_735_740_000;
-const COMPANY_TS_SHARED_INSTANT_MS: i64 = 1_735_740_000_000;
+// 2025-01-01T13:20:00Z — every shared-instant encoding below must resolve to this
+// exact UTC instant (including fractional form with .000 subseconds).
+const COMPANY_TS_SHARED_INSTANT_SECS: i64 = 1_735_737_600;
+const COMPANY_TS_SHARED_INSTANT_MS: i64 = 1_735_737_600_000;
 const COMPANY_TS_SHARED_RFC3339_UTC: &str = "2025-01-01T13:20:00Z";
 const COMPANY_TS_SHARED_OFFSET_PLUS: &str = "2025-01-01T14:20:00+01:00";
 const COMPANY_TS_SHARED_OFFSET_MINUS: &str = "2025-01-01T08:20:00-05:00";
-const COMPANY_TS_SHARED_FRACTIONAL: &str = "2025-01-01T13:20:00.123Z";
+const COMPANY_TS_SHARED_FRACTIONAL: &str = "2025-01-01T13:20:00.000Z";
 const COMPANY_TS_SHARED_RFC5424: &str = "2025-01-01T13:20:00.000Z";
 
 fn company_timestamp_diversity_files() -> Vec<ImportFile> {

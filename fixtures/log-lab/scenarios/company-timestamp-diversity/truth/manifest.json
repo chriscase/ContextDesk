@@ -7,7 +7,7 @@
       "01-shared-encodings.jsonl": {
         "bytes": 1445,
         "events": 7,
-        "sha256": "6155b0d4028df86a3438e28452f4d5689f5eeebbfba6443be13e48373f3d63a7"
+        "sha256": "51b98d2100ab3f046d95c9f6e31ffa992cabc8e754d3f241baa06816b79608ec"
       },
       "02-logfmt-offset.log": {
         "bytes": 197,
@@ -27,7 +27,7 @@
       "05-skew-and-late.log": {
         "bytes": 375,
         "events": 2,
-        "sha256": "0148bea158dda3155b7852cc5ebef14c56642176c5eb416540c648b58bddff77"
+        "sha256": "4fcceb21fcf690e40274c4ab5667a6df8bfefc708aba1a3386669f983f26bf27"
       }
     },
     "severities": {
@@ -85,8 +85,8 @@
     ],
     "product_gap_note": "Supports evaluation of future timestamp normalization (#670). Does not assert that normalization or auto-correction already ships.",
     "shared_instant": {
-      "epoch_milliseconds": 1735740000000,
-      "epoch_seconds": 1735740000,
+      "epoch_milliseconds": 1735737600000,
+      "epoch_seconds": 1735737600,
       "event_ids": [
         "ts-rfc3339-utc",
         "ts-offset-plus",

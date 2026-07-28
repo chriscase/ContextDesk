@@ -7,17 +7,17 @@
       "health/health.jsonl": {
         "bytes": 772,
         "events": 4,
-        "sha256": "7bf1cdf5d80f8d0f018c436da1348c9c52227377f0b15608a069151565ded962"
+        "sha256": "ccafdf0c375a63ea74f7dc53ebc94d6ca03dbc509abeaeaec839de6d3d712aa6"
       },
       "services/errors-and-incident.jsonl": {
         "bytes": 1505,
         "events": 7,
-        "sha256": "b84c433c9d914dcf2840c4e83fc06c373e1d7e7cd6235cf06f537c0294cbebae"
+        "sha256": "50eb8aa5aa676a030b6824831ef8f39587939425bbe3385feec1e5adc4110713"
       },
       "worker/retries.log": {
         "bytes": 588,
         "events": 3,
-        "sha256": "cf836f59a382f1f21840a14ebff4a91d3f41716b5943d155941a9b3b5fd3a5c7"
+        "sha256": "6e186eb6764fb62645a075029089b02946f1eff36bc9831d0a3601f787d8e5c0"
       }
     },
     "severities": {

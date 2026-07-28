@@ -7,12 +7,12 @@
       "formats/01-json-ordered.jsonl": {
         "bytes": 610,
         "events": 2,
-        "sha256": "c30419e176790c03f41713d1038442ce804c421dbaf9fd98245eb4cc775bccc5"
+        "sha256": "70a3aa7060e8e5e36712ea61ec355271a2cca8a7fa1e3e9f8e3b2fd6d134968b"
       },
       "formats/02-logfmt.log": {
         "bytes": 176,
         "events": 1,
-        "sha256": "be84f21194bc5ee0a3aa310b138fcb844dc861358b79d56fe82aedd0198eb852"
+        "sha256": "5cb0ed2f78557f9e4e7637c3c0451512191c4356fabc39df433e5757a1c63b71"
       },
       "formats/03-syslog.log": {
         "bytes": 110,
@@ -32,7 +32,7 @@
       "formats/06-long.log": {
         "bytes": 526,
         "events": 1,
-        "sha256": "316215e614c4935b271b0d8942bcd814a96ded3e21d025c21fa55b48992f09e7"
+        "sha256": "95c2afefd5263bcfa38ac79db75dcc25915d6f21c4ac7d624998d6e997123caa"
       }
     },
     "severities": {

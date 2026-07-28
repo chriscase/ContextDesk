@@ -1,4 +1,4 @@
-{"host":"health-01.example","level":"info","message":"event_id=noise-health-0 GET /health status=200 latency_ms=3","service":"health-monitor","trace_id":"trace-noise-health-0","ts":1735743600}
-{"host":"health-01.example","level":"info","message":"event_id=noise-health-1 GET /health status=200 latency_ms=4","service":"health-monitor","trace_id":"trace-noise-health-1","ts":1735743601}
-{"host":"health-01.example","level":"info","message":"event_id=noise-health-2 GET /health status=200 latency_ms=5","service":"health-monitor","trace_id":"trace-noise-health-2","ts":1735743602}
-{"host":"health-01.example","level":"info","message":"event_id=noise-health-3 GET /health status=200 latency_ms=6","service":"health-monitor","trace_id":"trace-noise-health-3","ts":1735743603}
+{"host":"health-01.example","level":"info","message":"event_id=noise-health-0 GET /health status=200 latency_ms=3","service":"health-monitor","trace_id":"trace-noise-health-0","ts":1735741200}
+{"host":"health-01.example","level":"info","message":"event_id=noise-health-1 GET /health status=200 latency_ms=4","service":"health-monitor","trace_id":"trace-noise-health-1","ts":1735741201}
+{"host":"health-01.example","level":"info","message":"event_id=noise-health-2 GET /health status=200 latency_ms=5","service":"health-monitor","trace_id":"trace-noise-health-2","ts":1735741202}
+{"host":"health-01.example","level":"info","message":"event_id=noise-health-3 GET /health status=200 latency_ms=6","service":"health-monitor","trace_id":"trace-noise-health-3","ts":1735741203}

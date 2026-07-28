@@ -1,1 +1,1 @@
-ts=1735747202 level=info service=format-service host=fmt-01.example trace_id=trace-fid-logfmt msg="event_id=fid-logfmt escaped=\"inner\" path=C:\\lab\\file" unknown_kv=keep-me
+ts=1735744802 level=info service=format-service host=fmt-01.example trace_id=trace-fid-logfmt msg="event_id=fid-logfmt escaped=\"inner\" path=C:\\lab\\file" unknown_kv=keep-me

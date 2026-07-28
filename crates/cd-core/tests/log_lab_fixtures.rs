@@ -1,6 +1,7 @@
 #[path = "support/log_lab_generator.rs"]
 mod log_lab_generator;
 
+use chrono::{DateTime, NaiveDateTime};
 use log_lab_generator::{
     generate_behavior, generate_compact, generate_scale, load_behavior_manifest, tree_hashes,
     verify_safety, write_performance_template, BehaviorControls, LARGE_PROFILE,
@@ -10,6 +11,116 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Expected shared wall-clock instant for company-timestamp-diversity encodings
+/// (2025-01-01T13:20:00Z). Must match generator COMPANY_TS_SHARED_INSTANT_SECS.
+const COMPANY_TS_SHARED_INSTANT_SECS: i64 = 1_735_737_600;
+
+fn parse_rfc3339_to_unix_secs(text: &str) -> i64 {
+    DateTime::parse_from_rfc3339(text)
+        .unwrap_or_else(|err| panic!("invalid RFC3339 `{text}`: {err}"))
+        .timestamp()
+}
+
+fn parse_timestamp_token_to_unix_secs(token: &str) -> Option<i64> {
+    if let Ok(number) = token.parse::<i64>() {
+        // Heuristic used by the fixtures: values past year ~2001 in ms are epoch ms.
+        if number.abs() >= 1_000_000_000_000 {
+            return Some(number / 1_000);
+        }
+        return Some(number);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(token) {
+        return Some(dt.timestamp());
+    }
+    // Offset-less local face: interpret as UTC for fixture comparison only.
+    if let Ok(naive) = NaiveDateTime::parse_from_str(token, "%Y-%m-%dT%H:%M:%S") {
+        return Some(naive.and_utc().timestamp());
+    }
+    None
+}
+
+fn event_id_from_line(line: &str) -> Option<String> {
+    // Prefer JSON message field when present; otherwise scan the whole line so
+    // logfmt `msg="event_id=..."` still resolves.
+    let haystack = if let Ok(value) = serde_json::from_str::<Value>(line) {
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or(line)
+            .to_owned()
+    } else {
+        line.to_owned()
+    };
+    let marker = "event_id=";
+    let start = haystack.find(marker)? + marker.len();
+    let end = haystack[start..]
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | ',' | ';' | '}'))
+        .map(|offset| start + offset)
+        .unwrap_or(haystack.len());
+    let id = haystack[start..end].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_owned())
+    }
+}
+
+fn company_timestamp_import_instants() -> BTreeMap<String, i64> {
+    let import_root = fixture_root().join("scenarios/company-timestamp-diversity/import");
+    let mut instants = BTreeMap::new();
+    for path in walkdir_files(&import_root) {
+        let text = fs::read_to_string(&path).unwrap();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let Some(event_id) = event_id_from_line(line) else {
+                continue;
+            };
+
+            let instant = if let Ok(value) = serde_json::from_str::<Value>(line) {
+                match &value["ts"] {
+                    Value::Number(number) => {
+                        let n = number
+                            .as_i64()
+                            .or_else(|| number.as_u64().map(|v| v as i64))
+                            .expect("numeric ts");
+                        if n.abs() >= 1_000_000_000_000 {
+                            n / 1_000
+                        } else {
+                            n
+                        }
+                    }
+                    Value::String(text) => match parse_timestamp_token_to_unix_secs(text) {
+                        Some(value) => value,
+                        None => continue, // malformed / unusable
+                    },
+                    Value::Null => continue, // missing timestamp field
+                    other => panic!("unsupported JSON ts for {event_id}: {other}"),
+                }
+            } else if let Some(ts) = line
+                .split_whitespace()
+                .find_map(|token| token.strip_prefix("ts="))
+            {
+                match parse_timestamp_token_to_unix_secs(ts.trim_matches('"')) {
+                    Some(value) => value,
+                    None => continue,
+                }
+            } else if line.starts_with('<') && line.contains(" - - - ") {
+                // RFC5424 with explicit offset: <pri>VERSION TIMESTAMP HOST APP ...
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                assert!(
+                    fields.len() >= 3,
+                    "RFC5424 line too short for {event_id}: {line}"
+                );
+                parse_rfc3339_to_unix_secs(fields[1])
+            } else {
+                // Yearless classic syslog and other incomplete forms have no unique UTC.
+                continue;
+            };
+            instants.insert(event_id, instant);
+        }
+    }
+    instants
+}
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -187,7 +298,40 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
     assert!(shared.iter().any(|id| id == "ts-rfc5424"));
     assert_eq!(
         company_ts["investigation"]["shared_instant"]["epoch_seconds"],
-        1_735_740_000
+        COMPANY_TS_SHARED_INSTANT_SECS
+    );
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["epoch_milliseconds"],
+        COMPANY_TS_SHARED_INSTANT_SECS * 1_000
+    );
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["rfc3339_utc"],
+        "2025-01-01T13:20:00Z"
+    );
+    // Honest proof: parse each shared_instant import encoding to one UTC instant.
+    let import_instants = company_timestamp_import_instants();
+    for event_id in shared {
+        let id = event_id.as_str().unwrap();
+        let instant = import_instants
+            .get(id)
+            .unwrap_or_else(|| panic!("shared_instant event_id missing from import: {id}"));
+        assert_eq!(
+            *instant, COMPANY_TS_SHARED_INSTANT_SECS,
+            "shared_instant {id} resolved to {instant}, expected {COMPANY_TS_SHARED_INSTANT_SECS}"
+        );
+    }
+    // Control: similar-local-only and skew must NOT collapse to the shared instant.
+    assert_ne!(
+        *import_instants.get("ts-similar-local-only").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS
+    );
+    assert_eq!(
+        *import_instants.get("ts-skew-behind").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS - 180
+    );
+    assert_eq!(
+        *import_instants.get("ts-late").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS + 30
     );
     assert_eq!(
         company_ts["investigation"]["known_skew"]["skew_seconds"],
