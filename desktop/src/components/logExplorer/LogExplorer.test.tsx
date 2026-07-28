@@ -646,18 +646,24 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/long-message/);
 
-    const headers = screen.getByTestId("log-explorer-col-headers");
+    const headers = screen.getByRole("row", {
+      name: "All sources column headings",
+    });
     expect(headers.style.gridTemplateColumns).toContain("12rem");
-    const messageResize = screen.getByTestId("col-resize-3");
+    const messageResize = within(headers).getByRole("button", {
+      name: "Resize Message column for All sources",
+    });
     expect(messageResize.getAttribute("aria-label")).toBe(
-      "Resize Message column",
+      "Resize Message column for All sources",
     );
     fireEvent.keyDown(messageResize, { key: "ArrowRight" });
     await waitFor(() =>
       expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
     );
 
-    const timeResize = screen.getByTestId("col-resize-0");
+    const timeResize = within(headers).getByRole("button", {
+      name: "Resize Time column for All sources",
+    });
     fireEvent.mouseDown(timeResize, { clientX: 100 });
     fireEvent.mouseMove(window, { clientX: 132 });
     fireEvent.mouseUp(window);
@@ -706,6 +712,68 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
     );
+  });
+
+  it("scopes synchronized resizable headings to every visible lane", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    chooseLaneCount(2);
+
+    const lanes = screen.getByTestId("log-explorer-lanes");
+    const filters = screen.getByTestId("log-explorer-filters");
+    const chat = screen.getByTestId("log-explorer-chat");
+    const headings = screen.getAllByRole("row", {
+      name: /column headings$/,
+    });
+    expect(headings).toHaveLength(2);
+    expect(headings.every((heading) => lanes.contains(heading))).toBe(true);
+    expect(headings.some((heading) => filters.contains(heading))).toBe(false);
+    expect(headings.some((heading) => chat.contains(heading))).toBe(false);
+
+    for (const heading of headings) {
+      expect(within(heading).getAllByRole("columnheader")).toHaveLength(4);
+      expect(heading.style.gridTemplateColumns).toContain("12rem");
+    }
+
+    const laneTwoHeading = screen.getByRole("row", {
+      name: "Lane 2 column headings",
+    });
+    fireEvent.keyDown(
+      within(laneTwoHeading).getByRole("button", {
+        name: "Resize Message column for Lane 2",
+      }),
+      { key: "ArrowRight" },
+    );
+    await waitFor(() => {
+      for (const heading of headings) {
+        expect(heading.style.gridTemplateColumns).toContain("12.5rem");
+      }
+    });
+  });
+
+  it("keeps compact rail controls, event rows, and timestamps keyboard focusable", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    const message = await screen.findByText("auth failure");
+
+    const collapseFilters = screen.getByTestId("collapse-log-filters");
+    collapseFilters.focus();
+    expect(document.activeElement).toBe(collapseFilters);
+
+    const collapseChat = screen.getByTestId("collapse-linked-chat");
+    collapseChat.focus();
+    expect(document.activeElement).toBe(collapseChat);
+
+    const row = message.closest('[role="listitem"]') as HTMLElement;
+    row.focus();
+    expect(document.activeElement).toBe(row);
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(false);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(true);
+
+    const timestamp = screen.getByTestId("event-time-1");
+    timestamp.focus();
+    expect(document.activeElement).toBe(timestamp);
+    expect(timestamp.closest('[role="listitem"]')).toBe(row);
   });
 
   it("keeps narrow logs primary with keyboard-safe filter and chat drawers", async () => {
@@ -2176,6 +2244,11 @@ describe("LogExplorer shell", () => {
     expect(document.activeElement).toBe(
       screen.getByTestId("lane-editor-close"),
     );
+    const editorContent = editor.querySelector(
+      ".log-explorer__lane-editor-content",
+    ) as HTMLElement;
+    expect(editorContent.style.scrollbarGutter).toBe("stable");
+    expect(editorContent.style.paddingInlineEnd).toBe("0.25rem");
 
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(

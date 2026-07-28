@@ -121,6 +121,12 @@ const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
 const SPLITTER_WIDTH_PX = 6;
 const COLLAPSED_FILTER_WIDTH_PX = 42;
 const COLLAPSED_CHAT_WIDTH_PX = 42;
+const EVENT_COLUMNS = [
+  { label: "Time", index: 0 as const },
+  { label: "Lvl", index: 1 as const },
+  { label: "Source", index: 2 as const },
+  { label: "Message", index: 3 as const },
+] as const;
 
 type FindCursor = {
   seq: number;
@@ -2576,6 +2582,7 @@ export function LogExplorer({ corpusId }: Props) {
     laneCount,
     filters,
   );
+  const columnGridTemplate = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
 
   return (
     <div
@@ -2847,58 +2854,6 @@ export function LogExplorer({ corpusId }: Props) {
         </div>
       </header>
 
-      <div
-        className="log-explorer__col-headers"
-        data-testid="log-explorer-col-headers"
-        role="row"
-        style={{
-          gridTemplateColumns: `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`,
-        }}
-      >
-        {(
-          [
-            { label: "Time", index: 0 as const },
-            { label: "Lvl", index: 1 as const },
-            { label: "Source", index: 2 as const },
-            { label: "Message", index: 3 as const },
-          ] as const
-        ).map((col) => (
-          <div
-            key={col.label}
-            className="log-explorer__col-header"
-            role="columnheader"
-          >
-            <span>{col.label}</span>
-            <button
-              type="button"
-              className="log-explorer__col-resizer"
-              data-testid={`col-resize-${col.index}`}
-              aria-label={`Resize ${col.label} column`}
-              title="Drag or use ← → to resize"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                colDragRef.current = {
-                  index: col.index,
-                  startX: e.clientX,
-                  startW: colWidths[col.index],
-                };
-                document.body.style.cursor = "col-resize";
-                document.body.style.userSelect = "none";
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "ArrowLeft") {
-                  e.preventDefault();
-                  setColWidths((w) => resizeCol(w, col.index, -0.5));
-                } else if (e.key === "ArrowRight") {
-                  e.preventDefault();
-                  setColWidths((w) => resizeCol(w, col.index, 0.5));
-                }
-              }}
-            />
-          </div>
-        ))}
-      </div>
-
       {laneEditorOpen && (
         <div
           ref={laneEditorRef}
@@ -2940,7 +2895,13 @@ export function LogExplorer({ corpusId }: Props) {
               </button>
             </div>
           </div>
-          <div className="log-explorer__lane-editor-content">
+          <div
+            className="log-explorer__lane-editor-content"
+            style={{
+              paddingInlineEnd: "0.25rem",
+              scrollbarGutter: "stable",
+            }}
+          >
             <p className="log-explorer__lane-editor-help">
               Empty membership means all sources. A source can belong to more
               than one lane.
@@ -3848,6 +3809,53 @@ export function LogExplorer({ corpusId }: Props) {
                       {laneMatchedHint(lane.id)}
                       {focusLaneId === lane.id ? " · focused" : ""}
                     </span>
+                  </div>
+                  <div
+                    className="log-explorer__col-headers"
+                    data-testid={`log-explorer-col-headers-${lane.id}`}
+                    role="row"
+                    aria-label={`${lane.label} column headings`}
+                    style={{ gridTemplateColumns: columnGridTemplate }}
+                  >
+                    {EVENT_COLUMNS.map((col) => (
+                      <div
+                        key={col.label}
+                        className="log-explorer__col-header"
+                        role="columnheader"
+                      >
+                        <span>{col.label}</span>
+                        <button
+                          type="button"
+                          className="log-explorer__col-resizer"
+                          data-testid={`col-resize-${lane.id}-${col.index}`}
+                          aria-label={`Resize ${col.label} column for ${lane.label}`}
+                          title="Drag or use ← → to resize every visible lane"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            colDragRef.current = {
+                              index: col.index,
+                              startX: e.clientX,
+                              startW: colWidths[col.index],
+                            };
+                            document.body.style.cursor = "col-resize";
+                            document.body.style.userSelect = "none";
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "ArrowLeft") {
+                              e.preventDefault();
+                              setColWidths((w) =>
+                                resizeCol(w, col.index, -0.5),
+                              );
+                            } else if (e.key === "ArrowRight") {
+                              e.preventDefault();
+                              setColWidths((w) =>
+                                resizeCol(w, col.index, 0.5),
+                              );
+                            }
+                          }}
+                        />
+                      </div>
+                    ))}
                   </div>
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
