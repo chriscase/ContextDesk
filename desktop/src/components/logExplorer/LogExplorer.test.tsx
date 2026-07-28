@@ -3594,6 +3594,13 @@ describe("LogExplorer shell", () => {
         }),
       ),
     );
+    expect(
+      await screen.findByTestId("bookmark-activate-log-lab-bookmark"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark (B)" }));
+    fireEvent.keyDown(root, { key: "b" });
+    await screen.findByText("Already bookmarked: seq 101");
+    expect(host.hostLogAddBookmark).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByTestId("new-linked-chat"));
     await waitFor(() =>

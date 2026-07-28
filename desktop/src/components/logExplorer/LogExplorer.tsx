@@ -1570,6 +1570,13 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const from = seqs[0]!;
     const to = seqs[seqs.length - 1]!;
+    const existing = bookmarks.find(
+      (bookmark) => bookmark.seqFrom === from && bookmark.seqTo === to,
+    );
+    if (existing) {
+      setStatus(`Already bookmarked: ${existing.label}`);
+      return;
+    }
     try {
       const bm = await hostLogAddBookmark(corpusId, {
         seqFrom: from,
@@ -1578,8 +1585,16 @@ export function LogExplorer({ corpusId }: Props) {
         tsFrom: detail?.ts ?? null,
         tsTo: detail?.ts ?? null,
       });
-      setBookmarks((b) => [...b, bm]);
-      setStatus(`Bookmarked ${bm.label}`);
+      setBookmarks((current) =>
+        current.some((bookmark) => bookmark.id === bm.id)
+          ? current
+          : [...current, bm],
+      );
+      setStatus(
+        bookmarks.some((bookmark) => bookmark.id === bm.id)
+          ? `Already bookmarked: ${bm.label}`
+          : `Bookmarked ${bm.label}`,
+      );
     } catch (e) {
       setError(String(e));
     }
