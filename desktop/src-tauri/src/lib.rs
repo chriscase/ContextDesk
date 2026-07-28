@@ -370,8 +370,9 @@ fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Re
 
 fn take_ready_linked_host<F>(
     shared: &Arc<Mutex<Option<ToolHost>>>,
+    generation: &std::sync::atomic::AtomicU64,
     fallback: F,
-) -> Result<(ToolHost, bool), String>
+) -> Result<(ToolHost, bool, Option<u64>), String>
 where
     F: FnOnce() -> Result<ToolHost, String>,
 {
@@ -383,12 +384,33 @@ where
                     .iter()
                     .any(|tool| tool.name == cd_core::log_analysis::SEARCH_LOGS)
         });
-        log_ready.then(|| guard.take()).flatten()
+        log_ready
+            .then(|| {
+                let borrowed_generation = generation.load(std::sync::atomic::Ordering::SeqCst);
+                guard.take().map(|host| (host, borrowed_generation))
+            })
+            .flatten()
     });
     match ready {
-        Some(host) => Ok((host, false)),
-        None => fallback().map(|host| (host, true)),
+        Some((host, borrowed_generation)) => Ok((host, false, Some(borrowed_generation))),
+        None => fallback().map(|host| (host, true, None)),
     }
+}
+
+fn restore_host_if_generation_matches(
+    shared: &Arc<Mutex<Option<ToolHost>>>,
+    generation: &std::sync::atomic::AtomicU64,
+    borrowed_generation: u64,
+    host: ToolHost,
+) -> bool {
+    let mut guard = shared.lock().expect("host");
+    if generation.load(std::sync::atomic::Ordering::SeqCst) != borrowed_generation
+        || guard.is_some()
+    {
+        return false;
+    }
+    *guard = Some(host);
+    true
 }
 
 fn linked_log_host_terminal_events() -> [cd_core::events::StreamEvent; 2] {
@@ -591,14 +613,6 @@ fn spawn_durable_memory_warmup(
 }
 
 fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), String> {
-    let host_generation = state
-        .host_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        .saturating_add(1);
-    // Stop previous watcher before replacing the host (#116).
-    if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
-        prev.stop();
-    }
     let index_cache = ensure_config_dir(&state.branding)
         .ok()
         .map(|d| d.join("index"));
@@ -629,6 +643,12 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
     let memory_embed_backend = host.embed_backend();
     let memory_embed_model = host.embed_model().to_string();
 
+    // Do not invalidate an active host or its durable-memory retry worker until
+    // every fallible replacement-host construction step has succeeded.
+    if let Some(mut prev) = state.index_watch.lock().expect("watch").take() {
+        prev.stop();
+    }
+
     {
         let mut st = state.index_status.lock().expect("index_status");
         *st = cd_core::index::IndexStatus {
@@ -643,7 +663,15 @@ fn rebuild_host(state: &AppState, cfg: AppConfig, ws: Workspace) -> Result<(), S
         };
     }
 
-    *state.host.lock().expect("host") = Some(host);
+    let host_generation = {
+        let mut host_guard = state.host.lock().expect("host");
+        let generation = state
+            .host_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        *host_guard = Some(host);
+        generation
+    };
 
     spawn_durable_memory_warmup(
         Arc::clone(&state.host),
@@ -3249,48 +3277,56 @@ async fn agent_turn(
     // Linked log turns never join optional workspace/memory initialization.
     // They take an already-published full host when immediately available and
     // otherwise use an independent turn-local read-only log host.
-    let (mut host, using_fallback_host) = if let Some(context) = log_explorer_context.as_ref() {
-        if let Err(error) = validate_linked_log_corpus(&state, context) {
-            tracing::warn!(error = %error, "linked log corpus preflight failed");
-            for event in linked_log_host_terminal_events() {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
-            }
-            return Ok(());
-        }
-        match take_ready_linked_host(&state.host, || {
-            build_linked_log_fallback_host(&state, context)
-        }) {
-            Ok((host, using_fallback)) => {
-                if using_fallback {
-                    let notice = linked_log_fallback_notice();
-                    let _ = on_event.send(cd_core::research::event_to_dto(&notice));
-                }
-                (host, using_fallback)
-            }
-            Err(error) => {
-                tracing::warn!(error = %error, "linked log-only fallback construction failed");
+    let (mut host, using_fallback_host, borrowed_host_generation) =
+        if let Some(context) = log_explorer_context.as_ref() {
+            if let Err(error) = validate_linked_log_corpus(&state, context) {
+                tracing::warn!(error = %error, "linked log corpus preflight failed");
                 for event in linked_log_host_terminal_events() {
                     let _ = on_event.send(cd_core::research::event_to_dto(&event));
                 }
                 return Ok(());
             }
-        }
-    } else {
-        let app = window.app_handle().clone();
-        if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
-            let state = app.state::<AppState>();
-            ensure_host(&state)
-        })
-        .await
-        {
-            for event in host_readiness_terminal_events(&failure) {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            match take_ready_linked_host(&state.host, &state.host_generation, || {
+                build_linked_log_fallback_host(&state, context)
+            }) {
+                Ok((host, using_fallback, borrowed_generation)) => {
+                    if using_fallback {
+                        let notice = linked_log_fallback_notice();
+                        let _ = on_event.send(cd_core::research::event_to_dto(&notice));
+                    }
+                    (host, using_fallback, borrowed_generation)
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "linked log-only fallback construction failed");
+                    for event in linked_log_host_terminal_events() {
+                        let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                    }
+                    return Ok(());
+                }
             }
-            return Ok(());
-        }
-        let mut host_guard = state.host.lock().expect("host");
-        (host_guard.take().ok_or("host missing")?, false)
-    };
+        } else {
+            let app = window.app_handle().clone();
+            if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
+                let state = app.state::<AppState>();
+                ensure_host(&state)
+            })
+            .await
+            {
+                for event in host_readiness_terminal_events(&failure) {
+                    let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                }
+                return Ok(());
+            }
+            let mut host_guard = state.host.lock().expect("host");
+            let borrowed_generation = state
+                .host_generation
+                .load(std::sync::atomic::Ordering::SeqCst);
+            (
+                host_guard.take().ok_or("host missing")?,
+                false,
+                Some(borrowed_generation),
+            )
+        };
 
     let mut history = {
         let mut histories = state.histories.lock().expect("hist");
@@ -3363,8 +3399,14 @@ async fn agent_turn(
     if !using_fallback_host {
         host.set_log_corpus_scope(previous_log_scope);
         host.set_active_log_corpus(previous_log_corpus);
-        let mut host_guard = state.host.lock().expect("host");
-        *host_guard = Some(host);
+        if !restore_host_if_generation_matches(
+            &state.host,
+            &state.host_generation,
+            borrowed_host_generation.expect("shared host generation"),
+            host,
+        ) {
+            tracing::info!("discarding turn host replaced by a newer host generation");
+        }
     }
 
     // #327/#650: a gateway/model rejected tools. Persist the exact model as
@@ -6355,14 +6397,15 @@ mod startup_host_tests {
         build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
         host_readiness_terminal_events, install_prepared_durable_memory,
         linked_log_fallback_notice, linked_log_host_terminal_events, log_search_cancel_key,
-        normalize_log_corpus_id, take_ready_linked_host, validate_linked_log_corpus_at,
-        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
+        normalize_log_corpus_id, restore_host_if_generation_matches, take_ready_linked_host,
+        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
+        HostInitFlight, HostReadinessFailure,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
     use cd_core::tool_host::ToolHost;
     use cd_core::workspace::Workspace;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::time::Duration;
 
@@ -6414,11 +6457,21 @@ mod startup_host_tests {
         let rebuild_start = src.find("fn rebuild_host(").expect("rebuild_host");
         let rebuild = &src[rebuild_start..];
         let publish = rebuild
-            .find("*state.host.lock().expect(\"host\") = Some(host)")
+            .find("*host_guard = Some(host)")
             .expect("core host publication");
         let memory = rebuild
             .find("spawn_durable_memory_warmup(")
             .expect("isolated memory warmup");
+        let shell = rebuild
+            .find("KeywordIndex::open_shell_bounded(")
+            .expect("replacement index shell");
+        let generation = rebuild
+            .find(".host_generation")
+            .expect("host generation publication");
+        assert!(
+            shell < generation,
+            "failed replacement construction must not invalidate the active host generation"
+        );
         assert!(
             publish < memory,
             "optional durable-memory I/O must begin only after the core host is published"
@@ -6487,17 +6540,20 @@ mod startup_host_tests {
     #[test]
     fn linked_log_selection_never_waits_for_a_locked_workspace_host() {
         let shared = Arc::new(Mutex::new(None::<ToolHost>));
+        let generation = AtomicU64::new(4);
         let held = shared.lock().expect("simulate permanently blocked host");
         let started = std::time::Instant::now();
-        let (host, used_fallback) = take_ready_linked_host(&shared, || {
-            Ok(ToolHost::new(
-                Workspace::new("linked fallback", Vec::new()),
-                KeywordIndex::new(),
-                None,
-            ))
-        })
-        .expect("fallback");
+        let (host, used_fallback, borrowed_generation) =
+            take_ready_linked_host(&shared, &generation, || {
+                Ok(ToolHost::new(
+                    Workspace::new("linked fallback", Vec::new()),
+                    KeywordIndex::new(),
+                    None,
+                ))
+            })
+            .expect("fallback");
         assert!(used_fallback);
+        assert_eq!(borrowed_generation, None);
         assert!(host.workspace.roots.is_empty());
         assert!(
             started.elapsed() < Duration::from_millis(100),
@@ -6513,11 +6569,14 @@ mod startup_host_tests {
         let mut ready = ToolHost::new(workspace, KeywordIndex::new(), None);
         ready.set_log_analysis(true, Some(std::env::temp_dir()));
         let shared = Arc::new(Mutex::new(Some(ready)));
-        let (host, used_fallback) = take_ready_linked_host(&shared, || {
-            panic!("ready host should be taken without constructing fallback")
-        })
-        .expect("ready host");
+        let generation = AtomicU64::new(7);
+        let (host, used_fallback, borrowed_generation) =
+            take_ready_linked_host(&shared, &generation, || {
+                panic!("ready host should be taken without constructing fallback")
+            })
+            .expect("ready host");
         assert!(!used_fallback);
+        assert_eq!(borrowed_generation, Some(7));
         assert_eq!(host.workspace.id, expected_id);
     }
 
@@ -6530,17 +6589,20 @@ mod startup_host_tests {
             KeywordIndex::new(),
             None,
         ))));
-        let (fallback, used_fallback) = take_ready_linked_host(&shared, || {
-            let mut host = ToolHost::new(
-                Workspace::new("fallback", Vec::new()),
-                KeywordIndex::new(),
-                None,
-            );
-            host.set_log_analysis(true, Some(std::env::temp_dir()));
-            Ok(host)
-        })
-        .expect("fallback");
+        let generation = AtomicU64::new(11);
+        let (fallback, used_fallback, borrowed_generation) =
+            take_ready_linked_host(&shared, &generation, || {
+                let mut host = ToolHost::new(
+                    Workspace::new("fallback", Vec::new()),
+                    KeywordIndex::new(),
+                    None,
+                );
+                host.set_log_analysis(true, Some(std::env::temp_dir()));
+                Ok(host)
+            })
+            .expect("fallback");
         assert!(used_fallback);
+        assert_eq!(borrowed_generation, None);
         assert!(fallback.log_analysis_enabled());
         assert_eq!(
             shared
@@ -6550,6 +6612,35 @@ mod startup_host_tests {
                 .map(|host| host.workspace.id.as_str()),
             Some(expected_id.as_str()),
             "non-log host must remain available for ordinary workspace turns"
+        );
+    }
+
+    #[test]
+    fn completed_turn_cannot_overwrite_a_newer_host_generation() {
+        let generation = AtomicU64::new(21);
+        let old_workspace = Workspace::new("old", vec![std::env::temp_dir()]);
+        let old_host = ToolHost::new(old_workspace, KeywordIndex::new(), None);
+        let shared = Arc::new(Mutex::new(None::<ToolHost>));
+
+        let new_workspace = Workspace::new("new", vec![std::env::temp_dir()]);
+        let new_id = new_workspace.id.clone();
+        *shared.lock().expect("host") =
+            Some(ToolHost::new(new_workspace, KeywordIndex::new(), None));
+        generation.store(22, Ordering::SeqCst);
+
+        assert!(!restore_host_if_generation_matches(
+            &shared,
+            &generation,
+            21,
+            old_host,
+        ));
+        assert_eq!(
+            shared
+                .lock()
+                .expect("host")
+                .as_ref()
+                .map(|host| host.workspace.id.as_str()),
+            Some(new_id.as_str())
         );
     }
 
