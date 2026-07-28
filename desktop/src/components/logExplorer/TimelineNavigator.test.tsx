@@ -398,6 +398,22 @@ describe("TimelineNavigator", () => {
     expect(
       screen.getByTestId("operational-metric-track-cpu-percent"),
     ).toBeTruthy();
+    const trackSize = screen.getByRole("combobox", {
+      name: "Metric track size",
+    }) as HTMLSelectElement;
+    expect(trackSize.value).toBe("compact");
+    expect(
+      panel
+        .querySelector(".operational-metric-tracks")
+        ?.getAttribute("data-density"),
+    ).toBe("compact");
+    fireEvent.change(trackSize, { target: { value: "detailed" } });
+    expect(trackSize.value).toBe("detailed");
+    expect(
+      panel
+        .querySelector(".operational-metric-tracks")
+        ?.getAttribute("data-density"),
+    ).toBe("detailed");
 
     const cpu = screen.getByRole("slider", {
       name: "CPU shared time cursor",

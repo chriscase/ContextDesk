@@ -133,10 +133,7 @@ function bucketLabel(summary: SharedTimelineSummaryDto, index: number) {
   return `mixed time/order ${start}–${Math.max(start, end - 1)}`;
 }
 
-function compactBucketRange(
-  summary: SharedTimelineSummaryDto,
-  index: number,
-) {
+function compactBucketRange(summary: SharedTimelineSummaryDto, index: number) {
   const { start, end } = bucketBounds(summary, index);
   return `${compactTime(summary, start)}–${compactTime(
     summary,
@@ -172,6 +169,9 @@ export function TimelineNavigator({
   const [metricFileName, setMetricFileName] = useState<string | null>(null);
   const [metricError, setMetricError] = useState<string | null>(null);
   const [metricsOpen, setMetricsOpen] = useState(false);
+  const [metricDensity, setMetricDensity] = useState<
+    "compact" | "standard" | "detailed"
+  >("compact");
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
@@ -353,7 +353,9 @@ export function TimelineNavigator({
           `Metric bundle has more than ${MAX_SESSION_METRIC_POINTS.toLocaleString()} points.`,
         );
       }
-      if (validated.data.series.some((series) => series.timeQuality !== "wall")) {
+      if (
+        validated.data.series.some((series) => series.timeQuality !== "wall")
+      ) {
         throw new Error(
           "Session metric alignment requires explicit wall-clock timestamps for every series.",
         );
@@ -726,7 +728,8 @@ export function TimelineNavigator({
                           <li key={lane.id}>
                             <span>{lane.label}</span>
                             <b>
-                              {lane.summary?.counts[detailIndex] ?? "unavailable"}
+                              {lane.summary?.counts[detailIndex] ??
+                                "unavailable"}
                             </b>
                           </li>
                         ))}
@@ -755,10 +758,7 @@ export function TimelineNavigator({
                 </div>
               </div>
               {metricError ? (
-                <div
-                  role="alert"
-                  className="timeline-navigator__metric-error"
-                >
+                <div role="alert" className="timeline-navigator__metric-error">
                   {metricError}
                 </div>
               ) : null}
@@ -769,13 +769,38 @@ export function TimelineNavigator({
                   data-testid="timeline-session-metrics"
                 >
                   <div className="timeline-navigator__session-metrics-note">
-                    <strong>Session metrics</strong>
+                    <div>
+                      <strong>Session metrics</strong>
+                      <label>
+                        Track size
+                        <select
+                          aria-label="Metric track size"
+                          value={metricDensity}
+                          onChange={(event) =>
+                            setMetricDensity(
+                              event.currentTarget.value as
+                                "compact" | "standard" | "detailed",
+                            )
+                          }
+                        >
+                          <option value="compact">Compact</option>
+                          <option value="standard">Standard</option>
+                          <option value="detailed">Detailed</option>
+                        </select>
+                      </label>
+                    </div>
                     <span title={metricFileName ?? undefined}>
                       {metricFileName} · session only · not persisted
                     </span>
                   </div>
                   <OperationalMetricTracks
                     document={metricDocument}
+                    density={metricDensity}
+                    sharedTimeBounds={
+                      summary.spanFrom != null && summary.spanTo != null
+                        ? { from: summary.spanFrom, to: summary.spanTo }
+                        : undefined
+                    }
                     cursorTimestamp={
                       sharedCursorTimestamp ??
                       summary.spanFrom ??

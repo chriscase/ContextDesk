@@ -35,6 +35,9 @@ flowchart LR
 - Missing intervals break the plotted line and include explicit text. A gap is
   never interpolated into an apparently continuous measurement, including when
   the gap lies entirely between two sampled endpoints.
+- Samples are plotted at their actual timestamps. Uneven cadence is ordinary
+  time-series data and never creates an inferred gap; only a source-declared
+  outage or discontinuity may break the line.
 - Thresholds are annotations within one metric's native unit, not conversions
   between tracks.
 - Text exposes the current value, unit, y-domain, time quality, provenance, and
@@ -51,6 +54,12 @@ selection, and callbacks. On wide or ultrawide layouts an eventual parent may
 dock it beside logs; it must not mount a second renderer, duplicate a host
 query, or fork interaction state. Placement and the #707 user-facing chooser
 are outside this slice.
+
+The renderer separately supports compact, standard, and detailed track sizes.
+Compact is a sparkline-like evidence companion: it shortens plots and removes
+nonessential visible metadata while retaining the complete accessible
+description. A parent may provide shared time bounds; the renderer expands
+those bounds when necessary so no imported measurement is silently discarded.
 
 ## Two explicit ingestion paths
 
@@ -71,7 +80,10 @@ Closing the Explorer loses the attachment. Hiding the tracks unmounts their
 renderer while retaining the session document; collapsing the Timeline prevents
 timeline and metric rendering work. Pointer release or Enter/Space maps the
 shared metric cursor to one bounded timeline bucket seek and delegates the
-existing nearby-log load.
+existing nearby-log load. Compact is the default session track size, with
+standard and detailed choices in the metric header. In the stacked
+presentation, metric tracks precede the log-volume histogram so the histogram
+acts as the bottom evidence track.
 
 ### 1. Separately imported metric bundle
 
@@ -297,6 +309,8 @@ gaps, cap input size, and pass the final document through the shared validator.
 
 - a validated v1 document;
 - a `stacked` or `compact-side` presentation hint for the same renderer;
+- a compact, standard, or detailed track size;
+- optional parent-owned shared time bounds;
 - optional controlled cursor and selected range;
 - a deterministic per-track render bound;
 - cursor preview, range selection, and pointer-release seek callbacks.
