@@ -175,6 +175,7 @@ export function TimelineNavigator({
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
+  const detailDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
   const filterKey = JSON.stringify(filter);
@@ -185,6 +186,55 @@ export function TimelineNavigator({
       emptySourceScope: lane.emptySourceScope,
     })),
   );
+
+  const clearDetail = useCallback(() => {
+    if (detailDismissTimer.current != null) {
+      clearTimeout(detailDismissTimer.current);
+      detailDismissTimer.current = null;
+    }
+    setDetailIndex(null);
+  }, []);
+
+  const showTransientDetail = useCallback((index: number) => {
+    if (detailDismissTimer.current != null) {
+      clearTimeout(detailDismissTimer.current);
+    }
+    setDetailIndex(index);
+    detailDismissTimer.current = setTimeout(() => {
+      detailDismissTimer.current = null;
+      setDetailIndex(null);
+    }, 1_400);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (detailDismissTimer.current != null) {
+        clearTimeout(detailDismissTimer.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (detailIndex == null) return;
+    const dismissOnOutsidePointer = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(".timeline-navigator__chart")
+      ) {
+        return;
+      }
+      clearDetail();
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer, true);
+    return () =>
+      document.removeEventListener(
+        "pointerdown",
+        dismissOnOutsidePointer,
+        true,
+      );
+  }, [clearDetail, detailIndex]);
 
   useEffect(() => {
     if (!open) {
@@ -475,6 +525,10 @@ export function TimelineNavigator({
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.preventDefault();
+            if (detailIndex != null) {
+              clearDetail();
+              return;
+            }
             setOpen(false);
             setStatus("Timeline collapsed · no timeline work");
             requestAnimationFrame(() => toggleRef.current?.focus());
@@ -635,7 +689,7 @@ export function TimelineNavigator({
                           previewTimestamp(bucketBounds(summary, index).start);
                           setDetailIndex(index);
                         }}
-                        onBlur={() => setDetailIndex(null)}
+                        onBlur={clearDetail}
                         onClick={() => void seekBucket(index)}
                       >
                         <span className="timeline-navigator__stack">
@@ -681,11 +735,11 @@ export function TimelineNavigator({
                     aria-valuetext={`${compactTime(summary, bucketBounds(summary, previewIndex).start)} · ${counts[previewIndex]} events · ${timeQualityLabel(summary.timeQuality)}`}
                     title={bucketLabel(summary, previewIndex)}
                     onFocus={() => setDetailIndex(previewIndex)}
-                    onBlur={() => setDetailIndex(null)}
+                    onBlur={clearDetail}
                     onChange={(event) => {
                       const next = Number(event.target.value);
                       previewTimestamp(bucketBounds(summary, next).start);
-                      setDetailIndex(next);
+                      showTransientDetail(next);
                     }}
                     onPointerUp={(event) =>
                       void seekBucket(Number(event.currentTarget.value))

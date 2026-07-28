@@ -2,6 +2,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
@@ -211,6 +212,7 @@ function MetricTrack({
   onKeyboardTimestamp,
   onKeyboardCommit,
 }: MetricTrackProps) {
+  const [showReading, setShowReading] = useState(false);
   const points = useMemo(
     () => downsampleMetricPoints(series.points, maxRenderedPoints),
     [maxRenderedPoints, series.points],
@@ -310,9 +312,18 @@ function MetricTrack({
         aria-valuenow={Math.round(cursor)}
         aria-valuetext={currentText}
         aria-keyshortcuts="Enter Space"
+        style={
+          {
+            "--metric-cursor-position": `${cursorX}%`,
+          } as CSSProperties
+        }
+        onPointerEnter={() => setShowReading(true)}
+        onPointerLeave={() => setShowReading(false)}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onFocus={() => setShowReading(true)}
+        onBlur={() => setShowReading(false)}
         onKeyDown={onKeyDown}
       >
         <svg
@@ -397,6 +408,26 @@ function MetricTrack({
             vectorEffect="non-scaling-stroke"
           />
         </svg>
+        <span
+          className="operational-metric-track__scale-label operational-metric-track__scale-label--max"
+          aria-hidden="true"
+        >
+          {formatValue(domain.max, series.unit)}
+        </span>
+        <span
+          className="operational-metric-track__scale-label operational-metric-track__scale-label--min"
+          aria-hidden="true"
+        >
+          {formatValue(domain.min, series.unit)}
+        </span>
+        {showReading ? (
+          <output
+            className="operational-metric-track__hover-reading"
+            data-testid={`operational-metric-hover-reading-${series.id}`}
+          >
+            {currentText}
+          </output>
+        ) : null}
       </div>
       <footer className="operational-metric-track__details">
         <span>

@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -300,8 +301,13 @@ describe("TimelineNavigator", () => {
       />,
     );
     const range = await screen.findByLabelText("Timeline position");
+    vi.useFakeTimers();
     fireEvent.change(range, { target: { value: "3" } });
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(1_400));
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    vi.useRealTimers();
     fireEvent.pointerUp(range, { target: { value: "3" } });
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
@@ -515,7 +521,7 @@ describe("TimelineNavigator", () => {
     ).toHaveLength(2);
 
     const bucket = screen.getByTestId("timeline-bucket-0");
-    bucket.focus();
+    fireEvent.focus(bucket);
     const detail = await screen.findByTestId("timeline-bucket-detail");
     expect(bucket.getAttribute("aria-describedby")).toBe(
       "timeline-bucket-detail",
@@ -525,8 +531,18 @@ describe("TimelineNavigator", () => {
     expect(detail.textContent).toContain("Error 1");
     expect(detail.textContent).toContain("2023-");
 
-    fireEvent.blur(bucket);
+    fireEvent.pointerDown(document.body);
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+
+    fireEvent.focus(bucket);
+    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    fireEvent.keyDown(bucket, { key: "Escape" });
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
   });
 
   it("labels order-only summaries as order rather than calendar time", async () => {

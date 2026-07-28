@@ -76,6 +76,46 @@ describe("OperationalMetricTracks", () => {
     expect(screen.getAllByRole("slider")).toHaveLength(3);
   });
 
+  it("shows compact axis values and a non-sticky hover or focus reading", () => {
+    render(
+      <OperationalMetricTracks document={coherentFixture} density="compact" />,
+    );
+    const track = screen.getByTestId("operational-metric-track-cpu-percent");
+    const plot = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    setPlotBounds(plot);
+
+    expect(
+      Array.from(
+        track.querySelectorAll(".operational-metric-track__scale-label"),
+      ).map((label) => label.textContent),
+    ).toEqual(["96 %", "22 %"]);
+    expect(
+      screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
+    ).toBeNull();
+
+    fireEvent.pointerEnter(plot);
+    fireEvent.pointerMove(plot, { clientX: 75, pointerId: 1 });
+    expect(
+      screen.getByTestId("operational-metric-hover-reading-cpu-percent")
+        .textContent,
+    ).toMatch(/% at .*UTC/);
+    fireEvent.pointerLeave(plot);
+    expect(
+      screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
+    ).toBeNull();
+
+    fireEvent.focus(plot);
+    expect(
+      screen.getByTestId("operational-metric-hover-reading-cpu-percent"),
+    ).toBeTruthy();
+    fireEvent.blur(plot);
+    expect(
+      screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
+    ).toBeNull();
+  });
+
   it("uses one shared renderer and interaction model in compact side presentation", () => {
     const { container } = render(
       <OperationalMetricTracks
