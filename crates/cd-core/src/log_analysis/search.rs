@@ -1,11 +1,114 @@
 //! Hybrid log search (#360).
 
-use super::store::LogCorpus;
+use super::query::{classify_ts, TimeQuality};
+use super::store::{LogCorpus, LogEvent};
 use crate::embed::EmbedBackend;
 use crate::error::CoreResult;
 use crate::memory::embed_blocking;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+const MAX_EXEMPLARS_PER_TEMPLATE: usize = 3;
+const MAX_EXEMPLAR_MESSAGE_CHARS: usize = 320;
+
+#[derive(Debug)]
+struct RankedExemplar {
+    exact_phrase: bool,
+    keyword_score: f32,
+    text: String,
+}
+
+fn exemplar_rank_is_better(candidate: &RankedExemplar, current: &RankedExemplar) -> bool {
+    (candidate.exact_phrase && !current.exact_phrase)
+        || (candidate.exact_phrase == current.exact_phrase
+            && candidate.keyword_score > current.keyword_score)
+}
+
+fn bounded_message_excerpt(message: &str, query: Option<&str>) -> String {
+    let message_chars = message.chars().count();
+    if message_chars <= MAX_EXEMPLAR_MESSAGE_CHARS {
+        return message.replace('\n', "\\n").replace('\r', "\\r");
+    }
+
+    let message_ascii_lower = message.to_ascii_lowercase();
+    let query = query.map(str::trim).filter(|query| !query.is_empty());
+    let match_byte = query
+        .and_then(|query| message_ascii_lower.find(&query.to_ascii_lowercase()))
+        .or_else(|| {
+            query.and_then(|query| {
+                query
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|token| token.len() > 2)
+                    .find_map(|token| message_ascii_lower.find(&token.to_ascii_lowercase()))
+            })
+        });
+    let match_char = match_byte
+        .map(|byte| {
+            message
+                .char_indices()
+                .take_while(|(index, _)| *index < byte)
+                .count()
+        })
+        .unwrap_or(0);
+    if match_char > MAX_EXEMPLAR_MESSAGE_CHARS / 2 {
+        let prefix_len = MAX_EXEMPLAR_MESSAGE_CHARS / 3;
+        let context_len = MAX_EXEMPLAR_MESSAGE_CHARS - prefix_len;
+        let context_start = match_char.saturating_sub(context_len / 3);
+        let prefix: String = message.chars().take(prefix_len).collect();
+        let context: String = message
+            .chars()
+            .skip(context_start)
+            .take(context_len)
+            .collect();
+        return format!(
+            "{} … {}{}",
+            prefix.replace('\n', "\\n").replace('\r', "\\r"),
+            context.replace('\n', "\\n").replace('\r', "\\r"),
+            if context_start + context.chars().count() < message_chars {
+                "…"
+            } else {
+                ""
+            }
+        );
+    }
+    let start = match_char.saturating_sub(MAX_EXEMPLAR_MESSAGE_CHARS / 3);
+    let excerpt: String = message
+        .chars()
+        .skip(start)
+        .take(MAX_EXEMPLAR_MESSAGE_CHARS)
+        .collect();
+    let has_prefix = start > 0;
+    let has_suffix = start + excerpt.chars().count() < message_chars;
+    format!(
+        "{}{}{}",
+        if has_prefix { "…" } else { "" },
+        excerpt.replace('\n', "\\n").replace('\r', "\\r"),
+        if has_suffix { "…" } else { "" }
+    )
+}
+
+fn format_event_exemplar(event: &LogEvent, query: Option<&str>) -> String {
+    let (timestamp, time_quality) = match classify_ts(event.ts) {
+        TimeQuality::Wall => (
+            DateTime::<Utc>::from_timestamp(event.ts, 0)
+                .map(|time| time.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_else(|| format!("unix:{}", event.ts)),
+            "wall",
+        ),
+        TimeQuality::Mixed | TimeQuality::OrderOnly => {
+            (format!("order:{}", event.ts), "order_only")
+        }
+    };
+    format!(
+        "seq={} source={} timestamp={} time_quality={} message={}",
+        event.seq,
+        event.source,
+        timestamp,
+        time_quality,
+        bounded_message_excerpt(&event.message, query)
+    )
+}
 
 /// Query for `search_logs`.
 #[derive(Debug, Clone, Default)]
@@ -65,7 +168,9 @@ pub fn search_logs(
     let k = q.k.clamp(1, 100);
     // Structured filter → allowed template ids + exemplar messages
     let mut allowed: HashSet<u64> = HashSet::new();
-    let mut exemplars: std::collections::HashMap<u64, Vec<String>> =
+    let mut representative_exemplars: std::collections::HashMap<u64, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut matching_exemplars: std::collections::HashMap<u64, Vec<RankedExemplar>> =
         std::collections::HashMap::new();
     let mut fts_scores: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
     let query_l = q.query.as_deref().unwrap_or("").to_lowercase();
@@ -102,9 +207,9 @@ pub fn search_logs(
                 }
             }
             allowed.insert(e.template_id);
-            let ex = exemplars.entry(e.template_id).or_default();
-            if ex.len() < 3 {
-                ex.push(e.message.chars().take(160).collect());
+            let representatives = representative_exemplars.entry(e.template_id).or_default();
+            if representatives.len() < MAX_EXEMPLARS_PER_TEMPLATE {
+                representatives.push(format_event_exemplar(e, q.query.as_deref()));
             }
             // FTS-ish keyword score on message
             if !tokens.is_empty() {
@@ -119,6 +224,28 @@ pub fn search_logs(
                     let s = hit as f32 / tokens.len() as f32;
                     let e_s = fts_scores.entry(e.template_id).or_insert(0.0);
                     *e_s = (*e_s).max(s);
+                    let exact_phrase = !query_l.is_empty() && msg_l.contains(&query_l);
+                    let ranked = RankedExemplar {
+                        exact_phrase,
+                        keyword_score: s,
+                        text: format_event_exemplar(e, q.query.as_deref()),
+                    };
+                    let matches = matching_exemplars.entry(e.template_id).or_default();
+                    if matches.len() < MAX_EXEMPLARS_PER_TEMPLATE {
+                        matches.push(ranked);
+                    } else if let Some((worst_index, _)) =
+                        matches.iter().enumerate().min_by(|(_, left), (_, right)| {
+                            left.exact_phrase.cmp(&right.exact_phrase).then_with(|| {
+                                left.keyword_score
+                                    .partial_cmp(&right.keyword_score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                        })
+                    {
+                        if exemplar_rank_is_better(&ranked, &matches[worst_index]) {
+                            matches[worst_index] = ranked;
+                        }
+                    }
                 }
             }
         }
@@ -196,6 +323,26 @@ pub fn search_logs(
         let kw = fts_scores.get(&tid).copied().unwrap_or(0.0);
         let sem = sem_scores.get(&tid).copied().unwrap_or(0.0);
         let score = 0.45 * kw + 0.45 * sem + 0.10 * (row.info.severity as f32 / 5.0);
+        let mut exemplars = matching_exemplars
+            .remove(&tid)
+            .map(|mut matches| {
+                matches.sort_by(|left, right| {
+                    right.exact_phrase.cmp(&left.exact_phrase).then_with(|| {
+                        right
+                            .keyword_score
+                            .partial_cmp(&left.keyword_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                });
+                matches
+                    .into_iter()
+                    .map(|exemplar| exemplar.text)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if exemplars.is_empty() {
+            exemplars = representative_exemplars.remove(&tid).unwrap_or_default();
+        }
         hits.push(SearchHit {
             template_id: tid,
             pattern: row.info.pattern.clone(),
@@ -204,7 +351,7 @@ pub fn search_logs(
             keyword_score: kw,
             count: row.info.count,
             severity: row.info.severity,
-            exemplars: exemplars.remove(&tid).unwrap_or_default(),
+            exemplars,
         });
     }
     hits.sort_by(|a, b| {
@@ -220,7 +367,9 @@ pub fn search_logs(
 mod tests {
     use super::*;
     use crate::embed::ConceptEmbedBackend;
+    use crate::log_analysis::drain::TemplateInfo;
     use crate::log_analysis::ingest::ingest_path;
+    use crate::log_analysis::store::{template_content_hash, TemplateRow};
     use std::io::Write;
 
     #[test]
@@ -325,5 +474,98 @@ mod tests {
             corpus.embedding_status().state,
             super::super::store::EmbeddingState::KeywordOnly
         );
+    }
+
+    #[test]
+    fn rare_keyword_uses_the_matching_event_identity_not_an_early_template_exemplar() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "deep fixture").unwrap();
+        let template_id = 7;
+        corpus
+            .upsert_templates([TemplateRow {
+                info: TemplateInfo {
+                    template_id,
+                    pattern: "event_id=<*> LONG_JSON_SENTINEL payload=<*>".into(),
+                    token_count: 3,
+                    count: 4,
+                    first_seen: 1_735_900_000,
+                    last_seen: 1_735_936_041,
+                    severity: 2,
+                    example: "event_id=behavior-100 LONG_JSON_SENTINEL payload=early".into(),
+                },
+                content_hash: template_content_hash("event_id=<*> LONG_JSON_SENTINEL payload=<*>"),
+                vector: None,
+            }])
+            .unwrap();
+        let events = [
+            (
+                1,
+                1_735_900_000,
+                "behavior-100",
+                "api/early.log",
+                "ordinary",
+            ),
+            (
+                2,
+                1_735_900_010,
+                "behavior-200",
+                "api/early.log",
+                "ordinary",
+            ),
+            (
+                3,
+                1_735_900_020,
+                "behavior-300",
+                "api/early.log",
+                "ordinary",
+            ),
+            (
+                71_366,
+                1_735_936_041,
+                "behavior-80000",
+                "edge/access.jsonl",
+                "FIND_RARE_DEEP",
+            ),
+        ]
+        .map(|(seq, ts, event_id, source, marker)| LogEvent {
+            seq,
+            ts,
+            level: "info".into(),
+            service: Some("checkout-api".into()),
+            host: None,
+            template_id,
+            params: vec![],
+            trace_id: None,
+            message: format!(
+                "event_id={event_id} LONG_JSON_SENTINEL payload={} marker={marker}",
+                "x".repeat(600)
+            ),
+            source: source.into(),
+        });
+        corpus.push_events(&events).unwrap();
+
+        let hits = search_logs(
+            &corpus,
+            &SearchLogsQuery {
+                query: Some("FIND_RARE_DEEP".into()),
+                semantic: false,
+                k: 8,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        let evidence = hits[0].exemplars.join("\n");
+        assert!(evidence.contains("seq=71366"), "{evidence}");
+        assert!(evidence.contains("source=edge/access.jsonl"), "{evidence}");
+        assert!(
+            evidence.contains("timestamp=2025-01-03T20:27:21Z"),
+            "{evidence}"
+        );
+        assert!(evidence.contains("event_id=behavior-80000"), "{evidence}");
+        assert!(evidence.contains("FIND_RARE_DEEP"), "{evidence}");
+        assert!(!evidence.contains("behavior-100"), "{evidence}");
     }
 }

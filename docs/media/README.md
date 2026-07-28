@@ -19,14 +19,14 @@ Do not commit fabricated or hand-drawn product art as the main README shot.
 
 ## Log Explorer acceptance captures
 
-`log-explorer-align-100k.jpeg` and
-`log-explorer-four-lanes-100k.jpeg` are real captures of the packaged macOS
-application investigating the deterministic Log Lab `ui-medium` corpus.
+The files below are real captures of the packaged macOS application
+investigating deterministic Log Lab corpora.
 
 | File | Size | What it shows |
 |------|------|---------------|
 | `log-explorer-align-100k.jpeg` | 1195 × 768 JPEG | Two composed lanes in exact Align mode, explicit empty/gap cells, useful UTC time, source provenance, and the complete event inspector |
 | `log-explorer-four-lanes-100k.jpeg` | 2048 × 560 JPEG | Four composed evidence lanes at ultrawide width, bounded resident rows, compact controls, filters, and linked-chat rail |
+| `log-explorer-seven-day-navigator.jpeg` | 1100 × 760 JPEG | Final-bucket seek across a seven-day corpus with the Navigator still open, target row and surrounding evidence mounted, and the selected event inspector visible |
 
 | Property | Value |
 |----------|-------|
@@ -34,6 +34,15 @@ application investigating the deterministic Log Lab `ui-medium` corpus.
 | Corpus | Deterministic synthetic Log Lab fixture; 100,000 events across 10 files |
 | Provenance | Native Computer Use against `ContextDesk.app`; no DOM-only capture and no mockup |
 | Claim boundary | One-machine acceptance evidence only; no universal throughput or provider-tool claim |
+
+The seven-day Navigator frame was captured from the packaged acceptance build
+at feature head `1851ed0` (based on `c61a93f`), after importing the default
+`seven-day` fixture: 25,000 events across 10 imported source files, spanning
+2025-01-01 12:00:00Z through 2025-01-08 12:00:00Z. The screenshot intentionally
+shows the final-bucket seek while the Navigator remains open; it is evidence
+for the deep-seek visibility repair tracked in
+[#627](https://github.com/chriscase/ContextDesk/issues/627), not a claim that
+the acceptance branch was already on `main` when captured.
 
 When recapturing, build the packaged app from the intended `main` SHA, import
 the deterministic `ui-medium` corpus, avoid diagnostic/error overlays, and

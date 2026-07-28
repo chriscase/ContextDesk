@@ -104,6 +104,14 @@ mockups; the event count is fixture data, not a universal performance claim.
 
 ![Log Explorer showing four composed evidence lanes over a deterministic 100,000-event corpus on an ultrawide display](docs/media/log-explorer-four-lanes-100k.jpeg)
 
+A separate seven-day synthetic corpus exercises deep time navigation rather
+than just row volume. Here the Navigator remains open after seeking its final
+time bucket, with the selected event and surrounding rows still mounted and
+the complete event inspector visible. The 25,000-event count is fixture data,
+not a production-size ceiling or throughput claim.
+
+![Log Explorer keeping a deep seven-day Navigator seek visible with the final time bucket, surrounding rows, and selected event inspector](docs/media/log-explorer-seven-day-navigator.jpeg)
+
 **Roadmap / partial (do not treat as done):**
 
 - Headless **team** server: workspaces, roles, shared memory (#167) — server binary + SSE exist; roles/sharing are not built

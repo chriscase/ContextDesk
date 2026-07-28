@@ -41,7 +41,6 @@ import {
   type LaneEventRef,
 } from "../../lib/logExplorer/lanes";
 import {
-  aggregateLaneTimeQuality,
   classifyBreakpoint,
   emptyFilters,
   formatCanonicalUtc,
@@ -96,6 +95,11 @@ import {
   VirtualizedEventList,
   type LineMode,
 } from "./VirtualizedEventList";
+import {
+  applyThemeToDocument,
+  subscribeThemeChanges,
+  THEME_STORAGE_KEY,
+} from "../../lib/themeBridge";
 import "../../styles/components/log-explorer.css";
 
 type Props = {
@@ -103,6 +107,12 @@ type Props = {
 };
 
 const FIND_PAGE_SIZE = 50;
+// Time + level + source + a useful message excerpt fit without reducing a
+// lane to timestamp/severity slivers. Availability is based on the central
+// evidence grid, after the live Filters/Chat rail widths and splitters.
+const MIN_EVIDENCE_LANE_WIDTH_PX = 420;
+const SPLITTER_WIDTH_PX = 6;
+const COLLAPSED_CHAT_WIDTH_PX = 42;
 
 type FindCursor = {
   seq: number;
@@ -146,6 +156,32 @@ function emptyEventPage(timeQuality: TimeQuality = "order_only"): EventPageDto {
     totalMatched: 0,
     timeQuality,
   };
+}
+
+/**
+ * Empty results do not erase the backend's known corpus/view time quality.
+ * Failed or still-loading lanes remain fail-closed because they provide no
+ * trustworthy quality claim at all.
+ */
+function aggregateViewTimeQuality(
+  laneIds: string[],
+  states: Record<string, LaneTimeState>,
+): TimeQuality {
+  if (laneIds.length === 0) return "order_only";
+  const qualities: TimeQuality[] = [];
+  for (const laneId of laneIds) {
+    const state = states[laneId];
+    if (
+      !state ||
+      state.status === "unloaded" ||
+      state.status === "error" ||
+      state.quality == null
+    ) {
+      return "order_only";
+    }
+    qualities.push(state.quality);
+  }
+  return leastReliableTimeQuality(qualities);
 }
 
 function effectiveLaneSources(
@@ -239,10 +275,12 @@ export function LogExplorer({ corpusId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
   const [breakpoint, setBreakpoint] = useState<Breakpoint>("normal");
+  const [explorerWidth, setExplorerWidth] = useState(() => window.innerWidth);
   const [linkMode, setLinkMode] = useState<TimeLinkMode>(() =>
     loadLinkMode(corpusId),
   );
   const [laneCount, setLaneCount] = useState(1);
+  const [preferredLaneCount, setPreferredLaneCount] = useState(1);
   const [lanes, setLanes] = useState<LaneConfig[]>(() => {
     const saved = loadLanes(corpusId);
     return saved && saved.length > 0 ? saved : defaultLanes(1);
@@ -379,6 +417,7 @@ export function LogExplorer({ corpusId }: Props) {
   const findRefreshRef = useRef<(nextFilters: ExplorerFilters) => void>(
     () => {},
   );
+  const suppressNextFindRefreshRef = useRef(false);
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
@@ -425,6 +464,17 @@ export function LogExplorer({ corpusId }: Props) {
         ? previous
         : next,
     );
+  }, []);
+
+  useEffect(() => {
+    try {
+      applyThemeToDocument(localStorage.getItem(THEME_STORAGE_KEY));
+    } catch {
+      // theme-init already supplied the safe default.
+    }
+    return subscribeThemeChanges((theme) => {
+      applyThemeToDocument(theme);
+    });
   }, []);
 
   useEffect(() => {
@@ -577,20 +627,60 @@ export function LogExplorer({ corpusId }: Props) {
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? window.innerWidth;
-      const bp = classifyBreakpoint(w);
+    const applyWidth = (width: number) => {
+      setExplorerWidth(width);
+      const bp = classifyBreakpoint(width);
       setBreakpoint(bp);
-      // #536: narrow is single-lane by contract.
+      // #536: narrow is a drawer-based, independent-time workspace.
       if (bp === "narrow") {
-        setLaneCount(1);
         setTimeLinkMode("independent");
       }
+    };
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? window.innerWidth;
+      applyWidth(w);
     });
+    const onWindowResize = () =>
+      applyWidth(el.clientWidth || window.innerWidth);
     ro.observe(el);
-    setBreakpoint(classifyBreakpoint(el.clientWidth || window.innerWidth));
-    return () => ro.disconnect();
+    applyWidth(el.clientWidth || window.innerWidth);
+    window.addEventListener("resize", onWindowResize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", onWindowResize);
+    };
   }, []);
+
+  const usableEvidenceWidth =
+    breakpoint === "narrow"
+      ? explorerWidth
+      : Math.max(
+          0,
+          explorerWidth -
+            filterW -
+            SPLITTER_WIDTH_PX -
+            (chatCollapsed
+              ? COLLAPSED_CHAT_WIDTH_PX
+              : SPLITTER_WIDTH_PX + chatW),
+        );
+  const maxLaneCount =
+    breakpoint === "narrow"
+      ? 1
+      : Math.max(
+          1,
+          Math.min(
+            4,
+            Math.floor(usableEvidenceWidth / MIN_EVIDENCE_LANE_WIDTH_PX),
+          ),
+        );
+
+  useEffect(() => {
+    const visibleCount = Math.min(preferredLaneCount, maxLaneCount);
+    setLaneCount((current) =>
+      current === visibleCount ? current : visibleCount,
+    );
+    if (visibleCount === 1) setLaneScrollSeq({});
+  }, [maxLaneCount, preferredLaneCount]);
 
   // Drag splitters
   useEffect(() => {
@@ -684,7 +774,6 @@ export function LogExplorer({ corpusId }: Props) {
     setLaneMatched(
       Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
     );
-    setTimeQuality("order_only");
     setGaps([]);
     try {
       if (laneCount <= 1) {
@@ -700,13 +789,13 @@ export function LogExplorer({ corpusId }: Props) {
         const laneState: LaneTimeState =
           page.events.length > 0
             ? { status: "loaded", quality: page.timeQuality }
-            : { status: "empty", quality: null };
+            : { status: "empty", quality: page.timeQuality };
         const states = { "lane-0": laneState };
         setTotalMatched(page.totalMatched);
         setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
-        setTimeQuality(aggregateLaneTimeQuality(["lane-0"], states));
+        setTimeQuality(aggregateViewTimeQuality(["lane-0"], states));
         const seeded = seedFromPage(page);
         setLaneEvents({ "lane-0": seeded.events });
         setLaneCursors({
@@ -789,7 +878,7 @@ export function LogExplorer({ corpusId }: Props) {
           states[lane.id] =
             page.events.length > 0
               ? { status: "loaded", quality: page.timeQuality }
-              : { status: "empty", quality: null };
+              : { status: "empty", quality: page.timeQuality };
         }
         setLaneEvents(byLane);
         setLaneMatched(matchedByLane);
@@ -798,7 +887,7 @@ export function LogExplorer({ corpusId }: Props) {
         // No global unique matched total is derivable from overlapping lanes.
         setTotalMatched(0);
         setTimeQuality(
-          aggregateLaneTimeQuality(
+          aggregateViewTimeQuality(
             visibleLanes.map((lane) => lane.id),
             states,
           ),
@@ -926,7 +1015,11 @@ export function LogExplorer({ corpusId }: Props) {
       );
     });
     if (!settled) return;
+    const everyLaneHasEvents = visibleLaneIds.every(
+      (laneId) => laneTimeStates[laneId]?.status === "loaded",
+    );
     const invalid =
+      (linkMode !== "independent" && !everyLaneHasEvents) ||
       (linkMode === "align_time" && timeQuality !== "wall") ||
       (linkMode === "follow_cursor" && timeQuality === "order_only");
     if (invalid) {
@@ -1284,6 +1377,10 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   useEffect(() => {
+    if (suppressNextFindRefreshRef.current) {
+      suppressNextFindRefreshRef.current = false;
+      return;
+    }
     findRefreshRef.current(filters);
   }, [filters]);
 
@@ -1650,6 +1747,16 @@ export function LogExplorer({ corpusId }: Props) {
         revealLanes = [revealLane, ...lanes.slice(1)];
         setLanes(revealLanes);
       }
+      // Preserve the active Find definition for Restore prior view, but do not
+      // let either an in-flight request or the filter-change refresh race this
+      // explicit bookmark seek.
+      findRequestRef.current += 1;
+      const activeFindRequest = activeFindRequestRef.current;
+      activeFindRequestRef.current = null;
+      if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
+      setFindSearching(false);
+      setFindCancelling(false);
+      suppressNextFindRefreshRef.current = true;
       setFilters(openFilters);
       setFilterDraft("");
       const status = await seekToSeq(seq, {
@@ -1828,7 +1935,7 @@ export function LogExplorer({ corpusId }: Props) {
             } satisfies LaneTimeState,
           };
           setTimeQuality(
-            aggregateLaneTimeQuality(
+            aggregateViewTimeQuality(
               lanes.slice(0, laneCount).map((visible) => visible.id),
               next,
             ),
@@ -1957,7 +2064,8 @@ export function LogExplorer({ corpusId }: Props) {
   /** User-composed lanes: change count without inventing first-N source assignment (#486). */
   const configureLanes = (n: number) => {
     const count = clampLaneCount(n);
-    setLaneCount(count);
+    setPreferredLaneCount(count);
+    setLaneCount(Math.min(count, maxLaneCount));
     setLanes((prev) => {
       const next = resizeLaneList(prev, count);
       saveLanes(corpusId, next);
@@ -2024,6 +2132,9 @@ export function LogExplorer({ corpusId }: Props) {
     linkMode === "align_time"
       ? (alignedRowsByLane[lanes[0]?.id ?? ""]?.length ?? 0)
       : 0;
+  const visibleLanesHaveEvents = lanes
+    .slice(0, laneCount)
+    .every((lane) => laneTimeStates[lane.id]?.status === "loaded");
 
   const densityClass = density === "compact" ? "log-explorer--compact" : "";
   const bpClass = `log-explorer--${breakpoint}`;
@@ -2084,6 +2195,8 @@ export function LogExplorer({ corpusId }: Props) {
       data-density={density}
       data-line-mode={lineMode}
       data-lane-count={laneCount}
+      data-max-lane-count={maxLaneCount}
+      data-usable-evidence-width={Math.floor(usableEvidenceWidth)}
       data-link-mode={linkMode}
       data-aligned-slots={alignedSlotCount}
       data-time-quality={timeQuality}
@@ -2145,6 +2258,15 @@ export function LogExplorer({ corpusId }: Props) {
                     : "Align lanes on a shared vertical time axis with explicit gap bands"
               }
               onClick={() => {
+                if (
+                  mode !== "independent" &&
+                  !visibleLanesHaveEvents
+                ) {
+                  setStatus(
+                    `${label} unavailable: every visible lane needs matching events`,
+                  );
+                  return;
+                }
                 if (mode === "align_time" && timeQuality !== "wall") {
                   setStatus(
                     `Align unavailable: ${timeQualityLabel(timeQuality)} time is not a reliable shared wall clock`,
@@ -2197,17 +2319,26 @@ export function LogExplorer({ corpusId }: Props) {
             {density}
           </button>
           {breakpoint !== "narrow" &&
-            [1, 2, 3, 4].map((n) => (
-              <button
-                key={n}
-                type="button"
-                className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
-                onClick={() => configureLanes(n)}
-                title={`${n} evidence lane${n > 1 ? "s" : ""}`}
-              >
-                {n}L
-              </button>
-            ))}
+            [1, 2, 3, 4].map((n) => {
+              const unavailable = n > maxLaneCount;
+              const requiredWidth = n * MIN_EVIDENCE_LANE_WIDTH_PX;
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  className={`log-explorer__btn ${laneCount === n ? "log-explorer__btn--active" : ""}`}
+                  disabled={unavailable}
+                  onClick={() => configureLanes(n)}
+                  title={
+                    unavailable
+                      ? `${n} evidence lanes need ${requiredWidth}px of usable evidence width; ${Math.floor(usableEvidenceWidth)}px available`
+                      : `${n} evidence lane${n > 1 ? "s" : ""}`
+                  }
+                >
+                  {n}L
+                </button>
+              );
+            })}
           {(
             [
               ["compact", "1 line"],
@@ -3155,7 +3286,7 @@ export function LogExplorer({ corpusId }: Props) {
                 laneTime.status === "loaded" && laneTime.quality != null
                   ? timeQualityLabel(laneTime.quality)
                   : laneTime.status === "empty"
-                    ? "time unavailable · empty"
+                    ? "time unavailable · no matching events"
                     : laneTime.status === "error"
                       ? "time unavailable · load failed"
                       : "time unavailable · loading";

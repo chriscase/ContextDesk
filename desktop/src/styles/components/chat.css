@@ -731,7 +731,7 @@ ol.md-inline-list {
   font-size: var(--text-sm);
 }
 
-.chat-wizard-cards {
+.first-chat-workflow-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.55rem;

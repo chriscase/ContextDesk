@@ -237,6 +237,10 @@ function eventNeighborhood(
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 3840,
+    });
     const store = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: (k: string) => store.get(k) ?? null,
@@ -340,6 +344,96 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-chat-collapsed")).toBe("false");
     expect(screen.getByTestId("splitter-chat")).toBeTruthy();
     expect(screen.getByTestId("log-explorer-chat-thread")).toBeTruthy();
+  });
+
+  it("gates lane counts by usable evidence width and restores the preferred composed lanes", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1280,
+    });
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+        { id: "lane-2", label: "DB", sources: ["db.log"] },
+        { id: "lane-3", label: "Proxy", sources: ["proxy.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    const root = await screen.findByTestId("log-explorer");
+    await waitFor(() => {
+      expect(root.getAttribute("data-breakpoint")).toBe("normal");
+      expect(root.getAttribute("data-usable-evidence-width")).toBe("748");
+      expect(root.getAttribute("data-max-lane-count")).toBe("1");
+    });
+
+    const twoLUnavailable = screen.getByRole("button", { name: "2L" });
+    expect((twoLUnavailable as HTMLButtonElement).disabled).toBe(true);
+    expect(twoLUnavailable.title).toMatch(
+      /need 840px of usable evidence width; 748px available/,
+    );
+    expect(
+      (screen.getByRole("button", { name: "1L" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-usable-evidence-width")).toBe("1012");
+      expect(root.getAttribute("data-max-lane-count")).toBe("2");
+    });
+    const twoL = screen.getByRole("button", { name: "2L" });
+    expect((twoL as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(twoL);
+    await waitFor(() =>
+      expect(root.getAttribute("data-lane-count")).toBe("2"),
+    );
+
+    fireEvent.click(screen.getByTestId("lane-editor-toggle"));
+    const editor = await screen.findByTestId("lane-editor");
+    expect(
+      (
+        within(
+          within(editor).getByRole("group", {
+            name: "Worker source membership",
+          }),
+        ).getByRole("checkbox", {
+          name: /worker\.log/i,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    fireEvent.click(screen.getByTestId("lane-editor-close"));
+
+    fireEvent.click(screen.getByTestId("expand-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-lane-count")).toBe("1");
+      expect(root.getAttribute("data-max-lane-count")).toBe("1");
+    });
+    fireEvent.click(screen.getByTestId("collapse-linked-chat"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-lane-count")).toBe("2");
+      expect(root.getAttribute("data-max-lane-count")).toBe("2");
+    });
+
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 3840,
+    });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() =>
+      expect(root.getAttribute("data-max-lane-count")).toBe("4"),
+    );
+    const fourL = screen.getByRole("button", { name: "4L" });
+    expect((fourL as HTMLButtonElement).disabled).toBe(false);
+    fourL.focus();
+    fireEvent.keyDown(fourL, { key: "Enter" });
+    fireEvent.click(fourL);
+    await waitFor(() =>
+      expect(root.getAttribute("data-lane-count")).toBe("4"),
+    );
+    expect(document.activeElement).toBe(fourL);
   });
 
   it("focuses Find with the platform find shortcut", async () => {
@@ -943,6 +1037,108 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
   });
 
+  it("does not let an active Find refresh overwrite a temporary bookmark reveal", async () => {
+    const allEvents = defaultEventPage().events;
+    const findTarget = allEvents.find((event) => event.seq === 1)!;
+    const bookmarkTarget = allEvents.find((event) => event.seq === 2)!;
+    const staleFind =
+      deferred<Awaited<ReturnType<typeof host.hostLogSearchEventsAdvanced>>>();
+    const findResult: Awaited<
+      ReturnType<typeof host.hostLogSearchEventsAdvanced>
+    > = {
+      hits: [
+        {
+          event: findTarget,
+          score: 1,
+          excerpt: "auth failure",
+          matchKind: "keyword",
+          templateId: findTarget.templateId,
+        },
+      ],
+      partial: false,
+      scanned: 2,
+      totalMatched: 1,
+    };
+    let findRequestCount = 0;
+    vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
+      bookmark("bm-find-race", "worker evidence", bookmarkTarget.seq),
+    ]);
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      findRequestCount += 1;
+      return findRequestCount === 2 ? staleFind.promise : findResult;
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockImplementation(
+      async (_corpusId, query) => {
+        const target =
+          query.targetSeq === bookmarkTarget.seq ? bookmarkTarget : findTarget;
+        const hidden =
+          target.seq === bookmarkTarget.seq &&
+          (query.filter?.levels ?? []).includes("error");
+        return eventNeighborhood(
+          target,
+          hidden ? "hidden_by_filter" : "found",
+        );
+      },
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "auth" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(1),
+    );
+
+    const errorFacet = within(screen.getByTestId("log-explorer-filters"))
+      .getByText("error")
+      .closest("label");
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
+    );
+
+    fireEvent.click(
+      await screen.findByTestId("bookmark-activate-bm-find-race"),
+    );
+    await screen.findByTestId("bookmark-restore-view");
+    await waitFor(() =>
+      expect(screen.getByTestId("detail-metadata").textContent).toContain(
+        "seq 2",
+      ),
+    );
+    expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2);
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="2"]')
+        ?.classList.contains("log-explorer__row--selected"),
+    ).toBe(true);
+    expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-request");
+
+    staleFind.resolve(findResult);
+    await act(async () => {
+      await staleFind.promise;
+    });
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-seq="2"]')
+        ?.classList.contains("log-explorer__row--selected"),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId("bookmark-restore-view"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      (screen.getByRole("checkbox", {
+        name: /error 3/i,
+      }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(screen.queryByTestId("bookmark-restore-view")).toBeNull();
+  });
+
   it("reports a missing bookmark target without claiming navigation success", async () => {
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([
       {
@@ -1389,6 +1585,144 @@ describe("LogExplorer shell", () => {
     expect(root.getAttribute("data-link-mode")).toBe("independent");
     expect(screen.queryByTestId("log-explorer-gap")).toBeNull();
   });
+
+  it("preserves wall-clock quality through an empty Find and Filter intersection, then restores Align", async () => {
+    const visible = defaultEventPage().events[0]!;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue({
+      hits: [
+        {
+          event: visible,
+          score: 1,
+          matchKind: "keyword",
+          templateId: visible.templateId,
+        },
+      ],
+      nextCursor: null,
+      nextTs: null,
+      totalMatched: 1,
+      partial: false,
+      scanned: 1,
+    });
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(
+      async (_corpusId, query) => {
+        if (query?.keyword === "no-shared-result") {
+          return eventPage(query.sources?.[0] ?? "all.log", "wall", 0);
+        }
+        return eventPage(query?.sources?.[0] ?? "all.log", "wall");
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["api.log"] },
+        { id: "lane-1", label: "Worker", sources: ["worker.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "2L" }));
+    const root = screen.getByTestId("log-explorer");
+    await waitFor(() =>
+      expect(root.getAttribute("data-time-quality")).toBe("wall"),
+    );
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("align_time");
+
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "rare identity" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("log-explorer-filter"), {
+      target: { value: "no-shared-result" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    await waitFor(() => {
+      expect(root.getAttribute("data-time-quality")).toBe("wall");
+      expect(root.getAttribute("data-link-mode")).toBe("independent");
+      expect(
+        document
+          .querySelector('[data-lane-id="lane-0"]')
+          ?.getAttribute("data-time-status"),
+      ).toBe("empty");
+    });
+    expect(
+      screen.getAllByText("time unavailable · no matching events"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).toContain("wall clock");
+    expect(
+      screen.getByTestId("log-explorer-global-counts").textContent,
+    ).not.toContain("order only");
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("independent");
+    expect(
+      screen.getByText(
+        "Align unavailable: every visible lane needs matching events",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "keyword:no-shared-result ×" }),
+    );
+    await waitFor(() => {
+      expect(root.getAttribute("data-time-quality")).toBe("wall");
+      expect(
+        document
+          .querySelector('[data-lane-id="lane-0"]')
+          ?.getAttribute("data-time-status"),
+      ).toBe("loaded");
+    });
+    fireEvent.click(screen.getByTestId("time-link-align_time"));
+    expect(root.getAttribute("data-link-mode")).toBe("align_time");
+  });
+
+  it.each([
+    ["order_only", "order only (not calendar time)"],
+    ["mixed", "mixed time quality"],
+  ] as const)(
+    "retains known %s quality for an empty result and refuses Align",
+    async (quality, label) => {
+      vi.mocked(host.hostLogFacets).mockResolvedValue({
+        sources: { "api.log": 1 },
+        levels: { info: 1 },
+        services: {},
+        hosts: {},
+        timeQuality: quality,
+      });
+      vi.mocked(host.hostLogQueryEvents).mockResolvedValue(
+        eventPage("api.log", quality, 0),
+      );
+
+      render(<LogExplorer corpusId="c1" />);
+      const root = await screen.findByTestId("log-explorer");
+      await waitFor(() => {
+        expect(root.getAttribute("data-time-quality")).toBe(quality);
+        expect(
+          document
+            .querySelector('[data-lane-id="lane-0"]')
+            ?.getAttribute("data-time-status"),
+        ).toBe("empty");
+      });
+      expect(
+        screen.getByTestId("log-explorer-global-counts").textContent,
+      ).toContain(label);
+      expect(
+        screen.getByText("time unavailable · no matching events"),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByTestId("time-link-align_time"));
+      expect(root.getAttribute("data-link-mode")).toBe("independent");
+      expect(
+        screen.getByText(
+          "Align unavailable: every visible lane needs matching events",
+        ),
+      ).toBeTruthy();
+    },
+  );
 
   it("aligns wall-clock lanes on shared virtual rows with explicit empty cells and synchronized scroll", async () => {
     const makeEvent = (

@@ -151,6 +151,8 @@ pub struct ToolHost {
     log_cache_dir: Option<PathBuf>,
     /// Default corpus for log tools when `corpus` arg is omitted (wizard handoff).
     active_log_corpus: Option<String>,
+    /// Turn-scoped corpus that provider-generated arguments cannot override.
+    scoped_log_corpus: Option<String>,
     /// Full router budget for agent turns.
     router_budget: crate::router::RouterBudget,
     /// Per-model context char budgets (declared + learned).
@@ -246,6 +248,7 @@ impl ToolHost {
             log_analysis_enabled: false,
             log_cache_dir: None,
             active_log_corpus: None,
+            scoped_log_corpus: None,
             router_budget: crate::router::RouterBudget::default(),
             model_context_budgets: crate::model_context::ModelContextBudgets::default(),
             dynamic_tools: std::collections::HashMap::new(),
@@ -869,8 +872,28 @@ impl ToolHost {
         self.active_log_corpus.as_deref()
     }
 
+    /// Pin log tools to one turn-scoped corpus regardless of provider arguments.
+    pub fn set_log_corpus_scope(&mut self, corpus_id: Option<String>) {
+        self.scoped_log_corpus = corpus_id.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        });
+    }
+
+    /// Current turn-scoped log corpus, when a linked Explorer turn is active.
+    pub fn log_corpus_scope(&self) -> Option<&str> {
+        self.scoped_log_corpus.as_deref()
+    }
+
     /// Resolve corpus id from tool args, falling back to the host active corpus.
     fn resolve_log_corpus(&self, args: &Value, tool: &str) -> CoreResult<String> {
+        if let Some(cid) = self.scoped_log_corpus.as_deref() {
+            return Ok(cid.to_string());
+        }
         if let Some(cid) = args.get("corpus").and_then(|v| v.as_str()) {
             let t = cid.trim();
             if !t.is_empty() {
@@ -2080,19 +2103,27 @@ impl ToolHost {
             query: args
                 .get("query")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             level: args
                 .get("level")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             service: args
                 .get("service")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             trace_id: args
                 .get("trace_id")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             semantic: args
                 .get("semantic")
                 .and_then(|v| v.as_bool())
@@ -2116,7 +2147,8 @@ impl ToolHost {
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_templates\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_templates\nquery: {}\nresult_count: {}\nresult_cap: {}\n---\n",
+                q.query.as_deref().unwrap_or("").replace(['\r', '\n'], " "),
                 hits.len(),
                 self.max_results_per_source
             ),
@@ -5904,6 +5936,22 @@ mod tests {
                 .unwrap(),
             "override"
         );
+        host.set_log_corpus_scope(Some("linked-corpus".into()));
+        assert_eq!(
+            host.resolve_log_corpus(
+                &json!({"corpus": "provider-invented-corpus"}),
+                "cluster_problems"
+            )
+            .unwrap(),
+            "linked-corpus"
+        );
+        assert_eq!(host.log_corpus_scope(), Some("linked-corpus"));
+        host.set_log_corpus_scope(None);
+        assert_eq!(
+            host.resolve_log_corpus(&json!({"corpus": "override"}), "cluster_problems")
+                .unwrap(),
+            "override"
+        );
         // Explicit empty falls through to active default.
         assert_eq!(
             host.resolve_log_corpus(&json!({"corpus": "  "}), "cluster_problems")
@@ -5939,6 +5987,38 @@ mod tests {
         host.set_log_analysis(true, Some(cache));
         host.set_active_log_corpus(Some(report.corpus_id.clone()));
         host.set_max_results_per_source(3);
+
+        let search = host
+            .execute(
+                crate::log_analysis::SEARCH_LOGS,
+                &json!({
+                    "query": "connection refused",
+                    "level": " ",
+                    "service": "",
+                    "trace_id": "\t"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(search.ok, "{}", search.summary);
+        assert!(
+            search.detail_raw.contains("query: connection refused"),
+            "{}",
+            search.detail_raw
+        );
+        assert!(search.detail_raw.contains("seq="), "{}", search.detail_raw);
+        assert!(
+            search.detail_raw.contains("source=app.log"),
+            "{}",
+            search.detail_raw
+        );
+        assert!(
+            search.detail_raw.contains("timestamp=")
+                && search.detail_raw.contains("time_quality=wall"),
+            "{}",
+            search.detail_raw
+        );
 
         // No corpus arg — must use host active default.
         let r = host

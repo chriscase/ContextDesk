@@ -155,11 +155,14 @@ performance statement.
 ### Generated `behavior-scale` (`ui-medium`, `seven-day`, `paging-stress`)
 
 Behavior-rich profiles (#542) write under `scenarios/behavior-scale/` with a
-truth manifest that records:
+scenario-v2 truth manifest derived from the generated row plan. It records:
 
 - generator/scenario versions, seed, counts, hashes;
 - source identities and per-source counts;
-- time quality, time span, traffic shape;
+- requested and actual time extrema/span, time quality, traffic shape;
+- deterministic same-second burst windows;
+- genuinely event-free source-specific gaps;
+- exact 90-second source-skew and late-arrival windows;
 - sentinel event tokens for Find/Filter and bookmarks (including beyond first
   page and beyond ~4,000 events);
 - expected queries, lane gaps, shared timestamps, long/multiline samples;

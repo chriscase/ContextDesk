@@ -136,9 +136,17 @@ describe("ChatPane first-chat home", () => {
         })}
       />,
     );
-    const guided = screen.getAllByTestId("chat-guided-workflow")[0]!;
+    const guidedGroup = screen.getByRole("group", {
+      name: "Guided workflows",
+    });
+    expect(guidedGroup.className).toMatch(/first-chat-workflow-grid/);
+    const guidedCards = screen.getAllByTestId("chat-guided-workflow");
+    expect(guidedCards).toHaveLength(3);
+    const guided = guidedCards[0]!;
     expect(guided.getAttribute("data-action")).toBe("launch-workflow");
     expect(guided.className).toMatch(/chat-action-card/);
+    expect(guided.className).toMatch(/first-chat-workflow-card/);
+    expect(guided.className).not.toMatch(/chat-wizard-card/);
     expect(screen.getAllByTestId("chat-starter")[0]!.className).toMatch(
       /chat-action-card/,
     );

@@ -11,7 +11,8 @@ use crate::tools::{ToolSideEffect, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
-use std::time::Instant;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 /// Chat backend trait (real HTTP or mock).
 #[async_trait]
@@ -477,6 +478,48 @@ fn terminal_context_too_long(
     Ok(out.into_events())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnDeadlineElapsed;
+
+async fn within_turn_deadline<F, T>(
+    started: Instant,
+    deadline_ms: u64,
+    future: F,
+) -> Result<T, TurnDeadlineElapsed>
+where
+    F: Future<Output = T>,
+{
+    if deadline_ms == 0 {
+        return Ok(future.await);
+    }
+    let remaining = Duration::from_millis(deadline_ms).saturating_sub(started.elapsed());
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| TurnDeadlineElapsed)
+}
+
+fn terminal_budget_time(
+    mut out: EventCollector<'_>,
+    trail: &[String],
+    deadline_ms: u64,
+    operation: &str,
+) -> CoreResult<Vec<StreamEvent>> {
+    let mut steps = trail.to_vec();
+    steps.push(format!("budget_time:{operation}"));
+    out.push(StreamEvent::SearchTrail { steps });
+    out.push(StreamEvent::Error {
+        code: "budget_time".into(),
+        message: format!(
+            "This turn reached its {deadline_ms} ms deadline while {operation}. \
+             Retry with a narrower request or increase the turn deadline in Settings."
+        ),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "budget_time".into(),
+    });
+    Ok(out.into_events())
+}
+
 /// Collect + optional live sink for stream events.
 struct EventCollector<'a> {
     events: Vec<StreamEvent>,
@@ -721,15 +764,12 @@ pub async fn run_agent_turn_with_sink(
             return Ok(out.into_events());
         }
         if opts.deadline_ms > 0 && started.elapsed().as_millis() as u64 >= opts.deadline_ms {
-            if !trail.is_empty() {
-                out.push(StreamEvent::SearchTrail {
-                    steps: trail.clone(),
-                });
-            }
-            out.push(StreamEvent::TurnCompleted {
-                reason: "budget_time".into(),
-            });
-            return Ok(out.into_events());
+            return terminal_budget_time(
+                out,
+                &trail,
+                opts.deadline_ms,
+                "starting the next agent round",
+            );
         }
         let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
         let mut streamed_text = false;
@@ -957,9 +997,23 @@ pub async fn run_agent_turn_with_sink(
             } else {
                 &specs
             };
-            let result = backend
-                .complete_streaming(&model_ctx, tool_arg, &mut on_text, cancel_ref)
-                .await;
+            let result = match within_turn_deadline(
+                started,
+                opts.deadline_ms,
+                backend.complete_streaming(&model_ctx, tool_arg, &mut on_text, cancel_ref),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    return terminal_budget_time(
+                        out,
+                        &trail,
+                        opts.deadline_ms,
+                        "waiting for the provider",
+                    );
+                }
+            };
             match result {
                 Ok(c) => break c,
                 Err(e) if e.to_string().contains("cancelled") => {
@@ -980,7 +1034,24 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     });
                     // Soft-ground the model with a local KB prefetch when tools are off.
                     // Prefetch is unbounded from search — re-enforce hard budget before retry.
-                    if let Ok(ctx) = prefetch_context(host, user_text).await {
+                    let prefetched = match within_turn_deadline(
+                        started,
+                        opts.deadline_ms,
+                        prefetch_context(host, user_text),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            return terminal_budget_time(
+                                out,
+                                &trail,
+                                opts.deadline_ms,
+                                "running the local knowledge prefetch",
+                            );
+                        }
+                    };
+                    if let Ok(ctx) = prefetched {
                         if !ctx.is_empty() {
                             model_ctx.push(ChatMessage {
                                 role: Role::System,
@@ -1291,7 +1362,24 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             // Tool execution errors must not kill the whole turn (e.g. HTTP 401
             // on a news site). Feed the failure back as tool content so the
             // model can try another URL or answer from search snippets.
-            let mut result = match host.execute(&resolved_tool_name, &args, None).await {
+            let tool_result = match within_turn_deadline(
+                started,
+                opts.deadline_ms,
+                host.execute(&resolved_tool_name, &args, None),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    return terminal_budget_time(
+                        out,
+                        &trail,
+                        opts.deadline_ms,
+                        &format!("executing tool `{resolved_tool_name}`"),
+                    );
+                }
+            };
+            let mut result = match tool_result {
                 Ok(r) => r,
                 Err(e) => {
                     let id = uuid::Uuid::new_v4().to_string();
@@ -1450,10 +1538,24 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             out.push(StreamEvent::TextDelta { text: t });
         }
     };
-    match backend
-        .complete_streaming(&model_ctx, &[], &mut on_text, cancel_ref)
-        .await
+    let synthesis = match within_turn_deadline(
+        started,
+        opts.deadline_ms,
+        backend.complete_streaming(&model_ctx, &[], &mut on_text, cancel_ref),
+    )
+    .await
     {
+        Ok(result) => result,
+        Err(_) => {
+            return terminal_budget_time(
+                out,
+                &trail,
+                opts.deadline_ms,
+                "waiting for final provider synthesis",
+            );
+        }
+    };
+    match synthesis {
         Ok(completion) => {
             // Ignore further tool_calls — budget is closed.
             let content = if completion.content.trim().is_empty() {
@@ -2943,7 +3045,7 @@ mod tests {
         let idx = KeywordIndex::build(&ws).unwrap();
         let mut host = ToolHost::new(ws, idx, None);
         let mut history = vec![];
-        // Round 0 runs (~40ms); round 1 hits deadline before next complete.
+        // The active provider await is interrupted at the turn deadline.
         let events = run_agent_turn(
             &SlowBackend,
             &mut host,
@@ -2961,9 +3063,143 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Error { code, .. } if code == "budget_time")));
         assert!(events.iter().any(
             |e| matches!(e, StreamEvent::TurnCompleted { reason } if reason == "budget_time")
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_deadline_interrupts_never_resolving_provider_await() {
+        struct NeverBackend;
+
+        #[async_trait]
+        impl ChatBackend for NeverBackend {
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSpec],
+            ) -> CoreResult<ChatCompletion> {
+                std::future::pending().await
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = ToolHost::new(ws, KeywordIndex::new(), None);
+        let mut history = vec![];
+        let events = run_agent_turn(
+            &NeverBackend,
+            &mut host,
+            "provider must not outlive the turn",
+            &mut history,
+            &AgentOptions {
+                max_rounds: 8,
+                deadline_ms: 25,
+                max_results_per_source: 8,
+                session_id: "provider-deadline".into(),
+                model: Some("never".into()),
+                cancel: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let error_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    StreamEvent::Error { code, message }
+                        if code == "budget_time" && message.contains("waiting for the provider")
+                )
+            })
+            .expect("visible provider deadline error");
+        let completed_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    StreamEvent::TurnCompleted { reason } if reason == "budget_time"
+                )
+            })
+            .expect("terminal provider deadline event");
+        assert!(error_index < completed_index);
+        assert_eq!(completed_index, events.len() - 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_deadline_interrupts_never_resolving_tool_await() {
+        struct NeverEmbed;
+
+        #[async_trait]
+        impl crate::embed::EmbedBackend for NeverEmbed {
+            async fn embed(&self, _texts: &[String]) -> CoreResult<Vec<Vec<f32>>> {
+                std::future::pending().await
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let ws = Workspace::new("t", vec![dir.path().to_path_buf()]);
+        let mut host = ToolHost::new(ws, KeywordIndex::new(), None);
+        host.set_hybrid_retrieval(true);
+        host.set_embed_backend(Some(std::sync::Arc::new(NeverEmbed)));
+        let backend = ScriptedBackend::new(vec![ChatCompletion {
+            content: String::new(),
+            tool_calls: vec![ToolCallMsg {
+                id: "never-tool".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: crate::tools::names::SEARCH_KB.into(),
+                    arguments: r#"{"query":"hang forever","limit":1}"#.into(),
+                },
+            }],
+            finish_reason: "tool_calls".into(),
+        }]);
+        let mut history = vec![];
+        let events = run_agent_turn(
+            &backend,
+            &mut host,
+            "tool must not outlive the turn",
+            &mut history,
+            &AgentOptions {
+                max_rounds: 8,
+                deadline_ms: 25,
+                max_results_per_source: 8,
+                session_id: "tool-deadline".into(),
+                model: Some("scripted".into()),
+                cancel: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let error_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    StreamEvent::Error { code, message }
+                        if code == "budget_time"
+                            && message.contains("executing tool `search_kb`")
+                )
+            })
+            .expect("visible tool deadline error");
+        let completed_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    StreamEvent::TurnCompleted { reason } if reason == "budget_time"
+                )
+            })
+            .expect("terminal tool deadline event");
+        assert!(error_index < completed_index);
+        assert_eq!(completed_index, events.len() - 1);
     }
 
     #[test]

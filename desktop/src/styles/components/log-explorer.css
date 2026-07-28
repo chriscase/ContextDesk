@@ -95,6 +95,11 @@
   border-color: var(--accent, #5b9fd4);
 }
 
+.log-explorer__btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .log-explorer__btn--active {
   background: color-mix(in srgb, var(--accent, #5b9fd4) 22%, transparent);
   border-color: var(--accent, #5b9fd4);
