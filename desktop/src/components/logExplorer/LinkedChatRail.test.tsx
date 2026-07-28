@@ -224,6 +224,12 @@ describe("LinkedChatRail", () => {
       expect(stored?.chat_model).toBe("triage-1");
       expect(stored?.provider_profile_id).toBe("tools-provider");
     });
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("linked-chat-manage-toggle") as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
 
     fireEvent.change(selector, {
       target: { value: "forensics-provider::forensics-2" },
