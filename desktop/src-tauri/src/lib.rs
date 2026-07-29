@@ -5756,6 +5756,18 @@ impl DemoLogInstallDto {
             retryable: true,
         }
     }
+
+    fn cancelled_with_retained_corpus(corpus_id: String, events: u64) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Cancelled,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: Some(corpus_id),
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: Some(events),
+            detail: "Installation cancelled before activation. The published demo corpus was retained safely and will be recovered and activated when you retry. Your previous corpus selection was restored.".into(),
+            retryable: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -5774,16 +5786,23 @@ fn validate_demo_log_resource(path: &std::path::Path) -> bool {
     const REQUIRED_DIRS: &[&str] = &[
         "api", "auth", "db", "edge", "queue", "region-a", "region-b", "worker",
     ];
+    const MAX_RESOURCE_ENTRIES: usize = REQUIRED_DIRS.len() + DEMO_LOG_REQUIRED_FILES.len();
 
     fn visit(
         root: &std::path::Path,
         current: &std::path::Path,
+        depth: usize,
+        entry_count: &mut usize,
         files: &mut std::collections::BTreeSet<String>,
         directories: &mut std::collections::BTreeSet<String>,
     ) -> Result<(), ()> {
         let entries = std::fs::read_dir(current).map_err(|_| ())?;
         for entry in entries {
             let entry = entry.map_err(|_| ())?;
+            *entry_count = entry_count.checked_add(1).ok_or(())?;
+            if *entry_count > MAX_RESOURCE_ENTRIES {
+                return Err(());
+            }
             let kind = entry.file_type().map_err(|_| ())?;
             if kind.is_symlink() {
                 return Err(());
@@ -5792,10 +5811,18 @@ fn validate_demo_log_resource(path: &std::path::Path) -> bool {
             let relative = path.strip_prefix(root).map_err(|_| ())?;
             let relative = relative.to_str().ok_or(())?.replace('\\', "/");
             if kind.is_dir() {
-                directories.insert(relative);
-                visit(root, &path, files, directories)?;
+                if depth != 0 || !REQUIRED_DIRS.contains(&relative.as_str()) {
+                    return Err(());
+                }
+                if !directories.insert(relative) {
+                    return Err(());
+                }
+                visit(root, &path, depth + 1, entry_count, files, directories)?;
             } else if kind.is_file() {
-                files.insert(relative);
+                if !DEMO_LOG_REQUIRED_FILES.contains(&relative.as_str()) || !files.insert(relative)
+                {
+                    return Err(());
+                }
             } else {
                 return Err(());
             }
@@ -5803,12 +5830,25 @@ fn validate_demo_log_resource(path: &std::path::Path) -> bool {
         Ok(())
     }
 
-    if !path.is_dir() {
+    let Ok(root_metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return false;
     }
     let mut files = std::collections::BTreeSet::new();
     let mut directories = std::collections::BTreeSet::new();
-    if visit(path, path, &mut files, &mut directories).is_err() {
+    let mut entry_count = 0;
+    if visit(
+        path,
+        path,
+        0,
+        &mut entry_count,
+        &mut files,
+        &mut directories,
+    )
+    .is_err()
+    {
         return false;
     }
     files
@@ -6940,7 +6980,10 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
         Ok(publish) => publish,
         Err(DemoTransactionError::Cancelled) => {
             backend.select_corpus(prior_active_corpus);
-            return DemoLogInstallDto::cancelled();
+            return DemoLogInstallDto::cancelled_with_retained_corpus(
+                report.corpus_id,
+                report.events,
+            );
         }
         Err(DemoTransactionError::Failed(error)) => {
             // The corpus is intentionally retained: its reserved identity was
@@ -9414,6 +9457,7 @@ mod demo_log_host_tests {
     #[derive(Clone, Copy)]
     enum FakeIngestOutcome {
         Success,
+        SuccessThenCancel,
         Cancelled,
         Failed,
     }
@@ -9528,15 +9572,18 @@ mod demo_log_host_tests {
             if cancel.is_cancelled() {
                 return Err(LogIngestRunError::Cancelled);
             }
-            match self
+            let outcome = self
                 .outcomes
                 .lock()
                 .expect("outcomes")
                 .pop_front()
-                .unwrap_or(FakeIngestOutcome::Success)
-            {
-                FakeIngestOutcome::Success => {
+                .unwrap_or(FakeIngestOutcome::Success);
+            match outcome {
+                FakeIngestOutcome::Success | FakeIngestOutcome::SuccessThenCancel => {
                     let corpus = self.create_managed_corpus();
+                    if matches!(outcome, FakeIngestOutcome::SuccessThenCancel) {
+                        cancel.cancel();
+                    }
                     Ok(DemoLogIngestReceipt {
                         corpus_id: corpus.id().into(),
                         events: 25_000,
@@ -9641,6 +9688,55 @@ mod demo_log_host_tests {
         );
     }
 
+    #[test]
+    fn resource_validation_rejects_symlink_root_and_bounded_unknown_trees() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let target = tempfile::tempdir().expect("symlink target");
+            let target_import = target.path().join("import");
+            write_required_demo_files(&target_import);
+            let link_parent = tempfile::tempdir().expect("symlink parent");
+            let linked_import = link_parent.path().join("import");
+            symlink(&target_import, &linked_import).expect("resource root symlink");
+            assert!(
+                !validate_demo_log_resource(&linked_import),
+                "the packaged resource root itself must not be a symlink"
+            );
+        }
+
+        let deep = tempfile::tempdir().expect("deep unexpected root");
+        let deep_import = deep.path().join("import");
+        write_required_demo_files(&deep_import);
+        let mut unexpected = deep_import.join("unexpected");
+        for index in 0..64 {
+            unexpected = unexpected.join(format!("depth-{index}"));
+        }
+        std::fs::create_dir_all(&unexpected).expect("deep unexpected tree");
+        std::fs::write(unexpected.join("payload.log"), b"not approved")
+            .expect("deep unexpected file");
+        assert!(
+            !validate_demo_log_resource(&deep_import),
+            "an unknown deep tree must be rejected against the exact allowlist"
+        );
+
+        let excess = tempfile::tempdir().expect("excess unexpected root");
+        let excess_import = excess.path().join("import");
+        write_required_demo_files(&excess_import);
+        for index in 0..64 {
+            std::fs::write(
+                excess_import.join(format!("unexpected-{index}.log")),
+                b"not approved",
+            )
+            .expect("excess unexpected file");
+        }
+        assert!(
+            !validate_demo_log_resource(&excess_import),
+            "an excess resource tree must be rejected within the strict entry bound"
+        );
+    }
+
     #[tokio::test]
     async fn transaction_is_idempotent_and_never_matches_a_same_named_user_corpus() {
         let root = tempfile::tempdir().expect("cache root");
@@ -9685,6 +9781,45 @@ mod demo_log_host_tests {
         assert!(result.retryable);
         assert_eq!(backend.active_corpus().as_deref(), Some("user"));
         assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_corpus_publish_and_marker_commit_is_truthful_and_recoverable() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend =
+            FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::SuccessThenCancel])
+                .with_active("user");
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let cancelled = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(cancelled.status, DemoLogInstallStatus::Cancelled);
+        assert_eq!(cancelled.events, Some(25_000));
+        assert!(cancelled.corpus_id.is_some());
+        assert!(cancelled
+            .detail
+            .contains("published demo corpus was retained"));
+        assert!(cancelled.detail.contains("retry"));
+        assert!(cancelled.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert!(!demo_log_marker_path(&cache).exists());
+        let inspection_cancel = cd_core::process_progress::CancelFlag::new();
+        let managed =
+            managed_demo_log_corpora(&cache, &inspection_cancel).expect("managed corpus scan");
+        assert_eq!(managed.len(), 1);
+        assert_eq!(
+            cancelled.corpus_id.as_deref(),
+            Some(managed[0].id()),
+            "the disclosed retained corpus must be the recoverable managed corpus"
+        );
+
+        let retry_cancel = cd_core::process_progress::CancelFlag::new();
+        let recovered = install_demo_log_corpus_transaction(&backend, &retry_cancel).await;
+        assert_eq!(recovered.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(recovered.corpus_id, cancelled.corpus_id);
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_corpus(), recovered.corpus_id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

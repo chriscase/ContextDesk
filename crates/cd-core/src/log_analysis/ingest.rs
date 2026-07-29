@@ -2170,6 +2170,18 @@ fn ingest_path_inner_with_limits_and_fault(
         check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
         validate_staged_ingest(staging.cache_root(), &report)?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+        if cancelled(cancel) {
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Cancelled,
+                    "ingest cancelled",
+                    false,
+                ),
+            );
+            return Err(CoreError::Cancelled);
+        }
         staging.publish(cache_root, &report.corpus_id)?;
         Ok(report)
     })();
@@ -4782,6 +4794,51 @@ mod tests {
                 "cache tree changed at {checkpoint:?}"
             );
         }
+    }
+
+    #[test]
+    fn cancellation_after_validation_before_publish_is_typed_and_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("app.log"),
+            "ts=1700000000 level=error msg=must-not-publish\n",
+        )
+        .unwrap();
+        let cancel = CancelFlag::new();
+        let observer = RecordingProcessProgress::default();
+        let hook = |checkpoint| {
+            if checkpoint == IngestCheckpoint::BeforePublish {
+                cancel.cancel();
+            }
+            Ok(())
+        };
+
+        let error = ingest_path_inner_with_fault(
+            &cache,
+            &logs,
+            "cancel-before-publish",
+            None,
+            "none",
+            LogEmbedMode::None,
+            None,
+            &observer,
+            Some(&cancel),
+            None,
+            Some(&hook),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CoreError::Cancelled));
+        assert_eq!(error.to_string(), "ingest cancelled");
+        assert_eq!(
+            observer.phases().last(),
+            Some(&ProcessProgressPhase::Cancelled)
+        );
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
     }
 
     #[test]
