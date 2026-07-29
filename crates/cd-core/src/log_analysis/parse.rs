@@ -872,6 +872,12 @@ mod tests {
                 "error",
                 "[org.example.Worker] (default task-3) request failed",
             ),
+            (
+                "2026-07-29 09:14:08,654 ERROR [org.jboss.remoting.remote.connection] (webworker I/O-175) JBREM000200: Remote connection failed: java.io.IOException: synthetic peer reset",
+                44,
+                "error",
+                "[org.jboss.remoting.remote.connection] (webworker I/O-175) JBREM000200: Remote connection failed: java.io.IOException: synthetic peer reset",
+            ),
         ];
 
         for (line, ingest_seq, level, message) in cases {
