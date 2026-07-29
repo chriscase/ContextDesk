@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod bookmarks;
+pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
 pub mod ingest;
@@ -30,13 +31,20 @@ pub use bookmarks::{
     Bookmark, BookmarkEventRef, BookmarkEvidenceStatus, BookmarkSummary, NewBookmark,
     NewEvidenceBookmark, ResolvedBookmark, MAX_BOOKMARK_EVENT_REFS,
 };
+pub use diagnostics::{
+    classify_failed_ingest, FailedIngestDiagnostic, FailedIngestDiagnosticRecorder,
+    FailedIngestDiagnosticStore, FailedIngestEvidenceSummary, FailedIngestProgress,
+    FailedIngestReason, FailedIngestScanCounts, FailedIngestSourceKind,
+    FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION, MAX_FAILED_INGEST_EVIDENCE_ENTRIES,
+};
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
 };
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
-    ingest_path_with_policy_and_observer, IngestReport, IngestStats,
+    ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
+    IngestReport, IngestStats,
 };
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
@@ -50,17 +58,19 @@ pub use package::{
 pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
 pub use query::{
     classify_ts, corpus_time_quality, query_event_neighborhood, query_events, query_facets,
-    query_shared_timeline_summary, query_timeline_summary, search_events, search_events_advanced,
-    search_events_advanced_with_cancel, EventNeighborhood, EventNeighborhoodQuery, EventPage,
-    EventQuery, EventSearchHit, EventSearchQuery, EventSearchResult, ExplorerEvent, LogFacets,
-    SearchMatchMode, SharedTimelineAxisBucket, SharedTimelineLaneScope, SharedTimelineLaneSummary,
-    SharedTimelineSeverity, SharedTimelineSeveritySeries, SharedTimelineSummary,
-    SharedTimelineSummaryQuery, TargetResolveStatus, TimeQuality, TimelineSummary,
-    TimelineSummaryBucket, TimelineSummaryQuery, DEFAULT_EVENT_PAGE, DEFAULT_NEIGHBORHOOD_RADIUS,
-    DEFAULT_TIMELINE_BUCKETS, MAX_EVENT_PAGE, MAX_NEIGHBORHOOD_RADIUS, MAX_REGEX_SCAN_EVENTS,
-    MAX_SEARCH_EXCERPT_LEN, MAX_SEARCH_PATTERN_LEN, MAX_SHARED_TIMELINE_COUNT_CELLS,
-    MAX_SHARED_TIMELINE_LANES, MAX_SHARED_TIMELINE_LANE_SOURCES, MAX_TIMELINE_BUCKETS, MIN_WALL_TS,
-    SHARED_TIMELINE_SEVERITY_SERIES,
+    query_shared_timeline_summary, query_source_catalog, query_timeline_summary, search_events,
+    search_events_advanced, search_events_advanced_with_cancel, EventNeighborhood,
+    EventNeighborhoodQuery, EventPage, EventQuery, EventSearchHit, EventSearchQuery,
+    EventSearchResult, ExplorerEvent, LogFacets, LogSourceCatalogEntry, LogSourceCatalogPage,
+    LogSourceCatalogQuery, SearchMatchMode, SharedTimelineAxisBucket, SharedTimelineLaneScope,
+    SharedTimelineLaneSummary, SharedTimelineSeverity, SharedTimelineSeveritySeries,
+    SharedTimelineSummary, SharedTimelineSummaryQuery, TargetResolveStatus, TimeQuality,
+    TimelineSummary, TimelineSummaryBucket, TimelineSummaryQuery, DEFAULT_EVENT_PAGE,
+    DEFAULT_NEIGHBORHOOD_RADIUS, DEFAULT_SOURCE_CATALOG_PAGE, DEFAULT_TIMELINE_BUCKETS,
+    MAX_EVENT_PAGE, MAX_NEIGHBORHOOD_RADIUS, MAX_REGEX_SCAN_EVENTS, MAX_SEARCH_EXCERPT_LEN,
+    MAX_SEARCH_PATTERN_LEN, MAX_SHARED_TIMELINE_COUNT_CELLS, MAX_SHARED_TIMELINE_LANES,
+    MAX_SOURCE_CATALOG_CURSOR_BYTES, MAX_SOURCE_CATALOG_PAGE, MAX_SOURCE_CATALOG_SEARCH_CHARS,
+    MAX_TIMELINE_BUCKETS, MIN_WALL_TS, SHARED_TIMELINE_SEVERITY_SERIES,
 };
 pub use reanalyze::{
     reanalyze_corpus_embeddings, reanalyze_corpus_embeddings_quiet, LOCAL_REANALYZE_TEMPLATE_CAP,

@@ -993,6 +993,9 @@ fn materialize_package_metadata(
     meta.meta_version = META_VERSION;
     meta.id = new_id.to_string();
     meta.origin_corpus_id = Some(origin_id.to_string());
+    // Host-managed identities are local publication authority and must never
+    // cross a portable package boundary.
+    meta.managed_identity = None;
     meta.source_label = Some(format!("import:{origin_id}"));
     if meta.name.trim().is_empty() {
         meta.name = manifest.name.clone();
@@ -1053,6 +1056,7 @@ fn legacy_corpus_meta(
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_else(crate::embed::now_unix_secs),
         engine: EVENT_ENGINE.into(),
+        managed_identity: None,
         license: get_string("license", "license"),
         vector_index: get_string("vectorIndex", "vector_index"),
         source_label: Some(format!("import:{origin_id}")),
@@ -1583,6 +1587,10 @@ mod tests {
     fn export_import_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let (cache, corpus_id) = seed_corpus(dir.path());
+        LogCorpus::open(&cache, &corpus_id)
+            .unwrap()
+            .write_managed_identity("contextdesk.demo.test")
+            .unwrap();
         let out = dir.path().join("pack.cdlog.zip");
         let man = export_corpus_zip(&cache, &corpus_id, &out).unwrap();
         assert_eq!(man.format_version, PACKAGE_FORMAT_VERSION);
@@ -1600,6 +1608,10 @@ mod tests {
         assert!(c.template_count() > 0);
         let meta = c.meta().unwrap();
         assert_eq!(meta.origin_corpus_id.as_deref(), Some(corpus_id.as_str()));
+        assert!(
+            meta.managed_identity.is_none(),
+            "portable packages must not confer a host-managed identity"
+        );
         assert!(meta.stats.is_some());
         assert!(meta.stats.as_ref().unwrap().reduction_ratio > 1.0);
         match crate::log_analysis::query::query_event_original(&c, 0).unwrap() {

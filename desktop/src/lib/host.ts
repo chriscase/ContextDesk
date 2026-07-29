@@ -324,6 +324,11 @@ export async function agentTurn(
   onEvent?: (ev: EventDto) => void,
   pinnedSkillId?: string | null,
   logExplorerContext?: LogExplorerTurnContextDto | null,
+  retrySynthesisOnly = false,
+  transcriptIds?: {
+    userMessageId?: string | null;
+    assistantMessageId?: string | null;
+  },
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -333,6 +338,10 @@ export async function agentTurn(
     provider_profile_id: providerProfileId?.trim() || null,
     pinned_skill_id: pinnedSkillId?.trim() || null,
     log_explorer_context: logExplorerContext ?? null,
+    retry_synthesis_only: retrySynthesisOnly,
+    client_user_message_id: transcriptIds?.userMessageId?.trim() || null,
+    client_assistant_message_id:
+      transcriptIds?.assistantMessageId?.trim() || null,
   };
 
   if (!isTauri()) {
@@ -809,6 +818,8 @@ export type ProviderDto = {
   has_key: boolean;
   /** Native tool calling; false after gateway rejection (#327). */
   tools_enabled?: boolean;
+  /** Provider/profile deadline class; auto performs no network probing. */
+  deadline_preference?: "auto" | "patient" | "standard";
 };
 
 /** Persist active provider profile (refs only) + optional API key to OS keychain. */
@@ -881,6 +892,8 @@ export async function hostSaveActiveProvider(args: {
   localOnly?: boolean;
   /** When set, updates native tools capability (#327). */
   toolsEnabled?: boolean;
+  /** Explicit latency class for adaptive phase deadlines. */
+  deadlinePreference?: "auto" | "patient" | "standard";
 }): Promise<ProviderDto | null> {
   if (!isTauri()) return null;
   return invoke<ProviderDto>("save_active_provider", {
@@ -892,6 +905,7 @@ export async function hostSaveActiveProvider(args: {
       api_key: args.apiKey ?? null,
       local_only: args.localOnly ?? null,
       tools_enabled: args.toolsEnabled ?? null,
+      deadline_preference: args.deadlinePreference ?? null,
     },
   });
 }
@@ -1543,6 +1557,7 @@ export type RouterBudgetDto = {
   max_tool_rounds: number;
   max_results_per_source: number;
   deadline_ms: number;
+  deadline_is_explicit: boolean;
 };
 
 export async function hostGetRouterBudget(): Promise<RouterBudgetDto | null> {
@@ -1685,6 +1700,67 @@ export type LogIngestReportDto = {
   embedding?: LogEmbeddingStatusDto | null;
 };
 
+export type DemoLogInstallDto = {
+  status:
+    "installed" | "already_installed" | "cancelled" | "unavailable" | "failed";
+  demoIdentity: string;
+  corpusId: string | null;
+  corpusName: string;
+  events: number | null;
+  detail: string;
+  retryable: boolean;
+};
+
+export type FailedLogIngestDiagnosticDto = {
+  schemaVersion: number;
+  generatedAt: number;
+  sourceKind: "directory" | "zip" | "file" | "unknown";
+  reasonCode:
+    | "cancelled"
+    | "no_importable_files"
+    | "no_safe_events"
+    | "invalid_archive"
+    | "policy_rejected"
+    | "source_metadata_failed"
+    | "source_open_failed"
+    | "source_read_failed"
+    | "source_changed"
+    | "worker_failed"
+    | "ingest_failed";
+  summary: string;
+  cancelled: boolean;
+  progress: {
+    lastPhase: string;
+    linesProcessed: number | null;
+    filesProcessed: number | null;
+    bytesProcessed: number | null;
+    templates: number | null;
+    updatesSeen: number;
+  };
+  evidence: {
+    scanCounts: {
+      binary: number;
+      empty: number;
+      hidden: number;
+      oversized: number;
+      readFailed: number;
+      parseFailed: number;
+    };
+    transcript: {
+      reason:
+        | "binary"
+        | "empty"
+        | "hidden"
+        | "oversized"
+        | "read_failed"
+        | "parse_failed";
+      basename: string;
+    }[];
+    omittedEntries: number;
+  };
+  redacted: true;
+};
+
 export type LogPackageImportDto = {
   corpusId: string;
   name: string;
@@ -1742,10 +1818,40 @@ export async function hostIngestLogPath(
   });
 }
 
+/** Explicit first-run install of the packaged synthetic 25k log corpus. */
+export async function hostInstallDemoLogCorpus(): Promise<DemoLogInstallDto> {
+  if (!isTauri()) {
+    return {
+      status: "unavailable",
+      demoIdentity: "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1",
+      corpusId: null,
+      corpusName: "Demo · seven-day performance triage",
+      events: null,
+      detail: "Packaged demo logs require the installed desktop app.",
+      retryable: false,
+    };
+  }
+  return invoke<DemoLogInstallDto>("install_demo_log_corpus", undefined);
+}
+
 /** Request cancel of SoftWrite log ingest (#498). */
 export async function hostCancelLogIngest(): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_ingest");
+}
+
+/** One memory-only failed-ingest diagnostic for the latest failed trial. */
+export async function hostGetFailedLogIngestDiagnostic(): Promise<FailedLogIngestDiagnosticDto | null> {
+  if (!isTauri()) return null;
+  return invoke<FailedLogIngestDiagnosticDto | null>(
+    "get_failed_log_ingest_diagnostic",
+  );
+}
+
+/** Clear the memory-only failed-ingest diagnostic. */
+export async function hostClearFailedLogIngestDiagnostic(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("clear_failed_log_ingest_diagnostic");
 }
 
 /** Trusted local template-vector re-analysis; events are not reparsed. */
@@ -1883,17 +1989,50 @@ export async function hostExportLogCorpusPackage(
   return invoke<string>("export_log_corpus_package", { corpusId, path });
 }
 
-/** Write one bounded, privacy-reviewed corpus diagnostic to a user-selected path. */
-export async function hostSaveLogDiagnosticReport(
-  path: string,
-  format: "markdown" | "json",
-  content: string,
-): Promise<void> {
+export type LogDiagnosticSaveStatus = {
+  status: "saved" | "cancelled";
+} | {
+  status: "saved_with_warning";
+  warning: string;
+};
+
+export type PreparedLogDiagnosticDto = {
+  reportId: string;
+  markdown: string;
+  json: string;
+};
+
+/** Ask the trusted host to validate, scrub, render, and retain an exact preview. */
+export async function hostPrepareLogDiagnosticReport(
+  manifest: import("./logDiagnosticReport").LogDiagnosticManifest,
+): Promise<PreparedLogDiagnosticDto> {
   if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
-  await invoke<void>("save_log_diagnostic_report", {
-    path,
-    format,
-    content,
+  return invoke<PreparedLogDiagnosticDto>("prepare_log_diagnostic_report", {
+    request: { manifest },
+  });
+}
+
+/** Release one superseded process-local diagnostic preview. */
+export async function hostReleaseLogDiagnosticReport(
+  reportId: string,
+): Promise<boolean> {
+  if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
+  return invoke<boolean>("release_log_diagnostic_report", {
+    request: { reportId },
+  });
+}
+
+/** Ask the trusted host to select and atomically write one reviewed diagnostic. */
+export async function hostSaveLogDiagnosticReport(
+  reportId: string,
+  format: "markdown" | "json",
+): Promise<LogDiagnosticSaveStatus> {
+  if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
+  return invoke<LogDiagnosticSaveStatus>("save_log_diagnostic_report", {
+    request: {
+      reportId,
+      format,
+    },
   });
 }
 
@@ -2028,6 +2167,27 @@ export type LogFacetsDto = {
   services: Record<string, number>;
   hosts: Record<string, number>;
   timeQuality: TimeQuality;
+};
+
+export type LogSourceCatalogEntryDto = {
+  /** Exact corpus-relative path; duplicate basenames remain distinct. */
+  source: string;
+  eventCount: number;
+};
+
+export type LogSourceCatalogQueryDto = {
+  /** Case-insensitive literal substring over the full relative path. */
+  search?: string | null;
+  /** Exclusive full-path keyset returned by the preceding page. */
+  cursor?: string | null;
+  /** Zero uses the core default; the core rejects values above its hard cap. */
+  limit?: number;
+};
+
+export type LogSourceCatalogPageDto = {
+  sources: LogSourceCatalogEntryDto[];
+  nextCursor: string | null;
+  totalMatched: number;
 };
 
 export type EventSearchHitDto = {
@@ -2279,7 +2439,7 @@ export async function hostLogTimelineSummary(
 export async function hostLogSharedTimelineSummary(
   corpusId: string,
   filter: EventQueryDto = {},
-  lanes: { sources: string[] }[] = [],
+  lanes: { sources: string[]; allSources?: boolean }[] = [],
   maxBuckets = 96,
 ): Promise<SharedTimelineSummaryDto> {
   if (!isTauri()) {
@@ -2376,6 +2536,24 @@ export async function hostLogFacets(
     };
   }
   return invoke<LogFacetsDto>("log_facets", { corpusId, query });
+}
+
+/** Complete source inventory; deliberately separate from top-N filter facets. */
+export async function hostLogSourceCatalog(
+  corpusId: string,
+  query: LogSourceCatalogQueryDto = {},
+): Promise<LogSourceCatalogPageDto> {
+  if (!isTauri()) {
+    return {
+      sources: [],
+      nextCursor: null,
+      totalMatched: 0,
+    };
+  }
+  return invoke<LogSourceCatalogPageDto>("log_source_catalog", {
+    corpusId,
+    query,
+  });
 }
 
 export async function hostLogSearchEvents(

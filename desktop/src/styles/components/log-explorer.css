@@ -323,6 +323,10 @@
   .log-explorer__picker-trigger > svg {
     transition: none;
   }
+
+  .log-explorer__loading-inline::before {
+    animation: none;
+  }
 }
 
 .log-explorer__toolbar-field {
@@ -408,6 +412,11 @@
   padding: 0.25rem 0;
 }
 
+.log-explorer__lane-paging--upper {
+  justify-content: flex-start;
+  padding: 0.18rem 0.5rem;
+}
+
 .log-explorer__paging-boundary,
 .log-explorer__paging-loading {
   color: var(--text-muted, #838995);
@@ -452,6 +461,22 @@
   background: var(--bg-elevated, #121418);
   padding: 0.5rem;
   gap: 0.35rem;
+}
+
+.log-explorer__chat-scroll-region {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.log-explorer__chat--compact-layout .log-explorer__chat-scroll-region {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .log-explorer__chat--mode-hidden {
@@ -1549,6 +1574,19 @@
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
 }
 
+.log-explorer--narrow.log-explorer--chat-open
+  .log-explorer__chat-scroll-region {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.log-explorer--narrow.log-explorer--chat-open
+  .log-explorer__chat-thread-wrap {
+  flex: 1 0 10rem;
+}
+
 .log-explorer--narrow .log-explorer__lanes {
   min-height: 240px;
 }
@@ -1738,6 +1776,34 @@
   flex-direction: column;
   gap: 0.15rem;
   margin-bottom: 0.5rem;
+}
+
+.log-explorer__loading-inline {
+  align-items: center;
+  color: var(--fg-muted, #9aa0a6);
+  display: inline-flex;
+  font-size: 0.7rem;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.log-explorer__loading-inline::before {
+  animation: log-explorer-spin 0.85s linear infinite;
+  border: 1.5px solid
+    color-mix(in srgb, var(--fg-muted, #9aa0a6) 35%, transparent);
+  border-radius: 50%;
+  border-top-color: var(--accent, #5b9fd4);
+  box-sizing: border-box;
+  content: "";
+  flex: 0 0 auto;
+  height: 0.72rem;
+  width: 0.72rem;
+}
+
+@keyframes log-explorer-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .log-explorer__facet-row {
@@ -2352,9 +2418,15 @@
   min-width: 0;
 }
 
+.log-explorer__lane-source-more {
+  width: 100%;
+  margin-top: 0.45rem;
+}
+
 .log-explorer__lane-editor-content {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .log-explorer__lane-editor-row {

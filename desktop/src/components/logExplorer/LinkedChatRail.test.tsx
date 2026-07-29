@@ -13,10 +13,90 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as host from "../../lib/host";
 import {
+  hasHostLinkedSynthesisRetry,
   LinkedChatRail,
   shouldApplyChatLoad,
   type AgentContextSummary,
 } from "./LinkedChatRail";
+
+it("requires an exact host-authored retry availability event", () => {
+  const timeoutOnly: host.EventDto[] = [
+    {
+      kind: "error",
+      payload: { code: "linked_synthesis_timeout", message: "timed out" },
+    },
+  ];
+  expect(
+    hasHostLinkedSynthesisRetry(
+      timeoutOnly,
+      "chat",
+      "corpus",
+      "provider",
+      "model",
+    ),
+  ).toBe(false);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        ...timeoutOnly,
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "chat",
+            corpus_id: "corpus",
+            provider_profile_id: "provider",
+            model_id: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "provider",
+      "model",
+    ),
+  ).toBe(true);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "other-chat",
+            corpus_id: "corpus",
+            provider_profile_id: "provider",
+            model_id: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "provider",
+      "model",
+    ),
+  ).toBe(false);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "chat",
+            corpus_id: "corpus",
+            provider_profile_id: "other-provider",
+            model_id: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "provider",
+      "model",
+    ),
+  ).toBe(false);
+});
 
 vi.mock("../../lib/host", () => ({
   modelSelectionKey: (providerId: string, modelId: string) =>
@@ -382,6 +462,11 @@ describe("LinkedChatRail", () => {
       expect.any(Function),
       null,
       expect.objectContaining({ corpus_id: "c1" }),
+      false,
+      expect.objectContaining({
+        userMessageId: expect.any(String),
+        assistantMessageId: expect.any(String),
+      }),
     );
 
     first.unmount();
@@ -568,6 +653,11 @@ describe("LinkedChatRail", () => {
       expect.any(Function),
       null,
       expect.objectContaining({ corpus_id: "c1" }),
+      false,
+      expect.objectContaining({
+        userMessageId: expect.any(String),
+        assistantMessageId: expect.any(String),
+      }),
     );
     expect(
       vi.mocked(host.hostSaveChatSession).mock.calls[0]?.[0].linked_corpus_id,
@@ -1084,9 +1174,12 @@ describe("LinkedChatRail", () => {
 
     expect(
       await screen.findByText(
-        "Linked investigation completed with governed evidence tools",
+        "Linked investigation completed with governed evidence retrieval",
       ),
     ).toBeTruthy();
+    expect(
+      screen.getByTestId("linked-evidence-trust-disclosure").textContent,
+    ).toBe("Evidence references verified · model interpretation not verified");
     expect(screen.getByText("search_logs")).toBeTruthy();
     expect(screen.getByText("search_kb")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
@@ -1468,6 +1561,7 @@ describe("LinkedChatRail", () => {
 
     const assistant = await screen.findByTestId("linked-chat-msg-assistant");
     expect(assistant.textContent).toContain(unavailable);
+    expect(screen.queryByTestId("linked-evidence-trust-disclosure")).toBeNull();
     expect(assistant.textContent).not.toContain("**Error:**");
     expect(
       within(assistant).getByText("Error:", { selector: "strong" }),
@@ -1562,7 +1656,7 @@ describe("LinkedChatRail", () => {
     expect(host.agentTurn).toHaveBeenCalledTimes(2);
   });
 
-  it("does not report success when a governed-tool turn reaches its deadline", async () => {
+  it("preserves governed evidence and retries synthesis without another user turn or retrieval", async () => {
     let stored = sessionDto("s-tool-deadline", "Logs · fixture");
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
       stored = session;
@@ -1584,9 +1678,18 @@ describe("LinkedChatRail", () => {
         },
       ],
     );
-    vi.mocked(host.agentTurn).mockImplementationOnce(
-      async (_id, _text, _fl, _m, _p, onEvent) => {
+    vi.mocked(host.agentTurn)
+      .mockImplementationOnce(
+        async (id, _text, _fl, model, provider, onEvent) => {
         const events: host.EventDto[] = [
+          {
+            kind: "turn_phase",
+            payload: { phase: "choosing_evidence" },
+          },
+          {
+            kind: "turn_phase",
+            payload: { phase: "retrieving_evidence" },
+          },
           {
             kind: "tool",
             payload: {
@@ -1597,16 +1700,135 @@ describe("LinkedChatRail", () => {
             },
           },
           {
+            kind: "turn_phase",
+            payload: { phase: "synthesizing_answer" },
+          },
+          {
             kind: "error",
             payload: {
-              code: "budget_time",
+              code: "linked_synthesis_timeout",
               message:
-                "This turn reached its 60000 ms deadline while waiting for the provider.",
+                "Answer synthesis reached its bounded deadline. The successful log evidence above is preserved.",
+            },
+          },
+          {
+            kind: "linked_synthesis_retry",
+            payload: {
+              available: true,
+              session_id: id,
+              corpus_id: "c1",
+              provider_profile_id: provider,
+              model_id: model,
             },
           },
           {
             kind: "turn_completed",
-            payload: { reason: "budget_time" },
+            payload: { reason: "linked_synthesis_timeout" },
+          },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+        },
+      )
+      .mockImplementationOnce(async (_id, text, _fl, _m, _p, onEvent) => {
+        expect(text).toBe("");
+        const events: host.EventDto[] = [
+          {
+            kind: "turn_phase",
+            payload: { phase: "synthesizing_answer" },
+          },
+          {
+            kind: "text_delta",
+            payload: {
+              text: "Observed the failure at seq=0 source=worker.log.",
+            },
+          },
+          { kind: "turn_completed", payload: { reason: "stop" } },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      });
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Investigate the exact log identity" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    const status = await screen.findByRole("status");
+    expect(status.textContent).toContain("Bounded evidence is preserved");
+    expect(status.textContent).not.toContain("completed with governed");
+    expect(
+      screen.getByTestId("linked-chat-msg-assistant").textContent,
+    ).toContain("successful log evidence above is preserved");
+    expect(screen.getByText("search_logs")).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
+    ).toBe(false);
+
+    fireEvent.click(screen.getByTestId("retry-linked-synthesis"));
+    expect(
+      await screen.findByText(
+        "Observed the failure at seq=0 source=worker.log.",
+      ),
+    ).toBeTruthy();
+    expect(host.agentTurn).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(host.agentTurn).mock.calls[1]?.[8]).toBe(true);
+    expect(screen.queryByTestId("retry-linked-synthesis")).toBeNull();
+    expect(stored.messages).toHaveLength(3);
+    expect(
+      stored.messages.filter((message) => message.role === "user"),
+    ).toHaveLength(1);
+  });
+
+  it("persists a post-retrieval provider failure and trusts only its bound retry event", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (id, _text, _forceLocal, model, provider, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "tool",
+            payload: {
+              id: "search-provider-failure",
+              name: "search_logs",
+              summary: "1 matching log event",
+              ok: true,
+            },
+          },
+          {
+            kind: "error",
+            payload: {
+              code: "linked_synthesis_provider_error",
+              message:
+                "The provider failed after retrieval; governed evidence is preserved.",
+            },
+          },
+          {
+            kind: "turn_completed",
+            payload: { reason: "linked_synthesis_provider_error" },
+          },
+          {
+            kind: "linked_synthesis_retry",
+            payload: {
+              available: true,
+              session_id: id,
+              corpus_id: "c1",
+              provider_profile_id: provider,
+              model_id: model,
+            },
           },
         ];
         for (const event of events) onEvent?.(event);
@@ -1624,29 +1846,29 @@ describe("LinkedChatRail", () => {
     );
     fireEvent.click(screen.getByTestId("new-linked-chat"));
     fireEvent.change(await screen.findByLabelText("Chat message"), {
-      target: { value: "Investigate the exact log identity" },
+      target: { value: "Preserve this exact question" },
     });
     fireEvent.click(screen.getByTestId("send-linked-chat"));
 
-    const status = await screen.findByRole("status");
-    expect(status.textContent).toContain(
-      "Linked investigation stopped with Tools Provider · triage-1",
-    );
-    expect(status.textContent).not.toContain("completed with governed");
-    expect(
-      screen.getByTestId("linked-chat-msg-assistant").textContent,
-    ).toContain("This turn reached its 60000 ms deadline");
-    expect(screen.getByText("search_logs")).toBeTruthy();
-    expect(
-      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
-    ).toBe(false);
-
-    fireEvent.change(screen.getByLabelText("Chat message"), {
-      target: { value: "Retry with one precise search" },
+    expect(await screen.findByTestId("retry-linked-synthesis")).toBeTruthy();
+    expect(screen.queryByTestId("linked-evidence-trust-disclosure")).toBeNull();
+    await waitFor(() => {
+      const saved = stored;
+      expect(
+        saved?.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content === "Preserve this exact question",
+        ),
+      ).toBe(true);
+      expect(
+        saved?.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.content.includes("governed evidence is preserved"),
+        ),
+      ).toBe(true);
     });
-    expect(
-      (screen.getByTestId("send-linked-chat") as HTMLButtonElement).disabled,
-    ).toBe(false);
   });
 
   it("jump-to-latest restores follow mode after deliberate upward scroll", async () => {

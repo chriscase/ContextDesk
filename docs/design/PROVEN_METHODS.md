@@ -102,7 +102,7 @@ flowchart LR
 
 | Method                         | Primary question                                                                       | Current status                                                                                                                      | Chapter                                                                            |
 | ------------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model?                          | **Partial**: linked-log and ordinary-chat isolation plus one explicit main-chat corpus attachment ship; multi-corpus and phase-aware retry work remain #693/#649 | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
+| Deterministic context assembly | What evidence is eligible, bounded, and safe to give a model?                          | **Partial**: linked-log isolation, one explicit main-chat corpus attachment, phase-aware deadlines, and evidence-preserving synthesis retry ship; multi-corpus remains #693 and native slow-provider acceptance remains #649 | [Deterministic context assembly](proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md) |
 | Log evidence pipeline          | How do raw records become honest, searchable, scalable evidence?                       | **Partial**: batch single-corpus analysis ships; full timestamp policy, durable noise rules, and versioned cross-corpus application baselines remain #670/#671/#690 | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md)                   |
 | Operational metric alignment   | How can unlike time-series signals share log time without implying comparable values?  | **Partial**: schema, validation, bounded renderer, fixtures, and Explorer session import/seek ship; durable attachment, persistence, incident bundles, and responsive docking remain #707 | [Operational metric tracks](OPERATIONAL_METRIC_TRACKS.md)                         |
 | Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
@@ -233,7 +233,7 @@ This first version intentionally leaves several chapters for follow-up:
 - connector and database read isolation;
 - Help corpus authoring, validation, and offline delivery;
 - package/import safety and compatibility evolution;
-- provider lifecycle, cancellation, and evidence-preserving retry after #649;
+- provider-specific native acceptance for the phase-aware lifecycle on #649;
 - timestamp policy after the remaining #670 work ships;
 - report/export and proposal lifecycle after #646/#532; and
 - future chapters and diagrams for the remaining methods as their contracts and

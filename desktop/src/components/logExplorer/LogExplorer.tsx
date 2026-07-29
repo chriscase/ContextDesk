@@ -16,6 +16,7 @@ import {
 import {
   createLogSearchRequestId,
   hostCancelLogSearch,
+  hostGetBranding,
   hostGetLogCorpus,
   hostLogAddBookmark,
   hostLogAddInvestigationEvidence,
@@ -33,6 +34,7 @@ import {
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
+  hostLogSourceCatalog,
   hostSetActiveLogCorpus,
   type EventPageDto,
   type EventOriginalRepresentationDto,
@@ -47,6 +49,12 @@ import {
   type ResolvedInvestigationDocumentDto,
   type TimeQuality,
 } from "../../lib/host";
+import {
+  diagnosticEnvironmentFromBranding,
+  portableDiagnosticOsHint,
+  type LogDiagnosticActiveViewInput,
+  type LogDiagnosticEnvironment,
+} from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import {
   clampLaneCount,
@@ -86,9 +94,11 @@ import {
   defaultLanes,
   loadLanes,
   loadLinkMode,
+  restoreSpecificLaneSources,
   resizeLaneList,
   saveLanes,
   saveLinkMode,
+  selectAllLaneSources as selectAllSourcesForLane,
   toggleLaneSource,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
@@ -121,6 +131,7 @@ import {
 import { InvestigationAddMenu } from "./InvestigationAddMenu";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
+import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
 import {
   centeredLiteralExcerpt,
   eventRowHeight,
@@ -146,6 +157,8 @@ type Props = {
 };
 
 const FIND_PAGE_SIZE = 50;
+const LANE_SOURCE_PAGE_SIZE = 200;
+const LANE_SOURCE_SEARCH_DEBOUNCE_MS = 160;
 // Time + level + source + a useful message excerpt fit without reducing a
 // lane to timestamp/severity slivers. Availability is based on the central
 // evidence grid, after the live Filters/Chat rail widths and splitters.
@@ -694,7 +707,16 @@ export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
+  const [facetsLoading, setFacetsLoading] = useState(true);
+  const [timelineReady, setTimelineReady] = useState(false);
   const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
+  const [laneSourceCatalogNextCursor, setLaneSourceCatalogNextCursor] =
+    useState<string | null>(null);
+  const [laneSourceCatalogTotal, setLaneSourceCatalogTotal] = useState<
+    number | null
+  >(null);
+  const [laneSourceCatalogLoading, setLaneSourceCatalogLoading] =
+    useState(false);
   const [laneSourceCatalogUnavailable, setLaneSourceCatalogUnavailable] =
     useState(false);
   const [laneSourceQuery, setLaneSourceQuery] = useState("");
@@ -836,6 +858,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [findUseSemantic, setFindUseSemantic] = useState(false);
   const [findPartial, setFindPartial] = useState(false);
   const [findSearching, setFindSearching] = useState(false);
+  const [findLocating, setFindLocating] = useState(false);
   const [findCancelling, setFindCancelling] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState("");
@@ -952,6 +975,10 @@ export function LogExplorer({ corpusId }: Props) {
     startW: number;
   } | null>(null);
   const [status, setStatus] = useState("Ready");
+  const [diagnostic, setDiagnostic] = useState<{
+    environment: LogDiagnosticEnvironment;
+    activeView: LogDiagnosticActiveViewInput;
+  } | null>(null);
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
   const [chatW, setChatW] = useState(300);
@@ -966,11 +993,15 @@ export function LogExplorer({ corpusId }: Props) {
   const saveEvidenceTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationAddTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationEditTriggerRef = useRef<HTMLButtonElement>(null);
+  const diagnosticTriggerRef = useRef<HTMLButtonElement>(null);
   const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
+  const facetAfterPaintFrameRef = useRef<number | null>(null);
+  const facetStartFrameRef = useRef<number | null>(null);
   const laneSourceRequestRef = useRef(0);
+  const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
@@ -987,6 +1018,7 @@ export function LogExplorer({ corpusId }: Props) {
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+  const findBusy = findSearching || findLocating;
 
   const setAutoStatus = useCallback((nextStatus: string) => {
     if (autoStatusLockRef.current === "bookmark-restore") {
@@ -1011,11 +1043,13 @@ export function LogExplorer({ corpusId }: Props) {
       [
         ...new Set([
           ...laneSourceCatalog,
-          ...Object.keys(facets?.sources ?? {}),
+          ...(laneSourceCatalogUnavailable
+            ? Object.keys(facets?.sources ?? {})
+            : []),
           ...lanes.flatMap((lane) => lane.sources),
         ]),
       ].sort(),
-    [facets, laneSourceCatalog, lanes],
+    [facets, laneSourceCatalog, laneSourceCatalogUnavailable, lanes],
   );
   const visibleLaneEditorSources = useMemo(() => {
     const query = laneSourceQuery.trim().toLocaleLowerCase();
@@ -1351,6 +1385,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const loadFacets = useCallback(async () => {
     const requestId = ++facetRequestRef.current;
+    setFacetsLoading(true);
     try {
       const f = await hostLogFacets(
         corpusId,
@@ -1361,28 +1396,80 @@ export function LogExplorer({ corpusId }: Props) {
     } catch (e) {
       if (requestId !== facetRequestRef.current) return;
       setError(String(e));
+    } finally {
+      if (requestId === facetRequestRef.current) setFacetsLoading(false);
     }
   }, [corpusId, filters]);
 
-  const loadLaneSourceCatalog = useCallback(async () => {
-    const requestId = ++laneSourceRequestRef.current;
-    setLaneSourceCatalog([]);
-    setLaneSourceCatalogUnavailable(false);
-    try {
-      const sourceFacets = await hostLogFacets(
-        corpusId,
-        filtersToQuery(emptyFilters(), { keyword: null }),
-      );
-      if (requestId !== laneSourceRequestRef.current) return;
-      setLaneSourceCatalog(Object.keys(sourceFacets.sources ?? {}).sort());
-    } catch {
-      if (requestId !== laneSourceRequestRef.current) return;
-      setLaneSourceCatalogUnavailable(true);
+  const loadLaneSourceCatalog = useCallback(
+    async ({
+      append = false,
+      cursor = null,
+    }: {
+      append?: boolean;
+      cursor?: string | null;
+    } = {}) => {
+      const requestId = ++laneSourceRequestRef.current;
+      laneSourceLoadingRef.current = true;
+      setLaneSourceCatalogLoading(true);
+      if (!append) {
+        setLaneSourceCatalog([]);
+        setLaneSourceCatalogNextCursor(null);
+        setLaneSourceCatalogTotal(null);
+      }
+      setLaneSourceCatalogUnavailable(false);
+      try {
+        const page = await hostLogSourceCatalog(corpusId, {
+          search: laneSourceQuery.trim() || null,
+          cursor,
+          limit: LANE_SOURCE_PAGE_SIZE,
+        });
+        if (requestId !== laneSourceRequestRef.current) return;
+        const sources = page.sources.map((entry) => entry.source);
+        setLaneSourceCatalog((current) =>
+          append
+            ? [...new Set([...current, ...sources])].sort()
+            : [...new Set(sources)].sort(),
+        );
+        setLaneSourceCatalogNextCursor(page.nextCursor);
+        setLaneSourceCatalogTotal(page.totalMatched);
+      } catch {
+        if (requestId !== laneSourceRequestRef.current) return;
+        setLaneSourceCatalogUnavailable(true);
+        setLaneSourceCatalogNextCursor(null);
+      } finally {
+        if (requestId === laneSourceRequestRef.current) {
+          laneSourceLoadingRef.current = false;
+          setLaneSourceCatalogLoading(false);
+        }
+      }
+    },
+    [corpusId, laneSourceQuery],
+  );
+
+  const loadMoreLaneSources = useCallback(() => {
+    if (laneSourceLoadingRef.current || laneSourceCatalogNextCursor == null) {
+      return;
     }
-  }, [corpusId]);
+    void loadLaneSourceCatalog({
+      append: true,
+      cursor: laneSourceCatalogNextCursor,
+    });
+  }, [laneSourceCatalogNextCursor, loadLaneSourceCatalog]);
 
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
+    let loadedCurrentView = false;
+    if (facetAfterPaintFrameRef.current != null) {
+      window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
+      facetAfterPaintFrameRef.current = null;
+    }
+    if (facetStartFrameRef.current != null) {
+      window.cancelAnimationFrame(facetStartFrameRef.current);
+      facetStartFrameRef.current = null;
+    }
+    setTimelineReady(false);
+    setFacetsLoading(true);
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
       visibleLanes.map((lane) => [
@@ -1525,36 +1612,68 @@ export function LogExplorer({ corpusId }: Props) {
           `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
         );
       }
+      loadedCurrentView = true;
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      if (requestId === eventsRequestRef.current) setBusy(false);
+      if (requestId === eventsRequestRef.current) {
+        setBusy(false);
+        setTimelineReady(loadedCurrentView);
+        // Keep first useful rows on the critical path. Facet aggregation can
+        // scan a large corpus and is useful only after the evidence page is
+        // available. Two animation frames give React/browser one committed
+        // paint boundary before the background aggregation begins.
+        if (loadedCurrentView) {
+          facetAfterPaintFrameRef.current = window.requestAnimationFrame(() => {
+            facetAfterPaintFrameRef.current = null;
+            if (requestId !== eventsRequestRef.current) return;
+            facetStartFrameRef.current = window.requestAnimationFrame(() => {
+              facetStartFrameRef.current = null;
+              if (requestId === eventsRequestRef.current) void loadFacets();
+            });
+          });
+        } else {
+          setFacetsLoading(false);
+        }
+      }
     }
-  }, [corpusId, filters, laneCount, lanes, setAutoStatus]);
+  }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
 
   useEffect(() => {
     void refreshMeta();
   }, [refreshMeta]);
 
   useEffect(() => {
-    void loadFacets();
+    if (!laneEditorOpen) {
+      laneSourceRequestRef.current += 1;
+      laneSourceLoadingRef.current = false;
+      setLaneSourceCatalogLoading(false);
+      return;
+    }
+    const timeout = window.setTimeout(
+      () => void loadLaneSourceCatalog(),
+      laneSourceQuery ? LANE_SOURCE_SEARCH_DEBOUNCE_MS : 0,
+    );
     return () => {
-      facetRequestRef.current += 1;
-    };
-  }, [loadFacets]);
-
-  useEffect(() => {
-    void loadLaneSourceCatalog();
-    return () => {
+      window.clearTimeout(timeout);
       laneSourceRequestRef.current += 1;
     };
-  }, [loadLaneSourceCatalog]);
+  }, [laneEditorOpen, laneSourceQuery, loadLaneSourceCatalog]);
 
   useEffect(() => {
     void loadEvents();
     return () => {
       eventsRequestRef.current += 1;
+      facetRequestRef.current += 1;
+      if (facetAfterPaintFrameRef.current != null) {
+        window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
+        facetAfterPaintFrameRef.current = null;
+      }
+      if (facetStartFrameRef.current != null) {
+        window.cancelAnimationFrame(facetStartFrameRef.current);
+        facetStartFrameRef.current = null;
+      }
     };
   }, [loadEvents]);
 
@@ -1738,8 +1857,10 @@ export function LogExplorer({ corpusId }: Props) {
       focusRow?: boolean;
       viewFilters?: ExplorerFilters;
       selectTarget?: boolean;
+      isCurrent?: () => boolean;
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
+    if (opts?.isCurrent && !opts.isCurrent()) return "missing";
     const base =
       opts?.viewFilters ?? (opts?.clearFilters ? emptyFilters() : filters);
     const sourceFilter =
@@ -1762,6 +1883,7 @@ export function LogExplorer({ corpusId }: Props) {
       filter,
       sortByTime: true,
     });
+    if (opts?.isCurrent && !opts.isCurrent()) return "missing";
     if (nb.status === "found") {
       const laneId = opts?.laneId ?? "lane-0";
       applyNeighborhoodToLane(nb, laneId);
@@ -1796,12 +1918,16 @@ export function LogExplorer({ corpusId }: Props) {
       .find((lane) => (laneEvents[lane.id] ?? []).some((e) => e.seq === seq)) ??
     null;
 
-  const focusFindMatch = async (match: {
-    seq: number;
-    source?: string | null;
-  }): Promise<
+  const focusFindMatch = async (
+    match: {
+      seq: number;
+      source?: string | null;
+    },
+    isCurrent: () => boolean,
+  ): Promise<
     "focused" | "outside_visible_lanes" | "hidden_by_filter" | "missing"
   > => {
+    if (!isCurrent()) return "missing";
     const targetLane =
       visibleLaneForSource(match.source) ??
       visibleLaneWithResidentSeq(match.seq);
@@ -1812,6 +1938,7 @@ export function LogExplorer({ corpusId }: Props) {
       (e) => e.seq === match.seq,
     );
     if (residentTarget) {
+      if (!isCurrent()) return "missing";
       setFocusLaneId(targetLane.id);
       setLaneScrollSeq((m) => ({ ...m, [targetLane.id]: match.seq }));
       return "focused";
@@ -1819,6 +1946,7 @@ export function LogExplorer({ corpusId }: Props) {
     const status = await seekToSeq(match.seq, {
       laneId: targetLane.id,
       sources: targetLane.sources,
+      isCurrent,
     });
     return status === "found" ? "focused" : status;
   };
@@ -1835,6 +1963,7 @@ export function LogExplorer({ corpusId }: Props) {
     if (backendRequestId) void hostCancelLogSearch(backendRequestId);
     findActiveRef.current = false;
     setFindSearching(false);
+    setFindLocating(false);
     setFindCancelling(false);
     setFindActiveQuery(null);
     setFindMatches([]);
@@ -1884,8 +2013,8 @@ export function LogExplorer({ corpusId }: Props) {
     findActiveRef.current = true;
     setFindActiveQuery(q);
     setFindSearching(true);
+    setFindLocating(false);
     setFindCancelling(false);
-    setBusy(true);
     setError(null);
     try {
       const result = await hostLogSearchEventsAdvanced(corpusId, {
@@ -1905,6 +2034,11 @@ export function LogExplorer({ corpusId }: Props) {
         }),
       });
       if (requestId !== findRequestRef.current) return;
+      if (activeFindRequestRef.current === backendRequestId) {
+        activeFindRequestRef.current = null;
+      }
+      setFindSearching(false);
+      setFindCancelling(false);
       if (result.cancelled) {
         setStatus("Find cancelled · previous visible results preserved");
         return;
@@ -1949,7 +2083,16 @@ export function LogExplorer({ corpusId }: Props) {
       let findContextStatus: Awaited<ReturnType<typeof focusFindMatch>> | null =
         null;
       if (seqs.length > 0) {
-        findContextStatus = await focusFindMatch(hits[index]!.event);
+        setFindLocating(true);
+        setStatus(
+          `Find (${matchMode === "regex" ? "regex" : "literal"}): result page ready`,
+        );
+        findContextStatus = await focusFindMatch(
+          hits[index]!.event,
+          () => requestId === findRequestRef.current,
+        );
+        if (requestId !== findRequestRef.current) return;
+        setFindLocating(false);
       }
       const modeLabel = matchMode === "regex" ? "regex" : "literal";
       const extra = [
@@ -1987,8 +2130,8 @@ export function LogExplorer({ corpusId }: Props) {
           activeFindRequestRef.current = null;
         }
         setFindSearching(false);
+        setFindLocating(false);
         setFindCancelling(false);
-        setBusy(false);
       }
     }
   };
@@ -1997,13 +2140,21 @@ export function LogExplorer({ corpusId }: Props) {
     const requestId = activeFindRequestRef.current;
     if (!requestId || findCancelling) return;
     setFindCancelling(true);
-    setStatus("Cancelling Find…");
+    setStatus("Find cancellation requested");
     try {
       const signalled = await hostCancelLogSearch(requestId);
-      if (!signalled && activeFindRequestRef.current === requestId) {
+      if (activeFindRequestRef.current !== requestId) return;
+      if (!signalled) {
         setFindCancelling(false);
         setStatus("Find is still running · try Cancel again");
+        return;
       }
+      findRequestRef.current += 1;
+      activeFindRequestRef.current = null;
+      setFindSearching(false);
+      setFindLocating(false);
+      setFindCancelling(false);
+      setStatus("Find cancellation requested · previous visible results preserved");
     } catch (cancelError) {
       if (activeFindRequestRef.current !== requestId) return;
       setFindCancelling(false);
@@ -2082,23 +2233,39 @@ export function LogExplorer({ corpusId }: Props) {
       return;
     }
     const next = findIndex + dir;
+    const requestId = ++findRequestRef.current;
     setFindIndex(next);
     const seq = findMatches[next]!;
-    const findContextStatus = await focusFindMatch({
-      seq,
-      source: findMatchSources[seq],
-    });
-    setStatus(
-      `Find: match ${findBase + next + 1} of ${
-        findTotalExact
-          ? findTotal
-          : `${Math.max(findTotal, findBase + findMatches.length)}+`
-      }${
-        findContextStatus === "outside_visible_lanes"
-          ? " · target outside visible lanes; context not broadened"
-          : ""
-      }`,
-    );
+    setFindLocating(true);
+    setStatus(`Find: match ${findBase + next + 1} requested`);
+    try {
+      const findContextStatus = await focusFindMatch(
+        {
+          seq,
+          source: findMatchSources[seq],
+        },
+        () => requestId === findRequestRef.current,
+      );
+      if (requestId !== findRequestRef.current) return;
+      setStatus(
+        `Find: match ${findBase + next + 1} of ${
+          findTotalExact
+            ? findTotal
+            : `${Math.max(findTotal, findBase + findMatches.length)}+`
+        }${
+          findContextStatus === "outside_visible_lanes"
+            ? " · target outside visible lanes; context not broadened"
+            : ""
+        }`,
+      );
+    } catch (stepError) {
+      if (requestId !== findRequestRef.current) return;
+      setError(String(stepError));
+    } finally {
+      if (requestId === findRequestRef.current) {
+        setFindLocating(false);
+      }
+    }
   };
 
   /** Filter: reduce visible events by keyword ∩ facets (#523). */
@@ -2284,6 +2451,81 @@ export function LogExplorer({ corpusId }: Props) {
         viewportAnchors: laneViewportAnchors,
       });
     };
+
+  const openDiagnostics = async () => {
+    if (!summary) return;
+    let environment: LogDiagnosticEnvironment = {
+      appVersion: "unknown",
+      channel: "unknown",
+      gitSha: null,
+      os: portableDiagnosticOsHint(),
+    };
+    try {
+      environment = diagnosticEnvironmentFromBranding(await hostGetBranding());
+    } catch {
+      /* Keep an honest unknown identity if host branding is unavailable. */
+    }
+    setDiagnostic({
+      environment,
+      activeView: {
+        breakpoint,
+        density,
+        rowMode: lineMode,
+        metadataPresentation,
+        fieldEmphasis,
+        timeQuality,
+        linkMode,
+        visibleLaneCount: laneCount,
+        laneSourceCounts: lanes
+          .slice(0, laneCount)
+          .map((lane) => lane.sources.length),
+        filters: {
+          levelCount: filters.levels.length,
+          sourceCount: filters.sources.length,
+          serviceCount: filters.services.length,
+          hostCount: filters.hosts.length,
+          keywordPresent: Boolean(filters.keyword),
+          tracePresent: Boolean(filters.traceId),
+          timeFrom: filters.timeFrom,
+          timeTo: filters.timeTo,
+          seqFrom: filters.seqFrom,
+          seqTo: filters.seqTo,
+          templateId: filters.templateId,
+        },
+        find: {
+          active: Boolean(findActiveQuery),
+          matchMode: findMatchMode,
+          caseSensitive: findCaseSensitive,
+          semantic: findUseSemantic,
+          residentMatches: findMatches.length,
+        },
+        selectedSeqs: [...selected],
+        highlightedSeqs: [...highlight],
+        focusedSeq: detail?.seq ?? null,
+        viewportAnchors: Object.entries(laneViewportAnchors).map(
+          ([laneId, eventRef]) => ({ laneId, seq: eventRef.seq }),
+        ),
+        filtersCollapsed,
+        investigationCollapsed: chatCollapsed,
+        uiState: {
+          category: error
+            ? "error"
+            : busy || findBusy
+              ? "busy"
+              : status === "Ready"
+                ? "ready"
+                : "active",
+          busy: busy || findBusy,
+          hasError: Boolean(error),
+        },
+      },
+    });
+  };
+
+  const closeDiagnostics = () => {
+    setDiagnostic(null);
+    queueMicrotask(() => diagnosticTriggerRef.current?.focus());
+  };
 
   const bookmarkSelection = async () => {
     const selection = selectedEvidenceRefs();
@@ -2811,6 +3053,7 @@ export function LogExplorer({ corpusId }: Props) {
       activeFindRequestRef.current = null;
       if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
       setFindSearching(false);
+      setFindLocating(false);
       setFindCancelling(false);
       suppressNextFindRefreshRef.current = true;
       setFilters(openFilters);
@@ -2870,6 +3113,7 @@ export function LogExplorer({ corpusId }: Props) {
     activeFindRequestRef.current = null;
     if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
     setFindSearching(false);
+    setFindLocating(false);
     setFindCancelling(false);
     suppressNextFindRefreshRef.current = true;
     setFindActiveQuery(null);
@@ -3489,12 +3733,20 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
-  const selectAllLaneSources = (laneId: string) => {
+  const activateAllLaneSources = (laneId: string) => {
     setLanes((prev) => {
       const next = prev.map((lane) =>
-        lane.id === laneId
-          ? { ...lane, label: "All sources", sources: [] }
-          : lane,
+        lane.id === laneId ? selectAllSourcesForLane(lane) : lane,
+      );
+      saveLanes(corpusId, next);
+      return next;
+    });
+  };
+
+  const restoreLaneSpecificSources = (laneId: string) => {
+    setLanes((prev) => {
+      const next = prev.map((lane) =>
+        lane.id === laneId ? restoreSpecificLaneSources(lane) : lane,
       );
       saveLanes(corpusId, next);
       return next;
@@ -3755,6 +4007,7 @@ export function LogExplorer({ corpusId }: Props) {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
     const matched = laneMatched[laneId];
+    if (busy && matched == null) return "Loading first evidence rows…";
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
     return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
@@ -4109,6 +4362,15 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Bookmark (B)
           </button>
+          <button
+            ref={diagnosticTriggerRef}
+            type="button"
+            className="log-explorer__btn"
+            disabled={!summary}
+            onClick={() => void openDiagnostics()}
+          >
+            Export diagnostics…
+          </button>
         </div>
       </header>
 
@@ -4134,10 +4396,20 @@ export function LogExplorer({ corpusId }: Props) {
               <div className="log-explorer__lane-editor-summary">
                 {laneCount} visible lane{laneCount === 1 ? "" : "s"} ·{" "}
                 {laneSourceQuery
-                  ? `${visibleLaneEditorSources.length} of `
+                  ? `${laneSourceCatalogTotal ?? visibleLaneEditorSources.length} matching source${
+                      (laneSourceCatalogTotal ??
+                        visibleLaneEditorSources.length) === 1
+                        ? ""
+                        : "s"
+                    }`
+                  : `${laneSourceCatalogTotal ?? laneEditorSources.length} available source${
+                      (laneSourceCatalogTotal ?? laneEditorSources.length) === 1
+                        ? ""
+                        : "s"
+                    }`}
+                {laneSourceCatalogNextCursor
+                  ? ` · ${laneSourceCatalog.length} loaded`
                   : ""}
-                {laneEditorSources.length} available source
-                {laneEditorSources.length === 1 ? "" : "s"}
               </div>
             </div>
             <div className="log-explorer__lane-editor-actions">
@@ -4162,6 +4434,15 @@ export function LogExplorer({ corpusId }: Props) {
               paddingInlineEnd: "0.25rem",
               scrollbarGutter: "stable",
             }}
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              if (
+                target.scrollHeight - target.scrollTop - target.clientHeight <
+                96
+              ) {
+                loadMoreLaneSources();
+              }
+            }}
           >
             <p className="log-explorer__lane-editor-help">
               Choose specific source paths or use the explicit All sources
@@ -4183,6 +4464,11 @@ export function LogExplorer({ corpusId }: Props) {
                 sources.
               </p>
             )}
+            {laneSourceCatalogLoading && laneSourceCatalog.length === 0 ? (
+              <p className="log-explorer__lane-editor-help" role="status">
+                Loading source paths…
+              </p>
+            ) : null}
             {lanes.slice(0, laneCount).map((lane) => (
               <fieldset
                 key={lane.id}
@@ -4199,12 +4485,23 @@ export function LogExplorer({ corpusId }: Props) {
                   }`}
                   aria-pressed={lane.sources.length === 0}
                   disabled={lane.sources.length === 0}
-                  onClick={() => selectAllLaneSources(lane.id)}
+                  onClick={() => activateAllLaneSources(lane.id)}
                 >
                   {lane.sources.length === 0
                     ? "All sources active"
                     : "Use all sources"}
                 </button>
+                {lane.sources.length === 0 &&
+                (lane.rememberedSources?.length ?? 0) > 0 ? (
+                  <button
+                    type="button"
+                    className="log-explorer__btn"
+                    onClick={() => restoreLaneSpecificSources(lane.id)}
+                  >
+                    Restore {lane.rememberedSources!.length} selected source
+                    {lane.rememberedSources!.length === 1 ? "" : "s"}
+                  </button>
+                ) : null}
                 <div className="log-explorer__facet">
                   {visibleLaneEditorSources.map((src) => (
                     <label key={src} className="log-explorer__facet-row">
@@ -4232,6 +4529,26 @@ export function LogExplorer({ corpusId }: Props) {
                 </div>
               </fieldset>
             ))}
+            {laneSourceCatalogNextCursor ? (
+              <button
+                type="button"
+                className="log-explorer__btn log-explorer__lane-source-more"
+                disabled={laneSourceCatalogLoading}
+                onClick={loadMoreLaneSources}
+              >
+                {laneSourceCatalogLoading
+                  ? "Loading more sources…"
+                  : `Load more sources${
+                      laneSourceCatalogTotal == null
+                        ? ""
+                        : ` (${Math.max(
+                            0,
+                            laneSourceCatalogTotal -
+                              laneSourceCatalog.length,
+                          )} remaining)`
+                    }`}
+              </button>
+            ) : null}
           </div>
         </div>
       )}
@@ -4430,8 +4747,9 @@ export function LogExplorer({ corpusId }: Props) {
                   className="log-explorer__btn"
                   data-testid="log-explorer-find-prev"
                   disabled={
-                    findHistory.length === 0 &&
-                    (findMatches.length === 0 || findIndex === 0)
+                    findBusy ||
+                    (findHistory.length === 0 &&
+                      (findMatches.length === 0 || findIndex === 0))
                   }
                   onClick={() => void findStep(-1)}
                 >
@@ -4442,9 +4760,10 @@ export function LogExplorer({ corpusId }: Props) {
                   className="log-explorer__btn"
                   data-testid="log-explorer-find-next"
                   disabled={
-                    !findNextCursor &&
-                    (findMatches.length === 0 ||
-                      findIndex === findMatches.length - 1)
+                    findBusy ||
+                    (!findNextCursor &&
+                      (findMatches.length === 0 ||
+                        findIndex === findMatches.length - 1))
                   }
                   onClick={() => void findStep(1)}
                 >
@@ -4825,6 +5144,16 @@ export function LogExplorer({ corpusId }: Props) {
                   : ""}
               </div>
 
+              {facetsLoading ? (
+                <div
+                  className="log-explorer__loading-inline"
+                  aria-live="polite"
+                  data-testid="log-explorer-facets-loading"
+                >
+                  Updating filter counts…
+                </div>
+              ) : null}
+
               <div className="log-explorer__section-title">Levels</div>
               <div className="log-explorer__facet">
                 {Object.entries(facets?.levels ?? {})
@@ -5049,6 +5378,7 @@ export function LogExplorer({ corpusId }: Props) {
           <div className="log-explorer__lane-strip">
             <TimelineNavigator
               corpusId={corpusId}
+              ready={timelineReady}
               filter={filtersToQuery(filters, {
                 afterSeq: null,
                 afterTs: null,
@@ -5065,6 +5395,7 @@ export function LogExplorer({ corpusId }: Props) {
                   id: lane.id,
                   label: lane.label,
                   sources: sources ?? [],
+                  allSources: sources == null,
                   emptySourceScope: sources?.length === 0,
                 };
               })}
@@ -5179,8 +5510,13 @@ export function LogExplorer({ corpusId }: Props) {
                       {laneTimeLabel}
                     </span>
                     <span
-                      className="log-explorer__chat-preview"
+                      className={`log-explorer__chat-preview ${
+                        busy && laneMatched[lane.id] == null
+                          ? "log-explorer__loading-inline"
+                          : ""
+                      }`}
                       data-testid={`lane-count-${lane.id}`}
+                      aria-live="polite"
                     >
                       {laneMatchedHint(lane.id)}
                       {focusLaneId === lane.id ? " · focused" : ""}
@@ -5241,6 +5577,21 @@ export function LogExplorer({ corpusId }: Props) {
                       ))}
                     </div>
                   </div>
+                  {boundaryLabel === "Start of matched logs" ? (
+                    <div
+                      className="log-explorer__lane-paging log-explorer__lane-paging--upper"
+                      data-testid={`lane-boundary-start-${lane.id}`}
+                      aria-live="polite"
+                      aria-label={`${lane.label} upper paging boundary`}
+                    >
+                      <span
+                        className="log-explorer__paging-boundary"
+                        title={boundaryTitle}
+                      >
+                        {boundaryLabel}
+                      </span>
+                    </div>
+                  ) : null}
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
                     alignedRows={
@@ -5338,14 +5689,17 @@ export function LogExplorer({ corpusId }: Props) {
                       </button>
                     </div>
                   ) : null}
-                  {paging?.loading || boundaryLabel ? (
+                  {paging?.loading ||
+                  (boundaryLabel &&
+                    boundaryLabel !== "Start of matched logs") ? (
                     <div
                       className="log-explorer__lane-paging"
                       data-testid={`lane-paging-${lane.id}`}
                       aria-live="polite"
                       aria-label={`${lane.label} paging status`}
                     >
-                      {boundaryLabel ? (
+                      {boundaryLabel &&
+                      boundaryLabel !== "Start of matched logs" ? (
                         <span
                           className="log-explorer__paging-boundary"
                           title={boundaryTitle}
@@ -5750,9 +6104,29 @@ export function LogExplorer({ corpusId }: Props) {
         />
       ) : null}
 
+      {diagnostic && summary ? (
+        <LogDiagnosticDialog
+          corpus={summary}
+          activeView={diagnostic.activeView}
+          environment={diagnostic.environment}
+          currentStatus={null}
+          onDismiss={closeDiagnostics}
+        />
+      ) : null}
+
       <div className="log-explorer__status" role="status">
         {error ? `Error: ${error}` : status}
-        {busy ? " · busy" : ""}
+        {findSearching
+          ? findCancelling
+            ? " · cancelling Find"
+            : status === "Find is still running · try Cancel again"
+              ? ""
+              : " · searching"
+          : findLocating
+            ? " · locating match"
+            : busy
+              ? " · busy"
+              : ""}
       </div>
     </div>
   );

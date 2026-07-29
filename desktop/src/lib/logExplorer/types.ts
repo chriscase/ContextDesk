@@ -57,6 +57,7 @@ export type LaneConfig = {
   id: string;
   label: string;
   sources: string[];
+  rememberedSources?: string[];
 };
 
 export type LogNavAction = {

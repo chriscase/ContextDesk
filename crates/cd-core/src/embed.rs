@@ -277,11 +277,18 @@ impl ConceptEmbedBackend {
                 }
             }
         }
-        // Mild residual so empty concept texts are not zero-vectors (unique id)
+        // Mild residual so empty concept texts are not zero-vectors (unique
+        // id). Keep it outside the reserved concept basis: otherwise an
+        // unrelated text whose hash lands on a concept dimension can become a
+        // false semantic match.
         let mut h = DefaultHasher::new();
         lower.hash(&mut h);
-        let residual = (h.finish() as usize) % self.dims;
-        v[residual] += 0.05;
+        let residual_start = groups.len().min(self.dims);
+        let residual_span = self.dims.saturating_sub(residual_start);
+        if residual_span > 0 {
+            let residual = residual_start + (h.finish() as usize) % residual_span;
+            v[residual] += 0.05;
+        }
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if n > f32::EPSILON {
             for x in &mut v {
@@ -463,6 +470,41 @@ mod tests {
         assert!(
             cos_auth > cos_bill,
             "auth={cos_auth} bill={cos_bill} — mock should prefer semantic neighbor"
+        );
+    }
+
+    #[tokio::test]
+    async fn concept_embed_residual_cannot_collide_with_reserved_concept_basis() {
+        let backend = ConceptEmbedBackend::new(16);
+        let reserved = ConceptEmbedBackend::concept_groups().len();
+        let collision = (0..10_000)
+            .map(|index| format!("unrelated residual candidate {index}"))
+            .find(|text| {
+                let mut hash = DefaultHasher::new();
+                text.hash(&mut hash);
+                (hash.finish() as usize) % backend.dims < reserved
+            })
+            .expect("deterministic residual collision fixture");
+
+        let vectors = backend
+            .embed(&[
+                "econnrefused".into(),
+                "connection refused".into(),
+                collision,
+            ])
+            .await
+            .unwrap();
+
+        assert!(
+            vectors[2][..reserved]
+                .iter()
+                .all(|component| component.abs() < f32::EPSILON),
+            "unrelated residual occupied a reserved concept dimension"
+        );
+        assert!(
+            cosine_similarity(&vectors[0], &vectors[1])
+                > cosine_similarity(&vectors[0], &vectors[2]),
+            "explicit concept geometry must outrank residual noise"
         );
     }
 }

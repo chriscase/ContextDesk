@@ -2,10 +2,10 @@
 
 **Method status:** **Partial.** ContextDesk ships bounded retrieval, context
 budgets, ordinary-versus-linked chat isolation, native tool-capability checks,
-required log grounding, structured log evidence identities, and withholding of
-ungrounded linked-chat prose. Phase-aware provider deadlines and
-evidence-preserving synthesis retry remain open in #649. A genuine
-tools-enabled provider run remains an environment-dependent acceptance step.
+required log grounding, structured log evidence identities, withholding of
+ungrounded linked-chat prose, phase-aware provider deadlines, and
+evidence-preserving synthesis retry. A genuine slow, tools-enabled provider run
+remains an environment-dependent acceptance step for #649.
 
 ## 1. Problem
 
@@ -38,7 +38,7 @@ synthesis only after required deterministic steps succeed.
 | Structured evidence identity, not rendered-text reconstruction | **Shipped** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `ToolResult.log_evidence`                             | Other source types have source-specific citation contracts                                         |
 | Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
-| Slow-provider phase lifecycle and synthesis-only retry         | **Partial** | Whole-turn bounded lifecycle ships                                                                               | #649                                                                                               |
+| Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
 Issue status is descriptive, not proof by itself. The production paths and
@@ -285,8 +285,14 @@ universal recommendations:
 | Sources considered per turn |               3 default, sanitized to 1–16 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Rank and take bounded set                                  |
 | Tool rounds                 |              12 default, sanitized to 1–32 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Terminal bounded completion/error                          |
 | Results per source          |               8 default, sanitized to 1–50 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Retriever result cap                                       |
-| Whole-turn deadline         | 120,000 ms default, 500–600,000 ms allowed | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Visible timeout; #649 residual after evidence              |
+| Whole-turn deadline         | Adaptive: 300,000 ms local/private, 120,000 ms managed; explicit 500–600,000 ms | [`router.rs`](../../../crates/cd-core/src/router.rs) | Phase timeout or visible whole-turn timeout |
+| Phase deadlines             | Choosing, retrieval, and synthesis are each capped inside the one monotonic turn ceiling | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `TurnClock` | A phase cap never resets or extends the whole turn |
+| Provider readiness          | Same absolute turn deadline starts before health/readiness/backend construction | [`research.rs`](../../../crates/cd-core/src/research.rs) | Stop and explicit short deadlines remain authoritative during cold local/private startup |
+| Linked corpus preflight     | Same absolute deadline and cancel signal govern corpus validation/open in a bounded blocking task | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Setup cannot outlive Stop or consume time outside the turn ceiling |
 | Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
+| Current-turn evidence payload |                                 256 KiB | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | UTF-8-safe truncation; successful governed results only    |
+| Current-turn log identities |                                     512 | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | Independent deduplicated identity cap                      |
+| Retry checkpoint store      | 30-minute TTL; 16 entries; 2 MiB retained payload bytes total | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Deterministic oldest-first eviction; this is a payload-byte bound, not an allocator/heap-size claim |
 | View selection identities   |                                         64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate                                |
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
 | Session context files       |                                200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject over cap                                            |
@@ -296,6 +302,15 @@ universal recommendations:
 Character limits are approximate model-token controls. An implementation with
 provider tokenizers should still keep deterministic byte/character safety caps
 at trust boundaries.
+
+Adaptive provider classification is a pure configuration decision. An explicit
+profile preference is authoritative; otherwise local-only/Ollama profiles,
+loopback or private IPs, and private host suffixes such as `.internal`, `.local`,
+`.lan`, `.corp`, `.intranet`, and `.private` receive the patient plan. The
+classifier performs no DNS lookup or endpoint probe. A user-selected custom
+whole-turn ceiling overrides either adaptive class. Existing serialized router
+budgets migrate as custom so an upgrade cannot silently lengthen a prior
+setting; new installs default to adaptive.
 
 ## 8. Failure and recovery
 
@@ -307,10 +322,25 @@ at trust boundaries.
 | Requested source unavailable            | Eligibility computation                       | Name unavailable source class without secrets                         | Configure/authorize source                        | Remaining answer discloses gap           |
 | Context cannot fit                      | Deterministic budget helper                   | `context_too_long`                                                    | New chat/remove history/increase supported budget | Stored transcript not silently rewritten |
 | Timeout before retrieval                | Deadline                                      | Visible timeout                                                       | Retry                                             | No success claim                         |
-| Timeout after retrieval                 | Current whole-turn deadline                   | Visible failure, but richer preserved-evidence recovery is incomplete | #649 planned synthesis-only retry                 | Do not claim retry is complete           |
-| Cancellation                            | Per-turn cancel flag                          | Cancelled terminal state                                              | Start another turn                                | Cancellation is session-specific         |
+| Timeout/provider failure after complete retrieval | Synthesis phase or remaining whole-turn deadline; typed provider terminal | Visible failure; successful bounded evidence remains in the transcript and in a host-only checkpoint | Retry synthesis without running retrieval again | Checkpoint is bound to exact chat, corpus, provider profile, and model |
+| Provider failure during partial retrieval | Typed linked-retrieval terminal | Original user turn and successful tool events remain visible; no retry checkpoint | Retry the complete investigation | Missing explicitly requested sources cannot become silent success |
+| Cancellation                            | Per-turn cancel race around every provider/tool await | Cancelled terminal state                                           | Start another turn or retry preserved synthesis   | Cancellation is immediate and session-specific |
 | Malicious retrieved instructions        | Untrusted wrapper and system policy           | Usually not surfaced as instructions                                  | Continue with data-only interpretation            | No permission elevation                  |
 | Citation mismatch                       | Host validation against structured identities | Reject/downgrade answer                                               | Correct synthesis retry                           | Rendered text cannot forge identity      |
+
+Retry evidence comes only from a dedicated, bounded current-turn buffer
+populated by successful governed tool results for the resolved corpus. Every
+linked model-facing round strips historical `tool` messages and historical
+assistant tool-call protocol, including broader connector, database, memory,
+workspace, and web turns. A checkpoint is published only after all explicitly
+requested source classes succeeded and subsequent synthesis failed or was
+rejected. Historical, stale, cross-corpus, and partial-source evidence is never
+swept into synthesis.
+Single-owner session admission prevents another window from replacing the
+active turn's cancellation or checkpoint ownership. The host keeps checkpoints
+memory-only, applies TTL, entry-count, and total-byte caps with deterministic
+oldest-first eviction, clears them on chat lifecycle/context changes, and is
+the sole authority that may expose retry availability to the renderer.
 
 ## 9. Observability
 
@@ -374,7 +404,7 @@ synthesis step.
 | Host/session     | Empty-chat link persists; stale/corrupt corpus fails before capability/provider handling; attach failure leaves durable state unchanged; ordinary session has no log scope; cancellation targets exact session |
 | Component UI     | Add context attaches/detaches one corpus; availability/event count/Open Explorer remain visible; Return/Shift+Return/IME; errors remain visible; autoscroll/unread semantics |
 | Packaged/native  | Tools-enabled provider performs a general zero-prep log question from main chat and Explorer; tools-disabled profile is honest; ordinary chat has no corpus; linked chat keeps corpus after switch/reopen |
-| Slow provider    | Cold start, retrieval success then synthesis timeout, cancellation, and synthesis-only recovery after #649 ships                                                                                 |
+| Slow provider    | Deterministic cold/slow provider defaults; retrieval success then synthesis timeout; cancellation in choosing/retrieving/synthesizing; synthesis-only recovery; explicit deadline precedence |
 
 Evaluator fixtures must store expected findings outside every imported corpus,
 workspace root, memory store, session pack, and skill directory. The test should
@@ -417,7 +447,7 @@ assert the sentinel is absent from model-facing messages.
 | Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
-| Slow provider lifecycle     | **Partial** | Bounded deadline and Stop exist                                            | #649 phase-aware evidence preservation/retry                              |
+| Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 
@@ -450,8 +480,8 @@ Avoid these shortcuts:
 
 ## 16. Open residuals
 
-- #649: phase-aware deadlines, preserved evidence after synthesis timeout, and
-  synthesis-only retry.
+- #649: native acceptance with a real cold/slow tools-enabled provider profile;
+  the deterministic core/component lifecycle and synthesis-only retry ship.
 - #646/#532: ranked proposals, review history, walkthroughs, and report
   assembly.
 - Provider acceptance: a real tools-enabled company profile must be selected

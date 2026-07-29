@@ -109,13 +109,23 @@ row, byte, time, or result caps.
 | Request validation | Is the path, corpus, SQL, endpoint, or tool argument allowed? | Reject the request with a bounded error |
 | Retrieval cap | Which top results fit this source's row, result, byte, or time limit? | Mark truncation, partial coverage, cancellation, or timeout where available |
 | Turn budget | Do the selected history, instructions, and evidence fit the model? | Compact the model-facing history or stop before sending an oversized turn |
-| Agent deadline | Can provider and tool awaits finish within the turn deadline? | Emit a visible `budget_time` error and terminal completion |
+| Agent deadline | Can provider and tool awaits finish within the one monotonic turn deadline and the active phase cap? | Show choosing, retrieving, or synthesizing; Stop interrupts the active await; emit a visible bounded error |
 | Permission tier | Is this a Read, SoftWrite, or HardWrite action? | Pause for a UI-originated decision; text from a model or source is never approval |
 
 Deterministic ranking means the same indexed state, query, settings, and
 backend mode produce the same bounded ordering. It does not promise that the
 query finds every relevant fact. Index exclusions, stale data, source limits,
 ambiguous wording, and model tool choice can all affect coverage.
+
+The default deadline policy is adaptive: local, private-network, and explicitly
+patient profiles receive a longer bounded allowance than managed profiles.
+This classification uses only saved profile configuration and the literal host;
+it does not perform DNS probing. A custom whole-turn ceiling in Settings is
+authoritative. **Settings → AI → Response timing** can also explicitly classify
+an unusual company gateway as Patient or Standard. Choosing evidence,
+retrieving evidence, and synthesizing the answer have separate caps, but all
+draw down the same monotonic whole-turn clock—moving to another phase never
+resets the turn.
 
 ## What the selected model can receive
 
@@ -171,6 +181,16 @@ into success:
 - partial, capped, stale, cancelled, or timed-out retrieval;
 - required linked-log evidence that never succeeded; and
 - provider, tool, context-fit, or turn-deadline failure.
+
+If bounded linked-log retrieval succeeds but final synthesis times out, the
+successful tool result remains visible and **Retry synthesis** becomes
+available. That retry is tool-closed: it reuses only the redacted bounded
+evidence retained by the trusted host and does not rerun retrieval. The
+checkpoint is valid only for the same chat, corpus, provider profile, and
+model. Switching either provider or model clears it. ContextDesk does not offer
+synthesis-only retry unless every explicitly requested retrieval source
+succeeded first. A switch, incomplete retrieval, or stale request fails visibly
+instead of borrowing evidence from another context.
 
 Open citations and inspect tool details during triage. Treat uncited synthesis
 as inference, and narrow the question when the available evidence is partial.

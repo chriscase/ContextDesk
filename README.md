@@ -17,13 +17,14 @@ profile cannot use tools, the application says so instead of treating model
 prose as retrieved evidence. Every write still requires the appropriate
 confirmation.
 
-Run it **fully local** with [Ollama](https://ollama.com) (no product account or
-API key), or connect an optional **Grok Build** session already authorized on
-the machine (Settings → AI, explicit opt-in; credentials remain in the OS host,
-never the webview). ContextDesk is a research, synthesis, and investigation
-tool—not a code-editing agent—so pair it with your coding agent when you need
-source changes. The name is a working title; the product remains rename-friendly
-through [`branding.toml`](branding.toml).
+Run it **fully local** with [Ollama](https://ollama.com), connect a
+self-hosted/company or hosted **OpenAI-compatible gateway**, use the
+**Anthropic Messages API**, or explicitly opt in to reuse a **Grok Build**
+session already authorized on the machine. Remote credentials remain in the
+trusted OS host and keychain, never the webview. ContextDesk is a research,
+synthesis, and investigation tool—not a code-editing agent—so pair it with
+your coding agent when you need source changes. The name is a working title;
+the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 |                 |                                                                                                                                                             |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -35,11 +36,23 @@ through [`branding.toml`](branding.toml).
 
 ### Product gallery (packaged app)
 
-Public product captures are temporarily withheld pending neutral-profile
-recapture, exact source-SHA recording, and publication review under
-[#653](https://github.com/chriscase/ContextDesk/issues/653). Existing
-acceptance captures may contain owner-specific model/profile information or
-show an older interface and are not current product evidence.
+![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
+
+**Start with repeatable evidence.** Install the bundled synthetic corpus during
+first-run setup, inspect its import summary, and open it directly in Log
+Explorer.
+
+![ContextDesk Log Explorer investigating synthetic logs with aligned lanes and timeline](docs/media/gallery/log-explorer-investigation.png)
+
+**Investigate without losing provenance.** Navigate time, compose source lanes,
+inspect payloads, filter events, and retain evidence while the linked-chat area
+remains optional.
+
+![ContextDesk Help Center explaining demonstration datasets with the appearance picker open](docs/media/gallery/help-appearance.png)
+
+**Guidance is built in.** Search the offline Help Center for workflows, demo
+datasets, context boundaries, and trust behavior, with accessible appearance
+choices.
 
 ### From raw logs to a durable investigation
 
@@ -148,8 +161,9 @@ machine-checked against production symbols. Partial work is listed separately.
 Deterministic Log Lab corpora exercise 100,000-event multi-lane investigation
 and a separate 25,000-event seven-day time span. These fixture counts support
 repeatable acceptance checks; they are not production ceilings or universal
-performance claims. Neutral exact-SHA screenshots will return here only after
-they pass the publication gate tracked by #653.
+performance claims. Public screenshots are governed by the exact-build
+publication gate tracked by
+[#653](https://github.com/chriscase/ContextDesk/issues/653).
 
 **Roadmap / partial (do not treat as done):**
 
@@ -164,9 +178,78 @@ they pass the publication gate tracked by #653.
 
 ---
 
-## Quickstart
+## Install
 
-Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](https://v2.tauri.app/start/prerequisites/).
+ContextDesk is early software. The repository currently has **no published
+general-availability installer assets**, so the dependable installation path
+today is a source checkout. The
+[GitHub Releases page](https://github.com/chriscase/ContextDesk/releases) is
+the authority for future reviewed binary releases; an empty page means there
+is no binary release to install yet.
+
+### Run from source
+
+1. Install **Rust (stable)**, **Node 20+**, Git, and the
+   [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/)
+   for your operating system.
+2. Clone, install the locked frontend dependencies, and launch the desktop
+   application:
+
+   ```sh
+   git clone https://github.com/chriscase/ContextDesk.git
+   cd ContextDesk
+   cargo test -p cd-core
+   cd desktop
+   npm ci
+   npm run tauri:dev
+   ```
+
+   The core test is offline and needs no provider credentials. `tauri:dev`
+   starts a source-run development build and selects a free local frontend
+   port.
+3. Complete preflight in the application. You can install the entirely
+   synthetic 25,000-event demo corpus there, then choose **Enter app · Open
+   Logs** to verify Logs and Log Explorer without private data.
+
+### Build a local packaged desktop app
+
+From a clean checkout with the same prerequisites:
+
+```sh
+cd desktop
+npm ci
+npm run tauri:build
+```
+
+Platform bundles are written below
+`desktop/src-tauri/target/release/bundle/` (`.app`/`.dmg` on macOS,
+`.msi` or NSIS `.exe` on Windows, and `.AppImage`/`.deb` on Linux, depending
+on the host). Updater artifacts require the project release-signing private
+key. Without it, the command may report a signing-key error **after** a usable
+unsigned local application or installer has already been written; inspect the
+bundle directory before treating that local build as failed. Never create,
+request, or commit a release key merely to run a local package.
+
+See [Packaging & release](docs/PACKAGING.md) for exact bundle behavior,
+operator-owned signing/notarization, and the draft release workflow.
+
+### Install a published binary
+
+When the [Releases page](https://github.com/chriscase/ContextDesk/releases)
+contains a published release, use the asset for your operating system and
+follow that release's notes. Draft releases and CI artifacts are not supported
+end-user installers. Until reviewed assets are present, build from source
+instead. ContextDesk never requires an application account; provider
+credentials are configured after launch and stored by the trusted host in the
+OS keychain.
+
+---
+
+## Configure a provider
+
+ContextDesk supports local models, company/self-hosted or hosted gateways, and
+direct provider APIs. Tool capability is detected per profile; a compatible
+chat endpoint is not automatically assumed to support native tool calls.
 
 ### Option A — Ollama only (no account, no API key)
 
@@ -175,30 +258,52 @@ Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](http
    ollama pull mistral
    curl -s http://127.0.0.1:11434/api/tags | head   # should list your models
    ```
-2. **Clone and launch the desktop host:**
-   ```sh
-   git clone https://github.com/chriscase/ContextDesk.git
-   cd ContextDesk
-   cargo test -p cd-core          # offline library gate — no network, no keys
-   cd desktop && npm install && npm run tauri:dev   # free-port aware launcher
-   ```
+2. Launch ContextDesk using a source or published-binary path above.
 3. **Configure in the app (Settings-first, no config files):**
    - Preflight / Settings → pick a **workspace folder** to allowlist. Try the bundled [`fixtures/kb/`](fixtures/kb) folder (`auth.md`, `billing.md`, `deploy_runbook.md`, …).
    - Provider **Ollama (local)**, base `http://127.0.0.1:11434`, model `mistral` → Save.
 4. **Ask a question** grounded in that folder, e.g. _"How does authentication work in this codebase?"_ Expect streaming markdown, a **search trail** showing where it looked, and **citations** back to `fixtures/kb/auth.md` / `auth_gateway.md` when retrieval hits.
 
-### Option B — Grok Build session (opt-in)
+### Option B — internal or hosted OpenAI-compatible gateway
+
+Use this route for a company AI gateway, a self-hosted compatible server, or a
+hosted provider that exposes OpenAI-compatible chat endpoints.
+
+1. Launch ContextDesk using a source or published-binary path above.
+2. **Settings → AI** → provider **OpenAI-compatible**.
+3. Enter the gateway's HTTPS base URL, API key, and model id, then **Save**.
+   The key is stored by the Rust host in the OS keychain and is never returned
+   to the webview.
+4. Use model discovery when the gateway supports it. If it does not expose a
+   compatible model-list endpoint, use Advanced setup with a model id supplied
+   by the gateway administrator.
+5. Review preflight before sending organizational data. ContextDesk records
+   detected tool capability; it does not assume that every compatible gateway
+   or model supports native tool calls.
+
+A loopback-only profile refuses remote bases. Remote endpoints remain subject
+to ContextDesk's outbound URL and SSRF policy. Keychain storage protects the
+credential, but prompts and bounded context sent to a remote endpoint still
+leave the machine. See
+[AI providers and model selection](docs/help/providers/provider-setup.md).
+
+### Option C — Anthropic Messages API
+
+Choose **Anthropic** in Settings → AI, use the default Anthropic API base (or
+an approved compatible base), store the key when prompted, select a model, and
+run preflight. This route uses Anthropic's message and tool-call shapes rather
+than treating them as OpenAI-compatible responses.
+
+### Option D — Grok Build session reuse (opt-in)
 
 If you already use **Grok Build** / the Grok CLI on this machine, ContextDesk can talk to xAI models using that session — **without pasting an API key into the UI**.
 
 1. Sign in on the machine: run `grok login` (or use Grok Build) so `~/.grok/auth.json` exists.
-2. Launch ContextDesk (`cd desktop && npm run tauri:dev` as above).
+2. Launch ContextDesk using a source or published-binary path above.
 3. **Settings → AI** → provider **Grok Build session** → confirm the opt-in dialog → pick a chat model (e.g. `grok-3`) → **Save**.
 4. Allowlist a workspace folder and ask a grounded question the same way as Option A.
 
 **How it stays safe:** the host loads `~/.grok/auth.json` **in Rust only** after explicit opt-in; the webview never sees tokens; outbound chat is pinned to `api.x.ai`. Details and ToS note: [`docs/DEV.md`](docs/DEV.md#grok-build-session-opt-in).
-
-You can also add **OpenAI-compatible** or **Anthropic** providers in Settings → AI. API keys go to the OS keychain — never into the repo or the webview.
 
 ---
 

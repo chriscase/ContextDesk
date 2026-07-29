@@ -49,6 +49,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Follow latest          | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow                                                                                                                                                                                                                                                                                                                     |
 | Agent context          | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context                                                                                                                                                                                                                                                                |
 | Nav chips              | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only                                                                                                                                                                                                                                                                                                                                        |
+| Support diagnostics    | **Export diagnostics…** previews a bounded redacted Markdown/JSON report. Explorer reports include payload-free active view settings; a failed import exposes one memory-only diagnostic without publishing a corpus                                                                                                                                                                                                                                                  |
 
 ## Find vs Filter
 
@@ -238,6 +239,20 @@ permission-blocked sources remain visible rather than becoming silent success.
 Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
 source paths are not inserted wholesale.
 
+During a linked turn, the chat reports whether it is choosing evidence,
+retrieving bounded evidence, or synthesizing an evidence-cited answer. **Stop**
+interrupts the active provider or tool wait. If retrieval succeeded but
+synthesis reached its bounded deadline, the evidence remains visible and
+**Retry synthesis** answers from that preserved evidence without another log
+search. The retry is accepted only for the same chat, corpus, provider profile,
+and model. Switching either provider or model clears the checkpoint. The
+control appears only after the host confirms a still-valid checkpoint; a
+timeout or provider-error message alone cannot enable it. A checkpoint is
+published only after every explicitly requested source succeeds and synthesis
+then times out, fails provider-side, or is rejected as ungrounded. Checkpoints
+are memory-only, age/count/payload-byte bounded, and cleared when a chat is
+trashed, deleted, archived, relinked, or superseded by a new linked turn.
+
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.
 
@@ -249,6 +264,51 @@ profile advertises `capabilities.tools=false`, ContextDesk stops before
 contacting the provider and saves visible guidance that names the profile and
 unavailable capability. Ordinary chats keep `linked_corpus_id=null` and do not
 inherit an Explorer corpus or its active-corpus default.
+
+## Cross-computer diagnostic feedback
+
+Use **Export diagnostics…** in an active Explorer when you need to reproduce a
+view or product defect on another machine. Review the exact preview, add a
+short reproduction note, then copy the Markdown or save Markdown/JSON through
+the native file dialog.
+
+If an import fails, return to **Logs**. A **Failed import diagnostic available**
+card appears without creating or publishing a partial corpus. Preview, copy, or
+save it before clearing it. The preview includes typed counters for binary,
+empty, hidden, oversized, read-failed, and parse-failed sources and a bounded
+reason/basename transcript. At most 20 examples are retained; the report states
+how many additional observations were omitted. ContextDesk retains only one
+such diagnostic in memory: **Clear diagnostic**, the next ingest attempt, or an
+app restart removes it. Raw and package imports both clear the prior diagnostic
+before setup. A later attempt never silently inherits the previous failure, and
+a later success leaves no failed-import diagnostic.
+
+These reports exclude log/event payloads, absolute paths, source/service/host
+labels from the active view, filter and trace text, private hosts/IPs, chats,
+provider/model inventories, credentials, and evaluator truth. The preview can
+be focused with the keyboard and scrolled independently. Markdown and JSON
+buttons announce which format is selected.
+
+The native host creates the exact visible preview from a strict, payload-free
+metadata manifest and retains it under a short-lived report ID. Saving sends
+only that ID and the selected format: the renderer cannot author report text,
+choose the destination, or claim overwrite approval. The host-owned native
+Save panel alone selects the destination and confirms replacement. Accepted
+reports use a restricted same-folder temporary file and native atomic
+publication without replacement for new files. Cancelling the panel is a
+normal no-write outcome. If publication succeeds but a later cleanup or
+directory-sync step fails, ContextDesk says the report was saved and shows a
+durability warning. You must still review the preview before sharing.
+
+At short window heights, scroll **Diagnostic details and exact preview**; the
+dialog title, Close action, and Copy/Save actions remain available outside that
+scrolling region. Note edits prepare only the latest host-rendered generation,
+so rapid typing cannot leave the visible preview with an expired save ID.
+
+Do not confuse diagnostics with **Export package…**. A diagnostic is a small
+metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing
+workflow that contains the analyzed corpus and should be handled according to
+your organization’s data policy.
 
 ## Log Lab scale profiles (synthetic)
 

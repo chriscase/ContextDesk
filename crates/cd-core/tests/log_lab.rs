@@ -2,9 +2,9 @@
 mod log_lab_generator;
 
 use cd_core::log_analysis::{
-    add_line_bookmark, export_corpus_zip, import_corpus_zip_path, ingest_path,
+    add_line_bookmark, cluster_problems, export_corpus_zip, import_corpus_zip_path, ingest_path,
     ingest_path_with_observer, list_bookmarks, query_event_neighborhood, query_events,
-    query_facets, query_timeline_summary, search_events, search_events_advanced,
+    query_facets, query_timeline_summary, search_events, search_events_advanced, timeline,
     EventNeighborhoodQuery, EventQuery, EventSearchQuery, LogCorpus, SearchMatchMode, TimeQuality,
     TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
 };
@@ -12,9 +12,11 @@ use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
 };
 use log_lab_generator::{
-    generate_behavior, generate_scale, load_behavior_manifest, verify_safety,
-    write_performance_template, BehaviorControls, MEDIUM_EVENT_COUNT, MEDIUM_PROFILE,
-    UI_MEDIUM_PROFILE,
+    generate_behavior, generate_scale, generate_triage_stress, load_behavior_manifest,
+    load_triage_stress_manifest, verify_safety, write_performance_template, BehaviorControls,
+    DEFAULT_TRIAGE_STRESS_EVENT_COUNT, MEDIUM_EVENT_COUNT, MEDIUM_PROFILE,
+    MIN_TRIAGE_STRESS_EVENT_COUNT, TRIAGE_STRESS_INCIDENT_REPETITIONS,
+    TRIAGE_STRESS_PARSER_TEMPLATE_COUNT, TRIAGE_STRESS_SOURCE_COUNT, UI_MEDIUM_PROFILE,
 };
 use serde_json::Value;
 use std::fs;
@@ -376,12 +378,13 @@ fn log_lab_importer_edges_are_honest_and_hostile_archives_fail_closed() {
     )
     .unwrap();
     assert_eq!(report.stats.discovered_files, 4);
-    assert_eq!(report.stats.files, 2);
-    assert_eq!(report.stats.excluded_files, 1);
+    assert_eq!(report.stats.files, 1);
+    assert_eq!(report.stats.excluded_files, 2);
     assert_eq!(report.stats.failed_files, 0);
     assert_eq!(report.stats.ignored_files, 1);
     assert!(report.stats.partial);
     assert_eq!(report.stats.exclusion_counts["binary"], 1);
+    assert_eq!(report.stats.exclusion_counts["empty"], 1);
     assert_eq!(report.stats.exclusion_counts["hidden"], 1);
 
     let baseline_ids = LogCorpus::list_ids(&cache).unwrap();
@@ -779,6 +782,166 @@ fn log_lab_behavior_profiles_keep_their_declared_time_quality_after_import() {
             );
         }
     }
+}
+
+#[test]
+fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
+    let workspace = tempfile::tempdir().unwrap();
+    let generated = workspace.path().join("triage-stress");
+    let generation = generate_triage_stress(&generated, MIN_TRIAGE_STRESS_EVENT_COUNT).unwrap();
+    verify_safety(&generated).unwrap();
+    let manifest = load_triage_stress_manifest(&generated).unwrap();
+    let import_root = generated.join("scenarios/triage-stress/import");
+    let report = ingest_path(
+        &workspace.path().join("cache"),
+        &import_root,
+        "triage-stress-minimum",
+        None,
+        "none",
+    )
+    .unwrap();
+
+    assert_eq!(generation.events, MIN_TRIAGE_STRESS_EVENT_COUNT);
+    assert_eq!(report.stats.lines as usize, MIN_TRIAGE_STRESS_EVENT_COUNT);
+    assert_eq!(report.stats.files as usize, TRIAGE_STRESS_SOURCE_COUNT);
+    assert_eq!(
+        report.stats.templates as usize,
+        TRIAGE_STRESS_PARSER_TEMPLATE_COUNT
+    );
+    let corpus = LogCorpus::open(&workspace.path().join("cache"), &report.corpus_id).unwrap();
+    let facets = query_facets(&corpus, &EventQuery::default()).unwrap();
+    assert_eq!(facets.time_quality, TimeQuality::Wall);
+    assert_eq!(facets.levels["error"], 1_800);
+    assert_eq!(facets.levels["warn"], 1_500);
+    assert_eq!(facets.levels["debug"], 300);
+    assert_eq!(facets.levels["info"], 6_400);
+
+    let saturation = search_events(
+        &corpus,
+        &EventSearchQuery {
+            query: Some("CDLAB2004".into()),
+            semantic: false,
+            k: 20,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(saturation.len(), 16);
+    assert!(saturation.iter().all(|hit| {
+        hit.event.source == "db/database.log"
+            && hit.event.message.contains("database pool exhausted")
+            && !hit.event.message.contains("incident_id=")
+            && !hit.event.message.contains("role=")
+    }));
+
+    let clusters = cluster_problems(&corpus, 40).unwrap();
+    assert!(clusters.len() <= 40);
+    assert!(
+        clusters
+            .iter()
+            .flat_map(|cluster| &cluster.exemplars)
+            .any(|example| example.contains("CDLAB2004")
+                || example.contains("CDLAB3102")
+                || example.contains("CDLAB4203")),
+        "bounded clustering lost every rare severe incident signal"
+    );
+    let buckets = timeline(&corpus, 60, None, None).unwrap();
+    assert_eq!(
+        buckets.iter().map(|bucket| bucket.count).sum::<u64>(),
+        MIN_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
+    assert_eq!(
+        manifest["expected"]["parser_templates_after_import"],
+        report.stats.templates
+    );
+}
+
+/// Explicit local #745 scale vector. The generated 250k tree lives only in a
+/// temporary directory and is never checked into the repository.
+#[test]
+#[ignore = "explicit 250k triage-stress product-path proof"]
+fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
+    let workspace = tempfile::tempdir().unwrap();
+    let generated = workspace.path().join("triage-stress-250k");
+    let generation_started = Instant::now();
+    let generation = generate_triage_stress(&generated, DEFAULT_TRIAGE_STRESS_EVENT_COUNT).unwrap();
+    let generation_ms = generation_started.elapsed().as_millis();
+    verify_safety(&generated).unwrap();
+    let manifest = load_triage_stress_manifest(&generated).unwrap();
+
+    let cache = workspace.path().join("cache");
+    let import_started = Instant::now();
+    let report = ingest_path(
+        &cache,
+        &generated.join("scenarios/triage-stress/import"),
+        "triage-stress-250k",
+        None,
+        "none",
+    )
+    .unwrap();
+    let import_ms = import_started.elapsed().as_millis();
+    assert_eq!(report.stats.lines, DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64);
+    assert_eq!(report.stats.files as usize, TRIAGE_STRESS_SOURCE_COUNT);
+    assert_eq!(
+        report.stats.templates as usize,
+        TRIAGE_STRESS_PARSER_TEMPLATE_COUNT
+    );
+
+    let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+    let facets_started = Instant::now();
+    let facets = query_facets(&corpus, &EventQuery::default()).unwrap();
+    let facets_ms = facets_started.elapsed().as_millis();
+    assert_eq!(facets.levels["error"], 45_000);
+    assert_eq!(facets.levels["warn"], 37_500);
+    assert_eq!(facets.levels["debug"], 7_500);
+    assert_eq!(facets.levels["info"], 160_000);
+    assert_eq!(facets.sources.len(), TRIAGE_STRESS_SOURCE_COUNT);
+
+    let timeline_started = Instant::now();
+    let buckets = timeline(&corpus, 300, None, None).unwrap();
+    let timeline_ms = timeline_started.elapsed().as_millis();
+    assert_eq!(
+        buckets.iter().map(|bucket| bucket.count).sum::<u64>(),
+        DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
+
+    let cluster_started = Instant::now();
+    let clusters = cluster_problems(&corpus, 40).unwrap();
+    let cluster_ms = cluster_started.elapsed().as_millis();
+    assert!(clusters.len() <= 40);
+    for signal in ["CDLAB2004", "CDLAB3102", "CDLAB4203"] {
+        let hits = search_events(
+            &corpus,
+            &EventSearchQuery {
+                query: Some(signal.into()),
+                semantic: false,
+                k: 20,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), TRIAGE_STRESS_INCIDENT_REPETITIONS);
+    }
+    assert_eq!(manifest["expected"]["severities"]["error"], 45_000);
+    assert_eq!(manifest["expected"]["severities"]["warn"], 37_500);
+    assert_eq!(manifest["expected"]["severities"]["debug"], 7_500);
+    assert_eq!(manifest["expected"]["severities"]["info"], 160_000);
+
+    eprintln!(
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} facets_ms={} timeline_ms={} cluster_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        report.stats.lines,
+        report.stats.files,
+        report.stats.templates,
+        report.stats.source_bytes,
+        generation_ms,
+        import_ms,
+        facets_ms,
+        timeline_ms,
+        cluster_ms,
+        generation.tree_sha256
+    );
 }
 
 /// Explicit local acceptance path for #542. Kept out of the default suite

@@ -168,6 +168,11 @@ pub struct CorpusMeta {
     /// Original package id when imported from another machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_corpus_id: Option<String>,
+    /// Reserved host-managed identity, written before atomic publication.
+    ///
+    /// Ordinary user ingest and portable package import leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_identity: Option<String>,
     /// Ingest / corpus statistics when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<CorpusStats>,
@@ -287,6 +292,7 @@ impl LogCorpus {
             vector_index: "pure-rust VectorIndex (Exact/Hnsw)".into(),
             source_label: None,
             origin_corpus_id: None,
+            managed_identity: None,
             stats: None,
             top_templates: Vec::new(),
             embedding: CorpusEmbeddingStatus::default(),
@@ -423,6 +429,28 @@ impl LogCorpus {
         meta.stats = Some(stats);
         meta.top_templates = top_templates;
         meta.embedding = embedding;
+        write_meta_file(&self.root, &meta)?;
+        Ok(())
+    }
+
+    /// Stamp a bounded reserved host identity into staged metadata.
+    ///
+    /// Hosts use this only for corpora they manage idempotently. It must be
+    /// called before atomic publication so a later process can reconcile a
+    /// crash between corpus publication and host-side marker publication.
+    pub fn write_managed_identity(&self, identity: &str) -> CoreResult<()> {
+        if identity.is_empty()
+            || identity.len() > 160
+            || !identity
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(CoreError::Policy(
+                "managed corpus identity must be 1-160 safe ASCII characters".into(),
+            ));
+        }
+        let mut meta = self.meta.lock().map_err(|_| lock_err())?;
+        meta.managed_identity = Some(identity.to_string());
         write_meta_file(&self.root, &meta)?;
         Ok(())
     }
@@ -1038,6 +1066,7 @@ pub fn read_meta_file(root: &Path) -> CoreResult<CorpusMeta> {
             .into(),
         source_label: None,
         origin_corpus_id: None,
+        managed_identity: None,
         stats: None,
         top_templates: Vec::new(),
         embedding: CorpusEmbeddingStatus::default(),

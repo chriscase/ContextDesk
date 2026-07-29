@@ -7,6 +7,8 @@ export type LaneConfig = {
   id: string;
   label: string;
   sources: string[];
+  /** Last deliberate specific membership, retained while All sources is active. */
+  rememberedSources?: string[];
 };
 
 export type TimeLinkMode = "independent" | "follow_cursor" | "align_time";
@@ -64,7 +66,40 @@ export function toggleLaneSource(
       : sources.length === 1
         ? sources[0]!
         : `${sources.length} sources`;
-  return { ...lane, sources, label };
+  return {
+    ...lane,
+    sources,
+    label,
+    rememberedSources:
+      sources.length > 0 ? [...sources] : [...lane.sources],
+  };
+}
+
+/** Activate All sources without discarding the prior specific composition. */
+export function selectAllLaneSources(lane: LaneConfig): LaneConfig {
+  if (lane.sources.length === 0) return lane;
+  return {
+    ...lane,
+    label: "All sources",
+    sources: [],
+    rememberedSources: [...lane.sources],
+  };
+}
+
+/** Restore the last specific composition, when one has been remembered. */
+export function restoreSpecificLaneSources(lane: LaneConfig): LaneConfig {
+  const sources = [
+    ...new Set(
+      (lane.rememberedSources ?? []).filter((source) => source.length > 0),
+    ),
+  ];
+  if (sources.length === 0) return lane;
+  return {
+    ...lane,
+    sources,
+    rememberedSources: [...sources],
+    label: sources.length === 1 ? sources[0]! : `${sources.length} sources`,
+  };
 }
 
 /**
@@ -107,6 +142,9 @@ export function loadLanes(corpusId: string): LaneConfig[] | null {
         sources: Array.isArray(l.sources)
           ? l.sources.filter((s) => typeof s === "string")
           : [],
+        rememberedSources: Array.isArray(l.rememberedSources)
+          ? l.rememberedSources.filter((s) => typeof s === "string")
+          : undefined,
       }));
   } catch {
     return null;

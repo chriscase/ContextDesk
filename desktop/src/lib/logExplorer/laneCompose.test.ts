@@ -2,10 +2,13 @@ import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
   composeLaneSources,
   defaultLanes,
+  restoreSpecificLaneSources,
   resizeLaneList,
+  selectAllLaneSources,
   toggleLaneSource,
   loadLanes,
   saveLanes,
+  type LaneConfig,
 } from "./laneCompose";
 
 const store = new Map<string, string>();
@@ -50,7 +53,11 @@ describe("laneCompose", () => {
   });
 
   it("toggleLaneSource allows multi-source and all-sources empty set", () => {
-    let lane = { id: "lane-0", label: "All sources", sources: [] as string[] };
+    let lane: LaneConfig = {
+      id: "lane-0",
+      label: "All sources",
+      sources: [],
+    };
     lane = toggleLaneSource(lane, "a.log");
     expect(lane.sources).toEqual(["a.log"]);
     lane = toggleLaneSource(lane, "b.log");
@@ -59,6 +66,33 @@ describe("laneCompose", () => {
     expect(lane.sources).toEqual(["b.log"]);
     lane = toggleLaneSource(lane, "b.log");
     expect(lane.sources).toEqual([]);
+    expect(lane.rememberedSources).toEqual(["b.log"]);
+  });
+
+  it("round-trips through All sources without losing a specific composition", () => {
+    const specific = {
+      id: "lane-0",
+      label: "2 sources",
+      sources: ["region-a/app.log", "region-b/app.log"],
+    };
+    const all = selectAllLaneSources(specific);
+    expect(all.sources).toEqual([]);
+    expect(all.label).toBe("All sources");
+    expect(all.rememberedSources).toEqual(specific.sources);
+
+    const restored = restoreSpecificLaneSources(all);
+    expect(restored.sources).toEqual(specific.sources);
+    expect(restored.label).toBe("2 sources");
+  });
+
+  it("persists remembered specific membership while All sources is active", () => {
+    const lane = selectAllLaneSources({
+      id: "lane-0",
+      label: "api",
+      sources: ["api/app.log"],
+    });
+    saveLanes("corpus-a", [lane]);
+    expect(loadLanes("corpus-a")).toEqual([lane]);
   });
 
   it("intersects composed lane sources with global source filters", () => {

@@ -908,6 +908,7 @@ mod tests {
             embedding_model: None,
             embedding_base_url: None,
             local_only: false,
+            deadline_preference: Default::default(),
             capabilities: Default::default(),
         });
         providers.active_id = Some("openai".into());

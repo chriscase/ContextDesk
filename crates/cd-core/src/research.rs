@@ -1,7 +1,8 @@
 //! Offline and host research entry points (real tool path, no demo shell).
 
 use crate::agent::{
-    run_agent_turn, run_agent_turn_with_sink, AgentOptions, ChatBackend, ScriptedBackend,
+    run_agent_turn, run_agent_turn_with_sink_and_checkpoint, AgentOptions, ChatBackend,
+    LinkedSynthesisCheckpoint, ScriptedBackend,
 };
 use crate::audit::AuditLog;
 use crate::chat::{
@@ -20,7 +21,10 @@ use crate::tools::ToolSpec;
 use crate::workspace::Workspace;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Serialized stream event for IPC/JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +41,23 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
         StreamEvent::TurnStarted { session_id, model } => (
             "turn_started",
             serde_json::json!({ "session_id": session_id, "model": model }),
+        ),
+        StreamEvent::TurnPhase { phase } => ("turn_phase", serde_json::json!({ "phase": phase })),
+        StreamEvent::LinkedSynthesisRetry {
+            available,
+            session_id,
+            corpus_id,
+            provider_profile_id,
+            model_id,
+        } => (
+            "linked_synthesis_retry",
+            serde_json::json!({
+                "available": available,
+                "session_id": session_id,
+                "corpus_id": corpus_id,
+                "provider_profile_id": provider_profile_id,
+                "model_id": model_id,
+            }),
         ),
         StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
         StreamEvent::ThoughtDelta { text } => {
@@ -696,9 +717,108 @@ pub async fn research_turn_with_cancel_and_context(
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel_and_context_and_checkpoint(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        cancel,
+        log_explorer_context,
+        None,
+        None,
+        None,
+        false,
+        live,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderSetupWait {
+    Deadline,
+    Cancelled,
+}
+
+async fn wait_for_setup_cancel(cancel: Option<&std::sync::atomic::AtomicBool>) {
+    let Some(cancel) = cancel else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn await_provider_setup<F, T>(
+    started: Instant,
+    plan: crate::router::TurnDeadlinePlan,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    future: F,
+) -> Result<T, ProviderSetupWait>
+where
+    F: Future<Output = T>,
+{
+    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(ProviderSetupWait::Cancelled);
+    }
+    let remaining = if plan.total_ms == 0 {
+        None
+    } else {
+        Some(
+            Duration::from_millis(plan.total_ms)
+                .checked_sub(started.elapsed())
+                .ok_or(ProviderSetupWait::Deadline)?,
+        )
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_setup_cancel(cancel) => Err(ProviderSetupWait::Cancelled),
+        value = async {
+            match remaining {
+                Some(remaining) => tokio::time::timeout(remaining, future)
+                    .await
+                    .map_err(|_| ProviderSetupWait::Deadline),
+                None => Ok(future.await),
+            }
+        } => value,
+    }
+}
+
+/// Research turn with optional host-retained linked synthesis evidence.
+#[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
+pub async fn research_turn_with_cancel_and_context_and_checkpoint(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+    turn_started_at: Option<Instant>,
+    turn_prelude_emitted: bool,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
+        if linked_synthesis_retry.is_some() {
+            return Ok(emit_provider_error(
+                "linked_synthesis_retry_stale",
+                "Synthesis-only retry must use the original linked chat model. The local \
+                 keyword fallback cannot consume preserved model evidence."
+                    .into(),
+                session_id,
+                Some(profile.chat_model.clone()),
+                live,
+            ));
+        }
         let ev = research_local(host, user_text, session_id).await?;
         if let Some(sink) = live {
             for e in &ev {
@@ -708,7 +828,7 @@ pub async fn research_turn_with_cancel_and_context(
         return Ok(ev);
     }
 
-    if log_explorer_context.is_some() {
+    if log_explorer_context.is_some() && linked_synthesis_retry.is_none() {
         if let Some(events) = linked_tools_unavailable_events(profile, session_id) {
             if let Some(sink) = live {
                 for event in &events {
@@ -719,11 +839,52 @@ pub async fn research_turn_with_cancel_and_context(
         }
     }
 
+    let deadline_plan = crate::router::TurnDeadlinePlan::for_profile(host.router_budget(), profile);
+    let turn_started_at = turn_started_at.unwrap_or_else(Instant::now);
+    let cancel_ref = cancel.as_ref().map(|flag| flag.as_ref());
+    let prelude_was_emitted = turn_prelude_emitted;
+    if !prelude_was_emitted {
+        if let Some(sink) = live.as_mut() {
+            sink(StreamEvent::TurnStarted {
+                session_id: session_id.to_string(),
+                model: Some(profile.chat_model.clone()),
+            });
+            sink(StreamEvent::TurnPhase {
+                phase: crate::router::AgentPhase::ChoosingEvidence,
+            });
+        }
+    }
+    let turn_prelude_emitted = prelude_was_emitted || live.is_some();
+
     // Ollama health soft-fail (not a construction error): remain here; client build is in backend_for.
     // #123: never silently fall back to keyword-only when a chat model is selected.
     if profile.kind == ProviderKind::Ollama {
-        match OllamaClient::new(&profile.base_url, &profile.chat_model) {
-            Ok(client) if client.health().await => { /* reachable; build via factory below */ }
+        let health = match OllamaClient::new(&profile.base_url, &profile.chat_model) {
+            Ok(client) => {
+                await_provider_setup(turn_started_at, deadline_plan, cancel_ref, client.health())
+                    .await
+            }
+            Err(_) => Ok(false),
+        };
+        match health {
+            Ok(true) => { /* reachable; build via factory below */ }
+            Err(ProviderSetupWait::Cancelled) => {
+                return Ok(emit_provider_cancelled(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
+            Err(ProviderSetupWait::Deadline) => {
+                return Ok(emit_provider_deadline(
+                    session_id,
+                    Some(profile.chat_model.clone()),
+                    deadline_plan.total_ms,
+                    turn_prelude_emitted,
+                    live,
+                ));
+            }
             _ => {
                 let msg = format!(
                     "Ollama isn't reachable at {} — start Ollama or choose another provider in Settings.",
@@ -741,9 +902,33 @@ pub async fn research_turn_with_cancel_and_context(
     }
 
     // #122: single factory for all wired kinds (no per-kind if-chain for client construction).
-    let backend = match backend_for(profile, api_key).await {
-        Ok(b) => b,
-        Err(e) => {
+    let backend = match await_provider_setup(
+        turn_started_at,
+        deadline_plan,
+        cancel_ref,
+        backend_for(profile, api_key),
+    )
+    .await
+    {
+        Ok(Ok(b)) => b,
+        Err(ProviderSetupWait::Cancelled) => {
+            return Ok(emit_provider_cancelled(
+                session_id,
+                Some(profile.chat_model.clone()),
+                turn_prelude_emitted,
+                live,
+            ));
+        }
+        Err(ProviderSetupWait::Deadline) => {
+            return Ok(emit_provider_deadline(
+                session_id,
+                Some(profile.chat_model.clone()),
+                deadline_plan.total_ms,
+                turn_prelude_emitted,
+                live,
+            ));
+        }
+        Ok(Err(e)) => {
             let msg = e.to_string();
             let code = if msg.to_lowercase().contains("not wired") {
                 "provider_not_wired"
@@ -762,7 +947,7 @@ pub async fn research_turn_with_cancel_and_context(
 
     // #125: honor capability matrix with explicit degrade notices.
     let caps = profile.capabilities;
-    let tools_notice = if !caps.tools {
+    let tools_notice = if !caps.tools && linked_synthesis_retry.is_none() {
         Some(StreamEvent::SearchTrail {
             steps: vec![format!(
                 "tools disabled for profile “{}” (capabilities.tools=false)",
@@ -782,16 +967,29 @@ pub async fn research_turn_with_cancel_and_context(
         session_id,
         Some(profile.chat_model.clone()),
     );
+    opts.provider_profile_id = Some(profile.id.clone());
     opts.cancel = cancel;
     opts.log_explorer_context = log_explorer_context;
+    opts.linked_synthesis_retry = linked_synthesis_retry;
+    opts.deadline_plan = Some(deadline_plan);
+    opts.turn_started_at = Some(turn_started_at);
+    opts.turn_started_emitted = turn_prelude_emitted;
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).
     opts.context_char_budget = host
         .model_context_budgets()
         .resolve(Some(profile.chat_model.as_str()));
-    let mut events =
-        run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
+    let mut events = run_agent_turn_with_sink_and_checkpoint(
+        &backend,
+        host,
+        user_text,
+        history,
+        &opts,
+        live,
+        checkpoint_out,
+    )
+    .await?;
     if let Some(notice) = tools_notice {
         events.insert(0, notice);
     }
@@ -822,6 +1020,79 @@ fn emit_provider_error(
     if let Some(sink) = live {
         for e in &events {
             sink(e.clone());
+        }
+    }
+    events
+}
+
+fn emit_provider_cancelled(
+    session_id: &str,
+    model: Option<String>,
+    turn_prelude_emitted: bool,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> Vec<StreamEvent> {
+    let events = vec![
+        StreamEvent::TurnStarted {
+            session_id: session_id.into(),
+            model,
+        },
+        StreamEvent::TurnPhase {
+            phase: crate::router::AgentPhase::ChoosingEvidence,
+        },
+        StreamEvent::TurnCompleted {
+            reason: "cancel".into(),
+        },
+    ];
+    if let Some(sink) = live {
+        for event in &events {
+            if !turn_prelude_emitted
+                || !matches!(
+                    event,
+                    StreamEvent::TurnStarted { .. } | StreamEvent::TurnPhase { .. }
+                )
+            {
+                sink(event.clone());
+            }
+        }
+    }
+    events
+}
+
+fn emit_provider_deadline(
+    session_id: &str,
+    model: Option<String>,
+    deadline_ms: u64,
+    turn_prelude_emitted: bool,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> Vec<StreamEvent> {
+    let events = vec![
+        StreamEvent::TurnStarted {
+            session_id: session_id.into(),
+            model,
+        },
+        StreamEvent::TurnPhase {
+            phase: crate::router::AgentPhase::ChoosingEvidence,
+        },
+        StreamEvent::Error {
+            code: "budget_time".into(),
+            message: format!(
+                "The whole-turn deadline ({deadline_ms} ms) expired while preparing the provider."
+            ),
+        },
+        StreamEvent::TurnCompleted {
+            reason: "budget_time".into(),
+        },
+    ];
+    if let Some(sink) = live {
+        for event in &events {
+            if !turn_prelude_emitted
+                || !matches!(
+                    event,
+                    StreamEvent::TurnStarted { .. } | StreamEvent::TurnPhase { .. }
+                )
+            {
+                sink(event.clone());
+            }
         }
     }
     events
@@ -1054,6 +1325,55 @@ mod tests {
     use std::fs;
     use std::net::IpAddr;
     use tempfile::tempdir;
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_provider_health_is_bounded_by_original_whole_turn_deadline() {
+        let plan = crate::router::TurnDeadlinePlan {
+            total_ms: 100,
+            choosing_ms: 500,
+            retrieving_ms: 500,
+            synthesizing_ms: 500,
+            explicit: true,
+        };
+        let started = Instant::now();
+        tokio::time::advance(Duration::from_millis(80)).await;
+        let result = await_provider_setup(
+            started,
+            plan,
+            None,
+            tokio::time::sleep(Duration::from_millis(30)),
+        )
+        .await;
+        assert_eq!(result, Err(ProviderSetupWait::Deadline));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_is_authoritative_during_provider_health() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let plan = crate::router::TurnDeadlinePlan {
+            total_ms: 60_000,
+            choosing_ms: 60_000,
+            retrieving_ms: 60_000,
+            synthesizing_ms: 60_000,
+            explicit: true,
+        };
+        let result = await_provider_setup(
+            Instant::now(),
+            plan,
+            Some(cancel.as_ref()),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert_eq!(result, Err(ProviderSetupWait::Cancelled));
+    }
 
     /// #251: private resolve must not fall back to an unpinned refresh client.
     #[test]
@@ -1614,6 +1934,8 @@ mod tests {
         // Documented in docs/PROTOCOL.md — keep in sync.
         const DOCUMENTED: &[&str] = &[
             "turn_started",
+            "turn_phase",
+            "linked_synthesis_retry",
             "text_delta",
             "thought_delta",
             "tool",
@@ -1627,6 +1949,16 @@ mod tests {
             StreamEvent::TurnStarted {
                 session_id: "s".into(),
                 model: None,
+            },
+            StreamEvent::TurnPhase {
+                phase: crate::router::AgentPhase::ChoosingEvidence,
+            },
+            StreamEvent::LinkedSynthesisRetry {
+                available: true,
+                session_id: "s".into(),
+                corpus_id: "c".into(),
+                provider_profile_id: Some("p".into()),
+                model_id: Some("m".into()),
             },
             StreamEvent::TextDelta { text: "t".into() },
             StreamEvent::ThoughtDelta { text: "th".into() },

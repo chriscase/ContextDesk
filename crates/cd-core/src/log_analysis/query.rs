@@ -16,6 +16,18 @@ pub const MAX_EVENT_PAGE: usize = 500;
 /// Default page size when caller omits limit.
 pub const DEFAULT_EVENT_PAGE: usize = 100;
 
+/// Default number of source identities returned by the dedicated catalog.
+pub const DEFAULT_SOURCE_CATALOG_PAGE: usize = 100;
+
+/// Hard max source identities per catalog page.
+pub const MAX_SOURCE_CATALOG_PAGE: usize = 200;
+
+/// Hard max case-insensitive substring length for source-catalog search.
+pub const MAX_SOURCE_CATALOG_SEARCH_CHARS: usize = 256;
+
+/// Hard max serialized source identity accepted as a catalog cursor.
+pub const MAX_SOURCE_CATALOG_CURSOR_BYTES: usize = 4_096;
+
 /// Default number of fixed summary buckets used by the Explorer navigator.
 pub const DEFAULT_TIMELINE_BUCKETS: usize = 96;
 
@@ -25,8 +37,13 @@ pub const MAX_TIMELINE_BUCKETS: usize = 256;
 /// Hard cap on source-scoped lanes in one shared-axis timeline response.
 pub const MAX_SHARED_TIMELINE_LANES: usize = 4;
 
-/// Hard cap on source names accepted for one shared-axis lane.
-pub const MAX_SHARED_TIMELINE_LANE_SOURCES: usize = 64;
+/// Defensive request-size cap for an explicitly enumerated source lane.
+///
+/// Ordinary "All sources" lanes use [`SharedTimelineLaneScope::all_sources`]
+/// and therefore never expand the corpus catalog into this request. The higher
+/// bound keeps large, intentionally composed lanes useful without accepting an
+/// unbounded IPC payload.
+const MAX_SHARED_TIMELINE_SPECIFIC_SOURCES: usize = 4_096;
 
 /// The shared-axis contract always returns these five canonical severity series.
 pub const SHARED_TIMELINE_SEVERITY_SERIES: usize = 5;
@@ -266,12 +283,15 @@ pub struct TimelineSummary {
 
 /// One source-scoped lane requested on the global shared timeline axis.
 ///
-/// An empty source list deliberately describes an empty lane; it never widens
-/// to all sources. Source scopes are intersected with `filter.sources` when the
-/// global filter already restricts sources.
+/// Source scopes are intersected with `filter.sources` when the global filter
+/// already restricts sources. All-sources scope is explicit so an empty
+/// specific list can continue to mean a deliberately empty lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedTimelineLaneScope {
+    /// Use every source allowed by the global filter.
+    #[serde(default)]
+    pub all_sources: bool,
     /// Exact source names (OR) for this lane.
     #[serde(default)]
     pub sources: Vec<String>,
@@ -598,6 +618,40 @@ pub struct LogFacets {
     pub time_quality: TimeQuality,
 }
 
+/// One stable full-path identity in the corpus source catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSourceCatalogEntry {
+    /// Exact source value stored on events (relative path, never basename-only).
+    pub source: String,
+    /// Exact number of events attributed to this source.
+    pub event_count: u64,
+}
+
+/// Bounded request for the dedicated corpus source catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogSourceCatalogQuery {
+    /// Optional case-insensitive literal substring over the full relative path.
+    pub search: Option<String>,
+    /// Exclusive full-path keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Requested page size. Zero selects [`DEFAULT_SOURCE_CATALOG_PAGE`].
+    pub limit: usize,
+}
+
+/// One deterministic page of distinct source identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSourceCatalogPage {
+    /// Full relative paths in deterministic ascending lexical order.
+    pub sources: Vec<LogSourceCatalogEntry>,
+    /// Exclusive keyset cursor for the next page, present only when more exist.
+    pub next_cursor: Option<String>,
+    /// Exact distinct-source count under the current search, before the cursor.
+    pub total_matched: u64,
+}
+
 /// Event-level search hit (keyword, regex, or via template-semantic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -816,10 +870,35 @@ pub fn query_shared_timeline_summary(
 ) -> CoreResult<SharedTimelineSummary> {
     validate_shared_timeline_query(q)?;
     let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
-    let lane_sources = q
+    let all_sources_source_count = if q.lanes.iter().any(|lane| lane.all_sources) {
+        Some(if q.filter.sources.is_empty() {
+            query_corpus_source_count(corpus)?
+        } else {
+            deduplicated_sources(&q.filter.sources).len()
+        })
+    } else {
+        None
+    };
+    let lane_scopes = q
         .lanes
         .iter()
-        .map(|lane| intersect_lane_sources(&q.filter.sources, &lane.sources))
+        .map(|lane| {
+            if lane.all_sources {
+                ResolvedSharedTimelineLane {
+                    all_sources: true,
+                    sources: Vec::new(),
+                    source_count: all_sources_source_count.unwrap_or_default(),
+                }
+            } else {
+                let sources = intersect_lane_sources(&q.filter.sources, &lane.sources);
+                let source_count = sources.len();
+                ResolvedSharedTimelineLane {
+                    all_sources: false,
+                    sources,
+                    source_count,
+                }
+            }
+        })
         .collect::<Vec<_>>();
     let (where_sql, binds) = build_where(&q.filter);
     let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
@@ -836,7 +915,7 @@ pub fn query_shared_timeline_summary(
     })?;
 
     let (Some(min_ts), Some(max_ts)) = (min_ts, max_ts) else {
-        return Ok(empty_shared_timeline(lane_sources));
+        return Ok(empty_shared_timeline(&lane_scopes));
     };
     let (span_to, bucket_width, bucket_count) = shared_timeline_axis(min_ts, max_ts, max_buckets)?;
     let buckets = (0..bucket_count)
@@ -898,24 +977,33 @@ pub fn query_shared_timeline_summary(
             severity_counts[severity.index()][index].saturating_add(count);
     }
 
-    let mut lanes = Vec::with_capacity(lane_sources.len());
-    for (lane_index, sources) in lane_sources.iter().enumerate() {
-        lanes.push(query_shared_timeline_lane(
-            corpus,
-            &q.filter,
-            sources,
-            lane_index,
-            min_ts,
-            bucket_width,
-            bucket_count,
-        )?);
-    }
-
     let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
         (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
         (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
         _ => TimeQuality::Mixed,
     };
+    let mut lanes = Vec::with_capacity(lane_scopes.len());
+    for (lane_index, scope) in lane_scopes.iter().enumerate() {
+        if scope.all_sources {
+            lanes.push(SharedTimelineLaneSummary {
+                lane_index: lane_index as u8,
+                source_count: scope.source_count,
+                time_quality,
+                total_matched: total_matched.max(0) as u64,
+                counts: counts.clone(),
+            });
+        } else {
+            lanes.push(query_shared_timeline_lane(
+                corpus,
+                &q.filter,
+                &scope.sources,
+                lane_index,
+                min_ts,
+                bucket_width,
+                bucket_count,
+            )?);
+        }
+    }
     let severity_series = SharedTimelineSeverity::ALL
         .into_iter()
         .map(|severity| SharedTimelineSeveritySeries {
@@ -947,28 +1035,55 @@ fn validate_shared_timeline_query(q: &SharedTimelineSummaryQuery) -> CoreResult<
         )));
     }
     for (index, lane) in q.lanes.iter().enumerate() {
-        if lane.sources.len() > MAX_SHARED_TIMELINE_LANE_SOURCES {
+        if lane.all_sources && !lane.sources.is_empty() {
+            return Err(CoreError::Message(format!(
+                "shared timeline lane {index} cannot combine allSources with explicit sources"
+            )));
+        }
+        if lane.sources.len() > MAX_SHARED_TIMELINE_SPECIFIC_SOURCES {
             return Err(CoreError::Message(format!(
                 "shared timeline lane {index} source cap exceeded: {} requested, maximum is {}",
                 lane.sources.len(),
-                MAX_SHARED_TIMELINE_LANE_SOURCES
+                MAX_SHARED_TIMELINE_SPECIFIC_SOURCES
             )));
         }
     }
     Ok(())
 }
 
-fn intersect_lane_sources(global: &[String], requested: &[String]) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSharedTimelineLane {
+    all_sources: bool,
+    sources: Vec<String>,
+    source_count: usize,
+}
+
+fn deduplicated_sources(requested: &[String]) -> Vec<String> {
     let mut sources = Vec::with_capacity(requested.len());
     for source in requested {
-        if sources.contains(source) {
-            continue;
-        }
-        if global.is_empty() || global.contains(source) {
+        if !sources.contains(source) {
             sources.push(source.clone());
         }
     }
     sources
+}
+
+fn intersect_lane_sources(global: &[String], requested: &[String]) -> Vec<String> {
+    deduplicated_sources(requested)
+        .into_iter()
+        .filter(|source| global.is_empty() || global.contains(source))
+        .collect()
+}
+
+fn query_corpus_source_count(corpus: &LogCorpus) -> CoreResult<usize> {
+    let count = corpus.with_connection(|conn| {
+        conn.query_row("SELECT COUNT(DISTINCT source) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(duck_err)
+    })?;
+    usize::try_from(count.max(0))
+        .map_err(|_| CoreError::Message("source count exceeds this platform's limits".into()))
 }
 
 fn shared_timeline_axis(
@@ -1081,7 +1196,7 @@ fn query_shared_timeline_lane(
     })
 }
 
-fn empty_shared_timeline(lane_sources: Vec<Vec<String>>) -> SharedTimelineSummary {
+fn empty_shared_timeline(lane_scopes: &[ResolvedSharedTimelineLane]) -> SharedTimelineSummary {
     SharedTimelineSummary {
         time_quality: TimeQuality::OrderOnly,
         span_from: None,
@@ -1098,12 +1213,12 @@ fn empty_shared_timeline(lane_sources: Vec<Vec<String>>) -> SharedTimelineSummar
                 counts: Vec::new(),
             })
             .collect(),
-        lanes: lane_sources
-            .into_iter()
+        lanes: lane_scopes
+            .iter()
             .enumerate()
-            .map(|(lane_index, sources)| SharedTimelineLaneSummary {
+            .map(|(lane_index, scope)| SharedTimelineLaneSummary {
                 lane_index: lane_index as u8,
-                source_count: sources.len(),
+                source_count: scope.source_count,
                 time_quality: TimeQuality::OrderOnly,
                 total_matched: 0,
                 counts: Vec::new(),
@@ -1345,6 +1460,130 @@ pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets>
         Ok(())
     })?;
     Ok(facets)
+}
+
+/// Query the complete, corpus-scoped source inventory independently of facets.
+///
+/// Sources are grouped by their exact stored relative path and ordered by the
+/// database's deterministic default binary collation. The cursor is the last
+/// full path returned and is exclusive. Before advancing, it must still exist
+/// under the same search predicate; a stale or search-mismatched cursor fails
+/// explicitly rather than returning a plausible page with silently skipped
+/// sources.
+pub fn query_source_catalog(
+    corpus: &LogCorpus,
+    q: &LogSourceCatalogQuery,
+) -> CoreResult<LogSourceCatalogPage> {
+    let limit = if q.limit == 0 {
+        DEFAULT_SOURCE_CATALOG_PAGE
+    } else if q.limit <= MAX_SOURCE_CATALOG_PAGE {
+        q.limit
+    } else {
+        return Err(CoreError::Message(format!(
+            "source catalog page limit {} exceeds maximum {}",
+            q.limit, MAX_SOURCE_CATALOG_PAGE
+        )));
+    };
+
+    let search = normalize_source_catalog_search(q.search.as_deref())?;
+    let cursor = validate_source_catalog_cursor(q.cursor.as_deref())?;
+    let mut base_clauses = vec!["1=1".to_string()];
+    let mut base_binds = Vec::new();
+    if let Some(search) = &search {
+        base_clauses.push("contains(lower(source), ?)".into());
+        base_binds.push(Value::Text(search.clone()));
+    }
+    let base_where = base_clauses.join(" AND ");
+
+    corpus.with_connection(|conn| {
+        if let Some(cursor) = cursor {
+            let cursor_sql =
+                format!("SELECT COUNT(*) FROM events WHERE {base_where} AND source = ?");
+            let mut cursor_binds = base_binds.clone();
+            cursor_binds.push(Value::Text(cursor.to_string()));
+            let mut stmt = conn.prepare(&cursor_sql).map_err(duck_err)?;
+            let cursor_count = bind_and_query_row_i64(&mut stmt, &cursor_binds)?;
+            if cursor_count == 0 {
+                return Err(CoreError::Message(
+                    "source catalog cursor is not present under the current corpus search".into(),
+                ));
+            }
+        }
+
+        let total_sql = format!(
+            "SELECT COUNT(*) FROM (SELECT source FROM events WHERE {base_where} GROUP BY source)"
+        );
+        let mut total_stmt = conn.prepare(&total_sql).map_err(duck_err)?;
+        let total_matched = bind_and_query_row_i64(&mut total_stmt, &base_binds)?.max(0) as u64;
+
+        let mut page_where = base_where;
+        let mut page_binds = base_binds;
+        if let Some(cursor) = cursor {
+            page_where.push_str(" AND source > ?");
+            page_binds.push(Value::Text(cursor.to_string()));
+        }
+        page_binds.push(Value::BigInt((limit + 1) as i64));
+        let page_sql = format!(
+            "SELECT source, COUNT(*) AS event_count \
+             FROM events WHERE {page_where} \
+             GROUP BY source ORDER BY source ASC LIMIT ?"
+        );
+        let mut page_stmt = conn.prepare(&page_sql).map_err(duck_err)?;
+        let mut rows = bind_and_map_source_catalog(&mut page_stmt, &page_binds)?;
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
+        let next_cursor = has_more
+            .then(|| rows.last().map(|entry| entry.source.clone()))
+            .flatten();
+
+        Ok(LogSourceCatalogPage {
+            sources: rows,
+            next_cursor,
+            total_matched,
+        })
+    })
+}
+
+fn normalize_source_catalog_search(search: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(search) = search else {
+        return Ok(None);
+    };
+    let search = search.trim();
+    if search.is_empty() {
+        return Ok(None);
+    }
+    if search.contains('\0') {
+        return Err(CoreError::Message(
+            "source catalog search must not contain NUL".into(),
+        ));
+    }
+    let chars = search.chars().count();
+    if chars > MAX_SOURCE_CATALOG_SEARCH_CHARS {
+        return Err(CoreError::Message(format!(
+            "source catalog search length {chars} exceeds maximum {MAX_SOURCE_CATALOG_SEARCH_CHARS}"
+        )));
+    }
+    Ok(Some(search.to_lowercase()))
+}
+
+fn validate_source_catalog_cursor(cursor: Option<&str>) -> CoreResult<Option<&str>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    if cursor.is_empty() || cursor.contains('\0') {
+        return Err(CoreError::Message(
+            "source catalog cursor must be a non-empty source path without NUL".into(),
+        ));
+    }
+    if cursor.len() > MAX_SOURCE_CATALOG_CURSOR_BYTES {
+        return Err(CoreError::Message(format!(
+            "source catalog cursor exceeds maximum {} bytes",
+            MAX_SOURCE_CATALOG_CURSOR_BYTES
+        )));
+    }
+    Ok(Some(cursor))
 }
 
 /// Keyword / regex / optional template-semantic → **events** (template-first for semantic).
@@ -2260,6 +2499,25 @@ fn bind_and_map_kv(
     Ok(out)
 }
 
+fn bind_and_map_source_catalog(
+    stmt: &mut duckdb::Statement<'_>,
+    values: &[Value],
+) -> CoreResult<Vec<LogSourceCatalogEntry>> {
+    let rows = stmt
+        .query_map(params_ref(values).as_slice(), |row| {
+            Ok(LogSourceCatalogEntry {
+                source: row.get(0)?,
+                event_count: row.get::<_, i64>(1)?.max(0) as u64,
+            })
+        })
+        .map_err(duck_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(duck_err)?);
+    }
+    Ok(out)
+}
+
 fn duck_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Message(format!("duckdb: {e}"))
 }
@@ -2328,6 +2586,44 @@ mod tests {
         let cache = dir.path().join("cache");
         let report = ingest_path(&cache, &logs, "shared-timeline", None, "none").unwrap();
         (dir, report.corpus_id)
+    }
+
+    fn high_cardinality_source_catalog_fixture() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::create(&cache, "source-catalog").unwrap();
+        let corpus_id = corpus.id().to_string();
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN TRANSACTION").map_err(duck_err)?;
+                let mut seq = 0_i64;
+                for index in 1..=241 {
+                    let source = format!("services/service-{index:03}/application.log");
+                    conn.execute(
+                        "INSERT INTO events \
+                         (seq, ts, level, service, host, template_id, params, trace_id, message, source) \
+                         VALUES (?1, ?2, 'info', NULL, NULL, 0, '[]', NULL, 'event', ?3)",
+                        duckdb::params![seq, 1_700_000_000_i64 + seq, source],
+                    )
+                    .map_err(duck_err)?;
+                    seq += 1;
+                }
+                conn.execute(
+                    "INSERT INTO events \
+                     (seq, ts, level, service, host, template_id, params, trace_id, message, source) \
+                     VALUES (?1, ?2, 'error', NULL, NULL, 0, '[]', NULL, 'second event', ?3)",
+                    duckdb::params![
+                        seq,
+                        1_700_000_000_i64 + seq,
+                        "services/service-001/application.log"
+                    ],
+                )
+                .map_err(duck_err)?;
+                conn.execute_batch("COMMIT").map_err(duck_err)?;
+                Ok(())
+            })
+            .unwrap();
+        (dir, corpus_id)
     }
 
     #[test]
@@ -2550,15 +2846,19 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into(), "worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["missing.log".into()],
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -2671,11 +2971,13 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into(), "worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["worker.log".into()],
+                        ..Default::default()
                     },
-                    SharedTimelineLaneScope { sources: vec![] },
+                    SharedTimelineLaneScope::default(),
                 ],
             },
         )
@@ -2690,6 +2992,81 @@ mod tests {
         assert!(summary.lanes[1].counts.iter().all(|count| *count == 0));
         assert_eq!(summary.lanes[2].source_count, 0);
         assert_eq!(summary.lanes[2].total_matched, 0);
+    }
+
+    #[test]
+    fn shared_timeline_all_sources_is_explicit_and_reuses_the_global_axis() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 5,
+                lanes: vec![
+                    SharedTimelineLaneScope {
+                        all_sources: true,
+                        sources: Vec::new(),
+                    },
+                    SharedTimelineLaneScope::default(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.lanes[0].source_count, 2);
+        assert_eq!(summary.lanes[0].total_matched, summary.total_matched);
+        assert_eq!(summary.lanes[0].counts, summary.counts);
+        assert_eq!(summary.lanes[0].time_quality, summary.time_quality);
+        assert_eq!(summary.lanes[1].source_count, 0);
+        assert_eq!(summary.lanes[1].total_matched, 0);
+        assert!(summary.lanes[1].counts.iter().all(|count| *count == 0));
+
+        let filtered = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter: EventQuery {
+                    sources: vec!["api.log".into()],
+                    ..Default::default()
+                },
+                max_buckets: 5,
+                lanes: vec![SharedTimelineLaneScope {
+                    all_sources: true,
+                    sources: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.lanes[0].source_count, 1);
+        assert_eq!(filtered.lanes[0].total_matched, filtered.total_matched);
+        assert_eq!(filtered.lanes[0].counts, filtered.counts);
+    }
+
+    #[test]
+    fn shared_timeline_accepts_a_241_source_specific_lane() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let mut sources = (0..240)
+            .map(|index| format!("missing-{index}.log"))
+            .collect::<Vec<_>>();
+        sources.push("api.log".into());
+
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 5,
+                lanes: vec![SharedTimelineLaneScope {
+                    sources,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.lanes[0].source_count, 241);
+        assert_eq!(summary.lanes[0].total_matched, 2);
+        assert_eq!(summary.lanes[0].counts, vec![1, 0, 1, 0, 0]);
     }
 
     #[test]
@@ -2761,9 +3138,11 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["plain.log".into()],
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -2802,6 +3181,7 @@ mod tests {
                 lanes: (0..MAX_SHARED_TIMELINE_LANES)
                     .map(|_| SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
@@ -2815,6 +3195,7 @@ mod tests {
                 lanes: (0..MAX_SHARED_TIMELINE_LANES)
                     .map(|_| SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
@@ -2857,15 +3238,31 @@ mod tests {
             &corpus,
             &SharedTimelineSummaryQuery {
                 lanes: vec![SharedTimelineLaneScope {
-                    sources: (0..=MAX_SHARED_TIMELINE_LANE_SOURCES)
+                    sources: (0..=MAX_SHARED_TIMELINE_SPECIFIC_SOURCES)
                         .map(|index| format!("source-{index}.log"))
                         .collect(),
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
         )
         .unwrap_err();
         assert!(too_many_sources.to_string().contains("source cap exceeded"));
+
+        let ambiguous_all_sources = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                lanes: vec![SharedTimelineLaneScope {
+                    all_sources: true,
+                    sources: vec!["api.log".into()],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(ambiguous_all_sources
+            .to_string()
+            .contains("cannot combine allSources"));
     }
 
     #[test]
@@ -2881,6 +3278,7 @@ mod tests {
                 },
                 lanes: vec![SharedTimelineLaneScope {
                     sources: vec!["api.log".into()],
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -3396,6 +3794,185 @@ mod tests {
             f.time_quality,
             TimeQuality::Wall | TimeQuality::Mixed | TimeQuality::OrderOnly
         ));
+    }
+
+    #[test]
+    fn source_catalog_pages_all_241_full_paths_without_gaps_or_duplicates() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let mut cursor = None;
+        let mut sources = Vec::new();
+        let mut pages = 0;
+
+        loop {
+            let page = query_source_catalog(
+                &corpus,
+                &LogSourceCatalogQuery {
+                    cursor: cursor.clone(),
+                    limit: 37,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            pages += 1;
+            assert_eq!(page.total_matched, 241);
+            assert!(page.sources.len() <= 37);
+            assert!(page
+                .sources
+                .windows(2)
+                .all(|pair| pair[0].source < pair[1].source));
+            if let Some(next) = &page.next_cursor {
+                assert_eq!(
+                    Some(next.as_str()),
+                    page.sources.last().map(|entry| entry.source.as_str()),
+                    "continuation must be the last returned full-path identity"
+                );
+            }
+            sources.extend(page.sources);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+            assert!(pages < 20, "source catalog pagination did not terminate");
+        }
+
+        assert_eq!(pages, 7);
+        assert_eq!(sources.len(), 241);
+        assert!(sources
+            .windows(2)
+            .all(|pair| pair[0].source < pair[1].source));
+        assert_eq!(
+            sources
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            241
+        );
+        assert!(sources
+            .iter()
+            .any(|entry| entry.source == "services/service-241/application.log"));
+        assert_eq!(
+            sources
+                .iter()
+                .find(|entry| entry.source == "services/service-001/application.log")
+                .map(|entry| entry.event_count),
+            Some(2)
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|entry| entry.source.ends_with("/application.log")),
+            "duplicate basenames must remain distinct by full relative path"
+        );
+
+        let repeated_first = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                limit: 37,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(repeated_first.sources, sources[..37]);
+    }
+
+    #[test]
+    fn source_catalog_search_is_case_insensitive_literal_and_cursor_safe() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let matched = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("SERVICE-241/APPLICATION".into()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(matched.total_matched, 1);
+        assert_eq!(
+            matched.sources,
+            vec![LogSourceCatalogEntry {
+                source: "services/service-241/application.log".into(),
+                event_count: 1,
+            }]
+        );
+        assert_eq!(matched.next_cursor, None);
+
+        let wildcard_literal = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("%_".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(wildcard_literal.total_matched, 0);
+
+        let first = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("service-241".into()),
+                cursor: first.next_cursor,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not present under the current corpus search"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn source_catalog_rejects_unbounded_or_invalid_requests() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let defaults: LogSourceCatalogQuery =
+            serde_json::from_str("{}").expect("omitted IPC fields use bounded defaults");
+        let default_page = query_source_catalog(&corpus, &defaults).unwrap();
+        assert_eq!(default_page.sources.len(), DEFAULT_SOURCE_CATALOG_PAGE);
+        assert_eq!(default_page.total_matched, 241);
+        assert!(default_page.next_cursor.is_some());
+
+        for query in [
+            LogSourceCatalogQuery {
+                limit: MAX_SOURCE_CATALOG_PAGE + 1,
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                search: Some("x".repeat(MAX_SOURCE_CATALOG_SEARCH_CHARS + 1)),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some(String::new()),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some("missing/source.log".into()),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some("x".repeat(MAX_SOURCE_CATALOG_CURSOR_BYTES + 1)),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                query_source_catalog(&corpus, &query).is_err(),
+                "request must fail closed: {query:?}"
+            );
+        }
     }
 
     #[test]

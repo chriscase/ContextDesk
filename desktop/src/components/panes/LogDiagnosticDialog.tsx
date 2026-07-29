@@ -1,26 +1,43 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { saveFileDialog } from "../../lib/dialogs";
 import {
   buildLogDiagnosticReport,
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
+  type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import {
+  hostPrepareLogDiagnosticReport,
+  hostReleaseLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
+  type FailedLogIngestDiagnosticDto,
   type LogCorpusSummaryDto,
+  type PreparedLogDiagnosticDto,
 } from "../../lib/host";
 
 type PreviewFormat = "markdown" | "json";
+export const PREPARE_DEBOUNCE_MS = 140;
+
+async function releasePreparedReport(reportId: string) {
+  try {
+    await hostReleaseLogDiagnosticReport(reportId);
+  } catch {
+    // The store is bounded and process-local; an expired id is already released.
+  }
+}
 
 export function LogDiagnosticDialog({
   corpus,
+  failedIngest = null,
+  activeView = null,
   environment,
   currentStatus,
   onDismiss,
 }: {
-  corpus: LogCorpusSummaryDto;
+  corpus: LogCorpusSummaryDto | null;
+  failedIngest?: FailedLogIngestDiagnosticDto | null;
+  activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus: LogDiagnosticStatus | null;
   onDismiss: () => void;
@@ -30,9 +47,16 @@ export function LogDiagnosticDialog({
     useState<PreviewFormat>("markdown");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [prepared, setPrepared] =
+    useState<PreparedLogDiagnosticDto | null>(null);
+  const [prepareError, setPrepareError] = useState<string | null>(null);
   const generatedAtRef = useRef(new Date());
   const dialogRef = useRef<HTMLDivElement>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
+  const mountedRef = useRef(true);
+  const prepareVersionRef = useRef(0);
+  const prepareQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const preparedRef = useRef<PreparedLogDiagnosticDto | null>(null);
   const titleId = useId();
   const descriptionId = useId();
   const noteId = useId();
@@ -41,56 +65,130 @@ export function LogDiagnosticDialog({
     () =>
       buildLogDiagnosticReport({
         corpus,
+        failedIngest,
+        activeView,
         environment,
         currentStatus,
         userNote,
         generatedAt: generatedAtRef.current,
       }),
-    [corpus, currentStatus, environment, userNote],
+    [
+      activeView,
+      corpus,
+      currentStatus,
+      environment,
+      failedIngest,
+      userNote,
+    ],
   );
+  const failed = failedIngest != null;
+  const subjectLabel = corpus?.name ?? "the latest failed import";
 
   useEffect(() => {
     queueMicrotask(() => noteRef.current?.focus());
   }, []);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      prepareVersionRef.current += 1;
+      const selected = preparedRef.current;
+      preparedRef.current = null;
+      if (selected) void releasePreparedReport(selected.reportId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const version = ++prepareVersionRef.current;
+    setPrepared(null);
+    setPrepareError(null);
+    setResult(null);
+    const timer = window.setTimeout(() => {
+      prepareQueueRef.current = prepareQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!mountedRef.current || version !== prepareVersionRef.current) {
+            return;
+          }
+          try {
+            const next = await hostPrepareLogDiagnosticReport(report.manifest);
+            if (!mountedRef.current || version !== prepareVersionRef.current) {
+              await releasePreparedReport(next.reportId);
+              return;
+            }
+            const previous = preparedRef.current;
+            preparedRef.current = next;
+            setPrepared(next);
+            if (previous && previous.reportId !== next.reportId) {
+              await releasePreparedReport(previous.reportId);
+            }
+          } catch (error) {
+            if (!mountedRef.current || version !== prepareVersionRef.current) {
+              return;
+            }
+            const previous = preparedRef.current;
+            preparedRef.current = null;
+            if (previous) await releasePreparedReport(previous.reportId);
+            setPrepareError(
+              `Could not prepare diagnostics: ${String(error)}`,
+            );
+          }
+        });
+    }, PREPARE_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [report.manifest]);
+
   const dismiss = () => {
     if (!busy) onDismiss();
   };
 
-  async function copyMarkdown() {
+  async function copyPreview() {
     setResult(null);
+    const json = previewFormat === "json";
+    if (!prepared) {
+      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(report.markdown);
-      setResult("Copied redacted Markdown. Review it before sharing.");
+      await navigator.clipboard.writeText(
+        json ? prepared.json : prepared.markdown,
+      );
+      setResult(
+        `Copied redacted ${json ? "JSON" : "Markdown"}. Review it before sharing.`,
+      );
     } catch {
-      setResult("Clipboard unavailable. Use Save Markdown instead.");
+      setResult(
+        `Clipboard unavailable. Use Save ${json ? "JSON" : "Markdown"} instead.`,
+      );
     }
   }
 
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
-    const path = await saveFileDialog(
-      markdown ? "Save corpus diagnostics" : "Save corpus diagnostics as JSON",
-      `contextdesk-${corpus.id.slice(0, 8)}-diagnostics.${markdown ? "md" : "json"}`,
-      [
-        markdown
-          ? { name: "Markdown", extensions: ["md"] }
-          : { name: "JSON", extensions: ["json"] },
-      ],
-    );
-    if (!path) {
-      setResult("Save cancelled. No file was written.");
+    if (!prepared) {
+      setResult(prepareError ?? "The trusted host is still preparing the preview.");
       return;
     }
-
     setBusy(true);
     setResult(null);
     try {
-      await hostSaveLogDiagnosticReport(
-        path,
+      const outcome = await hostSaveLogDiagnosticReport(
+        prepared.reportId,
         format,
-        markdown ? report.markdown : report.json,
       );
+      if (outcome.status === "cancelled") {
+        setResult("Save cancelled. No file was written.");
+        return;
+      }
+      if (outcome.status === "saved_with_warning") {
+        setResult(
+          `Saved redacted ${markdown ? "Markdown" : "JSON"} diagnostics, but the host reported a durability warning: ${outcome.warning}`,
+        );
+        return;
+      }
       setResult(
         `Saved redacted ${markdown ? "Markdown" : "JSON"} diagnostics. Review before sharing.`,
       );
@@ -143,9 +241,12 @@ export function LogDiagnosticDialog({
       >
         <header className="log-diagnostic__header">
           <div>
-            <h3 id={titleId}>Export corpus diagnostics</h3>
+            <h3 id={titleId}>
+              Export {failed ? "failed-ingest" : "corpus"} diagnostics
+            </h3>
             <p id={descriptionId}>
-              A bounded, redacted support report for <strong>{corpus.name}</strong>.
+              A bounded, redacted support report for{" "}
+              <strong>{subjectLabel}</strong>.
             </p>
           </div>
           <button
@@ -159,83 +260,98 @@ export function LogDiagnosticDialog({
           </button>
         </header>
 
-        <div className="log-diagnostic__privacy" role="note">
-          <strong>Review before sharing.</strong>
-          <span>
-            Raw logs and event payloads, absolute paths, chats, provider/model
-            inventories, secrets, and evaluator truth are excluded.
-          </span>
-        </div>
-
-        <label className="log-diagnostic__note" htmlFor={noteId}>
-          <span>
-            Optional reproduction note
-            <small>
-              {Array.from(userNote).length}/{LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
-            </small>
-          </span>
-          <textarea
-            ref={noteRef}
-            id={noteId}
-            value={userNote}
-            maxLength={LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
-            disabled={busy}
-            placeholder="What did you do, and what did you expect?"
-            onChange={(event) => setUserNote(event.target.value)}
-          />
-        </label>
-
-        <div className="log-diagnostic__preview-header">
-          <strong>Exact export preview</strong>
-          <div
-            className="log-diagnostic__format"
-            role="group"
-            aria-label="Diagnostic preview format"
-          >
-            <button
-              type="button"
-              className="btn btn--ghost"
-              data-active={previewFormat === "markdown" ? "true" : "false"}
-              onClick={() => setPreviewFormat("markdown")}
-            >
-              Markdown
-            </button>
-            <button
-              type="button"
-              className="btn btn--ghost"
-              data-active={previewFormat === "json" ? "true" : "false"}
-              onClick={() => setPreviewFormat("json")}
-            >
-              JSON
-            </button>
-          </div>
-        </div>
-        <pre
-          className="log-diagnostic__preview"
-          aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
+        <div
+          className="log-diagnostic__body"
+          data-testid="log-diagnostic-scroll-body"
+          role="region"
+          aria-label="Diagnostic details and exact preview"
+          tabIndex={0}
         >
-          {previewFormat === "markdown" ? report.markdown : report.json}
-        </pre>
+          <div className="log-diagnostic__privacy" role="note">
+            <strong>Review before sharing.</strong>
+            <span>
+              Raw logs and event payloads, absolute paths, chats, provider/model
+              inventories, secrets, and evaluator truth are excluded.
+            </span>
+          </div>
 
-        {result ? (
-          <p className="log-diagnostic__result" role="status">
-            {result}
-          </p>
-        ) : null}
+          <label className="log-diagnostic__note" htmlFor={noteId}>
+            <span>
+              Optional reproduction note
+              <small>
+                {Array.from(userNote).length}/{LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
+              </small>
+            </span>
+            <textarea
+              ref={noteRef}
+              id={noteId}
+              value={userNote}
+              maxLength={LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
+              disabled={busy}
+              placeholder="What did you do, and what did you expect?"
+              onChange={(event) => setUserNote(event.target.value)}
+            />
+          </label>
+
+          <div className="log-diagnostic__preview-header">
+            <strong>Exact export preview</strong>
+            <div
+              className="log-diagnostic__format"
+              role="group"
+              aria-label="Diagnostic preview format"
+            >
+              <button
+                type="button"
+                className="btn btn--ghost"
+                aria-pressed={previewFormat === "markdown"}
+                data-active={previewFormat === "markdown" ? "true" : "false"}
+                onClick={() => setPreviewFormat("markdown")}
+              >
+                Markdown
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                aria-pressed={previewFormat === "json"}
+                data-active={previewFormat === "json" ? "true" : "false"}
+                onClick={() => setPreviewFormat("json")}
+              >
+                JSON
+              </button>
+            </div>
+          </div>
+          <pre
+            className="log-diagnostic__preview"
+            tabIndex={0}
+            aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
+          >
+            {prepared
+              ? previewFormat === "markdown"
+                ? prepared.markdown
+                : prepared.json
+              : prepareError ?? "Preparing exact preview in the trusted host…"}
+          </pre>
+
+          {result ? (
+            <p className="log-diagnostic__result" role="status">
+              {result}
+            </p>
+          ) : null}
+        </div>
 
         <footer className="log-diagnostic__actions">
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={busy}
-            onClick={() => void copyMarkdown()}
+            disabled={busy || !prepared}
+            onClick={() => void copyPreview()}
           >
-            Copy Markdown
+            Copy {previewFormat === "json" ? "JSON" : "Markdown"}
           </button>
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={busy}
+            disabled={busy || !prepared}
             onClick={() => void save("json")}
           >
             Save JSON…
@@ -243,7 +359,7 @@ export function LogDiagnosticDialog({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={busy}
+            disabled={busy || !prepared}
             onClick={() => void save("markdown")}
           >
             {busy ? "Saving…" : "Save Markdown…"}

@@ -18,6 +18,7 @@ import "./styles/components/tools.css";
 import "./styles/components/chat.css";
 import "./styles/components/forms.css";
 import "./styles/components/help-tip.css";
+import "./styles/components/theme-picker.css";
 import "./styles/components/settings.css";
 import "./styles/components/command-palette.css";
 import "./styles/components/composition.css";

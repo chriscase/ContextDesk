@@ -121,6 +121,37 @@ function moveTimelineTo(index: number, commit = false) {
 }
 
 describe("TimelineNavigator", () => {
+  it("waits for first evidence rows before requesting the timeline", async () => {
+    const { rerender } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        ready={false}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Waiting for first evidence rows…"),
+    ).toBeTruthy();
+    expect(host.hostLogSharedTimelineSummary).not.toHaveBeenCalled();
+
+    rerender(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        ready
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1),
+    );
+  });
+
   it("keeps the timeline on a full lane-strip row when adjacent disclosures can fit", async () => {
     render(
       <TimelineNavigator
@@ -167,7 +198,9 @@ describe("TimelineNavigator", () => {
         96,
       ),
     );
-    expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
+    await waitFor(() =>
+      expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4),
+    );
     expect(screen.getByText(/42 matching events summarized/)).toBeTruthy();
     const toggle = screen.getByTestId("timeline-navigator-toggle");
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
@@ -945,6 +978,107 @@ describe("TimelineNavigator", () => {
     expect(within(breakdown).getByText("API")).toBeTruthy();
     expect(within(breakdown).getByText("Worker")).toBeTruthy();
     expect(within(breakdown).getByText("12")).toBeTruthy();
+  });
+
+  it("requests an all-source lane distinctly from a deliberately empty lane", async () => {
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      lanes: [
+        {
+          laneIndex: 0,
+          sourceCount: 241,
+          timeQuality: "wall",
+          totalMatched: 42,
+          counts: [30, 0, 0, 12],
+        },
+        {
+          laneIndex: 1,
+          sourceCount: 0,
+          timeQuality: "order_only",
+          totalMatched: 0,
+          counts: [0, 0, 0, 0],
+        },
+      ],
+    });
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{ levels: ["error"] }}
+        residentEvents={[]}
+        lanes={[
+          {
+            id: "lane-all",
+            label: "All sources",
+            sources: [],
+            allSources: true,
+          },
+          {
+            id: "lane-empty",
+            label: "No matching sources",
+            sources: [],
+            emptySourceScope: true,
+          },
+        ]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("timeline-lane-coverage");
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
+      "c1",
+      { levels: ["error"] },
+      [{ sources: [], allSources: true }, { sources: [] }],
+      96,
+    );
+  });
+
+  it("sends all 241 sources in a specific lane without truncation", async () => {
+    const sources = Array.from(
+      { length: 241 },
+      (_, index) => `region-${index + 1}/application.log`,
+    );
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      ...summary,
+      lanes: [
+        {
+          laneIndex: 0,
+          sourceCount: 241,
+          timeQuality: "wall",
+          totalMatched: 42,
+          counts: [30, 0, 0, 12],
+        },
+        {
+          laneIndex: 1,
+          sourceCount: 1,
+          timeQuality: "wall",
+          totalMatched: 1,
+          counts: [1, 0, 0, 0],
+        },
+      ],
+    });
+
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        lanes={[
+          { id: "lane-241", label: "241 sources", sources },
+          {
+            id: "lane-control",
+            label: "Control",
+            sources: ["control.log"],
+          },
+        ]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("timeline-lane-coverage");
+    const request = vi.mocked(host.hostLogSharedTimelineSummary).mock.calls[0];
+    expect(request?.[2]?.[0]).toEqual({ sources });
+    expect(request?.[2]?.[0]?.sources).toHaveLength(241);
   });
 
   it("ignores a stale summary after filters change", async () => {

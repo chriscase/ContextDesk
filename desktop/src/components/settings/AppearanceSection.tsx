@@ -1,6 +1,6 @@
-import type { CSSProperties } from "react";
 import { SelectField } from "../forms";
-import { SKINS, type SkinId } from "../../lib/skins";
+import type { SkinId } from "../../lib/skins";
+import { ThemePicker } from "../ThemePicker";
 
 export type AppearanceSectionProps = {
   baseId: string;
@@ -17,14 +17,6 @@ export function AppearanceSection({
   uiScale,
   onUiScaleChange,
 }: AppearanceSectionProps) {
-  const active = SKINS.find((skin) => skin.id === theme) ?? SKINS[0];
-  const previewStyle = {
-    "--theme-preview-app": active.swatches.app,
-    "--theme-preview-panel": active.swatches.panel,
-    "--theme-preview-elevated": active.swatches.elevated,
-    "--theme-preview-accent": active.swatches.accent,
-  } as CSSProperties;
-
   return (
     <div>
       <p className="section-lead">
@@ -32,46 +24,14 @@ export function AppearanceSection({
         — no Save required.
       </p>
 
-      <div className="appearance-theme-picker">
-        <SelectField
-          id={`${baseId}-theme`}
-          label="Theme"
-          hint="The selected theme is applied and persisted immediately."
-          value={theme}
-          onChange={(event) => {
-            const next = SKINS.find(
-              (skin) => skin.id === event.currentTarget.value,
-            );
-            if (next) onThemeChange(next.id);
-          }}
-        >
-          {SKINS.map((skin) => (
-            <option key={skin.id} value={skin.id}>
-              {skin.label}
-            </option>
-          ))}
-        </SelectField>
-
-        <div
-          className="appearance-theme-preview"
-          role="status"
-          aria-label="Selected theme preview"
-          aria-live="polite"
-          aria-atomic="true"
-          style={previewStyle}
-        >
-          <span className="appearance-theme-preview__palette" aria-hidden="true">
-            <span data-tone="app" />
-            <span data-tone="panel" />
-            <span data-tone="elevated" />
-            <span data-tone="accent" />
-          </span>
-          <span className="appearance-theme-preview__copy">
-            <strong>{active.label}</strong>
-            <span>{active.description}</span>
-          </span>
-        </div>
-      </div>
+      <ThemePicker
+        variant="settings"
+        theme={theme}
+        onThemeChange={onThemeChange}
+      />
+      <p className="field__hint">
+        The selected theme is applied and persisted immediately.
+      </p>
 
       <SelectField
         id={`${baseId}-ui-scale`}

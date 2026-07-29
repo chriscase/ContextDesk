@@ -102,6 +102,7 @@ export function useSettingsController({
     max_tool_rounds: 12,
     max_results_per_source: 8,
     deadline_ms: 120_000,
+    deadline_is_explicit: false,
   });
   /** Workspace connector registry (#127). */
   const [connectors, setConnectors] = useState<ConnectorDto[]>([]);
@@ -115,6 +116,8 @@ export function useSettingsController({
   const baseId = useId();
   /** True after an open→true transition; avoids wiping typed secrets on setup re-renders (#157). */
   const wasOpenRef = useRef(false);
+  /** Last host-authoritative or successfully saved draft; user edits compare against this. */
+  const cleanDraftRef = useRef(setup);
 
   useEffect(() => {
     if (!open) {
@@ -126,6 +129,7 @@ export function useSettingsController({
       return;
     }
     wasOpenRef.current = true;
+    cleanDraftRef.current = setup;
     setDraft(setup);
     setSection(initialSection);
     setCfTokenDraft("");
@@ -134,6 +138,12 @@ export function useSettingsController({
     setXStatus(null);
     setApiKeyDraft("");
     void (async () => {
+      const hydrateDraft = (
+        update: (current: AppSetupState) => AppSetupState,
+      ) => {
+        cleanDraftRef.current = update(cleanDraftRef.current);
+        setDraft(update);
+      };
       // Abort if modal closed before host fetches return.
       const stillOpen = () => wasOpenRef.current;
       const cf = await hostGetConfluence();
@@ -156,7 +166,7 @@ export function useSettingsController({
         setConnectorKinds(ckinds);
         setNewConnectorKind(ckinds[0] ?? "sqlite");
       }
-      setDraft((d) => ({
+      hydrateDraft((d) => ({
         ...d,
         confluence: cf
           ? {
@@ -191,7 +201,7 @@ export function useSettingsController({
           ) {
             saveLastGatewayUrl(active.base_url);
           }
-          setDraft((d) => ({
+          hydrateDraft((d) => ({
             ...d,
             providerKind: kind,
             providerLabel: active.label || d.providerLabel,
@@ -200,6 +210,7 @@ export function useSettingsController({
             hasApiKey: active.has_key,
             toolsEnabled: active.tools_enabled ?? true,
             localOnly: kind === "ollama",
+            deadlinePreference: active.deadline_preference ?? "auto",
           }));
         }
       } else if (setup.providerKind !== "none") {
@@ -207,7 +218,7 @@ export function useSettingsController({
         const keyOk = await hostProviderHasSecret(pid);
         if (!stillOpen()) return;
         if (keyOk !== null) {
-          setDraft((d) => ({ ...d, hasApiKey: keyOk }));
+          hydrateDraft((d) => ({ ...d, hasApiKey: keyOk }));
         }
       }
       const cands = await hostListLocalCandidates();
@@ -248,8 +259,8 @@ export function useSettingsController({
 
   const dirty = useMemo(() => {
     if (apiKeyDraft.trim() || cfTokenDraft.trim() || xTokenDraft.trim()) return true;
-    return JSON.stringify(draft) !== JSON.stringify(setup);
-  }, [draft, setup, apiKeyDraft, cfTokenDraft, xTokenDraft]);
+    return JSON.stringify(draft) !== JSON.stringify(cleanDraftRef.current);
+  }, [draft, apiKeyDraft, cfTokenDraft, xTokenDraft]);
 
   // Must stay above any early return — Rules of Hooks.
   const confluenceUrlError = useMemo(() => {
@@ -283,6 +294,7 @@ export function useSettingsController({
         );
         if (!ok) return;
       }
+      setDraft(cleanDraftRef.current);
       setApiKeyDraft("");
       setCfTokenDraft("");
       setXTokenDraft("");
@@ -300,7 +312,7 @@ export function useSettingsController({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // requestClose closes over dirty/setup — rebind when those change
+    // requestClose closes over the current dirty state and clean baseline.
   });
 
   const recheck = async () => {
@@ -444,6 +456,7 @@ export function useSettingsController({
       };
       setDraft(next);
       if (opts?.persist) {
+        cleanDraftRef.current = next;
         onSaveSetup(next);
       }
     } finally {
@@ -478,6 +491,7 @@ export function useSettingsController({
             ? false
             : (source.localOnly ?? source.providerKind === "ollama"),
         toolsEnabled: source.toolsEnabled,
+        deadlinePreference: source.deadlinePreference ?? "auto",
       });
       if (!saved) return source;
       return {
@@ -487,6 +501,8 @@ export function useSettingsController({
         chatModel: saved.chat_model,
         providerLabel: saved.label,
         toolsEnabled: saved.tools_enabled ?? source.toolsEnabled ?? true,
+        deadlinePreference:
+          saved.deadline_preference ?? source.deadlinePreference ?? "auto",
         providerKind: source.providerKind,
         localOnly:
           saved.kind === "xai_grok_build" ? false : source.localOnly,
@@ -510,6 +526,7 @@ export function useSettingsController({
     const savedAi = await persistAiProvider(next, key);
     if (!savedAi) return;
     next = savedAi;
+    cleanDraftRef.current = next;
     setDraft(next);
     setApiKeyDraft("");
     onSaveSetup(next);
@@ -649,6 +666,8 @@ export function useSettingsController({
     setApiKeyDraft("");
     setCfTokenDraft("");
     setXTokenDraft("");
+    cleanDraftRef.current = next;
+    setDraft(next);
     onSaveSetup(next);
     onClose();
   };

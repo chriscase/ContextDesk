@@ -109,6 +109,19 @@ pub struct ProviderCapabilities {
     pub embeddings: bool,
 }
 
+/// Provider-specific deadline preference for private or unusually slow hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDeadlinePreference {
+    /// Infer from the provider kind and URL without network probing.
+    #[default]
+    Auto,
+    /// Prefer patient bounded defaults for cold or private-network models.
+    Patient,
+    /// Prefer standard managed-provider defaults.
+    Standard,
+}
+
 impl ProviderCapabilities {
     /// Chat-capable remote: tools + stream, no embeddings by default.
     pub const fn chat_remote() -> Self {
@@ -153,6 +166,9 @@ pub struct ProviderProfile {
     /// When true, refuse remote non-loopback bases.
     #[serde(default)]
     pub local_only: bool,
+    /// Optional latency/deadline class. This does not change network policy.
+    #[serde(default)]
+    pub deadline_preference: ProviderDeadlinePreference,
 }
 
 impl ProviderProfile {
@@ -173,6 +189,7 @@ impl ProviderProfile {
                 embeddings: true,
             },
             local_only: true,
+            deadline_preference: ProviderDeadlinePreference::Auto,
         }
     }
 }

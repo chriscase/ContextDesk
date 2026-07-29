@@ -38,6 +38,12 @@ A **Log Investigation Workspace**: multi-window, responsively dense, AI-assisted
    link (`linkedCorpusId`), not only chats created from Explorer. The shipped
    governed corpus-turn path remains the Explorer linked-chat rail; an ordinary
    main-screen chat never gains ambient corpus access.
+6. **Slow-provider lifecycle:** one monotonic whole-turn ceiling governs
+   separately bounded choosing, retrieving, and synthesizing phases. Adaptive
+   defaults are patient for local/private profiles; a custom user ceiling is
+   authoritative. Stop races every provider/tool await. When bounded evidence
+   succeeds but synthesis times out, the trusted host retains only that
+   redacted evidence for a same-chat, same-corpus, same-model tool-closed retry.
 
 ## 3. Surface split
 

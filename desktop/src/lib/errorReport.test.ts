@@ -28,12 +28,27 @@ describe("redactDiagnosticText (#325)", () => {
 
   it("redacts corp-looking hosts and private IPs", () => {
     const out = redactDiagnosticText(
-      "failed https://ies-ebs-conf.ies.mentorg.com/path and 100.64.1.30",
+      "failed https://ies-ebs-conf.ies.mentorg.com/path, server.internal, 100.64.1.30, 127.0.0.1, ::1, fd12:3456::7, and fe80::1",
     );
     expect(out).toContain("[REDACTED-HOST]");
     expect(out).toContain("[REDACTED-IP]");
     expect(out).not.toContain("mentorg");
+    expect(out).not.toContain("server.internal");
     expect(out).not.toContain("100.64.1.30");
+    expect(out).not.toContain("127.0.0.1");
+    expect(out).not.toContain("::1");
+    expect(out).not.toContain("fd12:3456::7");
+    expect(out).not.toContain("fe80::1");
+  });
+
+  it("redacts generic absolute paths without treating URL paths as local files", () => {
+    const out = redactDiagnosticText(
+      "read /opt/company/logs/app.log and C:\\Company\\logs\\app.log; request https://example.com/public/path",
+    );
+    expect(out).toContain("[REDACTED_PATH]");
+    expect(out).not.toContain("/opt/company");
+    expect(out).not.toContain("C:\\Company");
+    expect(out).toContain("https://example.com/public/path");
   });
 });
 

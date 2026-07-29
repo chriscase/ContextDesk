@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hostExportHandbookDocument,
+  hostClearFailedLogIngestDiagnostic,
+  hostGetFailedLogIngestDiagnostic,
   hostGetHandbookPage,
+  hostInstallDemoLogCorpus,
   hostOpenEngineeringHandbook,
   hostResolveHandbookLink,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
+  hostLogSourceCatalog,
+  hostPrepareLogDiagnosticReport,
+  hostReleaseLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
   modelSelectionKey,
   normalizeProviderKind,
@@ -55,23 +61,222 @@ describe("hostLogSharedTimelineSummary", () => {
       },
     });
   });
+
+  it("preserves explicit all-sources and large specific-source lane scopes", async () => {
+    invokeMock.mockResolvedValue({
+      timeQuality: "wall",
+      spanFrom: 1,
+      spanTo: 2,
+      bucketWidth: 1,
+      bucketCount: 1,
+      totalMatched: 1,
+      buckets: [{ index: 0, start: 1, end: 2 }],
+      counts: [1],
+      severitySeries: [],
+      lanes: [],
+    });
+    const sources = Array.from(
+      { length: 241 },
+      (_, index) => `region-${index + 1}/application.log`,
+    );
+
+    await hostLogSharedTimelineSummary(
+      "corpus-241",
+      { levels: ["error"] },
+      [{ sources: [], allSources: true }, { sources }],
+      96,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("log_shared_timeline_summary", {
+      corpusId: "corpus-241",
+      query: {
+        filter: { levels: ["error"] },
+        lanes: [{ sources: [], allSources: true }, { sources }],
+        maxBuckets: 96,
+      },
+    });
+    expect(
+      invokeMock.mock.calls[0]?.[1]?.query?.lanes?.[1]?.sources,
+    ).toHaveLength(241);
+  });
+});
+
+describe("hostLogSourceCatalog", () => {
+  it("uses the dedicated corpus-scoped paginated source command", async () => {
+    invokeMock.mockResolvedValue({
+      sources: [
+        {
+          source: "region-b/application.log",
+          eventCount: 7,
+        },
+      ],
+      nextCursor: "region-b/application.log",
+      totalMatched: 241,
+    });
+
+    await expect(
+      hostLogSourceCatalog("corpus-1", {
+        search: "APPLICATION",
+        cursor: "region-a/application.log",
+        limit: 40,
+      }),
+    ).resolves.toMatchObject({
+      sources: [{ source: "region-b/application.log", eventCount: 7 }],
+      totalMatched: 241,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("log_source_catalog", {
+      corpusId: "corpus-1",
+      query: {
+        search: "APPLICATION",
+        cursor: "region-a/application.log",
+        limit: 40,
+      },
+    });
+  });
+
+  it("returns an honest empty catalog outside the desktop host", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+
+    await expect(hostLogSourceCatalog("corpus-1")).resolves.toEqual({
+      sources: [],
+      nextCursor: null,
+      totalMatched: 0,
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("hostSaveLogDiagnosticReport", () => {
-  it("sends only the selected path, explicit format, and bounded report content", async () => {
-    invokeMock.mockResolvedValue(undefined);
-
-    await hostSaveLogDiagnosticReport(
-      "/tmp/contextdesk-diagnostic.md",
-      "markdown",
-      "# redacted diagnostic",
+  it("prepares a strict manifest and saves only by opaque id and format", async () => {
+    const manifest = {
+      schemaVersion: 1 as const,
+      generatedAt: "2026-07-29T12:34:56.000Z",
+      privacy: {
+        redacted: true as const,
+        reviewRequired: true as const,
+        excluded: [],
+      },
+      application: {
+        version: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "macOS",
+      },
+      corpus: null,
+      failedIngest: null,
+      activeView: null,
+      currentStatus: null,
+      userNote: null,
+    };
+    invokeMock.mockResolvedValueOnce({
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: "# host rendered",
+      json: "{}",
+    });
+    await expect(hostPrepareLogDiagnosticReport(manifest)).resolves.toEqual({
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: "# host rendered",
+      json: "{}",
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "prepare_log_diagnostic_report",
+      { request: { manifest } },
     );
 
+    invokeMock.mockResolvedValue({ status: "saved" });
+
+    await expect(
+      hostSaveLogDiagnosticReport(
+        "cdlogdiag-0000000000000001-0000000000000001",
+        "markdown",
+      ),
+    ).resolves.toEqual({ status: "saved" });
+
     expect(invokeMock).toHaveBeenCalledWith("save_log_diagnostic_report", {
-      path: "/tmp/contextdesk-diagnostic.md",
-      format: "markdown",
-      content: "# redacted diagnostic",
+      request: {
+        reportId: "cdlogdiag-0000000000000001-0000000000000001",
+        format: "markdown",
+      },
     });
+    const ipcArgs = JSON.stringify(invokeMock.mock.calls.at(-1)?.[1]);
+    expect(ipcArgs).not.toContain("path");
+    expect(ipcArgs).not.toContain("overwrite");
+    expect(ipcArgs).not.toContain("content");
+
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(
+      hostReleaseLogDiagnosticReport(
+        "cdlogdiag-0000000000000001-0000000000000001",
+      ),
+    ).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "release_log_diagnostic_report",
+      {
+        request: {
+          reportId: "cdlogdiag-0000000000000001-0000000000000001",
+        },
+      },
+    );
+  });
+});
+
+describe("failed-ingest diagnostic host boundary", () => {
+  it("reads and explicitly clears only the one transient host DTO", async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        reasonCode: "no_safe_events",
+        redacted: true,
+      })
+      .mockResolvedValueOnce(true);
+
+    await hostGetFailedLogIngestDiagnostic();
+    await hostClearFailedLogIngestDiagnostic();
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_failed_log_ingest_diagnostic", undefined],
+      ["clear_failed_log_ingest_diagnostic", undefined],
+    ]);
+  });
+});
+
+describe("first-run demo corpus host boundary", () => {
+  it("invokes only the narrow packaged-demo command in Tauri", async () => {
+    invokeMock.mockResolvedValue({
+      status: "installed",
+      demoIdentity: "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1",
+      corpusId: "demo-corpus",
+      corpusName: "Demo · seven-day performance triage",
+      events: 25_000,
+      detail: "installed",
+      retryable: false,
+    });
+
+    const result = await hostInstallDemoLogCorpus();
+
+    expect(result.status).toBe("installed");
+    expect(result.events).toBe(25_000);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "install_demo_log_corpus",
+      undefined,
+    );
+  });
+
+  it("is honest in browser rendering and never claims an install", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+
+    const result = await hostInstallDemoLogCorpus();
+
+    expect(result).toMatchObject({
+      status: "unavailable",
+      corpusId: null,
+      events: null,
+      retryable: false,
+    });
+    expect(result.detail).toContain("installed desktop app");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

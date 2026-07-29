@@ -40,6 +40,7 @@ The reusable method is a layered evidence plane:
 | Capability                                                  | Status                                    | ContextDesk evidence                                                                                                                           | Literal residual                                            |
 | ----------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Streaming batch ingest and omission accounting              | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs)                                                                              | Live tailing remains later work                             |
+| Bounded nested support-bundle ZIP intake                    | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) nested-archive preflight, private staging, virtual identities, and adversarial tests | Three-container depth and fixed safety caps are deliberate  |
 | Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
 | Bounded redacted Original representation                    | **Shipped**                               | `prepare_original_record` and additive store fields in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) and [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | Bounded redacted fidelity, not unbounded raw retention      |
 | JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
@@ -50,7 +51,7 @@ The reusable method is a layered evidence plane:
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
-| Privacy-reviewed corpus diagnostic handoff                  | **Partial**                               | `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs`                                                                 | Active-Explorer state and failed-ingest handoff remain #713/#527 |
+| Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, `log_diagnostic_report.rs`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -236,10 +237,32 @@ Trust boundaries:
 
 1. Traverse only the selected import scope.
 2. Reject symlinks/path escapes and count excluded, ignored, and failed files.
-3. Read with bounded buffers.
-4. Frame records deterministically; today the common path is line-oriented.
-5. Preserve source and ingest-order identity.
-6. Report partial import honestly if discovered content was not fully imported.
+3. Treat a directly selected ZIP, a ZIP discovered in a directory, or a ZIP
+   member inside another ZIP as a container only after bounded central-directory
+   preflight.
+4. Validate every archive identity before payload reads. Reject absolute,
+   traversing, backslash-ambiguous, NUL-containing, duplicate-normalized, or
+   archive-delimiter-conflicting names.
+5. Preserve nested provenance with a virtual identity such as
+   `support.zip!/host-a.zip!/logs/app.log`; identical basenames in distinct
+   paths remain distinct sources.
+6. Stream ordinary members in place. Copy only a nested archive container into
+   private per-ingest staging, using a fixed buffer, and remove it when
+   recursion returns or the ingest guard unwinds.
+7. Apply cumulative entry and expanded-byte budgets across every nested level,
+   plus per-member, depth, and compression-ratio limits.
+8. Read records with bounded buffers.
+9. Frame records deterministically; today the common path is line-oriented.
+10. Preserve source and ingest-order identity.
+11. Report partial import honestly if discovered content was not fully imported.
+
+The ContextDesk reference policy permits three ZIP containers in one identity
+chain, 50,000 cumulative entries, 512 MiB expanded bytes per member, 4 GiB
+aggregate expanded bytes, and a 2,048:1 expanded-to-compressed ratio. These are
+replaceable product bounds, not portable magic numbers. A reimplementation
+must retain explicit caps, cumulative accounting, preflight-before-payload,
+private staging, stable virtual identity, cancellation, and atomic
+non-publication.
 
 ### 6.2 Normalize and redact
 
@@ -271,7 +294,40 @@ Current local #681 behavior additionally:
 - deterministically truncates fractional input to whole seconds; and
 - keeps offsetless, yearless, malformed, and missing timestamps order-only.
 
-The last two points are limitations, not a complete timestamp system. A
+The #747 parser slice also recognizes the common JBoss/WildFly
+`server.log` prefix
+`YYYY-MM-DD HH:mm:ss,SSS LEVEL [logger] (thread) message` (including a dot
+millisecond separator). Logger and thread text remain in the parsed message and
+the redacted Original retains the complete normalized line. An attached or
+separate `Z`/numeric offset is normalized to a whole Unix second. An offsetless
+local calendar timestamp is validated but the event deliberately retains
+ingest-order time. The transient parser result exposes that validated source
+text as `unresolved_local_timestamp` so a bounded import-preview sampler can
+ask for timezone policy without guessing. Current ingest does not persist this
+field because the event schema has no honest place for the local datetime,
+timezone provenance, or DST ambiguity. A future #670 per-source timezone rule
+must preserve that source text, preview the chosen interpretation, and record
+the rule before the event becomes wall-time alignable.
+
+The #749 parser slice recognizes the classic Elasticsearch bracketed shape
+`[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message` by content, even
+when a file-level sample was classified as plain text. It trims padded
+severity, component, and node fields; maps component and node into the existing
+service and host fields; and keeps the complete original line. As with
+WildFly, an explicit `Z` or numeric offset becomes a whole-second instant while
+an offsetless local timestamp remains order-only and is exposed transiently as
+unresolved source-local evidence for the future #670 policy.
+
+The #752 parser slice also recognizes the strict content shape
+`YYYY-MM-DDTHH:mm,SSS ZONE. LEVEL: message`. It extracts severity and payload
+but deliberately leaves the complete timestamp token unresolved and
+order-only. The producer grammar has not established whether the comma field
+means seconds, milliseconds, or another unit, and abbreviations such as `CET`
+are not resolved through the workstation locale. A future declarative source
+profile (#751) may define those semantics; #670 must then retain the selected
+rule/version and original evidence.
+
+The preceding parser slices are limitations, not a complete timestamp system. A
 reimplementation should design the richer #670 contract before writing data:
 original timestamp evidence, precision, explicit time basis, timezone rule
 identity, ambiguity state, and non-destructive skew overlays.
@@ -330,27 +386,101 @@ problems. The package intentionally carries analyzed corpus data. The diagnostic
 is a small metadata report for reproducing product behavior across an isolated
 workstation and a support machine.
 
-The shipped successful-corpus slice builds diagnostics from an explicit
-allowlist: application identity, OS, corpus identity/name, safe scalar counts,
-parse/level summaries, bounded basename-only omission examples, embedding
-state, and an optional bounded reproduction note or current UI status. It does
-not serialize the corpus DTO. That structural choice keeps top-template
-patterns, event payloads, source labels and absolute paths, chats,
-provider/model inventories, evaluator truth, and secrets outside the report.
+Diagnostics are built from explicit allowlists rather than serialized product
+state. A persisted-corpus report contains application identity, OS, corpus
+identity/name, safe scalar counts, parse/level summaries, bounded
+basename-only omission examples, embedding state, and an optional bounded
+reproduction note or current UI status.
 
-The user previews the exact Markdown or JSON before saving. The native writer
-accepts only a bounded payload and a user-selected `.md` or `.json` destination,
-reapplies redaction, refuses symlink destinations, and writes no hidden cache.
-Cancel therefore creates no file, and a later trial cannot inherit a prior
-diagnostic. This is still **partial**: active Explorer view configuration and a
-failed ingest's bounded transient reason set are not yet available through this
-slice and remain open under #713 and #527.
+An active Explorer adds only payload-free reproduction state: layout and row
+modes, time quality/linking, lane and selected-source counts, filter-presence
+and numeric range information, bounded sequence identities, and logical
+viewport anchors. Filter text, trace values, source/service/host labels, event
+content, chat state, and model/provider state are deliberately not represented.
+
+A failed ingest has no corpus identity. The trusted core recorder discards
+free-form progress messages and original errors after mapping them to one
+stable final reason code. Raw intake sends a separate typed callback for only
+six evidence classes: `binary`, `empty`, `hidden`, `oversized`, `read_failed`,
+and `parse_failed`. That callback constructs a secret-scrubbed, bounded final
+basename in core; it never carries a parent path, archive ancestry, event
+payload, or parser/filesystem error string.
+
+The recorder keeps complete saturating counters for those six classes and at
+most 20 basename/reason observations in deterministic ingest order. An
+`omitted_entries` counter discloses additional observations beyond the
+transcript cap. `parse_failed` means a bounded source/archive representation
+could not be decoded under the intake contract (for example malformed ZIP
+metadata or an over-limit logical line); an unknown log syntax still uses the
+honest plain-log fallback and is not mislabeled as a parse failure.
+
+The desktop owns one in-memory slot. Raw ingest begins a new generation before
+fallible cache/provider setup; a setup failure is recorded into that new
+generation. Starting any later raw or package import clears the prior slot
+before its own fallible setup, a stale overlapping attempt cannot replace the
+newer generation, explicit Clear removes it, and restart removes it. A
+successful later attempt leaves the slot empty. Failure and cancellation
+therefore cannot publish a partial corpus merely to support diagnostics. The
+same typed observer is used for directory, directly selected ZIP, and
+recursively nested ZIP intake.
+
+These structural choices keep top-template patterns, event payloads, source
+labels and absolute paths, chats, provider/model inventories, evaluator truth,
+private network identities, and secrets outside the report.
+
+The user previews the exact Markdown or JSON before saving. The renderer sends
+a recursively `deny_unknown_fields` metadata DTO, not report text. The host
+validates identifier and Git-SHA shapes, applies secret/location scrubbing to
+every untrusted string, enforces all collection and byte bounds, renders both
+formats, and returns those exact previews under a bounded opaque in-memory
+report ID. Unknown payload/model fields fail closed. Saving sends only that ID
+and the selected format; the renderer cannot author export text, select a
+destination, assert overwrite confirmation, or authorize itself through a
+separate IPC call.
+
+Reproduction-note edits are debounced and host preparations are serialized.
+Queued stale generations are discarded before host work, stale completions are
+released, an accepted replacement releases its prior report ID, and closing
+the dialog releases the selected ID. This keeps the visible preview saveable
+even when many edits occur within the host store's bounded report window.
+
+Host privacy handling covers secret tokens, ordinary private-suffix hosts such
+as `server.internal`, arbitrary absolute Unix/Windows paths, private/loopback
+IPv4, and loopback/unique-local/link-local IPv6. The invoking native window
+owns the Save panel. Cancellation is typed and writes nothing. A completed save
+returns `saved`; a cleanup or directory-durability failure after publication
+returns `saved_with_warning` so the UI never claims a committed report was not
+saved.
+
+For an accepted exact preview, the host writes and syncs a restricted,
+create-new sibling temporary file. A new destination is published without
+replacement using `renamex_np(RENAME_EXCL)` on macOS,
+`renameat2(RENAME_NOREPLACE)` on Linux, or write-through `MoveFileExW` without
+replacement on Windows. Unsupported Unix compatibility paths fail closed. A
+native-panel-confirmed existing destination is atomically replaced with
+same-filesystem rename on Unix or write-through `MoveFileExW` on Windows.
+Publication is the commit point. The parent directory is then synced on Unix;
+post-commit cleanup or sync failures become typed warnings. Temporary files are
+cleaned after pre-publication errors, and symlink or Windows reparse-point
+destinations are refused. Diagnostics remain distinct from a `.cdlog.zip`
+package, which intentionally contains analyzed corpus data.
+
+The renderer report builder still narrows product state into the allowlisted
+DTO for display responsiveness, but only the host-rendered and host-retained
+result can be copied or saved. The native write boundary revalidates the stored
+content before publication. The UI therefore never reconstructs evidence by
+parsing free-form progress or error strings.
 
 ## 7. Performance and bounds
 
 | Dimension                              |                            ContextDesk bound/policy | Behavior                                               |
 | -------------------------------------- | --------------------------------------------------: | ------------------------------------------------------ |
 | Source ingest memory                   |                        Streamed record/file buffers | Does not load whole corpus                             |
+| Archive-container depth                |                                          3 ZIP layers | Reject deeper chains atomically                        |
+| Raw bundle entries                     |                                   50,000 cumulative | Reject before unbounded traversal                      |
+| Archive member expanded bytes          |                                            512 MiB | Exclude or reject under the typed policy               |
+| Raw ingest aggregate expanded bytes    |                                              4 GiB | Reject atomically                                      |
+| Archive compression ratio              |                                            2,048:1 | Reject suspicious metadata before payload reads        |
 | Original (redacted)                    |                     64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction     |
 | Ordinary event page                    |             200 default; core hard cap in query API | Keyset page                                            |
 | Timeline buckets                       |                                         256 maximum | Clamp; no event bodies                                 |
@@ -386,6 +516,7 @@ latency, template count, and cancellation—not only ingest throughput.
 | Mixed time quality            | Per-source/corpus classification | Align disabled or limited     | Inspect/fix source policy                  | Reliable peer does not upgrade it         |
 | Embedding unavailable/timeout | Embed status                     | Keyword-only/deferred/partial | Trusted reanalysis                         | Corpus remains usable                     |
 | Import omission/read error    | Per-file counters/reasons        | Partial corpus status         | Correct input and reimport                 | Missing data not hidden                   |
+| Unsafe/malformed nested ZIP   | Shared archive preflight/budgets | Stable import error           | Correct or split the bundle                | No partial corpus; private staging removed |
 | Cancelled ingest/reanalysis   | Cancel flag/progress             | Cancelled                     | Retry                                      | Previous published corpus/index preserved |
 | Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
 | Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
@@ -500,6 +631,9 @@ instant while ambiguous controls remain order-only.
 | Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
+| JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
+| Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized | Persisted local-calendar provenance and per-source timezone rule (#670) |
+| Incomplete time + zone abbreviation | **Partial**              | Strict shape, level, payload, and unresolved source token are preserved | Comma-field semantics and abbreviation mapping require a versioned source profile (#751/#670) |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |

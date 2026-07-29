@@ -1,6 +1,7 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 mod handbook;
+mod log_diagnostic_report;
 mod log_diagnostics;
 
 use cd_core::branding::Branding;
@@ -19,11 +20,13 @@ use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_fi
 use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
-use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
+use cd_core::providers::{
+    ProviderConfig, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+};
 use cd_core::research::{events_to_dto, grant_and_execute, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
-    SessionSearchHit, SessionStore,
+    SessionSearchHit, SessionStore, StoredMessage,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
@@ -38,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -46,6 +49,119 @@ const S3_ACCESS_KEY_REF: &str = "s3/default/access_key";
 const S3_SECRET_KEY_REF: &str = "s3/default/secret_key";
 const S3_SESSION_TOKEN_REF: &str = "s3/default/session_token";
 const AGENT_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const LINKED_CHECKPOINT_TTL: Duration = Duration::from_secs(30 * 60);
+const LINKED_CHECKPOINT_ENTRY_CAP: usize = 16;
+const LINKED_CHECKPOINT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+struct StoredLinkedCheckpoint<T> {
+    checkpoint: T,
+    inserted_at: StdInstant,
+    sequence: u64,
+    bytes: usize,
+}
+
+struct LinkedCheckpointStore<T = cd_core::agent::LinkedSynthesisCheckpoint> {
+    entries: HashMap<String, StoredLinkedCheckpoint<T>>,
+    next_sequence: u64,
+    total_bytes: usize,
+}
+
+impl<T> Default for LinkedCheckpointStore<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_sequence: 0,
+            total_bytes: 0,
+        }
+    }
+}
+
+impl<T: Clone> LinkedCheckpointStore<T> {
+    fn purge_expired_at(&mut self, now: StdInstant) {
+        let expired = self
+            .entries
+            .iter()
+            .filter_map(|(session_id, stored)| {
+                (now.saturating_duration_since(stored.inserted_at) >= LINKED_CHECKPOINT_TTL)
+                    .then_some(session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for session_id in expired {
+            self.remove(&session_id);
+        }
+    }
+
+    fn insert_value_at(
+        &mut self,
+        session_id: String,
+        checkpoint: T,
+        bytes: usize,
+        now: StdInstant,
+    ) -> bool {
+        self.purge_expired_at(now);
+        self.remove(&session_id);
+        if bytes > LINKED_CHECKPOINT_TOTAL_BYTES {
+            return false;
+        }
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        let inserted_session_id = session_id.clone();
+        self.entries.insert(
+            session_id,
+            StoredLinkedCheckpoint {
+                checkpoint,
+                inserted_at: now,
+                sequence: self.next_sequence,
+                bytes,
+            },
+        );
+        while self.entries.len() > LINKED_CHECKPOINT_ENTRY_CAP
+            || self.total_bytes > LINKED_CHECKPOINT_TOTAL_BYTES
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(session_id, stored)| (stored.sequence, *session_id))
+                .map(|(session_id, _)| session_id.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+        self.entries.contains_key(&inserted_session_id)
+    }
+
+    fn get_value(&mut self, session_id: &str, now: StdInstant) -> Option<T> {
+        self.purge_expired_at(now);
+        self.entries
+            .get(session_id)
+            .map(|stored| stored.checkpoint.clone())
+    }
+
+    fn remove(&mut self, session_id: &str) -> bool {
+        let Some(stored) = self.entries.remove(session_id) else {
+            return false;
+        };
+        self.total_bytes = self.total_bytes.saturating_sub(stored.bytes);
+        true
+    }
+}
+
+impl LinkedCheckpointStore {
+    fn insert(
+        &mut self,
+        session_id: String,
+        checkpoint: cd_core::agent::LinkedSynthesisCheckpoint,
+    ) -> bool {
+        let bytes = checkpoint.retained_payload_bytes();
+        self.insert_value_at(session_id, checkpoint, bytes, StdInstant::now())
+    }
+
+    fn get(&mut self, session_id: &str) -> Option<cd_core::agent::LinkedSynthesisCheckpoint> {
+        self.get_value(session_id, StdInstant::now())
+    }
+}
 
 #[derive(Default)]
 struct HostInitFlightState {
@@ -123,6 +239,58 @@ impl HostInitFlight {
     }
 }
 
+const LOG_CORPUS_HANDLE_CACHE_CAP: usize = 4;
+
+#[derive(Default)]
+struct LogCorpusHandleCacheState {
+    entries: HashMap<String, Arc<cd_core::log_analysis::LogCorpus>>,
+    order: std::collections::VecDeque<String>,
+}
+
+#[derive(Default)]
+struct LogCorpusHandleCache {
+    state: Mutex<LogCorpusHandleCacheState>,
+}
+
+impl LogCorpusHandleCache {
+    fn open(
+        &self,
+        cache_root: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<Arc<cd_core::log_analysis::LogCorpus>, String> {
+        let mut state = self.state.lock().expect("log corpus handle cache");
+        if let Some(corpus) = state.entries.get(corpus_id).cloned() {
+            state.order.retain(|id| id != corpus_id);
+            state.order.push_back(corpus_id.to_string());
+            return Ok(corpus);
+        }
+
+        // Hold the small cache lock during open so simultaneous startup reads
+        // coalesce into one schema/template/vector initialization.
+        let corpus = Arc::new(
+            cd_core::log_analysis::LogCorpus::open(cache_root, corpus_id)
+                .map_err(|error| error.to_string())?,
+        );
+        while state.entries.len() >= LOG_CORPUS_HANDLE_CACHE_CAP {
+            let Some(evicted) = state.order.pop_front() else {
+                break;
+            };
+            state.entries.remove(&evicted);
+        }
+        state
+            .entries
+            .insert(corpus_id.to_string(), Arc::clone(&corpus));
+        state.order.push_back(corpus_id.to_string());
+        Ok(corpus)
+    }
+
+    fn remove(&self, corpus_id: &str) {
+        let mut state = self.state.lock().expect("log corpus handle cache");
+        state.entries.remove(corpus_id);
+        state.order.retain(|id| id != corpus_id);
+    }
+}
+
 struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
@@ -142,6 +310,17 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// Bounded reusable corpus handles for Explorer/library read commands.
+    /// Coalesces repeated schema/template/vector initialization at startup.
+    log_corpus_handles: Arc<LogCorpusHandleCache>,
+    /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
+    /// later ingest starts, explicitly clearable, and absent after restart.
+    failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
+    /// Serializes the complete demo check/import/marker transaction.
+    demo_log_install: tokio::sync::Mutex<()>,
+    /// Bounded host-rendered diagnostic previews keyed by opaque, process-local
+    /// report ids. The renderer never supplies export content.
+    log_diagnostic_reports: Mutex<log_diagnostic_report::LogDiagnosticReportStore>,
     /// Serializes chat-session writes across windows so governed fields cannot
     /// race ordinary transcript saves (#695).
     chat_session_mutation: Mutex<()>,
@@ -149,6 +328,13 @@ struct AppState {
     investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Owner generation for each admitted chat turn. A second window cannot
+    /// replace cancellation/checkpoint ownership for the same session.
+    active_turn_owners: Mutex<HashMap<String, u64>>,
+    next_turn_owner: std::sync::atomic::AtomicU64,
+    /// Host-only bounded evidence retained for an explicit synthesis-only retry.
+    /// Never serialized to config, sessions, logs, or webview IPC.
+    linked_synthesis_checkpoints: Mutex<LinkedCheckpointStore>,
     /// At most one trusted workspace backup is active.
     backup_cancel: Mutex<Option<cd_core::object_store::ObjectCancellation>>,
     /// Debounced FS watcher for incremental index refresh (#116).
@@ -269,6 +455,8 @@ fn ensure_host_inner(state: &AppState) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostReadinessFailure {
     Timeout,
+    TurnDeadline,
+    Cancelled,
     Initialization,
     Worker,
 }
@@ -277,6 +465,8 @@ impl HostReadinessFailure {
     fn code(&self) -> &'static str {
         match self {
             Self::Timeout => "host_readiness_timeout",
+            Self::TurnDeadline => "budget_time",
+            Self::Cancelled => "cancel",
             Self::Initialization => "host_initialization_failed",
             Self::Worker => "host_initialization_worker_failed",
         }
@@ -288,6 +478,14 @@ impl HostReadinessFailure {
                 "Workspace tools are still starting. This turn stopped before contacting the \
                  provider. Check that ContextDesk can access the configured workspace, then retry."
             }
+            Self::TurnDeadline => {
+                "The whole-turn deadline expired while workspace tools were starting. No provider \
+                 request was allowed to continue beyond that deadline."
+            }
+            Self::Cancelled => {
+                "The turn was cancelled while workspace tools were starting. No provider request \
+                 was started."
+            }
             Self::Initialization => {
                 "Workspace tools could not start. This turn stopped before contacting the \
                  provider. Check the configured workspace and its permissions, then retry."
@@ -295,6 +493,87 @@ impl HostReadinessFailure {
             Self::Worker => {
                 "Workspace tools stopped unexpectedly while starting. This turn did not contact \
                  the provider. Retry, and check the application logs if the problem continues."
+            }
+        }
+    }
+}
+
+async fn wait_for_atomic_cancel(cancel: &std::sync::atomic::AtomicBool) {
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_host_readiness_for_turn<F>(
+    timeout: Duration,
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    initialize: F,
+) -> Result<(), HostReadinessFailure>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let remaining = if plan.total_ms == 0 {
+        timeout
+    } else {
+        Duration::from_millis(plan.total_ms)
+            .checked_sub(started.elapsed())
+            .ok_or(HostReadinessFailure::TurnDeadline)?
+            .min(timeout)
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_atomic_cancel(cancel) => Err(HostReadinessFailure::Cancelled),
+        result = wait_for_host_readiness(remaining, initialize) => {
+            match result {
+                Err(HostReadinessFailure::Timeout)
+                    if plan.total_ms > 0
+                        && started.elapsed() >= Duration::from_millis(plan.total_ms) =>
+                {
+                    Err(HostReadinessFailure::TurnDeadline)
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+async fn run_blocking_for_turn<T, F>(
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    task: F,
+) -> Result<Result<T, String>, HostReadinessFailure>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let remaining = if plan.total_ms == 0 {
+        None
+    } else {
+        Some(
+            Duration::from_millis(plan.total_ms)
+                .checked_sub(started.elapsed())
+                .ok_or(HostReadinessFailure::TurnDeadline)?,
+        )
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_atomic_cancel(cancel) => Err(HostReadinessFailure::Cancelled),
+        result = async {
+            let worker = tauri::async_runtime::spawn_blocking(task);
+            match remaining {
+                Some(remaining) => tokio::time::timeout(remaining, worker)
+                    .await
+                    .map_err(|_| HostReadinessFailure::TurnDeadline),
+                None => Ok(worker.await),
+            }
+        } => match result? {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                tracing::warn!(error = %error, "linked turn blocking setup worker failed");
+                Err(HostReadinessFailure::Worker)
             }
         }
     }
@@ -380,6 +659,7 @@ fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn linked_log_preflight_at(
     cache: &std::path::Path,
     context: &cd_core::agent::LogExplorerTurnContext,
@@ -391,6 +671,50 @@ fn linked_log_preflight_at(
     }
     tools_profile
         .and_then(|profile| cd_core::research::linked_tools_unavailable_events(profile, session_id))
+}
+
+#[derive(Debug)]
+enum LinkedTurnPreparation<T> {
+    Ready(T),
+    Terminal(Vec<cd_core::events::StreamEvent>),
+}
+
+async fn prepare_linked_turn_with<V, C, H, P, T>(
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    validate_corpus: V,
+    capability_refusal: C,
+    construct_host: H,
+) -> Result<LinkedTurnPreparation<T>, HostReadinessFailure>
+where
+    V: FnOnce() -> Result<P, String> + Send + 'static,
+    C: FnOnce() -> Option<Vec<cd_core::events::StreamEvent>>,
+    H: FnOnce(P) -> Result<T, String> + Send + 'static,
+    P: Send + 'static,
+    T: Send + 'static,
+{
+    let validated = match run_blocking_for_turn(started, plan, cancel, validate_corpus).await? {
+        Ok(validated) => validated,
+        Err(error) => {
+            tracing::warn!(error = %error, "linked corpus validation failed");
+            return Ok(LinkedTurnPreparation::Terminal(
+                linked_log_host_terminal_events().into(),
+            ));
+        }
+    };
+    if let Some(events) = capability_refusal() {
+        return Ok(LinkedTurnPreparation::Terminal(events));
+    }
+    match run_blocking_for_turn(started, plan, cancel, move || construct_host(validated)).await? {
+        Ok(host) => Ok(LinkedTurnPreparation::Ready(host)),
+        Err(error) => {
+            tracing::warn!(error = %error, "linked host construction failed");
+            Ok(LinkedTurnPreparation::Terminal(
+                linked_log_host_terminal_events().into(),
+            ))
+        }
+    }
 }
 
 fn take_ready_linked_host<F>(
@@ -450,6 +774,30 @@ fn linked_log_host_terminal_events() -> [cd_core::events::StreamEvent; 2] {
             reason: "linked_log_host_unavailable".into(),
         },
     ]
+}
+
+fn linked_setup_failure_events(
+    failure: &HostReadinessFailure,
+) -> Vec<cd_core::events::StreamEvent> {
+    match failure {
+        HostReadinessFailure::Cancelled => vec![cd_core::events::StreamEvent::TurnCompleted {
+            reason: "cancel".into(),
+        }],
+        HostReadinessFailure::TurnDeadline | HostReadinessFailure::Timeout => vec![
+            cd_core::events::StreamEvent::Error {
+                code: "budget_time".into(),
+                message: "The whole-turn deadline expired while validating or opening the linked \
+                          corpus. No provider request was started."
+                    .into(),
+            },
+            cd_core::events::StreamEvent::TurnCompleted {
+                reason: "budget_time".into(),
+            },
+        ],
+        HostReadinessFailure::Initialization | HostReadinessFailure::Worker => {
+            linked_log_host_terminal_events().into()
+        }
+    }
 }
 
 struct BackgroundIndexBuild {
@@ -1754,6 +2102,9 @@ struct SaveProviderReq {
     /// Optional override for native tool calling (#327). `None` preserves existing.
     #[serde(default)]
     tools_enabled: Option<bool>,
+    /// Optional explicit latency class. `None` preserves the saved profile value.
+    #[serde(default)]
+    deadline_preference: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1768,6 +2119,8 @@ struct ProviderDto {
     has_key: bool,
     /// Native tool calling enabled for this profile (#327).
     tools_enabled: bool,
+    /// `auto` | `patient` | `standard`; contains no endpoint or secret.
+    deadline_preference: String,
 }
 
 fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
@@ -1785,6 +2138,12 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
         api_key_ref: p.api_key_ref.clone(),
         has_key,
         tools_enabled: p.capabilities.tools,
+        deadline_preference: match p.deadline_preference {
+            ProviderDeadlinePreference::Auto => "auto",
+            ProviderDeadlinePreference::Patient => "patient",
+            ProviderDeadlinePreference::Standard => "standard",
+        }
+        .into(),
     }
 }
 
@@ -1865,9 +2224,11 @@ fn save_active_provider(
 
     // #125: seed per-kind defaults; preserve discovered capabilities.tools (#327).
     let mut capabilities = desc.default_capabilities;
+    let mut deadline_preference = Default::default();
     if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
         capabilities.tools = existing.capabilities.tools;
         capabilities.stream = existing.capabilities.stream;
+        deadline_preference = existing.deadline_preference;
         // embeddings from descriptor when kind changes still uses default above
         if existing.kind == kind {
             capabilities.embeddings = existing.capabilities.embeddings;
@@ -1875,6 +2236,14 @@ fn save_active_provider(
     }
     if let Some(te) = req.tools_enabled {
         capabilities.tools = te;
+    }
+    if let Some(preference) = req.deadline_preference.as_deref() {
+        deadline_preference = match preference {
+            "auto" => ProviderDeadlinePreference::Auto,
+            "patient" => ProviderDeadlinePreference::Patient,
+            "standard" => ProviderDeadlinePreference::Standard,
+            other => return Err(format!("unsupported deadline preference: {other}")),
+        };
     }
     let profile = ProviderProfile {
         id: id.clone(),
@@ -1892,6 +2261,7 @@ fn save_active_provider(
         embedding_base_url: None,
         capabilities,
         local_only,
+        deadline_preference,
     };
 
     if let Some(slot) = cfg.providers.profiles.iter_mut().find(|p| p.id == id) {
@@ -2104,6 +2474,7 @@ struct SetRouterBudgetReq {
     max_tool_rounds: usize,
     max_results_per_source: usize,
     deadline_ms: u64,
+    deadline_is_explicit: bool,
 }
 
 #[tauri::command]
@@ -2116,6 +2487,7 @@ fn set_router_budget(
         max_tool_rounds: req.max_tool_rounds,
         max_results_per_source: req.max_results_per_source,
         deadline_ms: req.deadline_ms,
+        deadline_is_explicit: req.deadline_is_explicit,
         order: cd_core::router::RouterBudget::default().order,
     }
     .sanitized();
@@ -2614,9 +2986,18 @@ struct AgentTurnReq {
     /// Present only for a turn started from a Log Explorer linked chat.
     #[serde(default)]
     log_explorer_context: Option<LogExplorerTurnContextReq>,
+    /// Reuse the exact host-retained evidence from this chat's prior synthesis timeout.
+    #[serde(default)]
+    retry_synthesis_only: bool,
+    /// Client-created transcript identities used by the trusted host when a
+    /// turn terminates before the ordinary agent persistence path starts.
+    #[serde(default)]
+    client_user_message_id: Option<String>,
+    #[serde(default)]
+    client_assistant_message_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct LogExplorerTurnContextReq {
     corpus_id: String,
     brief: String,
@@ -3254,6 +3635,426 @@ fn event_to_dto_with_linked_corpus(
     dto
 }
 
+struct AdmittedAgentTurn<'a> {
+    owners: &'a Mutex<HashMap<String, u64>>,
+    cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: String,
+    owner: u64,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+const CHAT_TURN_CANCEL_PREFIX: &str = "chat_turn:";
+
+fn chat_turn_cancel_key(session_id: &str) -> String {
+    format!("{CHAT_TURN_CANCEL_PREFIX}{session_id}")
+}
+
+impl Drop for AdmittedAgentTurn<'_> {
+    fn drop(&mut self) {
+        finish_agent_turn(self.owners, self.cancels, &self.session_id, self.owner);
+    }
+}
+
+fn admit_agent_turn<'a>(
+    owners: &'a Mutex<HashMap<String, u64>>,
+    cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    next_owner: &std::sync::atomic::AtomicU64,
+    session_id: &str,
+) -> Result<AdmittedAgentTurn<'a>, ()> {
+    let mut owner_map = owners.lock().expect("active turn owners");
+    if owner_map.contains_key(session_id) {
+        return Err(());
+    }
+    let owner = next_owner
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .saturating_add(1);
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owner_map.insert(session_id.to_string(), owner);
+    cancels
+        .lock()
+        .expect("cancels")
+        .insert(chat_turn_cancel_key(session_id), cancel.clone());
+    Ok(AdmittedAgentTurn {
+        owners,
+        cancels,
+        session_id: session_id.to_string(),
+        owner,
+        cancel,
+    })
+}
+
+fn finish_agent_turn(
+    owners: &Mutex<HashMap<String, u64>>,
+    cancels: &Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: &str,
+    owner: u64,
+) -> bool {
+    let mut owners = owners.lock().expect("active turn owners");
+    if owners.get(session_id).copied() != Some(owner) {
+        return false;
+    }
+    owners.remove(session_id);
+    cancels
+        .lock()
+        .expect("cancels")
+        .remove(&chat_turn_cancel_key(session_id));
+    true
+}
+
+fn request_agent_turn_cancel(
+    cancels: &Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: &str,
+) -> bool {
+    let cancels = cancels.lock().expect("cancels");
+    let Some(flag) = cancels.get(&chat_turn_cancel_key(session_id)) else {
+        return false;
+    };
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+fn linked_retry_event(
+    available: bool,
+    session_id: &str,
+    corpus_id: &str,
+    provider_profile_id: Option<String>,
+    model_id: Option<String>,
+) -> cd_core::events::StreamEvent {
+    cd_core::events::StreamEvent::LinkedSynthesisRetry {
+        available,
+        session_id: session_id.to_string(),
+        corpus_id: corpus_id.to_string(),
+        provider_profile_id,
+        model_id,
+    }
+}
+
+fn terminal_message_id(candidate: Option<&str>) -> String {
+    static NEXT_HOST_TERMINAL_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    candidate
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "host-terminal-{}-{}",
+                chrono_like(),
+                NEXT_HOST_TERMINAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        })
+}
+
+fn persist_host_terminal_turn_at(
+    store: &SessionStore,
+    session_id: &str,
+    user_text: &str,
+    client_user_message_id: Option<&str>,
+    client_assistant_message_id: Option<&str>,
+    events: &[cd_core::events::StreamEvent],
+    provider: (Option<&str>, Option<&str>, Option<&str>),
+) -> Result<Session, String> {
+    let (provider_profile_id, provider_label, model_id) = provider;
+    let mut session = store
+        .load(session_id)
+        .map_err(|error| format!("chat session is unavailable or corrupt: {error}"))?;
+    let assistant_id = terminal_message_id(client_assistant_message_id);
+    if session
+        .messages
+        .iter()
+        .any(|message| message.id == assistant_id)
+    {
+        return Ok(session);
+    }
+
+    let user_text = user_text.trim();
+    if !user_text.is_empty() {
+        let user_id = terminal_message_id(client_user_message_id);
+        if !session.messages.iter().any(|message| message.id == user_id) {
+            session.messages.push(StoredMessage {
+                id: user_id,
+                role: "user".into(),
+                content: user_text.to_string(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: Some(serde_json::json!({
+                    "host_persisted_terminal": true
+                })),
+            });
+        }
+    }
+
+    let errors = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::Error { code, message } => {
+                Some((code.as_str(), message.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let reason = events.iter().find_map(|event| match event {
+        cd_core::events::StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    let streamed_text = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    let terminal_text = if errors.is_empty() {
+        format!(
+            "**Stopped:** This turn ended before provider work completed{}.",
+            reason
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        )
+    } else {
+        errors
+            .iter()
+            .map(|(_, message)| format!("**Error:** {message}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let content = if streamed_text.trim().is_empty() {
+        terminal_text
+    } else {
+        format!("{streamed_text}\n\n{terminal_text}")
+    };
+    let mut tools = Vec::<serde_json::Value>::new();
+    for event in events {
+        let cd_core::events::StreamEvent::Tool {
+            id,
+            name,
+            summary,
+            detail,
+            ok,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if let Some(existing) = tools
+            .iter_mut()
+            .find(|tool| tool["id"].as_str() == Some(id.as_str()))
+        {
+            existing["name"] = serde_json::Value::String(name.clone());
+            existing["summary"] = serde_json::Value::String(summary.clone());
+            existing["detail"] = serde_json::json!(detail);
+            existing["ok"] = serde_json::json!(ok);
+        } else {
+            tools.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "summary": summary,
+                "detail": detail,
+                "ok": ok
+            }));
+        }
+    }
+    let linked_corpus_id = session.linked_corpus_id.clone();
+    let mut citations = Vec::<serde_json::Value>::new();
+    for event in events {
+        let cd_core::events::StreamEvent::Citation {
+            source_id,
+            label,
+            locator,
+        } = event
+        else {
+            continue;
+        };
+        if citations
+            .iter()
+            .any(|citation| citation["id"].as_str() == Some(source_id.as_str()))
+        {
+            continue;
+        }
+        let mut citation = serde_json::json!({
+            "id": source_id,
+            "label": label,
+            "title": locator
+        });
+        if source_id.starts_with("log_template:") || source_id.starts_with("log_event:") {
+            if let Some(corpus_id) = linked_corpus_id.as_ref() {
+                citation["corpusId"] = serde_json::Value::String(corpus_id.clone());
+            }
+        }
+        citations.push(citation);
+    }
+    let trail = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::SearchTrail { steps } => Some(steps.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .fold(Vec::<String>::new(), |mut steps, step| {
+            if !steps.contains(step) {
+                steps.push(step.clone());
+            }
+            steps
+        });
+    let error_codes = errors.iter().map(|(code, _)| *code).collect::<Vec<_>>();
+    if let Some(model_id) = model_id {
+        session.chat_model = Some(model_id.to_string());
+    }
+    if let Some(provider_profile_id) = provider_profile_id {
+        session.provider_profile_id = Some(provider_profile_id.to_string());
+    }
+    session.messages.push(StoredMessage {
+        id: assistant_id.clone(),
+        role: "assistant".into(),
+        content,
+        tools: (!tools.is_empty()).then_some(serde_json::Value::Array(tools)),
+        citations: (!citations.is_empty()).then_some(serde_json::Value::Array(citations)),
+        trail: (!trail.is_empty()).then_some(trail),
+        meta: Some(serde_json::json!({
+            "model": model_id,
+            "provider_label": provider_label,
+            "provider_id": provider_profile_id,
+            "linked_corpus_id": linked_corpus_id,
+            "host_confirmed": true,
+            "host_persisted_terminal": true,
+            "terminal": {
+                "reason": reason,
+                "error_codes": error_codes
+            }
+        })),
+    });
+    session.last_read_message_id = Some(assistant_id);
+    session.maybe_auto_title_from_first_user();
+    session.touch();
+    store.save(&session).map_err(|error| error.to_string())?;
+    Ok(session)
+}
+
+fn linked_provider_loop_terminal_failure(events: &[cd_core::events::StreamEvent]) -> bool {
+    let completed = events
+        .iter()
+        .any(|event| matches!(event, cd_core::events::StreamEvent::TurnCompleted { .. }));
+    let cancelled = events.iter().any(|event| {
+        matches!(
+            event,
+            cd_core::events::StreamEvent::TurnCompleted { reason } if reason == "cancel"
+        )
+    });
+    let terminal_error = events.iter().any(|event| {
+        matches!(
+            event,
+            cd_core::events::StreamEvent::Error { code, .. }
+                if !matches!(
+                    code.as_str(),
+                    "context_budget_learned" | "context_compacted" | "tools_unsupported"
+                )
+        )
+    });
+    completed && (cancelled || terminal_error)
+}
+
+#[allow(clippy::too_many_arguments)] // explicit provenance is the persistence boundary
+fn persist_linked_provider_loop_terminal_at(
+    store: &SessionStore,
+    session_id: &str,
+    user_text: &str,
+    client_user_message_id: Option<&str>,
+    client_assistant_message_id: Option<&str>,
+    events: &[cd_core::events::StreamEvent],
+    provider: (Option<&str>, Option<&str>, Option<&str>),
+) -> Result<bool, String> {
+    if !linked_provider_loop_terminal_failure(events) {
+        return Ok(false);
+    }
+    let session = store
+        .load(session_id)
+        .map_err(|error| format!("chat session is unavailable or corrupt: {error}"))?;
+    if session.linked_corpus_id.is_none() {
+        return Ok(false);
+    }
+    persist_host_terminal_turn_at(
+        store,
+        session_id,
+        user_text,
+        client_user_message_id,
+        client_assistant_message_id,
+        events,
+        provider,
+    )?;
+    Ok(true)
+}
+
+fn persist_host_terminal_turn(
+    state: &AppState,
+    req: &AgentTurnReq,
+    events: &[cd_core::events::StreamEvent],
+    provider_profile_id: Option<&str>,
+    provider_label: Option<&str>,
+    model_id: Option<&str>,
+) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+    let store = session_store(state)?;
+    persist_host_terminal_turn_at(
+        &store,
+        &req.session_id,
+        &req.text,
+        req.client_user_message_id.as_deref(),
+        req.client_assistant_message_id.as_deref(),
+        events,
+        (provider_profile_id, provider_label, model_id),
+    )
+}
+
+fn persist_and_emit_host_terminal(
+    state: &AppState,
+    req: &AgentTurnReq,
+    events: &[cd_core::events::StreamEvent],
+    provider_profile_id: Option<&str>,
+    provider_label: Option<&str>,
+    model_id: Option<&str>,
+    on_event: &tauri::ipc::Channel<EventDto>,
+) -> Result<(), String> {
+    persist_host_terminal_turn(
+        state,
+        req,
+        events,
+        provider_profile_id,
+        provider_label,
+        model_id,
+    )?;
+    for event in events {
+        let _ = on_event.send(cd_core::research::event_to_dto(event));
+    }
+    Ok(())
+}
+
+fn provider_profile_for_turn(
+    config: &AppConfig,
+    explicit_profile_id: Option<&str>,
+) -> Result<ProviderProfile, String> {
+    let explicit_profile_id = explicit_profile_id
+        .map(str::trim)
+        .filter(|profile_id| !profile_id.is_empty());
+    if let Some(profile_id) = explicit_profile_id {
+        return config
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .ok_or_else(|| profile_id.to_string());
+    }
+    Ok(config
+        .providers
+        .active()
+        .cloned()
+        .unwrap_or_else(ProviderProfile::ollama_local))
+}
+
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
@@ -3286,24 +4087,65 @@ async fn agent_turn(
             }
         }
     }
-    let mut profile = if let Some(pid) = req
-        .provider_profile_id
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        cfg.providers
-            .profiles
-            .iter()
-            .find(|p| p.id == pid)
-            .cloned()
-            .or_else(|| cfg.providers.active().cloned())
-            .unwrap_or_else(ProviderProfile::ollama_local)
-    } else {
-        cfg.providers
-            .active()
-            .cloned()
-            .unwrap_or_else(ProviderProfile::ollama_local)
+    let admitted_turn = match admit_agent_turn(
+        &state.active_turn_owners,
+        &state.cancels,
+        &state.next_turn_owner,
+        &req.session_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(()) => {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: req.chat_model.clone(),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "turn_in_progress".into(),
+                    message: "This chat already has an active turn in another window. Stop or \
+                              wait for that turn before sending again."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "turn_in_progress".into(),
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+    };
+    let explicit_profile_id = req.provider_profile_id.as_deref();
+    let mut profile = match provider_profile_for_turn(&cfg, explicit_profile_id) {
+        Ok(profile) => profile,
+        Err(profile_id) => {
+            let events = vec![
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: req.chat_model.clone(),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "provider_profile_unavailable".into(),
+                    message: "The provider profile selected for this chat no longer exists. \
+                              ContextDesk did not fall back to another provider. Choose an \
+                              available profile and retry."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "provider_profile_unavailable".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile_id),
+                None,
+                req.chat_model.as_deref(),
+                &on_event,
+            )?;
+            return Ok(());
+        }
     };
     // Per-chat model override (mid-chat switch), else app default, else profile model.
     if let Some(m) = req
@@ -3328,30 +4170,131 @@ async fn agent_turn(
         .api_key_ref
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
+    let cancel = admitted_turn.cancel.clone();
+    let turn_started_at = tokio::time::Instant::now();
+    let deadline_plan = cd_core::router::TurnDeadlinePlan::for_profile(&cfg.router, &profile);
 
     // Resolve the linked corpus only from the durable session. Explorer may
     // contribute a bounded viewport brief, but neither the model nor an
     // ordinary main-chat turn request chooses or broadens corpus scope.
     let store = session_store(&state)?;
     let stored_session = load_session_for_turn(&store, &req.session_id)?;
-    let log_explorer_context = linked_log_turn_context(
+    let log_explorer_context = match linked_log_turn_context(
         stored_session.as_ref(),
         window.label(),
-        req.log_explorer_context,
-    )?;
-
-    // Validate the durable corpus before capability checks or provider/host
-    // construction. A stale link must never be masked by a tools-disabled
-    // profile or silently broadened into an ordinary turn.
-    if let Some(context) = log_explorer_context.as_ref() {
-        let cache = log_cache_dir(&state)?;
-        let tools_profile = (!req.force_local).then_some(&profile);
-        if let Some(events) =
-            linked_log_preflight_at(&cache, context, tools_profile, &req.session_id)
-        {
-            for event in events {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
-            }
+        req.log_explorer_context.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) if req.log_explorer_context.is_some() => {
+            let events = vec![
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "linked_context_rejected".into(),
+                    message: format!(
+                        "The linked corpus context was rejected before provider contact: {error}"
+                    ),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "linked_context_rejected".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile.id),
+                Some(&profile.label),
+                Some(&profile.chat_model),
+                &on_event,
+            )?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let linked_synthesis_retry = if req.retry_synthesis_only {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .get(&req.session_id)
+    } else {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .remove(&req.session_id);
+        None
+    };
+    if req.retry_synthesis_only && linked_synthesis_retry.is_none() {
+        let events = vec![
+            cd_core::events::StreamEvent::TurnStarted {
+                session_id: req.session_id.clone(),
+                model: Some(profile.chat_model.clone()),
+            },
+            cd_core::events::StreamEvent::Error {
+                code: "linked_synthesis_retry_stale".into(),
+                message: "No preserved evidence is available for this chat. Run a new linked \
+                          investigation before retrying synthesis."
+                    .into(),
+            },
+            cd_core::events::StreamEvent::TurnCompleted {
+                reason: "linked_synthesis_retry_stale".into(),
+            },
+        ];
+        persist_and_emit_host_terminal(
+            &state,
+            &req,
+            &events,
+            Some(&profile.id),
+            Some(&profile.label),
+            Some(&profile.chat_model),
+            &on_event,
+        )?;
+        return Ok(());
+    }
+    if let (Some(context), Some(checkpoint)) = (
+        log_explorer_context.as_ref(),
+        linked_synthesis_retry.as_ref(),
+    ) {
+        if !checkpoint.matches(
+            &req.session_id,
+            &context.corpus_id,
+            Some(profile.id.as_str()),
+            Some(profile.chat_model.as_str()),
+        ) {
+            state
+                .linked_synthesis_checkpoints
+                .lock()
+                .expect("linked synthesis checkpoints")
+                .remove(&req.session_id);
+            let events = vec![
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "linked_synthesis_retry_stale".into(),
+                    message:
+                        "The preserved evidence belongs to a different chat, corpus, provider \
+                              profile, or model. Run a new linked investigation instead."
+                            .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "linked_synthesis_retry_stale".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile.id),
+                Some(&profile.label),
+                Some(&profile.chat_model),
+                &on_event,
+            )?;
             return Ok(());
         }
     }
@@ -3359,32 +4302,124 @@ async fn agent_turn(
     // Linked log turns never join optional workspace/memory initialization.
     // They take an already-published full host when immediately available and
     // otherwise use an independent turn-local read-only log host.
-    let (mut host, using_fallback_host, borrowed_host_generation) =
+    let mut turn_prelude_emitted = false;
+    let (mut host, using_fallback_host, borrowed_host_generation, validated_log_corpus) =
         if let Some(context) = log_explorer_context.as_ref() {
-            match take_ready_linked_host(&state.host, &state.host_generation, || {
-                build_linked_log_fallback_host(&state, context)
-            }) {
-                Ok((host, using_fallback, borrowed_generation)) => {
+            let cache = match log_cache_dir(&state) {
+                Ok(cache) => cache,
+                Err(error) => {
+                    tracing::warn!(error = %error, "linked log cache is unavailable");
+                    let events = linked_log_host_terminal_events().to_vec();
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
+                    return Ok(());
+                }
+            };
+            let corpus_id = context.corpus_id.clone();
+            let log_corpus_handles = Arc::clone(&state.log_corpus_handles);
+            let capability_profile =
+                (!req.force_local && linked_synthesis_retry.is_none()).then_some(profile.clone());
+            let capability_session_id = req.session_id.clone();
+            let app_for_host = window.app_handle().clone();
+            let fallback_context = context.clone();
+            match prepare_linked_turn_with(
+                turn_started_at,
+                deadline_plan,
+                cancel.as_ref(),
+                move || log_corpus_handles.open(&cache, &corpus_id),
+                move || {
+                    capability_profile.as_ref().and_then(|profile| {
+                        cd_core::research::linked_tools_unavailable_events(
+                            profile,
+                            &capability_session_id,
+                        )
+                    })
+                },
+                move |validated_corpus| {
+                    let state = app_for_host.state::<AppState>();
+                    let (host, using_fallback, borrowed_generation) =
+                        take_ready_linked_host(&state.host, &state.host_generation, || {
+                            build_linked_log_fallback_host(&state, &fallback_context)
+                        })?;
+                    Ok((
+                        host,
+                        using_fallback,
+                        borrowed_generation,
+                        Some(validated_corpus),
+                    ))
+                },
+            )
+            .await
+            {
+                Ok(LinkedTurnPreparation::Ready((
+                    host,
+                    using_fallback,
+                    borrowed_generation,
+                    validated_corpus,
+                ))) => {
                     if using_fallback {
                         let notice = linked_log_fallback_notice();
                         let _ = on_event.send(cd_core::research::event_to_dto(&notice));
                     }
-                    (host, using_fallback, borrowed_generation)
+                    (host, using_fallback, borrowed_generation, validated_corpus)
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "linked log-only fallback construction failed");
-                    for event in linked_log_host_terminal_events() {
-                        let _ = on_event.send(cd_core::research::event_to_dto(&event));
-                    }
+                Ok(LinkedTurnPreparation::Terminal(events)) => {
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
+                    return Ok(());
+                }
+                Err(failure) => {
+                    let events = linked_setup_failure_events(&failure);
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
                     return Ok(());
                 }
             }
         } else {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::TurnPhase {
+                    phase: cd_core::router::AgentPhase::ChoosingEvidence,
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            turn_prelude_emitted = true;
             let app = window.app_handle().clone();
-            if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
-                let state = app.state::<AppState>();
-                ensure_host(&state)
-            })
+            if let Err(failure) = wait_for_host_readiness_for_turn(
+                AGENT_HOST_READY_TIMEOUT,
+                turn_started_at,
+                deadline_plan,
+                cancel.as_ref(),
+                move || {
+                    let state = app.state::<AppState>();
+                    ensure_host(&state)
+                },
+            )
             .await
             {
                 for event in host_readiness_terminal_events(&failure) {
@@ -3400,6 +4435,7 @@ async fn agent_turn(
                 host_guard.take().ok_or("host missing")?,
                 false,
                 Some(borrowed_generation),
+                None,
             )
         };
 
@@ -3408,14 +4444,7 @@ async fn agent_turn(
         histories.entry(req.session_id.clone()).or_default().clone()
     };
 
-    // Fresh cancel flag for this turn (#109).
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.insert(req.session_id.clone(), cancel.clone());
-    }
-
-    let channel = on_event;
+    let channel = on_event.clone();
     let linked_citation_corpus = log_explorer_context
         .as_ref()
         .map(|context| context.corpus_id.clone());
@@ -3439,10 +4468,37 @@ async fn agent_turn(
     if let Some(context) = log_explorer_context.as_ref() {
         host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.set_active_log_corpus(Some(context.corpus_id.clone()));
+        if let Some(corpus) = validated_log_corpus {
+            if let Err(error) = host.seed_log_corpus_handle(&context.corpus_id, corpus) {
+                tracing::warn!(error = %error, "linked corpus preflight handoff failed");
+                host.set_log_corpus_scope(previous_log_scope.clone());
+                host.set_active_log_corpus(previous_log_corpus.clone());
+                if !using_fallback_host {
+                    let _ = restore_host_if_generation_matches(
+                        &state.host,
+                        &state.host_generation,
+                        borrowed_host_generation.expect("shared host generation"),
+                        host,
+                    );
+                }
+                let events = linked_log_host_terminal_events().to_vec();
+                persist_and_emit_host_terminal(
+                    &state,
+                    &req,
+                    &events,
+                    Some(&profile.id),
+                    Some(&profile.label),
+                    Some(&profile.chat_model),
+                    &on_event,
+                )?;
+                return Ok(());
+            }
+        }
     } else {
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
+    let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -3459,7 +4515,7 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel_and_context(
+        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint(
             &mut host,
             &profile,
             api_key,
@@ -3469,11 +4525,59 @@ async fn agent_turn(
             false,
             Some(cancel.clone()),
             log_explorer_context,
+            linked_synthesis_retry,
+            Some(&mut next_synthesis_checkpoint),
+            Some(turn_started_at),
+            turn_prelude_emitted,
             Some(&mut sink),
         )
         .await
         .map_err(|e| e.to_string())
     };
+    let linked_terminal_persistence = match (&linked_citation_corpus, &result) {
+        (Some(_), Ok(events)) => {
+            let _mutation = state
+                .chat_session_mutation
+                .lock()
+                .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+            let store = session_store(&state)?;
+            persist_linked_provider_loop_terminal_at(
+                &store,
+                &req.session_id,
+                &req.text,
+                req.client_user_message_id.as_deref(),
+                req.client_assistant_message_id.as_deref(),
+                events,
+                (
+                    Some(&profile.id),
+                    Some(&profile.label),
+                    Some(&profile.chat_model),
+                ),
+            )
+        }
+        _ => Ok(false),
+    };
+    let retry_available = {
+        let mut checkpoints = state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints");
+        if let Some(checkpoint) = next_synthesis_checkpoint {
+            checkpoints.insert(req.session_id.clone(), checkpoint)
+        } else {
+            checkpoints.remove(&req.session_id);
+            false
+        }
+    };
+    if let Some(corpus_id) = linked_citation_corpus.as_deref() {
+        sink(linked_retry_event(
+            retry_available,
+            &req.session_id,
+            corpus_id,
+            Some(profile.id.clone()),
+            Some(profile.chat_model.clone()),
+        ));
+    }
     if !using_fallback_host {
         host.set_log_corpus_scope(previous_log_scope);
         host.set_active_log_corpus(previous_log_corpus);
@@ -3547,23 +4651,17 @@ async fn agent_turn(
     }
 
     {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.remove(&req.session_id);
-    }
-    {
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(req.session_id.clone(), history);
     }
+    linked_terminal_persistence?;
     result.map(|_| ())
 }
 
 /// Signal cooperative cancel for an in-flight turn (#109).
 #[tauri::command]
 fn cancel_turn(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let cancels = state.cancels.lock().expect("cancels");
-    if let Some(flag) = cancels.get(&session_id) {
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+    request_agent_turn_cancel(&state.cancels, &session_id);
     Ok(())
 }
 
@@ -3615,6 +4713,11 @@ fn save_chat_session_at(
     Ok(session)
 }
 
+fn chat_provider_binding_changed(previous: &Session, next: &Session) -> bool {
+    previous.provider_profile_id != next.provider_profile_id
+        || previous.chat_model != next.chat_model
+}
+
 #[tauri::command]
 fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
     let _mutation = state
@@ -3622,7 +4725,18 @@ fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Ses
         .lock()
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
+    let provider_binding_changed = store
+        .load(&session.id)
+        .ok()
+        .is_some_and(|previous| chat_provider_binding_changed(&previous, &session));
     let session = save_chat_session_at(&store, session)?;
+    if provider_binding_changed {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .remove(&session.id);
+    }
     seed_history_from_session(&state, &session);
     Ok(session)
 }
@@ -3663,6 +4777,11 @@ fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session,
         .map_err(|e| e.to_string())?;
     let mut histories = state.histories.lock().expect("hist");
     histories.remove(&id);
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(session)
 }
 
@@ -3695,6 +4814,11 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
         .map_err(|e| e.to_string())?;
     let mut histories = state.histories.lock().expect("hist");
     histories.remove(&id);
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(())
 }
 
@@ -3736,6 +4860,11 @@ fn archive_chat_session(
     }
     session.touch();
     store.save(&session).map_err(|e| e.to_string())?;
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(session)
 }
 
@@ -4074,6 +5203,7 @@ async fn list_models_for_draft(
         embedding_model: None,
         embedding_base_url: None,
         local_only,
+        deadline_preference: Default::default(),
         capabilities: desc.default_capabilities,
     };
     Ok(models_for_profile_with_key(&profile, api_key.as_deref()).await)
@@ -4807,6 +5937,580 @@ struct LogIngestReportDto {
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
+const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
+const DEMO_LOG_NAME: &str = "Demo · seven-day performance triage";
+const DEMO_LOG_RESOURCE_DIR: &str = "demo-log-corpus/seven-day-25k";
+const DEMO_LOG_MARKER_DIR: &str = ".contextdesk-demo-corpora";
+const DEMO_LOG_MARKER_FILE: &str = "seven-day-25k-behavior-scale.v1.json";
+const DEMO_LOG_EXPECTED_EVENTS: u64 = 25_000;
+const DEMO_LOG_EXPECTED_SOURCES: u64 = 10;
+
+#[derive(Clone, Copy)]
+struct DemoLogResourceEntry {
+    path: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+}
+
+const DEMO_LOG_RESOURCE_MANIFEST: &[DemoLogResourceEntry] = &[
+    DemoLogResourceEntry {
+        path: "api/app.jsonl",
+        bytes: 1_357_297,
+        sha256: "daa9983c529b24d8768bf19b97b9a5c27c9c81a7078ce467952c109ba3a0b730",
+    },
+    DemoLogResourceEntry {
+        path: "auth/auth.jsonl",
+        bytes: 66_853,
+        sha256: "f2ce52d81dcb90abf275548041be4ed9f3a607eba2a9c6ff1d9e4358473bdfa1",
+    },
+    DemoLogResourceEntry {
+        path: "db/database.log",
+        bytes: 313_382,
+        sha256: "9812816b6ad145c5a12058da23422148d96f840b868b5ab537f7063a333dc479",
+    },
+    DemoLogResourceEntry {
+        path: "db/database.log.1",
+        bytes: 49_681,
+        sha256: "84039ec216e0eb76eaaa8d6ac553f98ac453c61497b74f91877c04e2f6a6914d",
+    },
+    DemoLogResourceEntry {
+        path: "edge/access.jsonl",
+        bytes: 1_661_664,
+        sha256: "b239d6b28374e10a79063899f939e3ee62da3153c720cb638be9215148ca6322",
+    },
+    DemoLogResourceEntry {
+        path: "queue/events.jsonl",
+        bytes: 69_767,
+        sha256: "fd24ecdf65e0e4faf159f3b2dbf1d321487ff698068a35bb516f94f49dd6e35c",
+    },
+    DemoLogResourceEntry {
+        path: "region-a/app.jsonl",
+        bytes: 79_574,
+        sha256: "8f3b86f157b629e5fddf8c0c6a388a372187ead992f45596c940276f4d86263f",
+    },
+    DemoLogResourceEntry {
+        path: "region-b/app.jsonl",
+        bytes: 54_421,
+        sha256: "5e788d2d03c86f484f22ee4d3bd5cc6c4ddc63671c2e06a461d08b8e2c498800",
+    },
+    DemoLogResourceEntry {
+        path: "worker/worker.log",
+        bytes: 476_347,
+        sha256: "26bff700bf415f35d054270a0fc43785f476642bf4763bfa44069b5b0b5cf414",
+    },
+    DemoLogResourceEntry {
+        path: "worker/worker.log.1",
+        bytes: 72_295,
+        sha256: "94222d1ffa4ad30680762d910bf90fb72949c904e37bb55eb5f2cae74489fb93",
+    },
+];
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DemoLogInstallStatus {
+    Installed,
+    AlreadyInstalled,
+    Cancelled,
+    Unavailable,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoLogInstallDto {
+    status: DemoLogInstallStatus,
+    demo_identity: String,
+    corpus_id: Option<String>,
+    corpus_name: String,
+    events: Option<u64>,
+    detail: String,
+    retryable: bool,
+}
+
+impl DemoLogInstallDto {
+    fn unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Unavailable,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: detail.into(),
+            retryable: false,
+        }
+    }
+
+    fn failed(detail: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Failed,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: detail.into(),
+            retryable,
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            status: DemoLogInstallStatus::Cancelled,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: "Installation cancelled. No demo corpus was installed.".into(),
+            retryable: true,
+        }
+    }
+
+    fn cancelled_with_retained_corpus(corpus_id: String, events: u64) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Cancelled,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: Some(corpus_id),
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: Some(events),
+            detail: "Installation cancelled before activation. The published demo corpus was retained safely and will be recovered and activated when you retry. Your previous corpus selection was restored.".into(),
+            retryable: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoLogMarker {
+    schema_version: u32,
+    demo_identity: String,
+    corpus_id: String,
+}
+
+fn demo_log_marker_path(cache: &std::path::Path) -> PathBuf {
+    cache.join(DEMO_LOG_MARKER_DIR).join(DEMO_LOG_MARKER_FILE)
+}
+
+fn normalize_demo_resource_path(path: &std::path::Path) -> Option<String> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(component) = component else {
+            return None;
+        };
+        let component = component.to_str()?;
+        if component.is_empty() || component.contains('/') || component.contains('\\') {
+            return None;
+        }
+        normalized.push(component);
+    }
+    (!normalized.is_empty()).then(|| normalized.join("/"))
+}
+
+fn validate_demo_log_resource_against_manifest(
+    path: &std::path::Path,
+    manifest: &[DemoLogResourceEntry],
+) -> bool {
+    struct ResourceWalk<'a> {
+        expected_files: &'a std::collections::BTreeMap<&'static str, DemoLogResourceEntry>,
+        expected_directories: &'a std::collections::BTreeSet<String>,
+        max_resource_entries: usize,
+        entry_count: usize,
+        files: std::collections::BTreeSet<String>,
+        directories: std::collections::BTreeSet<String>,
+    }
+
+    impl ResourceWalk<'_> {
+        fn visit(&mut self, root: &std::path::Path, current: &std::path::Path) -> Result<(), ()> {
+            use sha2::Digest;
+            use std::io::Read;
+
+            let entries = std::fs::read_dir(current).map_err(|_| ())?;
+            for entry in entries {
+                let entry = entry.map_err(|_| ())?;
+                self.entry_count = self.entry_count.checked_add(1).ok_or(())?;
+                if self.entry_count > self.max_resource_entries {
+                    return Err(());
+                }
+                let kind = entry.file_type().map_err(|_| ())?;
+                if kind.is_symlink() {
+                    return Err(());
+                }
+                let path = entry.path();
+                let relative = path.strip_prefix(root).map_err(|_| ())?;
+                let relative = normalize_demo_resource_path(relative).ok_or(())?;
+                if kind.is_dir() {
+                    if !self.expected_directories.contains(&relative) {
+                        return Err(());
+                    }
+                    if !self.directories.insert(relative) {
+                        return Err(());
+                    }
+                    self.visit(root, &path)?;
+                } else if kind.is_file() {
+                    let expected = self.expected_files.get(relative.as_str()).ok_or(())?;
+                    if !self.files.insert(relative) {
+                        return Err(());
+                    }
+                    let mut file = std::fs::File::open(&path).map_err(|_| ())?;
+                    let metadata = file.metadata().map_err(|_| ())?;
+                    if !metadata.is_file() || metadata.len() != expected.bytes {
+                        return Err(());
+                    }
+                    let mut hasher = sha2::Sha256::new();
+                    let mut buffer = [0_u8; 64 * 1024];
+                    let mut bytes_read = 0_u64;
+                    loop {
+                        let read = file.read(&mut buffer).map_err(|_| ())?;
+                        if read == 0 {
+                            break;
+                        }
+                        bytes_read = bytes_read.checked_add(read as u64).ok_or(())?;
+                        if bytes_read > expected.bytes {
+                            return Err(());
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    if bytes_read != expected.bytes
+                        || format!("{:x}", hasher.finalize()) != expected.sha256
+                    {
+                        return Err(());
+                    }
+                } else {
+                    return Err(());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let Ok(root_metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return false;
+    }
+    if manifest.len() != DEMO_LOG_EXPECTED_SOURCES as usize {
+        return false;
+    }
+    let mut expected_files = std::collections::BTreeMap::new();
+    let mut expected_directories = std::collections::BTreeSet::new();
+    for entry in manifest {
+        let manifest_path = std::path::Path::new(entry.path);
+        if normalize_demo_resource_path(manifest_path).as_deref() != Some(entry.path)
+            || entry.sha256.len() != 64
+            || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || expected_files.insert(entry.path, *entry).is_some()
+        {
+            return false;
+        }
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        for depth in 1..components.len() {
+            expected_directories.insert(components[..depth].join("/"));
+        }
+    }
+    let max_resource_entries = expected_directories.len() + expected_files.len();
+    let mut walk = ResourceWalk {
+        expected_files: &expected_files,
+        expected_directories: &expected_directories,
+        max_resource_entries,
+        entry_count: 0,
+        files: std::collections::BTreeSet::new(),
+        directories: std::collections::BTreeSet::new(),
+    };
+    if walk.visit(path, path).is_err() {
+        return false;
+    }
+    walk.files
+        == expected_files
+            .keys()
+            .map(|path| (*path).to_string())
+            .collect()
+        && walk.directories == expected_directories
+}
+
+fn validate_demo_log_resource(path: &std::path::Path) -> bool {
+    validate_demo_log_resource_against_manifest(path, DEMO_LOG_RESOURCE_MANIFEST)
+}
+
+fn resolve_demo_log_resource_from_candidates(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| validate_demo_log_resource(candidate))
+}
+
+fn resolve_demo_log_resource(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(DEMO_LOG_RESOURCE_DIR));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("fixtures")
+                .join("log-lab")
+                .join("acceptance")
+                .join("seven-day-25k")
+                .join("scenarios")
+                .join("behavior-scale")
+                .join("import"),
+        );
+    }
+    resolve_demo_log_resource_from_candidates(candidates)
+}
+
+enum DemoLogMarkerState {
+    Missing,
+    Installed(Box<cd_core::log_analysis::LogCorpus>),
+    RepairRequired,
+}
+
+fn demo_log_corpus_matches_expected(corpus: &cd_core::log_analysis::LogCorpus) -> bool {
+    let Ok(meta) = corpus.meta() else {
+        return false;
+    };
+    meta.managed_identity.as_deref() == Some(DEMO_LOG_IDENTITY)
+        && meta.stats.as_ref().is_some_and(|stats| {
+            stats.lines == DEMO_LOG_EXPECTED_EVENTS
+                && stats.files == DEMO_LOG_EXPECTED_SOURCES
+                && !stats.partial
+        })
+}
+
+fn read_demo_log_marker(cache: &std::path::Path) -> Result<DemoLogMarkerState, String> {
+    let marker_path = demo_log_marker_path(cache);
+    let metadata = match std::fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DemoLogMarkerState::Missing)
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the installed demo marker: {error}"
+            ))
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return Ok(DemoLogMarkerState::RepairRequired);
+    }
+    let bytes = std::fs::read(&marker_path)
+        .map_err(|error| format!("could not read the installed demo marker: {error}"))?;
+    let Ok(marker) = serde_json::from_slice::<DemoLogMarker>(&bytes) else {
+        return Ok(DemoLogMarkerState::RepairRequired);
+    };
+    if marker.schema_version != 1 || marker.demo_identity != DEMO_LOG_IDENTITY {
+        return Ok(DemoLogMarkerState::RepairRequired);
+    }
+    match cd_core::log_analysis::LogCorpus::open(cache, &marker.corpus_id) {
+        Ok(corpus) if demo_log_corpus_matches_expected(&corpus) => {
+            Ok(DemoLogMarkerState::Installed(Box::new(corpus)))
+        }
+        Ok(_) => Ok(DemoLogMarkerState::RepairRequired),
+        Err(_) => Ok(DemoLogMarkerState::RepairRequired),
+    }
+}
+
+fn managed_demo_log_corpora(
+    cache: &std::path::Path,
+    cancel: &cd_core::process_progress::CancelFlag,
+) -> Result<Vec<cd_core::log_analysis::LogCorpus>, DemoTransactionError> {
+    if cancel.is_cancelled() {
+        return Err(DemoTransactionError::Cancelled);
+    }
+    let mut managed = Vec::new();
+    for id in cd_core::log_analysis::LogCorpus::list_ids(cache)
+        .map_err(|error| DemoTransactionError::Failed(error.to_string()))?
+    {
+        if cancel.is_cancelled() {
+            return Err(DemoTransactionError::Cancelled);
+        }
+        let Ok(corpus) = cd_core::log_analysis::LogCorpus::open(cache, &id) else {
+            continue;
+        };
+        if demo_log_corpus_matches_expected(&corpus) {
+            managed.push(corpus);
+        }
+    }
+    managed.sort_by(|left, right| {
+        let left_created = left.meta().map(|meta| meta.created_at).unwrap_or_default();
+        let right_created = right.meta().map(|meta| meta.created_at).unwrap_or_default();
+        right_created
+            .cmp(&left_created)
+            .then_with(|| right.id().cmp(left.id()))
+    });
+    Ok(managed)
+}
+
+fn quarantine_demo_log_marker(cache: &std::path::Path) -> Result<(), String> {
+    static QUARANTINE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let marker_path = demo_log_marker_path(cache);
+    match std::fs::symlink_metadata(&marker_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the damaged demo marker: {error}"
+            ))
+        }
+    }
+    let parent = marker_path
+        .parent()
+        .ok_or_else(|| "demo marker has no parent directory".to_string())?;
+    let quarantine = parent.join(format!(
+        "{DEMO_LOG_MARKER_FILE}.invalid.{}.{}",
+        std::process::id(),
+        QUARANTINE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::rename(&marker_path, quarantine)
+        .map_err(|error| format!("could not quarantine the damaged demo marker: {error}"))
+}
+
+#[cfg(unix)]
+fn sync_demo_marker_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("could not sync the demo marker directory: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_demo_marker_dir(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DemoMarkerPublishOutcome {
+    warning: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DemoTransactionError {
+    Cancelled,
+    Failed(String),
+}
+
+fn demo_marker_post_commit_outcome(
+    backup_cleanup_error: Option<String>,
+    directory_sync_error: Option<String>,
+) -> DemoMarkerPublishOutcome {
+    let mut warnings = Vec::new();
+    if let Some(error) = backup_cleanup_error {
+        warnings.push(error);
+    }
+    if let Some(error) = directory_sync_error {
+        warnings.push(error);
+    }
+    DemoMarkerPublishOutcome {
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+    }
+}
+
+fn persist_demo_log_marker(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    cancel: &cd_core::process_progress::CancelFlag,
+) -> Result<DemoMarkerPublishOutcome, DemoTransactionError> {
+    use std::io::Write;
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    if cancel.is_cancelled() {
+        return Err(DemoTransactionError::Cancelled);
+    }
+    let marker_path = demo_log_marker_path(cache);
+    let marker_dir = marker_path.parent().ok_or_else(|| {
+        DemoTransactionError::Failed("demo marker has no parent directory".into())
+    })?;
+    std::fs::create_dir_all(marker_dir).map_err(|error| {
+        DemoTransactionError::Failed(format!("could not prepare the demo marker: {error}"))
+    })?;
+    let temp_path = marker_dir.join(format!(
+        ".{DEMO_LOG_MARKER_FILE}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let marker = DemoLogMarker {
+        schema_version: 1,
+        demo_identity: DEMO_LOG_IDENTITY.into(),
+        corpus_id: corpus_id.into(),
+    };
+    let bytes = serde_json::to_vec_pretty(&marker).map_err(|error| {
+        DemoTransactionError::Failed(format!("could not encode the demo marker: {error}"))
+    })?;
+    let mut temp = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            DemoTransactionError::Failed(format!("could not create the demo marker: {error}"))
+        })?;
+    let backup_path = marker_dir.join(format!(
+        ".{DEMO_LOG_MARKER_FILE}.{}.{}.previous",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let commit_result = (|| -> Result<(), DemoTransactionError> {
+        temp.write_all(&bytes).map_err(|error| {
+            DemoTransactionError::Failed(format!("could not write the demo marker: {error}"))
+        })?;
+        temp.sync_all().map_err(|error| {
+            DemoTransactionError::Failed(format!("could not sync the demo marker: {error}"))
+        })?;
+        if cancel.is_cancelled() {
+            return Err(DemoTransactionError::Cancelled);
+        }
+        if std::fs::symlink_metadata(&marker_path).is_ok() {
+            std::fs::rename(&marker_path, &backup_path).map_err(|error| {
+                DemoTransactionError::Failed(format!(
+                    "could not stage the previous demo marker: {error}"
+                ))
+            })?;
+        }
+        if cancel.is_cancelled() {
+            if std::fs::symlink_metadata(&backup_path).is_ok() {
+                std::fs::rename(&backup_path, &marker_path).map_err(|error| {
+                    DemoTransactionError::Failed(format!(
+                        "installation was cancelled, but the previous demo marker could not be restored: {error}"
+                    ))
+                })?;
+            }
+            return Err(DemoTransactionError::Cancelled);
+        }
+        if let Err(error) = std::fs::rename(&temp_path, &marker_path) {
+            let restore = if backup_path.exists() {
+                std::fs::rename(&backup_path, &marker_path)
+            } else {
+                Ok(())
+            };
+            return Err(DemoTransactionError::Failed(match restore {
+                Ok(()) => format!("could not publish the demo marker: {error}"),
+                Err(restore_error) => format!(
+                    "could not publish the demo marker: {error}; could not restore the previous marker: {restore_error}"
+                ),
+            }));
+        }
+        Ok(())
+    })();
+    if commit_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    commit_result?;
+
+    // The rename above is the commit point. Cleanup and directory durability
+    // diagnostics after it must never make an installed corpus look failed.
+    let backup_cleanup_error = if backup_path.exists() {
+        std::fs::remove_file(&backup_path)
+            .err()
+            .map(|error| format!("could not retire the previous demo marker: {error}"))
+    } else {
+        None
+    };
+    let directory_sync_error = sync_demo_marker_dir(marker_dir).err();
+    Ok(demo_marker_post_commit_outcome(
+        backup_cleanup_error,
+        directory_sync_error,
+    ))
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogPackageImportDto {
@@ -4886,55 +6590,106 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
 }
 
 /// List disposable log corpora under app cache.
-#[tauri::command]
-fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
-    let cache = log_cache_dir(&state)?;
+fn list_log_corpora_at(cache: &std::path::Path) -> Result<Vec<LogCorpusSummaryDto>, String> {
     let summaries =
-        cd_core::log_analysis::LogCorpus::list_summaries(&cache).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
-    for s in summaries {
-        if let Ok(c) = cd_core::log_analysis::LogCorpus::open(&cache, &s.id) {
-            out.push(summary_dto(&c));
-        }
+        cd_core::log_analysis::LogCorpus::list_summaries(cache).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let top_templates = cd_core::log_analysis::store::read_meta_file(
+            &cache.join("log_corpora").join(&summary.id),
+        )
+        .map(|meta| {
+            meta.top_templates
+                .into_iter()
+                .map(|template| LogTopTemplateDto {
+                    id: template.id,
+                    pattern: template.pattern,
+                    count: template.count,
+                    severity: template.severity,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        out.push(LogCorpusSummaryDto {
+            id: summary.id,
+            name: summary.name,
+            event_count: summary.event_count,
+            template_count: summary.template_count,
+            engine: summary.engine,
+            created_at: summary.created_at,
+            source_label: summary.source_label,
+            stats: summary.stats.as_ref().map(stats_dto),
+            top_templates,
+            embedding: summary.embedding,
+        });
     }
     Ok(out)
 }
 
-/// Full summary for one corpus (detail header).
 #[tauri::command]
-fn get_log_corpus(
+async fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || list_log_corpora_at(&cache))
+        .await
+        .map_err(|error| format!("log corpus list task join: {error}"))?
+}
+
+/// Full summary for one corpus (detail header).
+fn get_log_corpus_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<LogCorpusSummaryDto, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    Ok(summary_dto(&corpus))
+}
+
+#[tauri::command]
+async fn get_log_corpus(
     state: State<'_, AppState>,
     corpus_id: String,
 ) -> Result<LogCorpusSummaryDto, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    Ok(summary_dto(&c))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || get_log_corpus_at(&handles, &cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log corpus metadata task join: {error}"))?
 }
 
 /// List templates for a corpus (UI table).
+fn list_log_templates_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    limit: Option<u32>,
+) -> Result<Vec<LogTemplateRowDto>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    let lim = limit.unwrap_or(200) as usize;
+    let mut rows = corpus.list_templates();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.info.count));
+    Ok(rows
+        .into_iter()
+        .take(lim)
+        .map(|row| LogTemplateRowDto {
+            id: row.info.template_id,
+            pattern: row.info.pattern,
+            count: row.info.count,
+            severity: row.info.severity,
+        })
+        .collect())
+}
+
 #[tauri::command]
-fn list_log_templates(
+async fn list_log_templates(
     state: State<'_, AppState>,
     corpus_id: String,
     limit: Option<u32>,
 ) -> Result<Vec<LogTemplateRowDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let lim = limit.unwrap_or(200) as usize;
-    let mut rows = c.list_templates();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.info.count));
-    Ok(rows
-        .into_iter()
-        .take(lim)
-        .map(|r| LogTemplateRowDto {
-            id: r.info.template_id,
-            pattern: r.info.pattern,
-            count: r.info.count,
-            severity: r.info.severity,
-        })
-        .collect())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || list_log_templates_at(&handles, &cache, &corpus_id, limit))
+        .await
+        .map_err(|error| format!("log template list task join: {error}"))?
 }
 
 /// Export a corpus package zip to a user path (full analysis package).
@@ -4951,10 +6706,178 @@ fn export_log_corpus_package(
     Ok(man.format_version)
 }
 
-/// Write one bounded, redacted diagnostic to a path chosen by the native dialog.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticExportRequest {
+    format: String,
+    report_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticPrepareRequest {
+    manifest: log_diagnostic_report::LogDiagnosticManifest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticReleaseRequest {
+    report_id: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum LogDiagnosticSaveStatus {
+    Saved,
+    SavedWithWarning { warning: String },
+    Cancelled,
+}
+
+struct LogDiagnosticDialogSpec {
+    title: &'static str,
+    file_name: &'static str,
+    filter_name: &'static str,
+    extension: &'static str,
+}
+
+fn log_diagnostic_dialog_spec(format: &str) -> Result<LogDiagnosticDialogSpec, String> {
+    match format {
+        "markdown" => Ok(LogDiagnosticDialogSpec {
+            title: "Save log diagnostics as Markdown",
+            file_name: "contextdesk-log-diagnostics.md",
+            filter_name: "Markdown",
+            extension: "md",
+        }),
+        "json" => Ok(LogDiagnosticDialogSpec {
+            title: "Save log diagnostics as JSON",
+            file_name: "contextdesk-log-diagnostics.json",
+            filter_name: "JSON",
+            extension: "json",
+        }),
+        _ => Err("diagnostic format must be markdown or json".into()),
+    }
+}
+
+#[cfg(test)]
+fn complete_log_diagnostic_export(
+    request: &LogDiagnosticExportRequest,
+    reports: &log_diagnostic_report::LogDiagnosticReportStore,
+    selected_path: Option<PathBuf>,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let content = reports.content(&request.report_id, &request.format)?;
+    complete_log_diagnostic_export_content(&request.format, content, selected_path)
+}
+
+fn complete_log_diagnostic_export_content(
+    format: &str,
+    content: &str,
+    selected_path: Option<PathBuf>,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let Some(path) = selected_path else {
+        return Ok(LogDiagnosticSaveStatus::Cancelled);
+    };
+    let outcome = log_diagnostics::save_log_diagnostic_report_at_host_path(&path, format, content)?;
+    Ok(log_diagnostic_save_status(outcome))
+}
+
+fn log_diagnostic_save_status(
+    outcome: log_diagnostics::DiagnosticPublishOutcome,
+) -> LogDiagnosticSaveStatus {
+    match outcome.warning {
+        Some(warning) => LogDiagnosticSaveStatus::SavedWithWarning { warning },
+        None => LogDiagnosticSaveStatus::Saved,
+    }
+}
+
+/// Validate and scrub a strict payload-free manifest, render both exact
+/// previews in the trusted host, and retain them under an opaque memory-only id.
 #[tauri::command]
-fn save_log_diagnostic_report(path: String, format: String, content: String) -> Result<(), String> {
-    log_diagnostics::save_log_diagnostic_report(std::path::Path::new(&path), &format, &content)
+fn prepare_log_diagnostic_report(
+    state: State<'_, AppState>,
+    request: LogDiagnosticPrepareRequest,
+) -> Result<log_diagnostic_report::PreparedLogDiagnostic, String> {
+    state
+        .log_diagnostic_reports
+        .lock()
+        .map_err(|_| "diagnostic report store is unavailable".to_string())?
+        .prepare(request.manifest)
+}
+
+/// Release one process-local diagnostic preview when the renderer replaces or
+/// closes it. Unknown/expired ids are harmless; malformed ids fail closed.
+#[tauri::command]
+fn release_log_diagnostic_report(
+    state: State<'_, AppState>,
+    request: LogDiagnosticReleaseRequest,
+) -> Result<bool, String> {
+    state
+        .log_diagnostic_reports
+        .lock()
+        .map_err(|_| "diagnostic report store is unavailable".to_string())?
+        .release(&request.report_id)
+}
+
+/// Show the host-owned native Save panel and atomically write one bounded,
+/// privacy-reviewed diagnostic. The renderer has no destination or overwrite
+/// authority.
+#[tauri::command]
+async fn save_log_diagnostic_report(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: LogDiagnosticExportRequest,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    let content = {
+        let reports = state
+            .log_diagnostic_reports
+            .lock()
+            .map_err(|_| "diagnostic report store is unavailable".to_string())?;
+        reports
+            .content(&request.report_id, &request.format)?
+            .to_string()
+    };
+    let spec = log_diagnostic_dialog_spec(&request.format)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title(spec.title)
+        .set_file_name(spec.file_name)
+        .add_filter(spec.filter_name, &[spec.extension])
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "native diagnostic Save dialog ended unexpectedly".to_string())?
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "native diagnostic Save dialog returned an invalid path".to_string())
+        })
+        .transpose()?;
+    complete_log_diagnostic_export_content(&request.format, &content, selected)
+}
+
+/// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
+#[tauri::command]
+fn get_failed_log_ingest_diagnostic(
+    state: State<'_, AppState>,
+) -> Option<cd_core::log_analysis::FailedIngestDiagnostic> {
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .snapshot()
+}
+
+/// Explicitly clear the one memory-only failed-ingest diagnostic.
+#[tauri::command]
+fn clear_failed_log_ingest_diagnostic(state: State<'_, AppState>) -> bool {
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .clear()
 }
 
 /// Import a portable package zip (SoftWrite — creates disposable corpus).
@@ -4963,9 +6886,22 @@ fn import_log_corpus_package_path(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<LogPackageImportDto, String> {
+    // A package import is a new ingest attempt even though it does not produce
+    // the raw-ingest evidence DTO. Clear the prior transient failure before
+    // any cache/path validation can fail.
+    let diagnostic_attempt = state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .begin_attempt();
     let cache = log_cache_dir(&state)?;
     let report = cd_core::log_analysis::import_corpus_zip_path(&cache, std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .record_success(diagnostic_attempt);
     set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
     Ok(LogPackageImportDto {
         corpus_id: report.corpus_id,
@@ -4985,9 +6921,74 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress
     }
 }
 
+/// Fan one log-ingest progress stream to the UI and the payload-free recorder.
+struct TauriLogIngestProgress {
+    app: tauri::AppHandle,
+    recorder: Arc<cd_core::log_analysis::FailedIngestDiagnosticRecorder>,
+}
+
+impl cd_core::process_progress::ProcessProgressObserver for TauriLogIngestProgress {
+    fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
+        self.recorder.progress(update.clone());
+        let _ = self.app.emit("process-progress", update);
+    }
+
+    fn log_ingest_evidence(&self, evidence: cd_core::process_progress::LogIngestEvidence) {
+        self.recorder.log_ingest_evidence(evidence);
+    }
+}
+
 /// Key used in `AppState.cancels` for SoftWrite log ingest (#498).
 const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
 const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
+
+#[derive(Debug, PartialEq, Eq)]
+enum LogIngestRunError {
+    Cancelled,
+    Failed(String),
+}
+
+impl LogIngestRunError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Cancelled => "ingest cancelled",
+            Self::Failed(message) => message,
+        }
+    }
+
+    fn into_message(self) -> String {
+        self.message().to_string()
+    }
+}
+
+fn register_exclusive_cancel(
+    cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    key: &str,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    already_active: &str,
+) -> Result<(), String> {
+    if cancels.contains_key(key) {
+        return Err(already_active.into());
+    }
+    cancels.insert(key.into(), flag);
+    Ok(())
+}
+
+fn remove_cancel_if_owned(
+    cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    key: &str,
+    owner: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    if cancels
+        .get(key)
+        .is_some_and(|registered| Arc::ptr_eq(registered, owner))
+    {
+        cancels.remove(key);
+        true
+    } else {
+        false
+    }
+}
 
 fn desktop_local_log_embed_plan(
     host: &ToolHost,
@@ -5012,54 +7013,118 @@ fn desktop_log_ingest_embed_plan_nonblocking(
         .unwrap_or_else(|| (cd_core::log_analysis::LogEmbedPolicy::local_default(), None))
 }
 
-/// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
-/// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
+/// Shared trusted host orchestration for ordinary and packaged-demo ingest.
 ///
-/// Runs on a blocking thread pool so the UI event loop is not starved (macOS
-/// "Not Responding" during large zip/dir imports). Ordinary imports use the
-/// product-local ONNX backend when it is already available. Import never waits
-/// for the broader workspace/tool host: keyword/structured analysis remains
-/// available while that host is still starting, and input over 64 MiB remains
-/// deferred.
-#[tauri::command]
-async fn ingest_log_path(
+/// Runs on a blocking thread pool so the UI event loop is not starved. Both
+/// callers use the same exclusive admission, diagnostics, cancellation,
+/// progress, bounded core ingest policy, and active-corpus handoff.
+async fn run_log_ingest(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    path: String,
+    state: &AppState,
+    path: PathBuf,
     name: Option<String>,
-) -> Result<LogIngestReportDto, String> {
-    let cache = log_cache_dir(&state)?;
+    managed_identity: Option<String>,
+    cancel: cd_core::process_progress::CancelFlag,
+) -> Result<LogIngestReportDto, LogIngestRunError> {
+    let selected_path = path;
+    let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
+    let recorder = Arc::new(cd_core::log_analysis::FailedIngestDiagnosticRecorder::default());
+    // Exclusive admission is not itself an ingest attempt. Once admitted,
+    // invalidate the previous generation before cache setup, provider lookup,
+    // or any other fallible ingest work. A setup failure belongs to this attempt.
+    let diagnostic_attempt = state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .begin_attempt();
+    let cache = match log_cache_dir(state) {
+        Ok(cache) => cache,
+        Err(error) => {
+            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            return Err(LogIngestRunError::Failed(error));
+        }
+    };
     let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
-    let progress = TauriProcessProgress { app: app.clone() };
+    let progress = TauriLogIngestProgress {
+        app: app.clone(),
+        recorder: Arc::clone(&recorder),
+    };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
-    let cancel = cd_core::process_progress::CancelFlag::new();
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.insert(LOG_INGEST_CANCEL_KEY.into(), cancel.inner_arc());
-    }
     let cancel_for_job = cancel.clone();
-    let report = tokio::task::spawn_blocking(move || {
-        cd_core::log_analysis::ingest_path_with_policy_and_observer(
-            &cache,
-            std::path::Path::new(&path),
-            &name_owned,
-            &policy,
-            embed_backend,
-            &progress,
-            Some(&cancel_for_job),
-        )
-        .map_err(|e| e.to_string())
+    let outcome = tokio::task::spawn_blocking(move || {
+        let result = if let Some(identity) = managed_identity {
+            cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
+                &cache,
+                &selected_path,
+                &name_owned,
+                &policy,
+                embed_backend,
+                &progress,
+                Some(&cancel_for_job),
+                &identity,
+            )
+        } else {
+            cd_core::log_analysis::ingest_path_with_policy_and_observer(
+                &cache,
+                &selected_path,
+                &name_owned,
+                &policy,
+                embed_backend,
+                &progress,
+                Some(&cancel_for_job),
+            )
+        };
+        result.map_err(|error| match error {
+            cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
+            other => LogIngestRunError::Failed(other.to_string()),
+        })
     })
-    .await
-    .map_err(|e| format!("ingest task join: {e}"))?;
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.remove(LOG_INGEST_CANCEL_KEY);
-    }
-    let report = report?;
+    .await;
+    let report = match outcome {
+        Ok(Ok(report)) => {
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_success(diagnostic_attempt);
+            report
+        }
+        Ok(Err(error)) => {
+            let diagnostic = recorder.finish(
+                error.message(),
+                source_kind,
+                cd_core::embed::now_unix_secs(),
+            );
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            return Err(error);
+        }
+        Err(error) => {
+            let error = LogIngestRunError::Failed(format!("ingest task join: {error}"));
+            let diagnostic = recorder.finish(
+                error.message(),
+                source_kind,
+                cd_core::embed::now_unix_secs(),
+            );
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            return Err(error);
+        }
+    };
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
-    set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
+    set_active_log_corpus_state_nonblocking(state, Some(report.corpus_id.clone()));
     Ok(LogIngestReportDto {
         corpus_id: report.corpus_id,
         lines: report.stats.lines,
@@ -5092,6 +7157,359 @@ async fn ingest_log_path(
             .collect(),
         embedding: report.embedding,
     })
+}
+
+/// Ingest a user-selected local log file/dir into a disposable corpus
+/// (UI SoftWrite path).
+#[tauri::command]
+async fn ingest_log_path(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<LogIngestReportDto, String> {
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    let result = run_log_ingest(app, &state, PathBuf::from(path), name, None, cancel).await;
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        LOG_INGEST_CANCEL_KEY,
+        &cancel_registration,
+    );
+    result.map_err(LogIngestRunError::into_message)
+}
+
+struct DemoLogIngestReceipt {
+    corpus_id: String,
+    events: u64,
+    sources: u64,
+}
+
+fn discard_managed_demo_corpus(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
+    let corpus = cd_core::log_analysis::LogCorpus::open(cache, corpus_id)
+        .map_err(|error| format!("could not inspect the mismatched demo corpus: {error}"))?;
+    let is_managed = corpus
+        .meta()
+        .map_err(|error| format!("could not verify the mismatched demo corpus: {error}"))?
+        .managed_identity
+        .as_deref()
+        == Some(DEMO_LOG_IDENTITY);
+    if !is_managed {
+        return Err(
+            "refused to discard a corpus without the reserved packaged-demo identity".into(),
+        );
+    }
+    drop(corpus);
+    cd_core::log_analysis::LogCorpus::discard(cache, corpus_id)
+        .map_err(|error| format!("could not discard the mismatched demo corpus: {error}"))
+}
+
+#[async_trait::async_trait]
+trait DemoLogInstallBackend: Send + Sync {
+    fn cache_dir(&self) -> Result<PathBuf, String>;
+    fn resolve_resource(&self) -> Option<PathBuf>;
+    fn active_corpus(&self) -> Option<String>;
+    fn select_corpus(&self, corpus_id: Option<String>);
+    fn discard_ingested_corpus(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<(), String>;
+    fn publish_marker(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+        cancel: &cd_core::process_progress::CancelFlag,
+    ) -> Result<DemoMarkerPublishOutcome, DemoTransactionError>;
+    async fn ingest(
+        &self,
+        resource: PathBuf,
+        cancel: &cd_core::process_progress::CancelFlag,
+    ) -> Result<DemoLogIngestReceipt, LogIngestRunError>;
+}
+
+struct TauriDemoLogInstallBackend<'a> {
+    app: tauri::AppHandle,
+    state: &'a AppState,
+}
+
+#[async_trait::async_trait]
+impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
+    fn cache_dir(&self) -> Result<PathBuf, String> {
+        log_cache_dir(self.state)
+    }
+
+    fn resolve_resource(&self) -> Option<PathBuf> {
+        resolve_demo_log_resource(&self.app)
+    }
+
+    fn active_corpus(&self) -> Option<String> {
+        active_log_corpus_snapshot(self.state)
+    }
+
+    fn select_corpus(&self, corpus_id: Option<String>) {
+        set_active_log_corpus_state_nonblocking(self.state, corpus_id);
+    }
+
+    fn discard_ingested_corpus(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<(), String> {
+        discard_managed_demo_corpus(cache, corpus_id)
+    }
+
+    fn publish_marker(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+        cancel: &cd_core::process_progress::CancelFlag,
+    ) -> Result<DemoMarkerPublishOutcome, DemoTransactionError> {
+        persist_demo_log_marker(cache, corpus_id, cancel)
+    }
+
+    async fn ingest(
+        &self,
+        resource: PathBuf,
+        cancel: &cd_core::process_progress::CancelFlag,
+    ) -> Result<DemoLogIngestReceipt, LogIngestRunError> {
+        let report = run_log_ingest(
+            self.app.clone(),
+            self.state,
+            resource,
+            Some(DEMO_LOG_NAME.into()),
+            Some(DEMO_LOG_IDENTITY.into()),
+            cancel.clone(),
+        )
+        .await?;
+        Ok(DemoLogIngestReceipt {
+            corpus_id: report.corpus_id,
+            events: report.lines,
+            sources: report.files,
+        })
+    }
+}
+
+struct ReconciledDemoLog {
+    corpus: cd_core::log_analysis::LogCorpus,
+    recovered: bool,
+    managed_copies: usize,
+    warning: Option<String>,
+}
+
+fn reconcile_demo_log_corpus<B: DemoLogInstallBackend>(
+    backend: &B,
+    cache: &std::path::Path,
+    cancel: &cd_core::process_progress::CancelFlag,
+) -> Result<Option<ReconciledDemoLog>, DemoTransactionError> {
+    if cancel.is_cancelled() {
+        return Err(DemoTransactionError::Cancelled);
+    }
+    let marker_needs_repair =
+        match read_demo_log_marker(cache).map_err(DemoTransactionError::Failed)? {
+            DemoLogMarkerState::Installed(corpus) => {
+                if cancel.is_cancelled() {
+                    return Err(DemoTransactionError::Cancelled);
+                }
+                return Ok(Some(ReconciledDemoLog {
+                    corpus: *corpus,
+                    recovered: false,
+                    managed_copies: 1,
+                    warning: None,
+                }));
+            }
+            DemoLogMarkerState::Missing => false,
+            DemoLogMarkerState::RepairRequired => true,
+        };
+    if cancel.is_cancelled() {
+        return Err(DemoTransactionError::Cancelled);
+    }
+    let managed = managed_demo_log_corpora(cache, cancel)?;
+    if marker_needs_repair {
+        if cancel.is_cancelled() {
+            return Err(DemoTransactionError::Cancelled);
+        }
+        quarantine_demo_log_marker(cache).map_err(DemoTransactionError::Failed)?;
+    }
+    let managed_copies = managed.len();
+    let Some(corpus) = managed.into_iter().next() else {
+        return Ok(None);
+    };
+    let publish = backend.publish_marker(cache, corpus.id(), cancel)?;
+    Ok(Some(ReconciledDemoLog {
+        corpus,
+        recovered: true,
+        managed_copies,
+        warning: publish.warning,
+    }))
+}
+
+/// Explicit first-run convenience. The resource resolver can only select the
+/// packaged input directory (or its debug checkout equivalent); trusted ingest
+/// remains identical to an ordinary user-selected import.
+async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
+    backend: &B,
+    cancel: &cd_core::process_progress::CancelFlag,
+) -> DemoLogInstallDto {
+    if cancel.is_cancelled() {
+        return DemoLogInstallDto::cancelled();
+    }
+    let cache = match backend.cache_dir() {
+        Ok(cache) => cache,
+        Err(error) => return DemoLogInstallDto::failed(error, true),
+    };
+    if cancel.is_cancelled() {
+        return DemoLogInstallDto::cancelled();
+    }
+    match reconcile_demo_log_corpus(backend, &cache, cancel) {
+        Ok(Some(reconciled)) => {
+            let summary = reconciled.corpus.summary();
+            backend.select_corpus(Some(summary.id.clone()));
+            let mut detail = if reconciled.recovered {
+                if reconciled.managed_copies > 1 {
+                    format!(
+                        "Recovered the newest packaged demo after an interrupted install; {} older managed copies were left untouched.",
+                        reconciled.managed_copies - 1
+                    )
+                } else {
+                    "Recovered the packaged demo after an interrupted install and selected it."
+                        .into()
+                }
+            } else {
+                "The packaged demo corpus is already installed and selected.".into()
+            };
+            if let Some(warning) = reconciled.warning {
+                detail.push_str(&format!(" Warning: {warning}"));
+            }
+            return DemoLogInstallDto {
+                status: DemoLogInstallStatus::AlreadyInstalled,
+                demo_identity: DEMO_LOG_IDENTITY.into(),
+                corpus_id: Some(summary.id),
+                corpus_name: summary.name,
+                events: Some(summary.event_count),
+                detail,
+                retryable: false,
+            };
+        }
+        Ok(None) => {}
+        Err(DemoTransactionError::Cancelled) => return DemoLogInstallDto::cancelled(),
+        Err(DemoTransactionError::Failed(error)) => return DemoLogInstallDto::failed(error, true),
+    }
+    if cancel.is_cancelled() {
+        return DemoLogInstallDto::cancelled();
+    }
+    let Some(resource) = backend.resolve_resource() else {
+        return DemoLogInstallDto::unavailable(
+            "The packaged demo logs are unavailable in this installation.",
+        );
+    };
+    if cancel.is_cancelled() {
+        return DemoLogInstallDto::cancelled();
+    }
+    let prior_active_corpus = backend.active_corpus();
+    let report = match backend.ingest(resource, cancel).await {
+        Ok(report) => report,
+        Err(LogIngestRunError::Cancelled) => {
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::cancelled();
+        }
+        Err(LogIngestRunError::Failed(error)) => {
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::failed(error, true);
+        }
+    };
+    if report.events != DEMO_LOG_EXPECTED_EVENTS || report.sources != DEMO_LOG_EXPECTED_SOURCES {
+        backend.select_corpus(prior_active_corpus);
+        let cleanup_detail = match backend.discard_ingested_corpus(&cache, &report.corpus_id) {
+            Ok(()) => " The mismatched demo corpus was discarded.".to_string(),
+            Err(error) => format!(
+                " Cleanup failed: {error}. The mismatched corpus remains unselected and cannot be activated as the packaged demo."
+            ),
+        };
+        return DemoLogInstallDto::failed(
+            format!(
+                "The packaged demo did not match its expected post-ingest identity (expected {DEMO_LOG_EXPECTED_SOURCES} sources and {DEMO_LOG_EXPECTED_EVENTS} events; imported {} sources and {} events). The demo was not activated.{cleanup_detail}",
+                report.sources, report.events,
+            ),
+            true,
+        );
+    }
+    let publish = match backend.publish_marker(&cache, &report.corpus_id, cancel) {
+        Ok(publish) => publish,
+        Err(DemoTransactionError::Cancelled) => {
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::cancelled_with_retained_corpus(
+                report.corpus_id,
+                report.events,
+            );
+        }
+        Err(DemoTransactionError::Failed(error)) => {
+            // The corpus is intentionally retained: its reserved identity was
+            // written before atomic publication, so retry can prove and
+            // reconcile this crash window without guessing at user corpora.
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::failed(error, true);
+        }
+    };
+    let detail = publish.warning.map_or_else(
+        || "The packaged demo corpus is installed and selected.".into(),
+        |warning| format!("The packaged demo corpus is installed and selected. Warning: {warning}"),
+    );
+    DemoLogInstallDto {
+        status: DemoLogInstallStatus::Installed,
+        demo_identity: DEMO_LOG_IDENTITY.into(),
+        corpus_id: Some(report.corpus_id),
+        corpus_name: DEMO_LOG_NAME.into(),
+        events: Some(report.events),
+        detail,
+        retryable: false,
+    }
+}
+
+#[cfg(test)]
+async fn install_demo_log_corpus_serialized<B: DemoLogInstallBackend>(
+    serial: &tokio::sync::Mutex<()>,
+    backend: &B,
+    cancel: &cd_core::process_progress::CancelFlag,
+) -> DemoLogInstallDto {
+    let _transaction = serial.lock().await;
+    install_demo_log_corpus_transaction(backend, cancel).await
+}
+
+#[tauri::command]
+async fn install_demo_log_corpus(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DemoLogInstallDto, String> {
+    let _transaction = state.demo_log_install.lock().await;
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    let backend = TauriDemoLogInstallBackend { app, state: &state };
+    let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+    remove_cancel_if_owned(
+        &mut state.cancels.lock().expect("cancels"),
+        LOG_INGEST_CANCEL_KEY,
+        &cancel_registration,
+    );
+    Ok(result)
 }
 
 /// Trusted local re-analysis of template vectors; raw events are not reparsed.
@@ -5128,6 +7546,7 @@ async fn reanalyze_log_corpus(
         cancels.insert(LOG_REANALYZE_CANCEL_KEY.into(), cancel.inner_arc());
     }
     let cancel_for_job = cancel.clone();
+    let reanalyzed_corpus_id = corpus_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::reanalyze_corpus_embeddings(
             &cache,
@@ -5146,6 +7565,9 @@ async fn reanalyze_log_corpus(
         .lock()
         .expect("cancels")
         .remove(LOG_REANALYZE_CANCEL_KEY);
+    if matches!(&result, Ok(Ok(_))) {
+        state.log_corpus_handles.remove(&reanalyzed_corpus_id);
+    }
     result?
 }
 
@@ -5172,91 +7594,132 @@ fn cancel_log_ingest(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 /// Problem clusters for a corpus.
+fn log_cluster_problems_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    max_clusters: Option<u32>,
+) -> Result<Vec<LogClusterDto>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    let clusters =
+        cd_core::log_analysis::cluster_problems(&corpus, max_clusters.unwrap_or(10) as usize)
+            .map_err(|e| e.to_string())?;
+    Ok(clusters
+        .into_iter()
+        .map(|cluster| LogClusterDto {
+            cluster_id: cluster.cluster_id,
+            label: cluster.label,
+            count: cluster.count,
+            severity: cluster.severity,
+            score: cluster.score,
+            template_ids: cluster.template_ids,
+            exemplars: cluster.exemplars,
+        })
+        .collect())
+}
+
 #[tauri::command]
-fn log_cluster_problems(
+async fn log_cluster_problems(
     state: State<'_, AppState>,
     corpus_id: String,
     max_clusters: Option<u32>,
 ) -> Result<Vec<LogClusterDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let clusters = cd_core::log_analysis::cluster_problems(&c, max_clusters.unwrap_or(10) as usize)
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        log_cluster_problems_at(&handles, &cache, &corpus_id, max_clusters)
+    })
+    .await
+    .map_err(|error| format!("log problem cluster task join: {error}"))?
+}
+
+/// Timeline buckets for a corpus.
+fn log_timeline_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    width_secs: Option<i64>,
+) -> Result<Vec<LogTimelineBucketDto>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    let buckets = cd_core::log_analysis::timeline(&corpus, width_secs.unwrap_or(60), None, None)
         .map_err(|e| e.to_string())?;
-    Ok(clusters
+    Ok(buckets
         .into_iter()
-        .map(|cl| LogClusterDto {
-            cluster_id: cl.cluster_id,
-            label: cl.label,
-            count: cl.count,
-            severity: cl.severity,
-            score: cl.score,
-            template_ids: cl.template_ids,
-            exemplars: cl.exemplars,
+        .map(|bucket| LogTimelineBucketDto {
+            start: bucket.start,
+            width: bucket.width,
+            count: bucket.count,
         })
         .collect())
 }
 
-/// Timeline buckets for a corpus.
 #[tauri::command]
-fn log_timeline(
+async fn log_timeline(
     state: State<'_, AppState>,
     corpus_id: String,
     width_secs: Option<i64>,
 ) -> Result<Vec<LogTimelineBucketDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let buckets = cd_core::log_analysis::timeline(&c, width_secs.unwrap_or(60), None, None)
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || log_timeline_at(&handles, &cache, &corpus_id, width_secs))
+        .await
+        .map_err(|error| format!("log analysis timeline task join: {error}"))?
+}
+
+/// Hybrid log search (paraphrase-capable when embed backend present).
+fn log_search_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: String,
+    k: Option<u32>,
+    embed_backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
+) -> Result<Vec<LogSearchHitDto>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    let request = cd_core::log_analysis::SearchLogsQuery {
+        query: Some(query),
+        semantic: true,
+        k: k.unwrap_or(8) as usize,
+        ..Default::default()
+    };
+    let hits = cd_core::log_analysis::search_logs(&corpus, &request, embed_backend.as_deref())
         .map_err(|e| e.to_string())?;
-    Ok(buckets
+    Ok(hits
         .into_iter()
-        .map(|b| LogTimelineBucketDto {
-            start: b.start,
-            width: b.width,
-            count: b.count,
+        .map(|hit| LogSearchHitDto {
+            template_id: hit.template_id,
+            pattern: hit.pattern,
+            score: hit.score,
+            semantic_score: hit.semantic_score,
+            count: hit.count,
+            severity: hit.severity,
+            exemplars: hit.exemplars,
         })
         .collect())
 }
 
-/// Hybrid log search (paraphrase-capable when embed backend present).
 #[tauri::command]
-fn log_search(
+async fn log_search(
     state: State<'_, AppState>,
     corpus_id: String,
     query: String,
     k: Option<u32>,
 ) -> Result<Vec<LogSearchHitDto>, String> {
     let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
     let embed_backend = log_embed_backend_snapshot_nonblocking(&state);
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let q = cd_core::log_analysis::SearchLogsQuery {
-        query: Some(query),
-        semantic: true,
-        k: k.unwrap_or(8) as usize,
-        ..Default::default()
-    };
-    let hits = cd_core::log_analysis::search_logs(&c, &q, embed_backend.as_deref())
-        .map_err(|e| e.to_string())?;
-    Ok(hits
-        .into_iter()
-        .map(|h| LogSearchHitDto {
-            template_id: h.template_id,
-            pattern: h.pattern,
-            score: h.score,
-            semantic_score: h.semantic_score,
-            count: h.count,
-            severity: h.severity,
-            exemplars: h.exemplars,
-        })
-        .collect())
+    tokio::task::spawn_blocking(move || {
+        log_search_at(&handles, &cache, &corpus_id, query, k, embed_backend)
+    })
+    .await
+    .map_err(|error| format!("log analysis search task join: {error}"))?
 }
 
 /// Discard a disposable corpus.
 #[tauri::command]
 fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
+    state.log_corpus_handles.remove(&corpus_id);
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())?;
     if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
         set_active_log_corpus_state_nonblocking(&state, None);
@@ -5282,16 +7745,27 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
 
 /// Paged/keyset event query for the Log Explorer.
+fn query_log_events_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventPage, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_events(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_query_events(
+async fn log_query_events(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventPage, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_events_at(&handles, &cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log event query task join: {error}"))?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -5346,12 +7820,12 @@ impl From<cd_core::log_analysis::query::EventOriginalRepresentation> for LogEven
 }
 
 fn query_log_event_original_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     seq: u64,
 ) -> Result<LogEventOriginalDto, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query::query_event_original(&corpus, seq)
         .map(LogEventOriginalDto::from)
         .map_err(|e| e.to_string())
@@ -5362,65 +7836,144 @@ fn query_log_event_original_at(
 /// This remains separate from ordinary Explorer pages, search, evidence, and
 /// linked-chat DTOs so source records never enter those paths automatically.
 #[tauri::command]
-fn log_query_event_original(
+async fn log_query_event_original(
     state: State<'_, AppState>,
     corpus_id: String,
     seq: u64,
 ) -> Result<LogEventOriginalDto, String> {
     let cache = log_cache_dir(&state)?;
-    query_log_event_original_at(&cache, &corpus_id, seq)
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_original_at(&handles, &cache, &corpus_id, seq)
+    })
+    .await
+    .map_err(|error| format!("log original event task join: {error}"))?
 }
 
 /// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
+fn query_log_timeline_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::TimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::TimelineSummary, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_timeline_summary(
+async fn log_timeline_summary(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::TimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::TimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_timeline_summary(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_timeline_at(&handles, &cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log timeline task join: {error}"))?
 }
 
 /// One bounded global timeline axis with canonical severity and lane tracks.
+fn query_log_shared_timeline_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::SharedTimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_shared_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_shared_timeline_summary(
+async fn log_shared_timeline_summary(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::SharedTimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_shared_timeline_summary(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_shared_timeline_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("shared log timeline task join: {error}"))?
 }
 
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
+fn query_log_event_neighborhood_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventNeighborhoodQuery,
+) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_neighborhood(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_query_event_neighborhood(
+async fn log_query_event_neighborhood(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventNeighborhoodQuery,
 ) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_event_neighborhood(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_neighborhood_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log event neighborhood task join: {error}"))?
 }
 
 /// Facets under filters for explorer filter rail.
+fn query_log_facets_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::LogFacets, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_facets(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_facets(
+async fn log_facets(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::LogFacets, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_facets_at(&handles, &cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log facets task join: {error}"))?
+}
+
+fn query_log_source_catalog_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::LogSourceCatalogQuery,
+) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_source_catalog(&corpus, query).map_err(|e| e.to_string())
+}
+
+/// Dedicated, stable, paginated full-path source catalog for lane composition.
+#[tauri::command]
+async fn log_source_catalog(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::LogSourceCatalogQuery,
+) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_source_catalog_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log source catalog task join: {error}"))?
 }
 
 /// IPC args for advanced log search (#523).
@@ -5488,9 +8041,9 @@ async fn log_search_events(
     };
     let corpus_id = args.corpus_id;
     let cancel_for_job = cancel.clone();
+    let handles = Arc::clone(&state.log_corpus_handles);
     let result = tokio::task::spawn_blocking(move || {
-        let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id)
-            .map_err(|error| error.to_string())?;
+        let corpus = handles.open(&cache, &corpus_id)?;
         let is_cancelled = || cancel_for_job.load(std::sync::atomic::Ordering::SeqCst);
         cd_core::log_analysis::search_events_advanced_with_cancel(
             &corpus,
@@ -5519,15 +8072,25 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
 }
 
 /// List bookmarks for a corpus.
+fn list_log_bookmarks_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::list_resolved_bookmarks(&corpus).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_list_bookmarks(
+async fn log_list_bookmarks(
     state: State<'_, AppState>,
     corpus_id: String,
 ) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::list_resolved_bookmarks(&c).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || list_log_bookmarks_at(&handles, &cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log bookmarks task join: {error}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -5611,22 +8174,35 @@ fn active_investigation_for_corpus(
 }
 
 /// Load the newest active durable Investigation linked to a corpus.
-#[tauri::command]
-fn log_load_active_investigation(
-    state: State<'_, AppState>,
-    corpus_id: String,
+fn load_active_log_investigation_at(
+    store: &cd_core::investigations::InvestigationStore,
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
-    let store = investigation_store(&state)?;
-    let Some(summary) = active_investigation_for_corpus(&store, &corpus_id)? else {
+    let Some(summary) = active_investigation_for_corpus(store, corpus_id)? else {
         return Ok(None);
     };
-    let cache = log_cache_dir(&state)?;
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     store
         .load(&summary.id, &corpus)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_load_active_investigation(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
+    let store = investigation_store(&state)?;
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        load_active_log_investigation_at(&store, &handles, &cache, &corpus_id)
+    })
+    .await
+    .map_err(|error| format!("log investigation task join: {error}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -5995,14 +8571,20 @@ fn set_chat_linked_corpus(
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let cache = log_cache_dir(&state)?;
-    set_chat_linked_corpus_at(
+    let session = set_chat_linked_corpus_at(
         &store,
         &cache,
         &session_id,
         corpus_id,
         draft_session,
         expected_updated_at,
-    )
+    )?;
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&session_id);
+    Ok(session)
 }
 
 /// Build the SPA URL for a Log Explorer window.
@@ -6060,9 +8642,14 @@ async fn open_log_explorer(
     corpus_id: String,
 ) -> Result<String, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let title = format!("Log Explorer · {}", c.name());
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let open_corpus_id = corpus_id.clone();
+    let corpus_name = tokio::task::spawn_blocking(move || handles.open(&cache, &open_corpus_id))
+        .await
+        .map_err(|error| format!("open log explorer corpus task join: {error}"))??
+        .name()
+        .to_string();
+    let title = format!("Log Explorer · {corpus_name}");
     // Set active corpus so agent tools resolve without id.
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
@@ -6883,9 +9470,20 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        log_corpus_handles: Arc::new(LogCorpusHandleCache::default()),
+        failed_log_ingest_diagnostic: Mutex::new(
+            cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
+        ),
+        demo_log_install: tokio::sync::Mutex::new(()),
+        log_diagnostic_reports: Mutex::new(
+            log_diagnostic_report::LogDiagnosticReportStore::default(),
+        ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
+        active_turn_owners: Mutex::new(HashMap::new()),
+        next_turn_owner: std::sync::atomic::AtomicU64::new(0),
+        linked_synthesis_checkpoints: Mutex::new(LinkedCheckpointStore::default()),
         backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
         index_status: Arc::new(Mutex::new(cd_core::index::IndexStatus {
@@ -7023,7 +9621,10 @@ pub fn run() {
             get_log_corpus,
             list_log_templates,
             ingest_log_path,
+            install_demo_log_corpus,
             cancel_log_ingest,
+            get_failed_log_ingest_diagnostic,
+            clear_failed_log_ingest_diagnostic,
             reanalyze_log_corpus,
             cancel_log_reanalysis,
             log_cluster_problems,
@@ -7038,6 +9639,7 @@ pub fn run() {
             log_shared_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
+            log_source_catalog,
             log_search_events,
             cancel_log_search,
             log_list_bookmarks,
@@ -7055,6 +9657,8 @@ pub fn run() {
             set_chat_linked_corpus,
             open_log_explorer,
             export_log_corpus_package,
+            prepare_log_diagnostic_report,
+            release_log_diagnostic_report,
             save_log_diagnostic_report,
             import_log_corpus_package_path,
             write_memory_note,
@@ -7089,6 +9693,503 @@ pub fn run() {
 mod s3_backup_host_tests;
 
 #[cfg(test)]
+mod log_diagnostic_export_authority_tests {
+    use super::*;
+
+    fn prepared_request() -> (
+        log_diagnostic_report::LogDiagnosticReportStore,
+        LogDiagnosticExportRequest,
+        String,
+    ) {
+        let manifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "generatedAt": "2026-07-29T12:34:56.000Z",
+            "privacy": {
+                "redacted": true,
+                "reviewRequired": true,
+                "excluded": []
+            },
+            "application": {
+                "version": "0.1.0",
+                "channel": "dev",
+                "gitSha": "de43caeba66df05068a50db9356efad3b64a4a45",
+                "os": "macOS"
+            },
+            "corpus": {
+                "id": "019fab76-18ff-7361-8dd8-e4ddc0f1bb6c",
+                "name": "Incident",
+                "createdAt": 1700000000,
+                "engine": "duckdb",
+                "eventCount": 12,
+                "templateCount": 3,
+                "stats": null,
+                "embedding": { "state": "keyword_only" }
+            },
+            "failedIngest": null,
+            "activeView": null,
+            "currentStatus": null,
+            "userNote": null
+        }))
+        .expect("manifest");
+        let mut reports = log_diagnostic_report::LogDiagnosticReportStore::default();
+        let prepared = reports.prepare(manifest).expect("prepare report");
+        let markdown = prepared.markdown;
+        let request = LogDiagnosticExportRequest {
+            format: "markdown".into(),
+            report_id: prepared.report_id,
+        };
+        (reports, request, markdown)
+    }
+
+    #[test]
+    fn ipc_request_rejects_renderer_content_destination_and_overwrite_authority() {
+        for forbidden in [
+            serde_json::json!({
+                "format": "markdown",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
+                "content": "# Renderer-authored diagnostic"
+            }),
+            serde_json::json!({
+                "format": "markdown",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
+                "path": "/tmp/renderer-selected.md"
+            }),
+            serde_json::json!({
+                "format": "markdown",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
+                "overwriteConfirmed": true
+            }),
+        ] {
+            let error = serde_json::from_value::<LogDiagnosticExportRequest>(forbidden)
+                .expect_err("unknown renderer authority must fail closed");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+        serde_json::from_value::<LogDiagnosticExportRequest>(serde_json::json!({
+            "format": "markdown",
+            "reportId": "cdlogdiag-0000000000000001-0000000000000001"
+        }))
+        .expect("opaque report id and format are the complete renderer request");
+    }
+
+    #[test]
+    fn host_dialog_cancellation_is_typed_and_writes_nothing() {
+        let root = tempfile::tempdir().expect("temp root");
+        let (reports, request, _) = prepared_request();
+        let status = complete_log_diagnostic_export(&request, &reports, None)
+            .expect("cancel is not an error");
+        assert_eq!(status, LogDiagnosticSaveStatus::Cancelled);
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize status"),
+            serde_json::json!({ "status": "cancelled" })
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("read temp root")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn host_selected_path_returns_typed_saved_status() {
+        let root = tempfile::tempdir().expect("temp root");
+        let destination = root.path().join("diagnostic.md");
+        let (reports, request, markdown) = prepared_request();
+        let status = complete_log_diagnostic_export(&request, &reports, Some(destination.clone()))
+            .expect("host-selected save");
+        assert_eq!(status, LogDiagnosticSaveStatus::Saved);
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize status"),
+            serde_json::json!({ "status": "saved" })
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination).expect("read saved report"),
+            markdown
+        );
+    }
+
+    #[test]
+    fn post_publication_failure_serializes_as_saved_with_warning() {
+        let status = log_diagnostic_save_status(log_diagnostics::DiagnosticPublishOutcome {
+            warning: Some("parent directory sync failed".into()),
+        });
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize warning status"),
+            serde_json::json!({
+                "status": "saved_with_warning",
+                "warning": "parent directory sync failed"
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod failed_log_ingest_diagnostic_lifecycle_tests {
+    use super::*;
+
+    fn fresh_failed_ingest_state() -> Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore> {
+        Mutex::new(cd_core::log_analysis::FailedIngestDiagnosticStore::default())
+    }
+
+    #[test]
+    fn failed_ingest_diagnostics_are_process_memory_transient_across_fresh_state_construction() {
+        let first_state = fresh_failed_ingest_state();
+        let diagnostic = cd_core::log_analysis::FailedIngestDiagnosticRecorder::default().finish(
+            "source read failed",
+            cd_core::log_analysis::FailedIngestSourceKind::Directory,
+            1_735_737_600,
+        );
+        {
+            let mut store = first_state.lock().expect("first failed-ingest state");
+            let attempt = store.begin_attempt();
+            assert!(store.record_failure(attempt, diagnostic.clone()));
+            assert_eq!(store.snapshot(), Some(diagnostic));
+        }
+
+        drop(first_state);
+
+        let restarted_state = fresh_failed_ingest_state();
+        assert!(
+            restarted_state
+                .lock()
+                .expect("restarted failed-ingest state")
+                .snapshot()
+                .is_none(),
+            "a fresh process state must not reconstruct a prior failed-ingest diagnostic"
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_ingest_cancel_registry_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn concurrent_log_ingest_start_cannot_replace_or_steal_cancellation() {
+        let mut cancels = HashMap::new();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&first),
+            "a log import is already running",
+        )
+        .expect("first import starts");
+        let error = register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&second),
+            "a log import is already running",
+        )
+        .expect_err("second import must be rejected");
+
+        assert_eq!(error, "a log import is already running");
+        let registered = cancels
+            .get(LOG_INGEST_CANCEL_KEY)
+            .expect("first registration remains");
+        assert!(Arc::ptr_eq(registered, &first));
+        registered.store(true, Ordering::SeqCst);
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_log_ingest_completion_cannot_clear_a_newer_registration() {
+        let mut cancels = HashMap::new();
+        let older = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let newer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&older),
+            "a log import is already running",
+        )
+        .expect("older import starts");
+        assert!(remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &older,
+        ));
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&newer),
+            "a log import is already running",
+        )
+        .expect("newer import starts after older cleanup");
+
+        assert!(!remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &older,
+        ));
+        let registered = cancels
+            .get(LOG_INGEST_CANCEL_KEY)
+            .expect("newer registration remains");
+        assert!(Arc::ptr_eq(registered, &newer));
+        assert!(remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &newer,
+        ));
+        assert!(!cancels.contains_key(LOG_INGEST_CANCEL_KEY));
+    }
+}
+
+#[cfg(test)]
+mod log_explorer_async_query_host_tests {
+    use super::*;
+
+    fn assert_async_blocking_command(src: &str, signature: &str, boundary: &str, helper: &str) {
+        let start = src.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let end = src[start..]
+            .find(boundary)
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("{signature} boundary"));
+        let command = &src[start..end];
+        assert!(
+            command.contains("tokio::task::spawn_blocking"),
+            "{signature} must move blocking reads off the app event loop"
+        );
+        assert!(
+            command.contains(helper),
+            "{signature} must call its blocking helper"
+        );
+        assert!(
+            !command.contains("LogCorpus::open"),
+            "{signature} must not open DuckDB on the app event loop"
+        );
+    }
+
+    #[test]
+    fn explorer_startup_queries_are_async_and_leave_duckdb_work_off_the_event_loop() {
+        let src = include_str!("lib.rs");
+        for (signature, boundary, helper) in [
+            (
+                "async fn list_log_corpora(",
+                "/// Full summary for one corpus",
+                "list_log_corpora_at",
+            ),
+            (
+                "async fn get_log_corpus(",
+                "/// List templates for a corpus",
+                "get_log_corpus_at",
+            ),
+            (
+                "async fn list_log_templates(",
+                "/// Export a corpus package zip",
+                "list_log_templates_at",
+            ),
+            (
+                "async fn log_cluster_problems(",
+                "/// Timeline buckets for a corpus",
+                "log_cluster_problems_at",
+            ),
+            (
+                "async fn log_timeline(",
+                "/// Hybrid log search",
+                "log_timeline_at",
+            ),
+            (
+                "async fn log_search(",
+                "/// Discard a disposable corpus",
+                "log_search_at",
+            ),
+            (
+                "async fn log_query_events(",
+                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "query_log_events_at",
+            ),
+            (
+                "async fn log_query_event_original(",
+                "/// Fixed-size, filter-aware timeline summary",
+                "query_log_event_original_at",
+            ),
+            (
+                "async fn log_timeline_summary(",
+                "/// One bounded global timeline axis",
+                "query_log_timeline_at",
+            ),
+            (
+                "async fn log_shared_timeline_summary(",
+                "/// Bounded neighborhood around a stable event identity",
+                "query_log_shared_timeline_at",
+            ),
+            (
+                "async fn log_query_event_neighborhood(",
+                "/// Facets under filters for explorer filter rail",
+                "query_log_event_neighborhood_at",
+            ),
+            (
+                "async fn log_facets(",
+                "fn query_log_source_catalog_at(",
+                "query_log_facets_at",
+            ),
+            (
+                "async fn log_source_catalog(",
+                "/// IPC args for advanced log search",
+                "query_log_source_catalog_at",
+            ),
+            (
+                "async fn log_list_bookmarks(",
+                "#[derive(Debug, Deserialize)]",
+                "list_log_bookmarks_at",
+            ),
+            (
+                "async fn log_load_active_investigation(",
+                "#[derive(Debug, Deserialize)]",
+                "load_active_log_investigation_at",
+            ),
+        ] {
+            assert_async_blocking_command(src, signature, boundary, helper);
+        }
+    }
+
+    #[test]
+    fn blocking_helpers_preserve_startup_read_results() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::write(
+            logs.join("events.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-29T12:00:00Z\",\"level\":\"INFO\",",
+                "\"service\":\"api\",\"host\":\"node-1\",\"message\":\"started\"}\n",
+                "{\"timestamp\":\"2026-07-29T12:00:01Z\",\"level\":\"ERROR\",",
+                "\"service\":\"api\",\"host\":\"node-1\",\"message\":\"failed\"}\n",
+            ),
+        )
+        .expect("fixture");
+        let cache = root.path().join("cache");
+        let report = cd_core::log_analysis::ingest_path(&cache, &logs, "async-query", None, "none")
+            .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
+        let query = cd_core::log_analysis::EventQuery {
+            limit: 10,
+            ..Default::default()
+        };
+
+        let summary =
+            get_log_corpus_at(&handles, &cache, &report.corpus_id).expect("corpus summary");
+        assert_eq!(summary.event_count, 2);
+
+        let corpora = list_log_corpora_at(&cache).expect("corpus list");
+        assert_eq!(corpora.len(), 1);
+        assert_eq!(corpora[0].id, report.corpus_id);
+
+        let templates = list_log_templates_at(&handles, &cache, &report.corpus_id, Some(1))
+            .expect("template list");
+        assert_eq!(templates.len(), 1);
+
+        let page =
+            query_log_events_at(&handles, &cache, &report.corpus_id, &query).expect("event page");
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.total_matched, 2);
+
+        let facets =
+            query_log_facets_at(&handles, &cache, &report.corpus_id, &query).expect("facets");
+        assert_eq!(facets.levels.values().sum::<u64>(), 2);
+        assert_eq!(facets.services.values().sum::<u64>(), 2);
+        assert_eq!(facets.hosts.values().sum::<u64>(), 2);
+        assert_eq!(facets.sources.get("events.jsonl"), Some(&2));
+
+        let timeline = query_log_timeline_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::TimelineSummaryQuery::default(),
+        )
+        .expect("timeline");
+        assert_eq!(timeline.total_matched, 2);
+
+        let shared_timeline = query_log_shared_timeline_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::SharedTimelineSummaryQuery::default(),
+        )
+        .expect("shared timeline");
+        assert_eq!(shared_timeline.total_matched, 2);
+
+        let clusters = log_cluster_problems_at(&handles, &cache, &report.corpus_id, Some(10))
+            .expect("clusters");
+        assert!(!clusters.is_empty());
+
+        let analysis_timeline = log_timeline_at(&handles, &cache, &report.corpus_id, Some(60))
+            .expect("analysis timeline");
+        assert_eq!(
+            analysis_timeline
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<u64>(),
+            2
+        );
+
+        let search = log_search_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            "failed".into(),
+            Some(8),
+            None,
+        )
+        .expect("analysis search");
+        assert!(!search.is_empty());
+
+        let bookmarks =
+            list_log_bookmarks_at(&handles, &cache, &report.corpus_id).expect("resolved bookmarks");
+        assert!(bookmarks.is_empty());
+
+        let investigation_store =
+            cd_core::investigations::InvestigationStore::new(root.path().join("investigations"));
+        assert!(load_active_log_investigation_at(
+            &investigation_store,
+            &handles,
+            &cache,
+            &report.corpus_id,
+        )
+        .expect("no investigation")
+        .is_none());
+        let corpus =
+            cd_core::log_analysis::LogCorpus::open(&cache, &report.corpus_id).expect("open corpus");
+        investigation_store
+            .create("Async startup proof", &corpus)
+            .expect("create investigation");
+        let investigation = load_active_log_investigation_at(
+            &investigation_store,
+            &handles,
+            &cache,
+            &report.corpus_id,
+        )
+        .expect("load investigation")
+        .expect("active investigation");
+        assert_eq!(investigation.document.title, "Async startup proof");
+
+        let first = handles
+            .open(&cache, &report.corpus_id)
+            .expect("first handle");
+        let second = handles
+            .open(&cache, &report.corpus_id)
+            .expect("second handle");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "startup reads must reuse one initialized corpus handle"
+        );
+        handles.remove(&report.corpus_id);
+        let reopened = handles
+            .open(&cache, &report.corpus_id)
+            .expect("reopened handle");
+        assert!(
+            !Arc::ptr_eq(&first, &reopened),
+            "explicit invalidation must discard the initialized handle"
+        );
+    }
+}
+
+#[cfg(test)]
 mod log_original_host_tests {
     use super::*;
 
@@ -7106,8 +10207,10 @@ mod log_original_host_tests {
         let cache = root.path().join("cache");
         let report = cd_core::log_analysis::ingest_path(&cache, &logs, "original", None, "none")
             .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
 
-        let original = query_log_event_original_at(&cache, &report.corpus_id, 0).expect("original");
+        let original =
+            query_log_event_original_at(&handles, &cache, &report.corpus_id, 0).expect("original");
         let LogEventOriginalDto::Available {
             label,
             text,
@@ -7131,8 +10234,8 @@ mod log_original_host_tests {
         assert!(!encoding_normalized);
         assert!(redaction_applied);
 
-        let error =
-            query_log_event_original_at(&cache, &report.corpus_id, 99).expect_err("missing event");
+        let error = query_log_event_original_at(&handles, &cache, &report.corpus_id, 99)
+            .expect_err("missing event");
         assert!(error.contains("event seq 99 not found"), "{error}");
     }
 
@@ -7179,11 +10282,101 @@ mod log_original_host_tests {
             .map(|offset| shared_start + offset)
             .expect("shared timeline command boundary");
         let shared_command = &src[shared_start..neighborhood_start];
-        assert!(shared_command.contains("query_shared_timeline_summary"));
+        assert!(shared_command.contains("query_log_shared_timeline_at"));
+        assert!(
+            shared_command.contains("tokio::task::spawn_blocking"),
+            "shared timeline must keep DuckDB reads off the app event loop"
+        );
         assert!(
             !shared_command.contains("ensure_host("),
             "local bounded summary must not construct the agent host"
         );
+    }
+}
+
+#[cfg(test)]
+mod log_source_catalog_host_tests {
+    use super::*;
+
+    #[test]
+    fn source_catalog_binding_preserves_relative_paths_and_pages_stably() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        for region in ["region-a", "region-b"] {
+            let dir = logs.join(region);
+            std::fs::create_dir_all(&dir).expect("nested fixture directory");
+            std::fs::write(
+                dir.join("application.log"),
+                format!("2026-07-29T12:00:00Z INFO {region}\n"),
+            )
+            .expect("fixture");
+        }
+        let cache = root.path().join("cache");
+        let report =
+            cd_core::log_analysis::ingest_path(&cache, &logs, "source-catalog-host", None, "none")
+                .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
+
+        let first = query_log_source_catalog_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::LogSourceCatalogQuery {
+                search: Some("REGION-".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .expect("first page");
+        assert_eq!(first.total_matched, 2);
+        assert_eq!(first.sources.len(), 1);
+        assert_eq!(first.sources[0].source, "region-a/application.log");
+        assert_eq!(first.sources[0].event_count, 1);
+        assert_eq!(
+            first.next_cursor.as_deref(),
+            Some("region-a/application.log")
+        );
+
+        let second = query_log_source_catalog_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::LogSourceCatalogQuery {
+                search: Some("region-".into()),
+                cursor: first.next_cursor,
+                limit: 1,
+            },
+        )
+        .expect("second page");
+        assert_eq!(second.total_matched, 2);
+        assert_eq!(second.sources.len(), 1);
+        assert_eq!(second.sources[0].source, "region-b/application.log");
+        assert_eq!(second.next_cursor, None);
+
+        let wire = serde_json::to_value(&second).expect("serialize host DTO");
+        assert_eq!(wire["sources"][0]["source"], "region-b/application.log");
+        assert_eq!(wire["sources"][0]["eventCount"], 1);
+        assert_eq!(wire["totalMatched"], 2);
+        assert!(wire.get("nextCursor").is_some());
+    }
+
+    #[test]
+    fn source_catalog_command_is_registered_local_and_independent_of_facets() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("log_source_catalog,"));
+        assert!(source.contains("async fn log_source_catalog("));
+        let command_start = source
+            .find("fn log_source_catalog(")
+            .expect("source catalog command");
+        let command_end = source[command_start..]
+            .find("/// IPC args for advanced log search")
+            .map(|offset| command_start + offset)
+            .expect("source catalog command boundary");
+        let command = &source[command_start..command_end];
+        assert!(command.contains("tokio::task::spawn_blocking"));
+        assert!(command.contains("query_log_source_catalog_at"));
+        assert!(!command.contains("query_facets"));
+        assert!(!command.contains("ensure_host("));
     }
 }
 
@@ -7266,15 +10459,954 @@ mod help_host_tests {
 }
 
 #[cfg(test)]
+mod demo_log_host_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    enum FakeIngestOutcome {
+        Success,
+        SuccessThenCancel,
+        CountMismatch { events: u64, sources: u64 },
+        Cancelled,
+        Failed,
+    }
+
+    struct FakeDemoLogBackend {
+        cache: PathBuf,
+        resource: Option<PathBuf>,
+        active: Mutex<Option<String>>,
+        outcomes: Mutex<VecDeque<FakeIngestOutcome>>,
+        ingest_calls: AtomicUsize,
+        fail_next_discard: AtomicBool,
+        fail_next_marker: AtomicBool,
+        warn_next_marker: Mutex<Option<String>>,
+        cache_block: Mutex<Option<FakeCacheBlock>>,
+    }
+
+    struct FakeCacheBlock {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl FakeDemoLogBackend {
+        fn new(cache: PathBuf, outcomes: impl IntoIterator<Item = FakeIngestOutcome>) -> Self {
+            Self {
+                resource: Some(cache.join("packaged-demo")),
+                cache,
+                active: Mutex::new(None),
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                ingest_calls: AtomicUsize::new(0),
+                fail_next_discard: AtomicBool::new(false),
+                fail_next_marker: AtomicBool::new(false),
+                warn_next_marker: Mutex::new(None),
+                cache_block: Mutex::new(None),
+            }
+        }
+
+        fn with_active(self, corpus_id: &str) -> Self {
+            *self.active.lock().expect("active") = Some(corpus_id.into());
+            self
+        }
+
+        fn create_managed_corpus(&self) -> cd_core::log_analysis::LogCorpus {
+            self.create_managed_corpus_with_counts(
+                DEMO_LOG_EXPECTED_EVENTS,
+                DEMO_LOG_EXPECTED_SOURCES,
+            )
+        }
+
+        fn create_managed_corpus_with_counts(
+            &self,
+            events: u64,
+            sources: u64,
+        ) -> cd_core::log_analysis::LogCorpus {
+            let corpus = cd_core::log_analysis::LogCorpus::create(&self.cache, DEMO_LOG_NAME)
+                .expect("managed corpus");
+            corpus
+                .write_managed_identity(DEMO_LOG_IDENTITY)
+                .expect("managed identity");
+            corpus
+                .write_ingest_summary(
+                    None,
+                    cd_core::log_analysis::CorpusStats {
+                        files: sources,
+                        discovered_files: sources,
+                        lines: events,
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                    cd_core::log_analysis::CorpusEmbeddingStatus::default(),
+                )
+                .expect("managed ingest summary");
+            corpus
+        }
+
+        fn block_cache_inspection(
+            &self,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *self.cache_block.lock().expect("cache block") = Some(FakeCacheBlock {
+                entered: entered_tx,
+                release: release_rx,
+            });
+            (entered_rx, release_tx)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DemoLogInstallBackend for FakeDemoLogBackend {
+        fn cache_dir(&self) -> Result<PathBuf, String> {
+            if let Some(block) = self.cache_block.lock().expect("cache block").as_ref() {
+                block.entered.send(()).expect("announce cache inspection");
+                block.release.recv().expect("release cache inspection");
+            }
+            Ok(self.cache.clone())
+        }
+
+        fn resolve_resource(&self) -> Option<PathBuf> {
+            self.resource.clone()
+        }
+
+        fn active_corpus(&self) -> Option<String> {
+            self.active.lock().expect("active").clone()
+        }
+
+        fn select_corpus(&self, corpus_id: Option<String>) {
+            *self.active.lock().expect("active") = corpus_id;
+        }
+
+        fn discard_ingested_corpus(&self, cache: &Path, corpus_id: &str) -> Result<(), String> {
+            if self.fail_next_discard.swap(false, Ordering::SeqCst) {
+                return Err("injected demo cleanup failure".into());
+            }
+            discard_managed_demo_corpus(cache, corpus_id)
+        }
+
+        fn publish_marker(
+            &self,
+            cache: &Path,
+            corpus_id: &str,
+            cancel: &cd_core::process_progress::CancelFlag,
+        ) -> Result<DemoMarkerPublishOutcome, DemoTransactionError> {
+            if self.fail_next_marker.swap(false, Ordering::SeqCst) {
+                return Err(DemoTransactionError::Failed(
+                    "injected marker publication failure".into(),
+                ));
+            }
+            let mut result = persist_demo_log_marker(cache, corpus_id, cancel)?;
+            if let Some(warning) = self.warn_next_marker.lock().expect("marker warning").take() {
+                result.warning = Some(match result.warning {
+                    Some(existing) => format!("{existing}; {warning}"),
+                    None => warning,
+                });
+            }
+            Ok(result)
+        }
+
+        async fn ingest(
+            &self,
+            _resource: PathBuf,
+            cancel: &cd_core::process_progress::CancelFlag,
+        ) -> Result<DemoLogIngestReceipt, LogIngestRunError> {
+            self.ingest_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            if cancel.is_cancelled() {
+                return Err(LogIngestRunError::Cancelled);
+            }
+            let outcome = self
+                .outcomes
+                .lock()
+                .expect("outcomes")
+                .pop_front()
+                .unwrap_or(FakeIngestOutcome::Success);
+            match outcome {
+                FakeIngestOutcome::Success
+                | FakeIngestOutcome::SuccessThenCancel
+                | FakeIngestOutcome::CountMismatch { .. } => {
+                    let (events, sources) = match outcome {
+                        FakeIngestOutcome::CountMismatch { events, sources } => (events, sources),
+                        _ => (DEMO_LOG_EXPECTED_EVENTS, DEMO_LOG_EXPECTED_SOURCES),
+                    };
+                    let corpus = self.create_managed_corpus_with_counts(events, sources);
+                    if matches!(outcome, FakeIngestOutcome::SuccessThenCancel) {
+                        cancel.cancel();
+                    }
+                    Ok(DemoLogIngestReceipt {
+                        corpus_id: corpus.id().into(),
+                        events,
+                        sources,
+                    })
+                }
+                FakeIngestOutcome::Cancelled => Err(LogIngestRunError::Cancelled),
+                FakeIngestOutcome::Failed => {
+                    Err(LogIngestRunError::Failed("injected ingest failure".into()))
+                }
+            }
+        }
+    }
+
+    fn checked_in_demo_resource() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("log-lab")
+            .join("acceptance")
+            .join("seven-day-25k")
+            .join("scenarios")
+            .join("behavior-scale")
+            .join("import")
+    }
+
+    fn write_required_demo_files(root: &Path) {
+        let checked_in = checked_in_demo_resource();
+        for entry in DEMO_LOG_RESOURCE_MANIFEST {
+            let path = root.join(entry.path);
+            std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                .expect("fixture parent");
+            std::fs::copy(checked_in.join(entry.path), path).expect("copy authenticated fixture");
+        }
+    }
+
+    #[test]
+    fn packaging_maps_only_the_demo_import_directory_and_never_truth() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config");
+        let resources = config["bundle"]["resources"]
+            .as_object()
+            .expect("resource mapping");
+        let source =
+            "../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import";
+        assert_eq!(
+            resources.get(source),
+            Some(&serde_json::json!(DEMO_LOG_RESOURCE_DIR))
+        );
+        for (from, to) in resources {
+            assert!(
+                !from.to_ascii_lowercase().contains("truth")
+                    && !to
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains("truth"),
+                "packaged resources must never include evaluator truth: {from} -> {to}"
+            );
+        }
+        assert_eq!(
+            resources
+                .keys()
+                .filter(|path| path.contains("fixtures/log-lab"))
+                .count(),
+            1
+        );
+        let checked_in_import = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source);
+        assert!(
+            validate_demo_log_resource(&checked_in_import),
+            "the exact mapped source tree must contain only the approved runtime files"
+        );
+    }
+
+    #[test]
+    fn packaged_demo_manifest_matches_every_checked_in_source() {
+        use sha2::Digest;
+
+        let checked_in = checked_in_demo_resource();
+        assert_eq!(
+            DEMO_LOG_RESOURCE_MANIFEST.len(),
+            DEMO_LOG_EXPECTED_SOURCES as usize
+        );
+        assert!(
+            validate_demo_log_resource(&checked_in),
+            "the checked-in fixture bytes must match the compiled manifest"
+        );
+        let unique_paths = DEMO_LOG_RESOURCE_MANIFEST
+            .iter()
+            .map(|entry| entry.path)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique_paths.len(),
+            DEMO_LOG_RESOURCE_MANIFEST.len(),
+            "the compiled manifest must not contain duplicate normalized paths"
+        );
+        for entry in DEMO_LOG_RESOURCE_MANIFEST {
+            let bytes = std::fs::read(checked_in.join(entry.path)).expect("manifest source");
+            assert_eq!(bytes.len() as u64, entry.bytes, "length: {}", entry.path);
+            assert_eq!(
+                format!("{:x}", sha2::Sha256::digest(&bytes)),
+                entry.sha256,
+                "digest: {}",
+                entry.path
+            );
+        }
+    }
+
+    #[test]
+    fn resource_validation_rejects_one_byte_mutation_and_same_name_replacement() {
+        let mutated = tempfile::tempdir().expect("mutated root");
+        let mutated_import = mutated.path().join("import");
+        write_required_demo_files(&mutated_import);
+        let mutated_file = mutated_import.join("queue/events.jsonl");
+        let mut bytes = std::fs::read(&mutated_file).expect("mutated source");
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        std::fs::write(&mutated_file, bytes).expect("one-byte mutation");
+        assert!(
+            !validate_demo_log_resource(&mutated_import),
+            "a one-byte mutation must invalidate the packaged fixture"
+        );
+
+        let replaced = tempfile::tempdir().expect("replacement root");
+        let replaced_import = replaced.path().join("import");
+        write_required_demo_files(&replaced_import);
+        let replaced_file = replaced_import.join("auth/auth.jsonl");
+        let length = std::fs::metadata(&replaced_file)
+            .expect("replacement metadata")
+            .len();
+        std::fs::write(&replaced_file, vec![b'x'; length as usize])
+            .expect("same-name same-length replacement");
+        assert!(
+            !validate_demo_log_resource(&replaced_import),
+            "a same-name, same-length replacement must fail its digest"
+        );
+    }
+
+    #[test]
+    fn resource_validation_rejects_truncation_missing_extra_and_manifest_mismatch() {
+        let truncated = tempfile::tempdir().expect("truncated root");
+        let truncated_import = truncated.path().join("import");
+        write_required_demo_files(&truncated_import);
+        let truncated_file = truncated_import.join("worker/worker.log.1");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&truncated_file)
+            .expect("truncated source");
+        file.set_len(
+            std::fs::metadata(&truncated_file)
+                .expect("truncated metadata")
+                .len()
+                - 1,
+        )
+        .expect("truncate source");
+        assert!(!validate_demo_log_resource(&truncated_import));
+
+        let missing = tempfile::tempdir().expect("missing root");
+        let missing_import = missing.path().join("import");
+        write_required_demo_files(&missing_import);
+        std::fs::remove_file(missing_import.join("db/database.log.1"))
+            .expect("remove required source");
+        assert!(!validate_demo_log_resource(&missing_import));
+
+        let extra = tempfile::tempdir().expect("extra root");
+        let extra_import = extra.path().join("import");
+        write_required_demo_files(&extra_import);
+        std::fs::write(extra_import.join("unexpected.log"), b"not approved").expect("extra source");
+        assert!(!validate_demo_log_resource(&extra_import));
+
+        let mut mismatched = DEMO_LOG_RESOURCE_MANIFEST.to_vec();
+        mismatched[0].sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+        assert!(
+            !validate_demo_log_resource_against_manifest(
+                checked_in_demo_resource().as_path(),
+                &mismatched
+            ),
+            "a mismatched compiled digest must fail closed"
+        );
+        let mut duplicate = DEMO_LOG_RESOURCE_MANIFEST.to_vec();
+        duplicate.push(DEMO_LOG_RESOURCE_MANIFEST[0]);
+        assert!(
+            !validate_demo_log_resource_against_manifest(
+                checked_in_demo_resource().as_path(),
+                &duplicate
+            ),
+            "duplicate manifest paths must fail closed"
+        );
+    }
+
+    #[test]
+    fn resource_resolution_prefers_the_exact_packaged_mapping_then_debug_fallback() {
+        let installed = tempfile::tempdir().expect("installed root");
+        let fallback = tempfile::tempdir().expect("fallback root");
+        let installed_import = installed.path().join(DEMO_LOG_RESOURCE_DIR);
+        let fallback_import = fallback.path().join("import");
+        write_required_demo_files(&installed_import);
+        write_required_demo_files(&fallback_import);
+
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([
+                installed_import.clone(),
+                fallback_import.clone(),
+            ]),
+            Some(installed_import.clone())
+        );
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([
+                installed.path().join("missing"),
+                fallback_import.clone(),
+            ]),
+            Some(fallback_import)
+        );
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([installed.path().join("missing")]),
+            None
+        );
+
+        std::fs::write(installed_import.join("unexpected.txt"), b"not approved")
+            .expect("unexpected file");
+        assert!(
+            resolve_demo_log_resource_from_candidates([installed_import.clone()]).is_none(),
+            "an unexpected packaged file must make the resource unavailable"
+        );
+        std::fs::remove_file(installed_import.join("unexpected.txt")).expect("remove extra");
+        let forbidden = installed_import.join("truth");
+        std::fs::create_dir(&forbidden).expect("forbidden dir");
+        std::fs::write(forbidden.join("manifest.json"), b"{}").expect("forbidden file");
+        assert!(
+            resolve_demo_log_resource_from_candidates([installed_import]).is_none(),
+            "truth-like sibling content must never pass resource validation"
+        );
+    }
+
+    #[test]
+    fn resource_validation_rejects_symlink_root_and_bounded_unknown_trees() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let target = tempfile::tempdir().expect("symlink target");
+            let target_import = target.path().join("import");
+            write_required_demo_files(&target_import);
+            let link_parent = tempfile::tempdir().expect("symlink parent");
+            let linked_import = link_parent.path().join("import");
+            symlink(&target_import, &linked_import).expect("resource root symlink");
+            assert!(
+                !validate_demo_log_resource(&linked_import),
+                "the packaged resource root itself must not be a symlink"
+            );
+
+            let linked_entry = tempfile::tempdir().expect("linked entry root");
+            let linked_entry_import = linked_entry.path().join("import");
+            write_required_demo_files(&linked_entry_import);
+            let linked_path = linked_entry_import.join("api/app.jsonl");
+            std::fs::remove_file(&linked_path).expect("remove source before link");
+            symlink(
+                checked_in_demo_resource().join("api/app.jsonl"),
+                &linked_path,
+            )
+            .expect("resource entry symlink");
+            assert!(
+                !validate_demo_log_resource(&linked_entry_import),
+                "a symlinked packaged resource entry must fail closed"
+            );
+        }
+
+        let deep = tempfile::tempdir().expect("deep unexpected root");
+        let deep_import = deep.path().join("import");
+        write_required_demo_files(&deep_import);
+        let mut unexpected = deep_import.join("unexpected");
+        for index in 0..64 {
+            unexpected = unexpected.join(format!("depth-{index}"));
+        }
+        std::fs::create_dir_all(&unexpected).expect("deep unexpected tree");
+        std::fs::write(unexpected.join("payload.log"), b"not approved")
+            .expect("deep unexpected file");
+        assert!(
+            !validate_demo_log_resource(&deep_import),
+            "an unknown deep tree must be rejected against the exact allowlist"
+        );
+
+        let excess = tempfile::tempdir().expect("excess unexpected root");
+        let excess_import = excess.path().join("import");
+        write_required_demo_files(&excess_import);
+        for index in 0..64 {
+            std::fs::write(
+                excess_import.join(format!("unexpected-{index}.log")),
+                b"not approved",
+            )
+            .expect("excess unexpected file");
+        }
+        assert!(
+            !validate_demo_log_resource(&excess_import),
+            "an excess resource tree must be rejected within the strict entry bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_is_idempotent_and_never_matches_a_same_named_user_corpus() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("cache");
+        let user_corpus =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success]);
+        let serial = tokio::sync::Mutex::new(());
+        let first_cancel = cd_core::process_progress::CancelFlag::new();
+        let second_cancel = cd_core::process_progress::CancelFlag::new();
+
+        let first = install_demo_log_corpus_serialized(&serial, &backend, &first_cancel).await;
+        let second = install_demo_log_corpus_serialized(&serial, &backend, &second_cancel).await;
+
+        assert_eq!(first.status, DemoLogInstallStatus::Installed);
+        assert_eq!(second.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(first.corpus_id, second.corpus_id);
+        assert_ne!(first.corpus_id.as_deref(), Some(user_corpus.id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            cd_core::log_analysis::LogCorpus::open(&cache, user_corpus.id()).is_ok(),
+            "the same-named user corpus must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_typed_retryable_and_restores_selection() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend =
+            FakeDemoLogBackend::new(cache, [FakeIngestOutcome::Cancelled]).with_active("user");
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Cancelled);
+        assert_eq!(
+            result.detail,
+            "Installation cancelled. No demo corpus was installed."
+        );
+        assert!(result.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn post_ingest_identity_mismatch_never_activates_demo_marker() {
+        for (events, sources) in [
+            (DEMO_LOG_EXPECTED_EVENTS - 1, DEMO_LOG_EXPECTED_SOURCES),
+            (DEMO_LOG_EXPECTED_EVENTS, DEMO_LOG_EXPECTED_SOURCES - 1),
+        ] {
+            let root = tempfile::tempdir().expect("cache root");
+            let cache = root.path().join("cache");
+            let backend = FakeDemoLogBackend::new(
+                cache.clone(),
+                [
+                    FakeIngestOutcome::CountMismatch { events, sources },
+                    FakeIngestOutcome::Success,
+                ],
+            )
+            .with_active("user");
+            let cancel = cd_core::process_progress::CancelFlag::new();
+
+            let failed = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+            assert_eq!(failed.status, DemoLogInstallStatus::Failed);
+            assert!(failed.retryable);
+            assert!(failed
+                .detail
+                .contains("expected 10 sources and 25000 events"));
+            assert!(failed.detail.contains("was not activated"));
+            assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+            assert!(!demo_log_marker_path(&cache).exists());
+            assert!(
+                managed_demo_log_corpora(&cache, &cancel)
+                    .expect("managed scan")
+                    .is_empty(),
+                "a count-mismatched managed corpus must not be recoverable as the demo"
+            );
+            assert!(
+                cd_core::log_analysis::LogCorpus::list_ids(&cache)
+                    .expect("corpus list")
+                    .is_empty(),
+                "the just-created mismatched managed corpus must be discarded"
+            );
+
+            let retry = install_demo_log_corpus_transaction(&backend, &cancel).await;
+            assert_eq!(retry.status, DemoLogInstallStatus::Installed);
+            assert_eq!(retry.events, Some(DEMO_LOG_EXPECTED_EVENTS));
+            assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn post_ingest_identity_mismatch_surfaces_scoped_cleanup_failure() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(
+            cache.clone(),
+            [FakeIngestOutcome::CountMismatch {
+                events: DEMO_LOG_EXPECTED_EVENTS - 1,
+                sources: DEMO_LOG_EXPECTED_SOURCES,
+            }],
+        )
+        .with_active("user");
+        backend.fail_next_discard.store(true, Ordering::SeqCst);
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Failed);
+        assert!(result.retryable);
+        assert!(result.detail.contains("Cleanup failed"));
+        assert!(result.detail.contains("injected demo cleanup failure"));
+        assert!(result.detail.contains("remains unselected"));
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert!(!demo_log_marker_path(&cache).exists());
+        assert_eq!(
+            cd_core::log_analysis::LogCorpus::list_ids(&cache)
+                .expect("corpus list")
+                .len(),
+            1,
+            "truthful cleanup failure retains only the scoped managed corpus"
+        );
+    }
+
+    #[test]
+    fn scoped_demo_discard_refuses_to_touch_a_user_corpus() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let user =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let user_id = user.id().to_string();
+        drop(user);
+
+        let error = discard_managed_demo_corpus(&cache, &user_id)
+            .expect_err("a user corpus must never be discarded by demo rollback");
+
+        assert!(error.contains("reserved packaged-demo identity"));
+        assert!(
+            cd_core::log_analysis::LogCorpus::open(&cache, &user_id).is_ok(),
+            "the refused user corpus must remain intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_corpus_publish_and_marker_commit_is_truthful_and_recoverable() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend =
+            FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::SuccessThenCancel])
+                .with_active("user");
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let cancelled = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(cancelled.status, DemoLogInstallStatus::Cancelled);
+        assert_eq!(cancelled.events, Some(25_000));
+        assert!(cancelled.corpus_id.is_some());
+        assert!(cancelled
+            .detail
+            .contains("published demo corpus was retained"));
+        assert!(cancelled.detail.contains("retry"));
+        assert!(cancelled.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert!(!demo_log_marker_path(&cache).exists());
+        let inspection_cancel = cd_core::process_progress::CancelFlag::new();
+        let managed =
+            managed_demo_log_corpora(&cache, &inspection_cancel).expect("managed corpus scan");
+        assert_eq!(managed.len(), 1);
+        assert_eq!(
+            cancelled.corpus_id.as_deref(),
+            Some(managed[0].id()),
+            "the disclosed retained corpus must be the recoverable managed corpus"
+        );
+
+        let retry_cancel = cd_core::process_progress::CancelFlag::new();
+        let recovered = install_demo_log_corpus_transaction(&backend, &retry_cancel).await;
+        assert_eq!(recovered.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(recovered.corpus_id, cancelled.corpus_id);
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_corpus(), recovered.corpus_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transaction_owned_cancel_is_authoritative_while_cache_inspection_is_blocked() {
+        let root = tempfile::tempdir().expect("cache root");
+        let backend = Arc::new(
+            FakeDemoLogBackend::new(root.path().join("cache"), [FakeIngestOutcome::Success])
+                .with_active("user"),
+        );
+        let (entered, release) = backend.block_cache_inspection();
+        let serial = Arc::new(tokio::sync::Mutex::new(()));
+        let cancel = cd_core::process_progress::CancelFlag::new();
+        let cancel_registration = cancel.inner_arc();
+        let mut cancels = HashMap::new();
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "already active",
+        )
+        .expect("register transaction cancel");
+
+        let task = {
+            let backend = Arc::clone(&backend);
+            let serial = Arc::clone(&serial);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                install_demo_log_corpus_serialized(&serial, backend.as_ref(), &cancel).await
+            })
+        };
+        tokio::task::spawn_blocking(move || entered.recv().expect("cache inspection entered"))
+            .await
+            .expect("wait for cache inspection");
+        let accepted = if let Some(flag) = cancels.get(LOG_INGEST_CANCEL_KEY) {
+            flag.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        };
+        release.send(()).expect("release cache inspection");
+        let result = task.await.expect("install task");
+
+        assert!(accepted, "Cancel must be accepted before ingest starts");
+        assert_eq!(result.status, DemoLogInstallStatus::Cancelled);
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert!(remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &cancel_registration
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_invocations_serialize_the_complete_transaction() {
+        let root = tempfile::tempdir().expect("cache root");
+        let backend = FakeDemoLogBackend::new(
+            root.path().join("cache"),
+            [FakeIngestOutcome::Success, FakeIngestOutcome::Failed],
+        );
+        let serial = tokio::sync::Mutex::new(());
+        let first_cancel = cd_core::process_progress::CancelFlag::new();
+        let second_cancel = cd_core::process_progress::CancelFlag::new();
+
+        let (first, second) = tokio::join!(
+            install_demo_log_corpus_serialized(&serial, &backend, &first_cancel),
+            install_demo_log_corpus_serialized(&serial, &backend, &second_cancel)
+        );
+
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(first.status, DemoLogInstallStatus::Installed)
+                ^ matches!(second.status, DemoLogInstallStatus::Installed)
+        );
+        assert!(
+            matches!(first.status, DemoLogInstallStatus::AlreadyInstalled)
+                ^ matches!(second.status, DemoLogInstallStatus::AlreadyInstalled)
+        );
+        assert_eq!(first.corpus_id, second.corpus_id);
+    }
+
+    #[tokio::test]
+    async fn marker_fault_leaves_provable_corpus_for_retry_and_restores_selection() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success])
+            .with_active("user");
+        backend.fail_next_marker.store(true, Ordering::SeqCst);
+        let first_cancel = cd_core::process_progress::CancelFlag::new();
+
+        let failed = install_demo_log_corpus_transaction(&backend, &first_cancel).await;
+        assert_eq!(failed.status, DemoLogInstallStatus::Failed);
+        assert!(failed.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        let managed = managed_demo_log_corpora(&cache, &first_cancel).expect("managed scan");
+        assert_eq!(
+            managed.len(),
+            1,
+            "published managed corpus survives marker fault"
+        );
+        assert!(!demo_log_marker_path(&cache).exists());
+
+        let retry_cancel = cd_core::process_progress::CancelFlag::new();
+        let recovered = install_demo_log_corpus_transaction(&backend, &retry_cancel).await;
+        assert_eq!(recovered.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(recovered.corpus_id.as_deref(), Some(managed[0].id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_corpus(), recovered.corpus_id);
+    }
+
+    #[tokio::test]
+    async fn damaged_unknown_marker_is_quarantined_without_touching_user_corpora() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(
+            demo_log_marker_path(&cache)
+                .parent()
+                .expect("marker parent"),
+        )
+        .expect("marker parent");
+        std::fs::write(
+            demo_log_marker_path(&cache),
+            br#"{"schemaVersion":99,"demoIdentity":"unknown","corpusId":"user"}"#,
+        )
+        .expect("damaged marker");
+        let user =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success]);
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Installed);
+        assert!(cd_core::log_analysis::LogCorpus::open(&cache, user.id()).is_ok());
+        assert_ne!(result.corpus_id.as_deref(), Some(user.id()));
+        let marker_path = demo_log_marker_path(&cache);
+        let marker_dir = marker_path.parent().expect("marker parent");
+        assert!(
+            std::fs::read_dir(marker_dir)
+                .expect("marker entries")
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains(".invalid.")),
+            "unknown marker is retained as a quarantined diagnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_marker_pointing_to_user_corpus_is_quarantined_and_never_selected() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let user =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let marker_cancel = cd_core::process_progress::CancelFlag::new();
+        persist_demo_log_marker(&cache, user.id(), &marker_cancel)
+            .expect("syntactically valid marker");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success])
+            .with_active("prior-user-selection");
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Installed);
+        assert_ne!(result.corpus_id.as_deref(), Some(user.id()));
+        assert_ne!(backend.active_corpus().as_deref(), Some(user.id()));
+        assert!(cd_core::log_analysis::LogCorpus::open(&cache, user.id()).is_ok());
+        let marker_path = demo_log_marker_path(&cache);
+        assert!(
+            std::fs::read_dir(marker_path.parent().expect("marker parent"))
+                .expect("marker entries")
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains(".invalid.")),
+            "the unauthorized marker must be quarantined"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_commit_marker_warning_still_reports_installed() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success]);
+        *backend.warn_next_marker.lock().expect("marker warning") =
+            Some("could not sync the demo marker directory: injected".into());
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Installed);
+        assert!(!result.retryable);
+        assert!(result.detail.contains("Warning:"));
+        assert!(matches!(
+            read_demo_log_marker(&cache).expect("committed marker"),
+            DemoLogMarkerState::Installed(corpus)
+                if Some(corpus.id()) == result.corpus_id.as_deref()
+        ));
+    }
+
+    #[test]
+    fn backup_cleanup_and_directory_sync_failures_are_post_commit_warnings() {
+        let outcome = demo_marker_post_commit_outcome(
+            Some("backup cleanup failed".into()),
+            Some("directory sync failed".into()),
+        );
+
+        assert_eq!(
+            outcome.warning.as_deref(),
+            Some("backup cleanup failed; directory sync failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn damaged_marker_repairs_to_provably_managed_corpus_without_reimport() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Failed]);
+        let managed = backend.create_managed_corpus();
+        std::fs::create_dir_all(
+            demo_log_marker_path(&cache)
+                .parent()
+                .expect("marker parent"),
+        )
+        .expect("marker parent");
+        std::fs::write(demo_log_marker_path(&cache), b"not-json").expect("damaged marker");
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let repaired = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(repaired.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(repaired.corpus_id.as_deref(), Some(managed.id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            read_demo_log_marker(&cache).expect("repaired marker"),
+            DemoLogMarkerState::Installed(corpus) if corpus.id() == managed.id()
+        ));
+    }
+
+    #[test]
+    fn resolved_checked_in_resource_imports_through_the_real_bounded_core_path() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("log-lab")
+            .join("acceptance")
+            .join("seven-day-25k")
+            .join("scenarios")
+            .join("behavior-scale")
+            .join("import");
+        let resolved =
+            resolve_demo_log_resource_from_candidates([source]).expect("checked-in demo resource");
+        let cache = tempfile::tempdir().expect("ingest cache");
+        let report = cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
+            cache.path(),
+            &resolved,
+            DEMO_LOG_NAME,
+            &cd_core::log_analysis::LogEmbedPolicy::local_default(),
+            None,
+            &cd_core::process_progress::NoopProcessProgress,
+            None,
+            DEMO_LOG_IDENTITY,
+        )
+        .expect("real bounded demo ingest");
+        assert_eq!(report.stats.lines, 25_000);
+        assert_eq!(report.stats.files, 10);
+        assert_eq!(report.stats.discovered_files, 10);
+        assert!(!report.stats.partial);
+        let corpus = cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id)
+            .expect("installed demo corpus");
+        assert_eq!(corpus.summary().event_count, 25_000);
+        assert_eq!(
+            corpus.meta().expect("meta").managed_identity.as_deref(),
+            Some(DEMO_LOG_IDENTITY),
+            "managed identity must be durable before public corpus reconciliation"
+        );
+    }
+}
+
+#[cfg(test)]
 mod startup_host_tests {
     use super::{
-        build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
-        event_to_dto_with_linked_corpus, host_readiness_terminal_events,
+        admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
+        chat_turn_cancel_key, desktop_log_ingest_embed_plan_nonblocking,
+        event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
         install_prepared_durable_memory, linked_log_fallback_notice,
         linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
-        normalize_log_corpus_id, restore_host_if_generation_matches, save_chat_session_at,
-        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
-        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
+        normalize_log_corpus_id, persist_host_terminal_turn_at,
+        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
+        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
+        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
+        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
+        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
+        StdInstant, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
+        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -7291,6 +11423,480 @@ mod startup_host_tests {
             .as_str()
             .expect("revision string")
             .to_string()
+    }
+
+    #[test]
+    fn two_windows_cannot_replace_same_session_turn_or_its_cancel_target() {
+        let owners = Mutex::new(std::collections::HashMap::new());
+        let cancels = Mutex::new(std::collections::HashMap::new());
+        let next_owner = AtomicU64::new(0);
+
+        let first_window =
+            admit_agent_turn(&owners, &cancels, &next_owner, "shared-chat").expect("first admit");
+        let first_cancel = first_window.cancel.clone();
+        assert!(
+            admit_agent_turn(&owners, &cancels, &next_owner, "shared-chat").is_err(),
+            "a second window must be rejected before replacing ownership"
+        );
+        cancels
+            .lock()
+            .unwrap()
+            .get(&chat_turn_cancel_key("shared-chat"))
+            .unwrap()
+            .store(true, Ordering::SeqCst);
+        assert!(first_cancel.load(Ordering::SeqCst));
+        assert!(
+            !finish_agent_turn(&owners, &cancels, "shared-chat", first_window.owner + 1),
+            "stale completion must not remove the admitted owner"
+        );
+        assert!(owners.lock().unwrap().contains_key("shared-chat"));
+        drop(first_window);
+        assert!(!owners.lock().unwrap().contains_key("shared-chat"));
+        assert!(!cancels
+            .lock()
+            .unwrap()
+            .contains_key(&chat_turn_cancel_key("shared-chat")));
+    }
+
+    #[test]
+    fn chat_turn_cancellation_cannot_collide_with_log_operation_domains() {
+        let owners = Mutex::new(std::collections::HashMap::new());
+        let cancels = Mutex::new(std::collections::HashMap::new());
+        let next_owner = AtomicU64::new(0);
+        let log_ingest = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_reanalyze = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_search = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut registry = cancels.lock().unwrap();
+            registry.insert(LOG_INGEST_CANCEL_KEY.into(), log_ingest.clone());
+            registry.insert(LOG_REANALYZE_CANCEL_KEY.into(), log_reanalyze.clone());
+            registry.insert("log_search:find-123".into(), log_search.clone());
+        }
+
+        for session_id in [
+            LOG_INGEST_CANCEL_KEY,
+            LOG_REANALYZE_CANCEL_KEY,
+            "log_search:find-123",
+        ] {
+            let turn = admit_agent_turn(&owners, &cancels, &next_owner, session_id)
+                .expect("chat turn must use a separate cancellation namespace");
+            assert!(request_agent_turn_cancel(&cancels, session_id));
+            assert!(turn.cancel.load(Ordering::SeqCst));
+            assert!(!log_ingest.load(Ordering::SeqCst));
+            assert!(!log_reanalyze.load(Ordering::SeqCst));
+            assert!(!log_search.load(Ordering::SeqCst));
+            drop(turn);
+        }
+
+        let registry = cancels.lock().unwrap();
+        assert!(Arc::ptr_eq(
+            registry.get(LOG_INGEST_CANCEL_KEY).unwrap(),
+            &log_ingest
+        ));
+        assert!(Arc::ptr_eq(
+            registry.get(LOG_REANALYZE_CANCEL_KEY).unwrap(),
+            &log_reanalyze
+        ));
+        assert!(Arc::ptr_eq(
+            registry.get("log_search:find-123").unwrap(),
+            &log_search
+        ));
+    }
+
+    #[test]
+    fn preflight_and_readiness_terminal_turns_are_host_persisted_and_idempotent() {
+        for (suffix, code) in [
+            ("preflight", "linked_log_host_unavailable"),
+            ("readiness", "budget_time"),
+        ] {
+            let sessions_root = tempfile::tempdir().expect("sessions");
+            let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+            let mut session = cd_core::sessions::Session::new("Linked");
+            session.set_linked_corpus_id(Some("corpus-a".into()));
+            store.save(&session).expect("save session");
+            let events = vec![
+                StreamEvent::Error {
+                    code: code.into(),
+                    message: format!("{suffix} failed before provider contact"),
+                },
+                StreamEvent::SearchTrail {
+                    steps: vec![format!("terminal:{code}")],
+                },
+                StreamEvent::TurnCompleted {
+                    reason: code.into(),
+                },
+            ];
+            let saved = persist_host_terminal_turn_at(
+                &store,
+                &session.id,
+                "Which logs explain the incident?",
+                Some("user-terminal"),
+                Some("assistant-terminal"),
+                &events,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("trusted terminal persistence");
+            assert_eq!(saved.messages.len(), 2);
+            assert_eq!(saved.messages[0].id, "user-terminal");
+            assert_eq!(saved.messages[0].role, "user");
+            assert_eq!(
+                saved.messages[0].content,
+                "Which logs explain the incident?"
+            );
+            assert_eq!(saved.messages[1].id, "assistant-terminal");
+            assert_eq!(saved.messages[1].role, "assistant");
+            assert!(saved.messages[1]
+                .content
+                .contains("failed before provider contact"));
+            assert_eq!(
+                saved.messages[1]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta["terminal"]["error_codes"][0].as_str()),
+                Some(code)
+            );
+            assert_eq!(
+                saved.messages[1].trail.as_deref(),
+                Some([format!("terminal:{code}")].as_slice())
+            );
+
+            persist_host_terminal_turn_at(
+                &store,
+                &session.id,
+                "Which logs explain the incident?",
+                Some("user-terminal"),
+                Some("assistant-terminal"),
+                &events,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("idempotent replay");
+            assert_eq!(
+                store
+                    .load(&session.id)
+                    .expect("switch back to chat")
+                    .messages
+                    .len(),
+                2,
+                "switching away and back must reveal one durable typed terminal turn"
+            );
+        }
+    }
+
+    #[test]
+    fn first_linked_provider_failure_survives_renderer_crash_before_save() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let session_id = {
+            let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+            let mut session = cd_core::sessions::Session::new("Linked");
+            session.set_linked_corpus_id(Some("corpus-a".into()));
+            let session_id = session.id.clone();
+            store.save(&session).expect("save empty linked session");
+
+            let scripted_first_provider_failure = vec![
+                StreamEvent::TurnStarted {
+                    session_id: session_id.clone(),
+                    model: Some("private-model".into()),
+                },
+                StreamEvent::Error {
+                    code: "linked_retrieval_provider_error".into(),
+                    message: "The provider failed before linked evidence was retrieved. No \
+                              log-grounded answer was produced."
+                        .into(),
+                },
+                StreamEvent::SearchTrail {
+                    steps: vec![
+                        "phase:choosing_evidence".into(),
+                        "linked_retrieval_provider_failure:missing=linked logs".into(),
+                    ],
+                },
+                StreamEvent::TurnCompleted {
+                    reason: "linked_retrieval_provider_error".into(),
+                },
+            ];
+            assert!(
+                persist_linked_provider_loop_terminal_at(
+                    &store,
+                    &session_id,
+                    "What caused the worker failure?",
+                    Some("linked-user-1"),
+                    Some("linked-assistant-1"),
+                    &scripted_first_provider_failure,
+                    (
+                        Some("private-profile"),
+                        Some("Private provider"),
+                        Some("private-model"),
+                    ),
+                )
+                .expect("persist before returning events"),
+                "the linked terminal provider outcome must cross the host durability boundary"
+            );
+
+            // Simulate the renderer process disappearing after IPC delivery but before
+            // its normal full-session save.
+            drop(scripted_first_provider_failure);
+            drop(store);
+            session_id
+        };
+
+        let reopened = cd_core::sessions::SessionStore::new(sessions_root.path())
+            .load(&session_id)
+            .expect("fresh host process reopens linked transcript");
+        assert_eq!(reopened.messages.len(), 2);
+        assert_eq!(reopened.messages[0].id, "linked-user-1");
+        assert_eq!(reopened.messages[0].role, "user");
+        assert_eq!(
+            reopened.messages[0].content,
+            "What caused the worker failure?"
+        );
+        assert_eq!(reopened.messages[1].id, "linked-assistant-1");
+        assert_eq!(reopened.messages[1].role, "assistant");
+        assert!(reopened.messages[1]
+            .content
+            .contains("No log-grounded answer was produced"));
+        assert_eq!(
+            reopened.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["terminal"]["reason"].as_str()),
+            Some("linked_retrieval_provider_error")
+        );
+        assert_eq!(
+            reopened.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["linked_corpus_id"].as_str()),
+            Some("corpus-a")
+        );
+        assert_eq!(
+            reopened.provider_profile_id.as_deref(),
+            Some("private-profile")
+        );
+        assert_eq!(reopened.chat_model.as_deref(), Some("private-model"));
+    }
+
+    #[test]
+    fn evidence_preserving_linked_failure_persists_provenance_once() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut session = cd_core::sessions::Session::new("Linked evidence");
+        session.set_linked_corpus_id(Some("corpus-evidence".into()));
+        let session_id = session.id.clone();
+        store.save(&session).expect("save empty linked session");
+        let terminal = vec![
+            StreamEvent::TurnStarted {
+                session_id: session_id.clone(),
+                model: Some("slow-model".into()),
+            },
+            StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "search_logs".into(),
+                phase: cd_core::events::ToolPhase::Started,
+                summary: "Searching linked logs".into(),
+                detail: None,
+                ok: None,
+            },
+            StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "search_logs".into(),
+                phase: cd_core::events::ToolPhase::Finished,
+                summary: "Found bounded evidence".into(),
+                detail: Some("seq=42 source=worker.log".into()),
+                ok: Some(true),
+            },
+            StreamEvent::Citation {
+                source_id: "log_event:42".into(),
+                label: "worker.log · seq 42".into(),
+                locator: Some("seq=42 source=worker.log".into()),
+            },
+            StreamEvent::SearchTrail {
+                steps: vec![
+                    "phase:retrieving_evidence".into(),
+                    "phase:synthesizing_answer".into(),
+                    "linked_evidence_preserved_for_synthesis_retry".into(),
+                ],
+            },
+            StreamEvent::Error {
+                code: "linked_synthesis_provider_error".into(),
+                message: "The provider failed after bounded evidence was retrieved.".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "linked_synthesis_provider_error".into(),
+            },
+        ];
+
+        for _ in 0..2 {
+            assert!(persist_linked_provider_loop_terminal_at(
+                &store,
+                &session_id,
+                "What evidence explains the incident?",
+                Some("evidence-user"),
+                Some("evidence-assistant"),
+                &terminal,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("idempotent terminal persistence"));
+        }
+
+        let reopened_store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let reopened = reopened_store
+            .load(&session_id)
+            .expect("reopen evidence-preserving failure");
+        assert_eq!(reopened.messages.len(), 2);
+        let assistant = &reopened.messages[1];
+        let tools = assistant
+            .tools
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .expect("durable tool provenance");
+        assert_eq!(tools.len(), 1, "started/finished events fold by tool id");
+        assert_eq!(tools[0]["id"], "tool-1");
+        assert_eq!(tools[0]["ok"], true);
+        let citations = assistant
+            .citations
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .expect("durable citation provenance");
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0]["id"], "log_event:42");
+        assert_eq!(citations[0]["corpusId"], "corpus-evidence");
+        assert_eq!(
+            assistant.trail.as_deref(),
+            Some(
+                [
+                    "phase:retrieving_evidence".to_string(),
+                    "phase:synthesizing_answer".to_string(),
+                    "linked_evidence_preserved_for_synthesis_retry".to_string(),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["provider_id"].as_str()),
+            Some("private-profile")
+        );
+        assert_eq!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["model"].as_str()),
+            Some("slow-model")
+        );
+        assert!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("linked_synthesis_retry"))
+                .is_none(),
+            "process-local synthesis checkpoints must not become durable state"
+        );
+    }
+
+    #[test]
+    fn removed_explicit_provider_never_falls_back_and_terminal_is_durable() {
+        let config = cd_core::config::AppConfig {
+            providers: cd_core::providers::ProviderConfig::with_local_ollama(),
+            ..Default::default()
+        };
+        assert!(
+            provider_profile_for_turn(&config, Some("removed-company-profile")).is_err(),
+            "an explicit missing profile must not borrow active Ollama"
+        );
+        assert_eq!(
+            provider_profile_for_turn(&config, None)
+                .expect("implicit active profile")
+                .id,
+            "ollama-local"
+        );
+
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let session = cd_core::sessions::Session::new("Removed profile");
+        store.save(&session).expect("save session");
+        let events = vec![
+            StreamEvent::Error {
+                code: "provider_profile_unavailable".into(),
+                message: "Selected provider profile no longer exists".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "provider_profile_unavailable".into(),
+            },
+        ];
+        let saved = persist_host_terminal_turn_at(
+            &store,
+            &session.id,
+            "Investigate these logs",
+            Some("removed-user"),
+            Some("removed-assistant"),
+            &events,
+            (Some("removed-company-profile"), None, Some("company-model")),
+        )
+        .expect("persist removed-profile failure");
+        assert_eq!(
+            saved.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["provider_id"].as_str()),
+            Some("removed-company-profile")
+        );
+        assert_eq!(
+            saved.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["terminal"]["reason"].as_str()),
+            Some("provider_profile_unavailable")
+        );
+    }
+
+    #[test]
+    fn linked_checkpoint_store_expires_and_evicts_deterministically() {
+        let now = StdInstant::now();
+        let mut by_count = LinkedCheckpointStore::<String>::default();
+        for index in 0..=LINKED_CHECKPOINT_ENTRY_CAP {
+            assert!(by_count.insert_value_at(
+                format!("session-{index:02}"),
+                format!("checkpoint-{index}"),
+                1,
+                now,
+            ));
+        }
+        assert!(by_count.get_value("session-00", now).is_none());
+        assert_eq!(by_count.entries.len(), LINKED_CHECKPOINT_ENTRY_CAP);
+        assert_eq!(
+            by_count.get_value("session-16", now).as_deref(),
+            Some("checkpoint-16")
+        );
+
+        let mut by_bytes = LinkedCheckpointStore::<String>::default();
+        let majority = LINKED_CHECKPOINT_TOTAL_BYTES / 2 + 1;
+        assert!(by_bytes.insert_value_at("older".into(), "a".into(), majority, now));
+        assert!(by_bytes.insert_value_at("newer".into(), "b".into(), majority, now));
+        assert!(by_bytes.get_value("older", now).is_none());
+        assert_eq!(by_bytes.get_value("newer", now).as_deref(), Some("b"));
+        assert!(!by_bytes.insert_value_at(
+            "oversized".into(),
+            "c".into(),
+            LINKED_CHECKPOINT_TOTAL_BYTES + 1,
+            now,
+        ));
+
+        let expired_at = now + LINKED_CHECKPOINT_TTL;
+        assert!(by_bytes.get_value("newer", expired_at).is_none());
+        assert_eq!(by_bytes.total_bytes, 0);
     }
 
     #[test]
@@ -7432,26 +12038,251 @@ mod startup_host_tests {
         assert!(!replaced.durable_memory_active());
     }
 
-    #[test]
-    fn linked_tools_disabled_guard_precedes_host_construction() {
-        let src = include_str!("lib.rs");
-        let turn_start = src.find("async fn agent_turn(").expect("agent_turn");
-        let turn_end = src[turn_start..]
-            .find("/// Signal cooperative cancel")
-            .map(|offset| turn_start + offset)
-            .expect("agent_turn boundary");
-        let turn_src = &src[turn_start..turn_end];
-        let guard = turn_src
-            .find("linked_tools_unavailable_events")
-            .expect("linked tools-disabled guard");
-        let host = turn_src
-            .find("wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT")
-            .expect("bounded host readiness wait");
+    #[tokio::test]
+    async fn linked_tools_disabled_preflight_validates_corpus_before_refusal_and_precedes_host_readiness(
+    ) {
+        use std::sync::atomic::AtomicBool;
 
-        assert!(
-            guard < host,
-            "provider-free linked refusal must not wait for workspace host/index warmup"
+        #[derive(Debug, PartialEq, Eq)]
+        enum SetupStep {
+            ValidateCorpus,
+            CheckToolCapability,
+            BeginHostReadiness,
+        }
+
+        let plan = cd_core::router::TurnDeadlinePlan {
+            total_ms: 1_000,
+            choosing_ms: 1_000,
+            retrieving_ms: 1_000,
+            synthesizing_ms: 1_000,
+            explicit: true,
+        };
+        let cancel = AtomicBool::new(false);
+
+        let invalid_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = invalid_order.clone();
+        let capability_order = invalid_order.clone();
+        let host_order = invalid_order.clone();
+        let invalid = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
+                Err("invalid corpus".into())
+            },
+            move || {
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
+                None
+            },
+            move |_: ()| {
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(invalid, LinkedTurnPreparation::Terminal(_)));
+        assert_eq!(*invalid_order.lock().unwrap(), [SetupStep::ValidateCorpus]);
+
+        let refusal_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = refusal_order.clone();
+        let capability_order = refusal_order.clone();
+        let host_order = refusal_order.clone();
+        let mut tools_disabled = ProviderProfile::ollama_local();
+        tools_disabled.capabilities.tools = false;
+        let refused = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
+                Ok(())
+            },
+            move || {
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
+                cd_core::research::linked_tools_unavailable_events(
+                    &tools_disabled,
+                    "linked-session",
+                )
+            },
+            move |_: ()| {
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        let LinkedTurnPreparation::Terminal(events) = refused else {
+            panic!("tools-disabled linked turn must terminate before host readiness");
+        };
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { code, .. } if code == "linked_tools_unavailable"
+        )));
+        assert_eq!(
+            *refusal_order.lock().unwrap(),
+            [SetupStep::ValidateCorpus, SetupStep::CheckToolCapability]
         );
+
+        let ready_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = ready_order.clone();
+        let capability_order = ready_order.clone();
+        let host_order = ready_order.clone();
+        let ready = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
+                Ok(())
+            },
+            move || {
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
+                None
+            },
+            move |_: ()| {
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ready, LinkedTurnPreparation::Ready(7)));
+        assert_eq!(
+            *ready_order.lock().unwrap(),
+            [
+                SetupStep::ValidateCorpus,
+                SetupStep::CheckToolCapability,
+                SetupStep::BeginHostReadiness
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_corpus_open_obeys_original_deadline_and_cancel_during_setup() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        let plan = cd_core::router::TurnDeadlinePlan {
+            total_ms: 1,
+            choosing_ms: 1_000,
+            retrieving_ms: 1_000,
+            synthesizing_ms: 1_000,
+            explicit: true,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let deadline_calls = calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now() - Duration::from_millis(2),
+            plan,
+            &AtomicBool::new(false),
+            move || {
+                deadline_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || None,
+            |_| Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let cancel = AtomicBool::new(true);
+        let cancel_calls = calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 1_000,
+                ..plan
+            },
+            &cancel,
+            move || {
+                cancel_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || None,
+            |_| Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::Cancelled);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let slow_deadline_calls = Arc::new(AtomicUsize::new(0));
+        let slow_deadline_worker = slow_deadline_calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 20,
+                ..plan
+            },
+            &AtomicBool::new(false),
+            move || {
+                slow_deadline_worker.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            },
+            || None,
+            |_| Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
+        assert_eq!(slow_deadline_calls.load(Ordering::SeqCst), 1);
+
+        let active_cancel = Arc::new(AtomicBool::new(false));
+        let cancel_trigger = active_cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel_trigger.store(true, AtomicOrdering::SeqCst);
+        });
+        let host_calls = Arc::new(AtomicUsize::new(0));
+        let host_worker_calls = host_calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 1_000,
+                ..plan
+            },
+            active_cancel.as_ref(),
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            },
+            || None,
+            move |_: ()| {
+                host_worker_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::Cancelled);
+        assert_eq!(host_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -7736,6 +12567,20 @@ mod startup_host_tests {
             .expect("reopen new session")
             .linked_corpus_id
             .is_none());
+    }
+
+    #[test]
+    fn retry_binding_changes_on_provider_or_model_switch_only() {
+        let original = cd_core::sessions::Session::new("Bound");
+        let mut same = original.clone();
+        assert!(!chat_provider_binding_changed(&original, &same));
+
+        same.provider_profile_id = Some("private-provider".into());
+        assert!(chat_provider_binding_changed(&original, &same));
+
+        let mut model_changed = original.clone();
+        model_changed.chat_model = Some("other-model".into());
+        assert!(chat_provider_binding_changed(&original, &model_changed));
     }
 
     #[test]
@@ -8174,8 +13019,10 @@ mod chat_session_host_tests {
 
     #[test]
     fn learned_tool_rejection_is_scoped_to_one_provider_model() {
-        let mut cfg = AppConfig::default();
-        cfg.providers = ProviderConfig::with_local_ollama();
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
         let profile = cfg.providers.active().expect("local profile").clone();
 
         assert!(model_tools_enabled(&cfg, &profile, "mistral:latest"));

@@ -53,7 +53,6 @@ import {
   subscribeHelpAcrossWindows,
   type HelpLocation,
 } from "./lib/help";
-import { nextSkinId } from "./lib/skins";
 import { SplashScreen } from "./components/launch/SplashScreen";
 import { ContextDeskMark } from "./components/launch/ContextDeskMark";
 import { IdentityPhase } from "./components/launch/IdentityPhase";
@@ -667,7 +666,10 @@ export function App() {
         onSaveSetup={shell.onSaveSetup}
         onApplyAi={applyAiFromLaunch}
         onRecheck={shell.refreshHostPreflight}
-        onEnterApp={shell.enterAppFromPrelaunch}
+        onEnterApp={(options) => {
+          if (options?.openLogs) shell.setPane("logs");
+          shell.enterAppFromPrelaunch();
+        }}
         onOpenSettings={(sec) =>
           shell.openSettings(
             (sec as "workspace" | "ai" | "connectors" | "health") || "health",
@@ -721,7 +723,7 @@ export function App() {
             onOpenSettings={() =>
               shell.openSettings("health", chatScrollRef.current)
             }
-            onToggleTheme={() => shell.setTheme((t) => nextSkinId(t))}
+            onThemeChange={shell.setTheme}
           />
           <UpdateBanner branding={shell.branding} />
           <Banners

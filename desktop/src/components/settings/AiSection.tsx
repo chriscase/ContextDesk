@@ -544,6 +544,26 @@ export function AiSection({
 
   {draft.providerKind !== "none" ? (
     <>
+      <SelectField
+        id={`${baseId}-deadline-preference`}
+        label="Response timing"
+        hint="Auto uses saved profile details only—no DNS probe. Patient suits cold or private-network models; Standard suits managed endpoints."
+        value={draft.deadlinePreference ?? "auto"}
+        onChange={(event) =>
+          setDraft((current) => ({
+            ...current,
+            deadlinePreference: event.target.value as
+              | "auto"
+              | "patient"
+              | "standard",
+          }))
+        }
+      >
+        <option value="auto">Auto</option>
+        <option value="patient">Patient local/private model</option>
+        <option value="standard">Standard managed model</option>
+      </SelectField>
+
       {discoveredModels.length > 0 ? (
         <SelectField
           id={`${baseId}-model-select`}

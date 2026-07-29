@@ -162,6 +162,12 @@ pub struct ToolHost {
     log_analysis_enabled: bool,
     /// Cache root for disposable log corpora (app cache dir).
     log_cache_dir: Option<PathBuf>,
+    /// One turn-scoped initialized corpus handle for sequential log tools.
+    ///
+    /// Linked triage commonly runs search → clusters → timeline against the
+    /// same corpus. Scope setters clear this between turns so re-analysis
+    /// cannot leave stale state behind.
+    log_corpus_handle: std::sync::Mutex<Option<(String, Arc<crate::log_analysis::LogCorpus>)>>,
     /// Default corpus for log tools when `corpus` arg is omitted (wizard handoff).
     active_log_corpus: Option<String>,
     /// Turn-scoped corpus that provider-generated arguments cannot override.
@@ -208,6 +214,7 @@ fn bounded_sample_indices(total: usize, limit: usize) -> Vec<usize> {
         .collect()
 }
 
+const LOG_CLUSTER_TEMPLATE_ID_SAMPLE: usize = 16;
 const READ_SLICE_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const READ_SLICE_MAX_LINES: usize = 400;
 const READ_SLICE_MAX_LINE_BYTES: usize = 2_000;
@@ -301,6 +308,7 @@ impl ToolHost {
             ambient_recall_enabled: true,
             log_analysis_enabled: false,
             log_cache_dir: None,
+            log_corpus_handle: std::sync::Mutex::new(None),
             active_log_corpus: None,
             scoped_log_corpus: None,
             log_only_tool_surface: false,
@@ -903,6 +911,10 @@ impl ToolHost {
     pub fn set_log_analysis(&mut self, enabled: bool, cache_dir: Option<PathBuf>) {
         self.log_analysis_enabled = enabled;
         self.log_cache_dir = cache_dir;
+        *self
+            .log_corpus_handle
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     /// Whether log analysis tools are registered.
@@ -912,7 +924,7 @@ impl ToolHost {
 
     /// Set the default log corpus for tools that omit `corpus` (wizard / UI handoff).
     pub fn set_active_log_corpus(&mut self, corpus_id: Option<String>) {
-        self.active_log_corpus = corpus_id.and_then(|s| {
+        let next = corpus_id.and_then(|s| {
             let t = s.trim().to_string();
             if t.is_empty() {
                 None
@@ -920,6 +932,13 @@ impl ToolHost {
                 Some(t)
             }
         });
+        if self.active_log_corpus != next {
+            *self
+                .log_corpus_handle
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+        self.active_log_corpus = next;
     }
 
     /// Active / default log corpus id, if any.
@@ -929,6 +948,10 @@ impl ToolHost {
 
     /// Pin log tools to one turn-scoped corpus regardless of provider arguments.
     pub fn set_log_corpus_scope(&mut self, corpus_id: Option<String>) {
+        *self
+            .log_corpus_handle
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         self.scoped_log_corpus = corpus_id.and_then(|s| {
             let t = s.trim().to_string();
             if t.is_empty() {
@@ -937,6 +960,41 @@ impl ToolHost {
                 Some(t)
             }
         });
+    }
+
+    /// Seed a corpus handle already validated by the host application.
+    ///
+    /// Identity and canonical cache-root containment are checked before the
+    /// handle becomes tool-visible. This lets a linked-turn preflight open the
+    /// expensive corpus exactly once and hand that same initialized snapshot to
+    /// every deterministic log tool in the turn.
+    pub fn seed_log_corpus_handle(
+        &mut self,
+        corpus_id: &str,
+        corpus: Arc<crate::log_analysis::LogCorpus>,
+    ) -> CoreResult<()> {
+        if corpus.id() != corpus_id {
+            return Err(CoreError::Policy(format!(
+                "validated log corpus identity mismatch: expected {corpus_id}"
+            )));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let expected_root = std::fs::canonicalize(cache.join("log_corpora").join(corpus_id))?;
+        let actual_root = std::fs::canonicalize(corpus.root())?;
+        if actual_root != expected_root {
+            return Err(CoreError::Policy(
+                "validated log corpus belongs to a different cache root".into(),
+            ));
+        }
+        *self
+            .log_corpus_handle
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((corpus_id.to_string(), corpus));
+        Ok(())
     }
 
     /// Current turn-scoped log corpus, when a linked Explorer turn is active.
@@ -975,6 +1033,24 @@ impl ToolHost {
         Err(CoreError::Message(format!(
             "{tool} requires corpus (no host active log corpus is set; use the log wizard or pass corpus=)"
         )))
+    }
+
+    fn open_log_corpus(&self, corpus_id: &str) -> CoreResult<Arc<crate::log_analysis::LogCorpus>> {
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let mut handle = self.log_corpus_handle.lock().map_err(|_| {
+            CoreError::Message("log corpus handle is temporarily unavailable".into())
+        })?;
+        if let Some((cached_id, corpus)) = handle.as_ref() {
+            if cached_id == corpus_id {
+                return Ok(Arc::clone(corpus));
+            }
+        }
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::open(cache, corpus_id)?);
+        *handle = Some((corpus_id.to_string(), Arc::clone(&corpus)));
+        Ok(corpus)
     }
 
     /// Borrow the durable memory store when configured (ambient recall / tools).
@@ -2214,12 +2290,8 @@ impl ToolHost {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
         let (time_from, time_to) = validated_search_log_time_bounds(args)?;
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "search_logs")?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let time_quality = crate::log_analysis::corpus_time_quality(&corpus);
         if time_from.is_some() && time_quality == crate::log_analysis::TimeQuality::OrderOnly {
             return Err(CoreError::Message(
@@ -2318,12 +2390,8 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "cluster_problems")?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let max = args
             .get("max_clusters")
             .and_then(|v| v.as_u64())
@@ -2332,17 +2400,61 @@ impl ToolHost {
         let clusters = crate::log_analysis::cluster_problems(&corpus, max)?;
         let mut raw = String::new();
         for c in &clusters {
-            raw.push_str(&format!(
-                "- cluster={} score={:.2} sev={} n={} templates={:?}: {}\n",
-                c.cluster_id, c.score, c.severity, c.count, c.template_ids, c.label
-            ));
+            let template_id_sample = c
+                .template_ids
+                .iter()
+                .take(LOG_CLUSTER_TEMPLATE_ID_SAMPLE)
+                .copied()
+                .collect::<Vec<_>>();
+            if c.partial {
+                raw.push_str(&format!(
+                    "- cluster={} score={:.2} sev={} n_considered={} \
+                     templates_considered_in_cluster={} templates_sample={:?}: {}\n",
+                    c.cluster_id,
+                    c.score,
+                    c.severity,
+                    c.count,
+                    c.template_ids.len(),
+                    template_id_sample,
+                    c.label
+                ));
+            } else {
+                raw.push_str(&format!(
+                    "- cluster={} score={:.2} sev={} n={} \
+                     templates_total={} templates_sample={:?}: {}\n",
+                    c.cluster_id,
+                    c.score,
+                    c.severity,
+                    c.count,
+                    c.template_ids.len(),
+                    template_id_sample,
+                    c.label
+                ));
+            }
         }
+        let partial = clusters.first().is_some_and(|cluster| cluster.partial);
+        let templates_considered = clusters
+            .first()
+            .map(|cluster| cluster.templates_considered)
+            .unwrap_or(0);
+        let templates_available = clusters
+            .first()
+            .map(|cluster| cluster.templates_available)
+            .unwrap_or(0);
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n\
+                 partial: {partial}\ntemplates_considered: {templates_considered}\n\
+                 templates_available: {templates_available}\n\
+                 count_scope: {}\n---\n",
                 clusters.len(),
-                self.max_results_per_source
+                self.max_results_per_source,
+                if partial {
+                    "exact for considered templates; unassigned templates excluded"
+                } else {
+                    "exact for all available templates"
+                }
             ),
         );
         Ok((
@@ -2363,28 +2475,33 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "timeline")?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let width = args
             .get("width_secs")
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
         let level = args.get("level").and_then(|v| v.as_str());
         let service = args.get("service").and_then(|v| v.as_str());
-        let buckets = crate::log_analysis::timeline(&corpus, width, level, service)?;
+        let timeline =
+            crate::log_analysis::analysis::timeline_summary(&corpus, width, level, service)?;
+        let buckets = &timeline.buckets;
         let total = buckets.len();
         let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
         let sampled = total > sample_indices.len();
         let mut raw = String::new();
         raw.push_str(&format!(
             "source_kind: log_timeline\nresult_count: {}\nresult_cap: {}\n\
-             total_available: {total}\nsampled: {sampled}\n---\n",
+             total_available: {total}\nsampled: {sampled}\n\
+             requested_width: {}\neffective_width: {}\ncoarsened: {}\n\
+             total_events: {}\naxis_bucket_cap: {}\n---\n",
             sample_indices.len(),
-            self.max_results_per_source
+            self.max_results_per_source,
+            timeline.requested_width,
+            timeline.effective_width,
+            timeline.coarsened,
+            timeline.total_count,
+            crate::log_analysis::analysis::MAX_ANALYSIS_TIMELINE_BUCKETS
         ));
         for index in sample_indices {
             let b = &buckets[index];
@@ -2398,7 +2515,20 @@ impl ToolHost {
         }
         Ok((
             true,
-            if sampled {
+            if timeline.coarsened && sampled {
+                format!(
+                    "sampled {} of {total} timeline buckets (coarsened {}s→{}s, per-source cap={})",
+                    self.max_results_per_source,
+                    timeline.requested_width,
+                    timeline.effective_width,
+                    self.max_results_per_source
+                )
+            } else if timeline.coarsened {
+                format!(
+                    "{total} timeline buckets (coarsened {}s→{}s, per-source cap={})",
+                    timeline.requested_width, timeline.effective_width, self.max_results_per_source
+                )
+            } else if sampled {
                 format!(
                     "sampled {} of {total} timeline buckets (per-source cap={})",
                     self.max_results_per_source, self.max_results_per_source
@@ -2421,10 +2551,6 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "correlate_logs")?;
         let focus = args
             .get("focus_template_id")
@@ -2439,7 +2565,7 @@ impl ToolHost {
             .unwrap_or(60);
         let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
             .min(self.max_results_per_source);
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let hits = crate::log_analysis::correlate(&corpus, focus, around, window, k)?;
         let mut raw = String::new();
         for h in &hits {
@@ -2476,10 +2602,6 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "anomalies_logs")?;
         let bf = args
             .get("baseline_from")
@@ -2499,7 +2621,7 @@ impl ToolHost {
             .ok_or_else(|| CoreError::Message("incident_to required".into()))?;
         let k = (args.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as usize)
             .min(self.max_results_per_source);
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let hits = crate::log_analysis::anomalies(&corpus, bf, bt, inf, ito, k)?;
         let mut raw = String::new();
         for h in &hits {
@@ -2533,16 +2655,12 @@ impl ToolHost {
         if !self.log_analysis_enabled {
             return Err(CoreError::Policy("log analysis disabled".into()));
         }
-        let cache = self
-            .log_cache_dir
-            .as_ref()
-            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
         let cid = self.resolve_log_corpus(args, "trace_logs")?;
         let tid = args
             .get("trace_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| CoreError::Message("trace_logs requires trace_id".into()))?;
-        let corpus = crate::log_analysis::LogCorpus::open(cache, &cid)?;
+        let corpus = self.open_log_corpus(&cid)?;
         let events = crate::log_analysis::trace(&corpus, tid)?;
         let total = events.len();
         let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
@@ -6209,6 +6327,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sequential_log_tools_reuse_one_turn_scoped_corpus_handle() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = crate::log_analysis::LogCorpus::create(&cache, "handle reuse").unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("handle-reuse", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+
+        host.execute(
+            crate::log_analysis::CLUSTER_PROBLEMS,
+            &json!({"max_clusters": 5}),
+            None,
+        )
+        .await
+        .unwrap();
+        let first = host
+            .log_corpus_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, corpus)| Arc::clone(corpus))
+            .expect("cluster tool cached corpus");
+
+        host.execute(
+            crate::log_analysis::TIMELINE,
+            &json!({"width_secs": 60}),
+            None,
+        )
+        .await
+        .unwrap();
+        let second = host
+            .log_corpus_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, corpus)| Arc::clone(corpus))
+            .expect("timeline tool cached corpus");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "sequential tools in one turn must reuse the initialized corpus"
+        );
+        let prior_turn = Arc::downgrade(&first);
+
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        assert!(
+            host.log_corpus_handle.lock().unwrap().is_none(),
+            "a new turn scope must invalidate the prior handle"
+        );
+        drop(first);
+        drop(second);
+        assert!(
+            prior_turn.upgrade().is_none(),
+            "scope invalidation must release the prior turn handle"
+        );
+        let reopened = host.open_log_corpus(&corpus_id).unwrap();
+        let cached = host
+            .log_corpus_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, corpus)| Arc::clone(corpus))
+            .expect("next turn cached reopened corpus");
+        assert!(
+            Arc::ptr_eq(&reopened, &cached),
+            "the next turn must cache its freshly reopened corpus"
+        );
+
+        host.set_active_log_corpus(None);
+        assert!(
+            host.log_corpus_handle.lock().unwrap().is_none(),
+            "changing an unscoped active corpus must invalidate the prior turn handle"
+        );
+    }
+
+    #[test]
+    fn validated_log_corpus_handle_can_seed_one_turn_without_reopening() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::create(&cache, "seeded").unwrap());
+        let corpus_id = corpus.id().to_string();
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("seeded-handle", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+
+        let opened = host.open_log_corpus(&corpus_id).unwrap();
+        assert!(
+            Arc::ptr_eq(&corpus, &opened),
+            "the first tool must receive the exact preflight-initialized handle"
+        );
+
+        let other = Arc::new(
+            crate::log_analysis::LogCorpus::create(&dir.path().join("other-cache"), "other")
+                .unwrap(),
+        );
+        let error = host.seed_log_corpus_handle(&corpus_id, other).unwrap_err();
+        assert!(
+            error.to_string().contains("identity mismatch"),
+            "a different corpus identity must not enter the turn cache: {error}"
+        );
+    }
+
     #[test]
     fn log_only_surface_exposes_exact_read_only_catalog() {
         let (_tmp, mut host) = host_with_docs();
@@ -6484,6 +6723,13 @@ mod tests {
             "{}",
             r.detail_raw
         );
+        assert!(r.detail_raw.contains("partial: false"), "{}", r.detail_raw);
+        assert!(
+            r.detail_raw
+                .contains("count_scope: exact for all available templates"),
+            "{}",
+            r.detail_raw
+        );
 
         let tl = host
             .execute(
@@ -6496,6 +6742,15 @@ mod tests {
         assert!(tl.ok, "{}", tl.summary);
         assert!(tl.summary.contains("sampled 3 of 40"), "{}", tl.summary);
         assert!(tl.detail_raw.contains("result_cap: 3"), "{}", tl.detail_raw);
+        assert!(
+            tl.detail_raw.contains("requested_width: 1")
+                && tl.detail_raw.contains("effective_width: 1")
+                && tl.detail_raw.contains("coarsened: false")
+                && tl.detail_raw.contains("total_events: 40")
+                && tl.detail_raw.contains("axis_bucket_cap: 512"),
+            "{}",
+            tl.detail_raw
+        );
         assert!(
             tl.detail_raw.contains("t=1700000000..1700000001")
                 && tl.detail_raw.contains("t=1700000039..1700000040"),
@@ -6521,6 +6776,100 @@ mod tests {
             trace.detail_raw.contains("result_cap: 3"),
             "{}",
             trace.detail_raw
+        );
+    }
+
+    #[tokio::test]
+    async fn log_analysis_tools_disclose_partial_clusters_and_timeline_coarsening() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = crate::log_analysis::LogCorpus::create(&cache, "bounded tool output").unwrap();
+        corpus
+            .upsert_templates((1..=700).map(|id| crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: id,
+                    pattern: format!("uniquecomponent{id}"),
+                    token_count: 1,
+                    count: 1,
+                    first_seen: 0,
+                    last_seen: 599,
+                    severity: 3,
+                    example: format!("redacted example {id}"),
+                },
+                content_hash: format!("hash-{id}"),
+                vector: None,
+            }))
+            .unwrap();
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO events (
+                        seq, ts, level, service, host, template_id, params,
+                        trace_id, message, source
+                    )
+                    SELECT i + 1, i, 'error', 'api', 'host-01',
+                           (i % 700) + 1, '[]', NULL,
+                           'bounded tool event', 'tool.log'
+                    FROM range(600) AS generated(i)
+                    "#,
+                )
+                .map_err(|error| CoreError::Message(format!("duckdb fixture: {error}")))?;
+                Ok(())
+            })
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("readme.md"), "bounded log tool test").unwrap();
+        let ws = Workspace::new("t", vec![workspace]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(corpus_id));
+        host.set_max_results_per_source(50);
+
+        let clusters = host
+            .execute(
+                crate::log_analysis::CLUSTER_PROBLEMS,
+                &json!({"max_clusters": 50}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(clusters.ok, "{}", clusters.summary);
+        assert!(
+            clusters.detail_raw.contains("partial: true")
+                && clusters.detail_raw.contains("templates_considered: 512")
+                && clusters.detail_raw.contains("templates_available: 700")
+                && clusters.detail_raw.contains("n_considered=")
+                && !clusters.detail_raw.contains(" n="),
+            "{}",
+            clusters.detail_raw
+        );
+
+        let timeline = host
+            .execute(
+                crate::log_analysis::TIMELINE,
+                &json!({"width_secs": 1}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(timeline.ok, "{}", timeline.summary);
+        assert!(
+            timeline.detail_raw.contains("requested_width: 1")
+                && timeline.detail_raw.contains("effective_width: 2")
+                && timeline.detail_raw.contains("coarsened: true")
+                && timeline.detail_raw.contains("total_events: 600")
+                && timeline.detail_raw.contains("total_available: 300")
+                && timeline.summary.contains("coarsened 1s→2s"),
+            "{}\n{}",
+            timeline.summary,
+            timeline.detail_raw
         );
     }
 }

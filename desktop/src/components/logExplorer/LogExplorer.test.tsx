@@ -33,6 +33,17 @@ vi.mock("../../lib/host", () => ({
     engine: "duckdb",
     createdAt: 0,
   })),
+  hostGetBranding: vi.fn(async () => ({
+    name: "ContextDesk",
+    slug: "contextdesk",
+    tagline: "Developer knowledge workbench",
+    version: "0.1.0",
+    protocol: "cd.v1",
+    channel: "dev",
+    git_sha: "de43caeba66df05068a50db9356efad3b64a4a45",
+    git_describe: null,
+    identity_line: "v0.1.0 · channel=dev",
+  })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
   hostLogListBookmarks: vi.fn(async () => []),
   hostListChatModels: vi.fn(async () => [
@@ -55,6 +66,14 @@ vi.mock("../../lib/host", () => ({
     services: { api: 5 },
     hosts: {},
     timeQuality: "wall",
+  })),
+  hostLogSourceCatalog: vi.fn(async () => ({
+    sources: [
+      { source: "api.log", eventCount: 5 },
+      { source: "worker.log", eventCount: 5 },
+    ],
+    nextCursor: null,
+    totalMatched: 2,
   })),
   hostLogQueryEvents: vi.fn(async () => ({
     events: [
@@ -137,6 +156,18 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
+    const actual = await vi.importActual<
+      typeof import("../../lib/logDiagnosticReport")
+    >("../../lib/logDiagnosticReport");
+    return {
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: actual.renderLogDiagnosticMarkdown(manifest),
+      json: JSON.stringify(manifest, null, 2),
+    };
+  }),
+  hostReleaseLogDiagnosticReport: vi.fn(async () => true),
+  hostSaveLogDiagnosticReport: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
   agentTurn: vi.fn(async () => []),
@@ -203,6 +234,62 @@ function defaultEventPage(): host.EventPageDto {
     nextCursor: null,
     totalMatched: 2,
     timeQuality: "wall",
+  };
+}
+
+function nonresidentFindEvent(
+  seq: number,
+  message: string,
+): host.ExplorerEventDto {
+  return {
+    ...defaultEventPage().events[0]!,
+    seq,
+    ts: 1_700_000_000 + seq,
+    message,
+    source: "api.log",
+  };
+}
+
+function findResultFor(
+  event: host.ExplorerEventDto,
+  options: {
+    nextCursor?: number | null;
+    nextTs?: number | null;
+    totalMatched?: number | null;
+  } = {},
+): host.EventSearchResultDto {
+  return {
+    hits: [
+      {
+        event,
+        score: 1,
+        matchKind: "keyword",
+        templateId: event.templateId,
+      },
+    ],
+    nextCursor: options.nextCursor ?? null,
+    nextTs: options.nextTs ?? null,
+    totalMatched: options.totalMatched ?? 1,
+    partial: false,
+    scanned: 1,
+  };
+}
+
+function foundNeighborhoodFor(
+  event: host.ExplorerEventDto,
+): Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>> {
+  return {
+    status: "found",
+    target: event,
+    targetIndex: 0,
+    events: [event],
+    totalMatched: 1,
+    corpusTotal: 10,
+    timeQuality: "wall",
+    nextCursor: null,
+    nextTs: null,
+    prevCursor: null,
+    prevTs: null,
   };
 }
 
@@ -369,6 +456,14 @@ describe("LogExplorer shell", () => {
       hosts: {},
       timeQuality: "wall",
     });
+    vi.mocked(host.hostLogSourceCatalog).mockResolvedValue({
+      sources: [
+        { source: "api.log", eventCount: 5 },
+        { source: "worker.log", eventCount: 5 },
+      ],
+      nextCursor: null,
+      totalMatched: 2,
+    });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogQueryEventOriginal).mockResolvedValue({
       state: "unavailable",
@@ -448,6 +543,114 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
+  });
+
+  it("loads first evidence rows before starting large-corpus facet aggregation", async () => {
+    const firstPage = deferred<host.EventPageDto>();
+    const facetPage = deferred<host.LogFacetsDto>();
+    let evidenceVisibleWhenFacetsStarted = false;
+    vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
+    vi.mocked(host.hostLogFacets).mockImplementation(() => {
+      evidenceVisibleWhenFacetsStarted =
+        screen.queryByText(/auth failure/) != null;
+      return facetPage.promise;
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogFacets).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("Loading first evidence rows…"),
+    ).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-facets-loading")).toBeTruthy();
+
+    await act(async () => {
+      firstPage.resolve(defaultEventPage());
+      await firstPage.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    await waitFor(() => expect(host.hostLogFacets).toHaveBeenCalledTimes(1));
+    expect(evidenceVisibleWhenFacetsStarted).toBe(true);
+    expect(screen.getByTestId("log-explorer-facets-loading")).toBeTruthy();
+
+    await act(async () => {
+      facetPage.resolve({
+        sources: { "api.log": 5, "worker.log": 5 },
+        levels: { error: 3, info: 7 },
+        services: { api: 5 },
+        hosts: {},
+        timeQuality: "wall",
+      });
+      await facetPage.promise;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("log-explorer-facets-loading"),
+      ).toBeNull(),
+    );
+  });
+
+  it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
+    const writeText = vi.fn(async (_value: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    fireEvent.change(screen.getByLabelText("Filter logs"), {
+      target: { value: "customer-private-filter" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    fireEvent.click(screen.getByText(/auth failure/));
+
+    const trigger = screen.getByRole("button", {
+      name: "Export diagnostics…",
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export corpus diagnostics",
+    });
+    await waitFor(() =>
+      expect(
+        within(dialog).getByLabelText("Markdown diagnostic preview")
+          .textContent,
+      ).toContain("Active Explorer view (payload-free)"),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy Markdown" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain("Active Explorer view (payload-free)");
+    expect(copied).toContain("Selected seqs (bounded): 1");
+    expect(copied).toContain("Filter values withheld: keyword present");
+    for (const forbidden of [
+      "customer-private-filter",
+      "auth failure",
+      "api.log",
+      "worker.log",
+      "triage-1",
+      "Tools Provider",
+    ]) {
+      expect(copied).not.toContain(forbidden);
+    }
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    const json = within(dialog).getByLabelText("JSON diagnostic preview")
+      .textContent;
+    expect(json).toContain('"activeView"');
+    expect(json).toContain('"sourceCount": 0');
+    expect(json).not.toContain("customer-private-filter");
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("moves the timeline cursor with the visible log viewport without backend work", async () => {
@@ -2754,12 +2957,12 @@ describe("LogExplorer shell", () => {
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     expect(laneRows.length).toBe(2);
     fireEvent.click(
-      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+      await within(laneRows[0] as HTMLElement).findByRole("checkbox", {
         name: /api\.log/i,
       }),
     );
     fireEvent.click(
-      within(laneRows[1] as HTMLElement).getByRole("checkbox", {
+      await within(laneRows[1] as HTMLElement).findByRole("checkbox", {
         name: /worker\.log/i,
       }),
     );
@@ -3442,7 +3645,7 @@ describe("LogExplorer shell", () => {
     const editor = await screen.findByTestId("lane-editor");
     expect(editor.textContent).toMatch(/All sources/);
     // Compose lane-0 → api only, lane-1 → worker only.
-    const checks = within(editor).getAllByRole("checkbox");
+    const checks = await within(editor).findAllByRole("checkbox");
     // First source checkbox for lane-0
     fireEvent.click(checks[0]!);
     // Second lane's worker checkbox (after lane-0's sources)
@@ -3516,7 +3719,9 @@ describe("LogExplorer shell", () => {
 
     const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls
       .length;
-    fireEvent.click(screen.getByRole("checkbox", { name: /db\.log/ }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /db\.log/ }),
+    );
 
     await waitFor(() =>
       expect(
@@ -3536,7 +3741,9 @@ describe("LogExplorer shell", () => {
     expect(editor.getAttribute("role")).toBe("dialog");
     expect(editor.getAttribute("data-lane-editor-mode")).toBe("popover");
     expect(editor.textContent).toContain("2 visible lanes");
-    expect(editor.textContent).toContain("2 available sources");
+    await waitFor(() =>
+      expect(editor.textContent).toContain("2 available sources"),
+    );
     expect(document.activeElement).toBe(
       screen.getByTestId("lane-editor-close"),
     );
@@ -3590,10 +3797,10 @@ describe("LogExplorer shell", () => {
     let editor = await screen.findByTestId("lane-editor");
     let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(
-      within(laneRows[0] as HTMLElement).getAllByRole("checkbox")[0]!,
+      (await within(laneRows[0] as HTMLElement).findAllByRole("checkbox"))[0]!,
     );
     fireEvent.click(
-      within(laneRows[1] as HTMLElement).getAllByRole("checkbox")[1]!,
+      (await within(laneRows[1] as HTMLElement).findAllByRole("checkbox"))[1]!,
     );
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
@@ -3628,7 +3835,7 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     const editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /worker\.log/i }),
     );
     fireEvent.keyDown(screen.getByTestId("lane-editor-close"), {
       key: "Escape",
@@ -3675,10 +3882,10 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     let editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /api\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /api\.log/i }),
     );
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /worker\.log/i }),
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
 
@@ -3716,27 +3923,58 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
   });
 
-  it("exposes sources beyond the old forty-item cutoff and makes all-sources membership explicit", async () => {
+  it("pages and searches all 241 full source paths without losing lane membership", async () => {
     const sourcePaths = Array.from(
-      { length: 55 },
-      (_, index) => `region-${String(index).padStart(2, "0")}/service.log`,
+      { length: 241 },
+      (_, index) => `region-${String(index).padStart(3, "0")}/service.log`,
     );
-    vi.mocked(host.hostLogFacets).mockResolvedValue({
-      sources: Object.fromEntries(sourcePaths.map((source) => [source, 1])),
-      levels: { info: sourcePaths.length },
-      services: {},
-      hosts: {},
-      timeQuality: "wall",
-    });
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (_corpusId, query = {}) => {
+        const search = query.search?.toLocaleLowerCase() ?? "";
+        const matching = sourcePaths.filter((source) =>
+          source.toLocaleLowerCase().includes(search),
+        );
+        const start = query.cursor
+          ? Math.max(0, matching.indexOf(query.cursor) + 1)
+          : 0;
+        const limit = query.limit ?? 100;
+        const page = matching.slice(start, start + limit);
+        return {
+          sources: page.map((source) => ({ source, eventCount: 1 })),
+          nextCursor:
+            start + page.length < matching.length
+              ? (page[page.length - 1] ?? null)
+              : null,
+          totalMatched: matching.length,
+        };
+      },
+    );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    expect(host.hostLogSourceCatalog).not.toHaveBeenCalled();
+    fireEvent.click(toggle);
     const editor = await screen.findByTestId("lane-editor");
     const lane = editor.querySelector(
       ".log-explorer__lane-editor-row",
     ) as HTMLElement;
 
-    expect(within(lane).getAllByRole("checkbox")).toHaveLength(55);
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(200),
+    );
+    fireEvent.click(
+      within(editor).getByRole("button", {
+        name: "Load more sources (41 remaining)",
+      }),
+    );
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(241),
+    );
+    expect(
+      within(lane).getByRole("checkbox", {
+        name: "region-240/service.log",
+      }),
+    ).toBeTruthy();
     expect(
       within(lane)
         .getByRole("button", { name: "All sources active" })
@@ -3746,17 +3984,37 @@ describe("LogExplorer shell", () => {
     const sourceSearch = within(editor).getByRole("searchbox", {
       name: "Find source",
     });
-    fireEvent.change(sourceSearch, { target: { value: "region-54/" } });
-    expect(within(lane).getAllByRole("checkbox")).toHaveLength(1);
+    fireEvent.change(sourceSearch, { target: { value: "region-240/" } });
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(1),
+    );
 
     fireEvent.click(
       within(lane).getByRole("checkbox", {
-        name: "region-54/service.log",
+        name: "region-240/service.log",
       }),
     );
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
+
+    fireEvent.change(sourceSearch, { target: { value: "region-001/" } });
+    await waitFor(() =>
+      expect(
+        within(lane).getByRole("checkbox", {
+          name: "region-001/service.log",
+        }),
+      ).toBeTruthy(),
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+
+    fireEvent.change(sourceSearch, { target: { value: "region-240/" } });
+    const selectedSource = await within(lane).findByRole("checkbox", {
+      name: "region-240/service.log",
+    });
+    expect((selectedSource as HTMLInputElement).checked).toBe(true);
 
     fireEvent.click(
       within(lane).getByRole("button", { name: "Use all sources" }),
@@ -3769,6 +4027,82 @@ describe("LogExplorer shell", () => {
         .getByRole("button", { name: "All sources active" })
         .getAttribute("aria-pressed"),
     ).toBe("true");
+    fireEvent.click(
+      within(lane).getByRole("button", {
+        name: "Restore 1 selected source",
+      }),
+    );
+    expect(
+      (
+        within(lane).getByRole("checkbox", {
+          name: "region-240/service.log",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+  });
+
+  it("keeps all-sources lanes explicit in shared timeline requests", async () => {
+    render(<LogExplorer corpusId="c1" />);
+
+    chooseLaneCount(2);
+
+    await waitFor(() => {
+      expect(
+        vi
+          .mocked(host.hostLogSharedTimelineSummary)
+          .mock.calls.some(
+            ([, , lanes]) =>
+              lanes?.length === 2 &&
+              lanes.every(
+                (lane) =>
+                  lane.allSources === true && lane.sources.length === 0,
+              ),
+          ),
+      ).toBe(true);
+    });
+  });
+
+  it("ignores a stale source-catalog response after the corpus changes", async () => {
+    const first = deferred<host.LogSourceCatalogPageDto>();
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (requestedCorpusId) => {
+        if (requestedCorpusId === "c1") return first.promise;
+        return {
+          sources: [{ source: "new-corpus/app.log", eventCount: 1 }],
+          nextCursor: null,
+          totalMatched: 1,
+        };
+      },
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    await waitFor(() =>
+      expect(host.hostLogSourceCatalog).toHaveBeenCalledWith(
+        "c1",
+        expect.anything(),
+      ),
+    );
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(
+      await screen.findByRole("checkbox", { name: "new-corpus/app.log" }),
+    ).toBeTruthy();
+
+    first.resolve({
+      sources: [{ source: "stale-corpus/app.log", eventCount: 1 }],
+      nextCursor: null,
+      totalMatched: 1,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      screen.queryByRole("checkbox", { name: "stale-corpus/app.log" }),
+    ).toBeNull();
   });
 
   it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {
@@ -3947,6 +4281,25 @@ describe("LogExplorer shell", () => {
     expect(empty.title).toBe(
       "No events match this lane's sources and active filters.",
     );
+  });
+
+  it("places the start boundary above the lane event viewport", async () => {
+    const firstPage = eventPage("api.log", "wall", 2, 1_700_000_000, 4);
+    firstPage.nextCursor = firstPage.events.at(-1)!.seq;
+    firstPage.nextTs = firstPage.events.at(-1)!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(firstPage);
+
+    render(<LogExplorer corpusId="c1" />);
+
+    const boundary = await screen.findByTestId(
+      "lane-boundary-start-lane-0",
+    );
+    const viewport = screen.getByTestId("virtualized-event-list");
+    expect(
+      boundary.compareDocumentPosition(viewport) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.queryByTestId("lane-paging-lane-0")).toBeNull();
   });
 
   it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
@@ -4229,6 +4582,11 @@ describe("LogExplorer shell", () => {
       timeQuality: "order_only",
     });
     render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("log-explorer-facets-loading"),
+      ).toBeNull(),
+    );
     fireEvent.click(await screen.findByTestId("log-explorer-advanced-toggle"));
     const utcStart = screen.getByLabelText(
       "UTC start filter",
@@ -4760,6 +5118,277 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
   });
 
+  it("retires backend cancellation before locating a nonresident Find match", async () => {
+    const target = nonresidentFindEvent(90, "needle located in context");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
+      findResultFor(target),
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: target.seq }),
+      ),
+    );
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "result page ready · locating match",
+    );
+    expect(screen.getByTestId("log-explorer-find-prev")).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByTestId("log-explorer-find-next")).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(host.hostCancelLogSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "locating match",
+    );
+  });
+
+  it("clears Find-owned state and ignores a late search response when the term changes", async () => {
+    const pendingSearch = deferred<host.EventSearchResultDto>();
+    const target = nonresidentFindEvent(91, "stale search target");
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-term");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(
+      pendingSearch.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    const find = screen.getByTestId("log-explorer-find");
+    fireEvent.change(find, { target: { value: "needle" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByTestId("log-explorer-find-cancel");
+
+    fireEvent.change(find, { target: { value: "replacement" } });
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find term changed — press Find to apply",
+    );
+    expect(screen.getByRole("status").textContent).not.toMatch(
+      /busy|searching|locating match/,
+    );
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-term"),
+    );
+
+    await act(async () => {
+      pendingSearch.resolve(findResultFor(target));
+      await pendingSearch.promise;
+    });
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find term changed — press Find to apply",
+    );
+  });
+
+  it("ignores a late Find neighborhood after the match mode changes", async () => {
+    const target = nonresidentFindEvent(92, "stale mode target");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
+      findResultFor(target),
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "locating match",
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+    fireEvent.click(screen.getByTestId("find-mode-regex"));
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find mode changed — press Find to apply",
+    );
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "locating match",
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+  });
+
+  it("ignores a late Find neighborhood after a Filter refresh", async () => {
+    const target = nonresidentFindEvent(93, "stale unfiltered location");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    let searchCount = 0;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      searchCount += 1;
+      return searchCount === 1
+        ? findResultFor(target)
+        : {
+            hits: [],
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 0,
+            partial: false,
+            scanned: 0,
+          };
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "locating match",
+      ),
+    );
+
+    const errorFacet = screen.getByText("error").closest("label");
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "no matches for “needle”",
+      ),
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "no matches for “needle”",
+    );
+  });
+
+  it("cancels one active backend Find request when Explorer unmounts", async () => {
+    const pendingSearch = deferred<host.EventSearchResultDto>();
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-unmount");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(
+      pendingSearch.promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByTestId("log-explorer-find-cancel");
+
+    view.unmount();
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-unmount"),
+    );
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingSearch.resolve({
+        hits: [],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 0,
+        partial: false,
+        scanned: 0,
+      });
+      await pendingSearch.promise;
+    });
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the locating phase when cursor pagination reveals a nonresident match", async () => {
+    const first = defaultEventPage().events[0]!;
+    const second = nonresidentFindEvent(94, "second page target");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    let searchCount = 0;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      searchCount += 1;
+      return searchCount === 1
+        ? findResultFor(first, {
+            nextCursor: first.seq,
+            nextTs: first.ts,
+            totalMatched: 2,
+          })
+        : findResultFor(second, { totalMatched: 2 });
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByText(/Match 1 of 2.*1 result identities resident/);
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: second.seq }),
+      ),
+    );
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "result page ready · locating match",
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(second));
+      await neighborhood.promise;
+    });
+    expect(
+      await screen.findByText(/Match 2 of 2.*1 result identities resident/),
+    ).toBeTruthy();
+  });
+
   it("cancels an in-flight Find without replacing the previous visible results", async () => {
     vi.mocked(host.createLogSearchRequestId)
       .mockReturnValueOnce("find-kept")
@@ -4813,11 +5442,15 @@ describe("LogExplorer shell", () => {
     );
 
     fireEvent.click(cancel);
-    expect(cancel.textContent).toBe("Cancelling…");
-    expect(cancel).toHaveProperty("disabled", true);
     await waitFor(() =>
       expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-cancelled"),
     );
+    expect(
+      await screen.findByText(
+        "Find cancellation requested · previous visible results preserved",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
 
     await act(async () => {
       cancelledSearch.resolve({
@@ -4831,18 +5464,17 @@ describe("LogExplorer shell", () => {
         ],
         nextCursor: null,
         nextTs: null,
-        totalMatched: null,
-        partial: true,
-        diagnostic: "cancelled",
-        cancelled: true,
+        totalMatched: 99,
+        partial: false,
+        cancelled: false,
         scanned: 12,
       });
       await Promise.resolve();
     });
 
     expect(
-      await screen.findByText(
-        "Find cancelled · previous visible results preserved",
+      screen.getByText(
+        "Find cancellation requested · previous visible results preserved",
       ),
     ).toBeTruthy();
     expect(
@@ -4880,7 +5512,12 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(host.hostCancelLogSearch).toHaveBeenNthCalledWith(2, "find-race"),
     );
-    expect(retry.textContent).toBe("Cancelling…");
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(
+      await screen.findByText(
+        "Find cancellation requested · previous visible results preserved",
+      ),
+    ).toBeTruthy();
 
     await act(async () => {
       pendingSearch.resolve({
@@ -4896,8 +5533,8 @@ describe("LogExplorer shell", () => {
       await Promise.resolve();
     });
     expect(
-      await screen.findByText(
-        "Find cancelled · previous visible results preserved",
+      screen.getByText(
+        "Find cancellation requested · previous visible results preserved",
       ),
     ).toBeTruthy();
   });
@@ -5056,6 +5693,11 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({
           corpus_id: "c1",
           brief: expect.stringContaining("corpusId=c1"),
+        }),
+        false,
+        expect.objectContaining({
+          userMessageId: expect.any(String),
+          assistantMessageId: expect.any(String),
         }),
       );
       expect(stored?.messages.map((message) => message.role)).toEqual([
@@ -5335,6 +5977,11 @@ describe("LogExplorer shell", () => {
           corpus_id: "corpus-a",
           brief: expect.stringContaining("corpusId=corpus-a"),
         }),
+        false,
+        expect.objectContaining({
+          userMessageId: expect.any(String),
+          assistantMessageId: expect.any(String),
+        }),
       ),
     );
 
@@ -5367,6 +6014,11 @@ describe("LogExplorer shell", () => {
         expect.objectContaining({
           corpus_id: "corpus-b",
           brief: expect.stringContaining("corpusId=corpus-b"),
+        }),
+        false,
+        expect.objectContaining({
+          userMessageId: expect.any(String),
+          assistantMessageId: expect.any(String),
         }),
       ),
     );

@@ -22,6 +22,13 @@ pub enum LogFormat {
 pub struct ParsedLine {
     /// Unix seconds when known; else ingest-order synthetic.
     pub ts: Option<i64>,
+    /// Validated source-local calendar text that lacks a timezone.
+    ///
+    /// This is parser evidence, not an instant. Consumers must not convert it
+    /// without an explicit source timezone/DST policy. Current event storage
+    /// does not persist this field and keeps the event order-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_local_timestamp: Option<String>,
     /// Normalized level: debug/info/warn/error/fatal/unknown.
     pub level: String,
     /// Optional service / app name.
@@ -46,6 +53,15 @@ pub fn detect_format(sample: &str, path: Option<&Path>) -> LogFormat {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
     {
         return LogFormat::Json;
+    }
+    if looks_like_zone_abbreviated_incomplete_time(t) {
+        return LogFormat::Syslog;
+    }
+    if looks_like_elasticsearch(t) {
+        return LogFormat::Syslog;
+    }
+    if looks_like_wildfly(t) {
+        return LogFormat::Syslog;
     }
     if looks_like_logfmt(t) {
         return LogFormat::Logfmt;
@@ -91,16 +107,44 @@ fn looks_like_syslog(t: &str) -> bool {
     if t.starts_with('<') && t.find('>').is_some_and(|i| i < 6) {
         return true;
     }
+    looks_like_classic_syslog(t)
+}
+
+fn looks_like_classic_syslog(t: &str) -> bool {
     let months = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     months.iter().any(|m| t.starts_with(m) && t.len() > 16)
 }
 
+fn looks_like_wildfly(t: &str) -> bool {
+    parse_wildfly_parts(t).is_some()
+}
+
+fn looks_like_elasticsearch(t: &str) -> bool {
+    parse_elasticsearch_parts(t).is_some()
+}
+
+fn looks_like_zone_abbreviated_incomplete_time(t: &str) -> bool {
+    parse_zone_abbreviated_incomplete_parts(t).is_some()
+}
+
 /// Parse one line with a known (or auto-detected) format.
 ///
 /// `ingest_seq` is used as synthetic timestamp when none is found.
 pub fn parse_line(raw: &str, format: Option<LogFormat>, ingest_seq: u64) -> ParsedLine {
+    // File-level detection is only a hint. A banner or continuation can precede
+    // a structured application-server record, so recognize strict content
+    // shapes regardless of the file's initial hint.
+    if let Some(parsed) = parse_zone_abbreviated_incomplete_time(raw, ingest_seq) {
+        return parsed;
+    }
+    if let Some(parsed) = parse_elasticsearch(raw, ingest_seq) {
+        return parsed;
+    }
+    if let Some(parsed) = parse_wildfly(raw, ingest_seq) {
+        return parsed;
+    }
     let format = format.unwrap_or_else(|| detect_format(raw, None));
     match format {
         LogFormat::Json => parse_json(raw, ingest_seq),
@@ -138,6 +182,7 @@ fn parse_json(raw: &str, ingest_seq: u64) -> ParsedLine {
     let message = get_str(&["message", "msg", "log", "text"]).unwrap_or_else(|| raw.to_string());
     ParsedLine {
         ts: ts.or(Some(ingest_seq as i64)),
+        unresolved_local_timestamp: None,
         level,
         service: get_str(&["service", "app", "component"]),
         host: get_str(&["host", "hostname", "node"]),
@@ -335,6 +380,7 @@ fn parse_logfmt(raw: &str, ingest_seq: u64) -> ParsedLine {
         .or(Some(ingest_seq as i64));
     ParsedLine {
         ts,
+        unresolved_local_timestamp: None,
         level,
         service: map.get("service").or_else(|| map.get("app")).cloned(),
         host: map.get("host").cloned(),
@@ -377,6 +423,381 @@ fn split_logfmt_tokens(raw: &str) -> Vec<String> {
     tokens
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WildflyTimestamp {
+    /// A timestamp with an explicit `Z` or numeric UTC offset.
+    Wall(i64),
+    /// A valid source-local calendar timestamp without a timezone.
+    Local,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZoneAbbreviatedIncompleteParts<'a> {
+    source_timestamp: &'a str,
+    level: &'a str,
+    payload: &'a str,
+}
+
+/// Recognize an application record shaped like:
+///
+/// `YYYY-MM-DDTHH:mm,SSS ZONE. LEVEL: message`
+///
+/// This is deliberately structure-only parsing. The producer grammar has not
+/// established whether the comma field denotes seconds, milliseconds, or
+/// something else, and timezone abbreviations are not unique offsets. The
+/// complete timestamp token is therefore retained as unresolved provenance and
+/// never converted to a wall-clock instant.
+fn parse_zone_abbreviated_incomplete_parts(
+    raw: &str,
+) -> Option<ZoneAbbreviatedIncompleteParts<'_>> {
+    const LOCAL_PREFIX_BYTES: usize = 20;
+    let local = raw.get(..LOCAL_PREFIX_BYTES)?;
+    let bytes = local.as_bytes();
+    if bytes.len() != LOCAL_PREFIX_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b','
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    chrono::NaiveDate::parse_from_str(local.get(..10)?, "%Y-%m-%d").ok()?;
+    let hour = local.get(11..13)?.parse::<u8>().ok()?;
+    let minute = local.get(14..16)?.parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+
+    let rest = raw.get(LOCAL_PREFIX_BYTES..)?.strip_prefix(' ')?;
+    let zone_end = rest.find(". ")?;
+    let zone = rest.get(..zone_end)?;
+    if !(2..=8).contains(&zone.len()) || !zone.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let source_timestamp_end = LOCAL_PREFIX_BYTES + 1 + zone.len();
+    let source_timestamp = raw.get(..source_timestamp_end)?;
+    let body = rest.get(zone_end + 2..)?;
+    let (level, payload) = body.split_once(": ")?;
+    if !is_wildfly_level(level) || payload.is_empty() {
+        return None;
+    }
+
+    Some(ZoneAbbreviatedIncompleteParts {
+        source_timestamp,
+        level,
+        payload,
+    })
+}
+
+fn parse_zone_abbreviated_incomplete_time(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_zone_abbreviated_incomplete_parts(raw.trim())?;
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        level: normalize_level(parts.level),
+        service: None,
+        host: None,
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchTimestamp {
+    /// A timestamp with an explicit `Z` or numeric UTC offset.
+    Wall(i64),
+    /// A valid source-local calendar timestamp without a timezone.
+    Local,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElasticsearchParts<'a> {
+    timestamp: ElasticsearchTimestamp,
+    source_timestamp: &'a str,
+    level: &'a str,
+    component: &'a str,
+    node: &'a str,
+    payload: &'a str,
+}
+
+/// Parse the classic Elasticsearch prefix:
+///
+/// `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message`
+///
+/// The shape is intentionally strict: four leading bracket groups, a valid
+/// calendar timestamp, a known severity, and non-empty component/node fields.
+/// This lets per-line recognition work despite a file-level `Plain` hint
+/// without mistaking arbitrary bracketed payloads for Elasticsearch records.
+fn parse_elasticsearch_parts(raw: &str) -> Option<ElasticsearchParts<'_>> {
+    let (source_timestamp, rest) = take_bracketed_field(raw)?;
+    let source_timestamp = source_timestamp.trim();
+    let timestamp = parse_elasticsearch_timestamp(source_timestamp)?;
+    let (level, rest) = take_bracketed_field(rest)?;
+    let level = level.trim();
+    if !is_wildfly_level(level) {
+        return None;
+    }
+    let (component, rest) = take_bracketed_field(rest)?;
+    let component = component.trim();
+    if component.is_empty() {
+        return None;
+    }
+    let (node, rest) = take_bracketed_field(rest)?;
+    let node = node.trim();
+    if node.is_empty() {
+        return None;
+    }
+
+    Some(ElasticsearchParts {
+        timestamp,
+        source_timestamp,
+        level,
+        component,
+        node,
+        payload: rest.trim_start(),
+    })
+}
+
+fn take_bracketed_field(value: &str) -> Option<(&str, &str)> {
+    let value = value.strip_prefix('[')?;
+    let end = value.find(']')?;
+    Some((value.get(..end)?, value.get(end + 1..)?))
+}
+
+fn parse_elasticsearch_timestamp(value: &str) -> Option<ElasticsearchTimestamp> {
+    const LOCAL_TIMESTAMP_BYTES: usize = 23;
+    let local = value.get(..LOCAL_TIMESTAMP_BYTES)?;
+    let bytes = local.as_bytes();
+    if bytes.len() != LOCAL_TIMESTAMP_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b' ' | b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !matches!(bytes[19], b',' | b'.')
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+    {
+        return None;
+    }
+
+    let mut canonical_local = local.to_string();
+    canonical_local.replace_range(10..11, " ");
+    canonical_local.replace_range(19..20, ".");
+    chrono::NaiveDateTime::parse_from_str(&canonical_local, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+
+    let suffix = value.get(LOCAL_TIMESTAMP_BYTES..)?;
+    if suffix.is_empty() {
+        return Some(ElasticsearchTimestamp::Local);
+    }
+    let offset = canonical_wildfly_offset(suffix)?;
+    canonical_local.replace_range(10..11, "T");
+    canonical_local.push_str(&offset);
+    parse_explicit_timestamp(&canonical_local).map(ElasticsearchTimestamp::Wall)
+}
+
+fn parse_elasticsearch(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_elasticsearch_parts(raw.trim())?;
+    let (ts, unresolved_local_timestamp) = match parts.timestamp {
+        ElasticsearchTimestamp::Wall(ts) => (ts, None),
+        ElasticsearchTimestamp::Local => {
+            (ingest_seq as i64, Some(parts.source_timestamp.to_string()))
+        }
+    };
+    Some(ParsedLine {
+        ts: Some(ts),
+        unresolved_local_timestamp,
+        level: normalize_level(parts.level),
+        service: Some(parts.component.to_string()),
+        host: Some(parts.node.to_string()),
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WildflyParts<'a> {
+    timestamp: WildflyTimestamp,
+    source_timestamp: &'a str,
+    level: &'a str,
+    logger: &'a str,
+    thread: &'a str,
+    payload: &'a str,
+}
+
+/// Parse the common JBoss/WildFly PatternFormatter prefix:
+///
+/// `YYYY-MM-DD HH:mm:ss,SSS LEVEL [logger] (thread) message`
+///
+/// A dot millisecond separator is also accepted. An immediately attached or
+/// whitespace-separated `Z`, `+HH:MM`, `-HH:MM`, `+HHMM`, or `-HHMM` makes the
+/// timestamp an unambiguous instant. Offsetless local calendar time is
+/// validated but intentionally remains order-only: current event storage has
+/// no field for a local datetime plus unresolved timezone provenance.
+fn parse_wildfly_parts(raw: &str) -> Option<WildflyParts<'_>> {
+    const LOCAL_TIMESTAMP_BYTES: usize = 23;
+    let timestamp_text = raw.get(..LOCAL_TIMESTAMP_BYTES)?;
+    let bytes = timestamp_text.as_bytes();
+    if bytes.len() != LOCAL_TIMESTAMP_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b' '
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !matches!(bytes[19], b',' | b'.')
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+    {
+        return None;
+    }
+
+    let mut canonical_local = timestamp_text.to_string();
+    canonical_local.replace_range(19..20, ".");
+    chrono::NaiveDateTime::parse_from_str(&canonical_local, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+
+    let tail = raw.get(LOCAL_TIMESTAMP_BYTES..)?;
+    let (timestamp, body) = if let Some((offset, rest)) = take_wildfly_offset_prefix(tail) {
+        (
+            WildflyTimestamp::Wall(parse_wildfly_wall_timestamp(&canonical_local, offset)?),
+            rest.trim_start(),
+        )
+    } else {
+        let body = tail.trim_start();
+        if body.len() == tail.len() {
+            return None;
+        }
+        if let Some((token, rest)) = take_token(body) {
+            if canonical_wildfly_offset(token).is_some() {
+                (
+                    WildflyTimestamp::Wall(parse_wildfly_wall_timestamp(&canonical_local, token)?),
+                    rest,
+                )
+            } else {
+                (WildflyTimestamp::Local, body)
+            }
+        } else {
+            return None;
+        }
+    };
+
+    let (level, rest) = take_token(body)?;
+    if !is_wildfly_level(level) {
+        return None;
+    }
+    let rest = rest.strip_prefix('[')?;
+    let logger_end = rest.find(']')?;
+    let logger = rest.get(..logger_end)?;
+    if logger.is_empty() {
+        return None;
+    }
+    let rest = rest.get(logger_end + 1..)?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let thread_end = rest.find(')')?;
+    let thread = rest.get(..thread_end)?;
+    if thread.is_empty() {
+        return None;
+    }
+    let payload = rest.get(thread_end + 1..)?.trim_start();
+
+    Some(WildflyParts {
+        timestamp,
+        source_timestamp: timestamp_text,
+        level,
+        logger,
+        thread,
+        payload,
+    })
+}
+
+fn take_wildfly_offset_prefix(tail: &str) -> Option<(&str, &str)> {
+    for len in [1, 6, 5] {
+        let candidate = tail.get(..len)?;
+        if canonical_wildfly_offset(candidate).is_none() {
+            continue;
+        }
+        let rest = tail.get(len..)?;
+        if rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace) {
+            return Some((candidate, rest));
+        }
+    }
+    None
+}
+
+fn canonical_wildfly_offset(offset: &str) -> Option<String> {
+    if offset == "Z" {
+        return Some("Z".into());
+    }
+    let bytes = offset.as_bytes();
+    match bytes {
+        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2]
+            if [h1, h2, m1, m2]
+                .into_iter()
+                .all(|byte| byte.is_ascii_digit()) =>
+        {
+            Some(String::from_utf8(vec![*sign, *h1, *h2, b':', *m1, *m2]).ok()?)
+        }
+        [sign @ (b'+' | b'-'), h1, h2, m1, m2]
+            if [h1, h2, m1, m2]
+                .into_iter()
+                .all(|byte| byte.is_ascii_digit()) =>
+        {
+            Some(String::from_utf8(vec![*sign, *h1, *h2, b':', *m1, *m2]).ok()?)
+        }
+        _ => None,
+    }
+}
+
+fn parse_wildfly_wall_timestamp(local: &str, offset: &str) -> Option<i64> {
+    let offset = canonical_wildfly_offset(offset)?;
+    let mut value = local.to_string();
+    value.replace_range(10..11, "T");
+    value.push_str(&offset);
+    parse_explicit_timestamp(&value)
+}
+
+fn is_wildfly_level(level: &str) -> bool {
+    matches!(
+        level.to_ascii_uppercase().as_str(),
+        "TRACE" | "DEBUG" | "INFO" | "WARN" | "WARNING" | "ERROR" | "SEVERE" | "FATAL"
+    )
+}
+
+fn parse_wildfly(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_wildfly_parts(raw.trim())?;
+    let mut message = format!("[{}] ({})", parts.logger, parts.thread);
+    if !parts.payload.is_empty() {
+        message.push(' ');
+        message.push_str(parts.payload);
+    }
+    let (ts, unresolved_local_timestamp) = match parts.timestamp {
+        WildflyTimestamp::Wall(ts) => (ts, None),
+        WildflyTimestamp::Local => (ingest_seq as i64, Some(parts.source_timestamp.to_string())),
+    };
+    Some(ParsedLine {
+        ts: Some(ts),
+        unresolved_local_timestamp,
+        level: normalize_level(parts.level),
+        service: None,
+        host: None,
+        trace_id: None,
+        message,
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
+}
+
 fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
     let mut rest = raw.trim();
     if rest.starts_with('<') {
@@ -393,6 +814,13 @@ fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
         return parsed;
     }
 
+    // A file-level Syslog hint also applies to continuation lines. Preserve
+    // stack frames and exception causes whole instead of splitting them as a
+    // malformed classic-syslog record.
+    if !looks_like_classic_syslog(rest) {
+        return parse_plain(raw, ingest_seq);
+    }
+
     // Classic / yearless path: do not invent year or timezone; order-only via ingest_seq.
     let parts: Vec<&str> = rest.splitn(4, char::is_whitespace).collect();
     let (host, message) = if parts.len() >= 3 {
@@ -406,6 +834,7 @@ fn parse_syslog(raw: &str, ingest_seq: u64) -> ParsedLine {
     let level = level_from_message_text(&message);
     ParsedLine {
         ts: Some(ingest_seq as i64),
+        unresolved_local_timestamp: None,
         level,
         service: None,
         host,
@@ -460,6 +889,7 @@ fn parse_rfc5424_body(rest: &str, ingest_seq: u64, raw: &str) -> Option<ParsedLi
     };
     Some(ParsedLine {
         ts: wall_ts.or(Some(ingest_seq as i64)),
+        unresolved_local_timestamp: None,
         level,
         service,
         host,
@@ -533,6 +963,7 @@ fn parse_plain(raw: &str, ingest_seq: u64) -> ParsedLine {
     };
     ParsedLine {
         ts: Some(ingest_seq as i64),
+        unresolved_local_timestamp: None,
         level,
         service: None,
         host: None,
@@ -633,6 +1064,280 @@ mod tests {
         assert_eq!(detect_format(line, None), LogFormat::Syslog);
         let p = parse_line(line, Some(LogFormat::Syslog), 1);
         assert!(!p.message.is_empty());
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_auto_detects_but_stays_order_only() {
+        let line = "2026-07-29T14:05,321 CET. INFO: synthetic scheduler initialized";
+        assert_eq!(detect_format(line, None), LogFormat::Syslog);
+
+        let parsed = parse_line(line, Some(LogFormat::Plain), 61);
+        assert_eq!(parsed.format, LogFormat::Syslog);
+        assert_eq!(parsed.ts, Some(61));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29T14:05,321 CET")
+        );
+        assert_eq!(parsed.level, "info");
+        assert_eq!(parsed.message, "synthetic scheduler initialized");
+        assert_eq!(parsed.raw, line);
+        assert_eq!(parsed.service, None);
+        assert_eq!(parsed.host, None);
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_does_not_interpret_comma_or_zone() {
+        let line = "2026-07-29T23:59,059 CEST. ERROR: synthetic request rejected";
+        let parsed = parse_line(line, None, 62);
+
+        assert_eq!(parsed.ts, Some(62));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29T23:59,059 CEST")
+        );
+        assert_eq!(parsed.level, "error");
+        assert_eq!(parsed.message, "synthetic request rejected");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_near_matches_remain_whole() {
+        let lines = [
+            "2026-13-29T14:05,321 CET. INFO: impossible date",
+            "2026-07-29T24:05,321 CET. INFO: impossible hour",
+            "2026-07-29T14:60,321 CET. INFO: impossible minute",
+            "2026-07-29T14:05:06,321 CET. INFO: seconds unexpectedly present",
+            "2026-07-29T14:05,321 cet. INFO: lowercase zone is ambiguous",
+            "2026-07-29T14:05,321 CET INFO: missing record delimiter",
+            "2026-07-29T14:05,321 CET. NOTICE: unsupported severity",
+            "INFO: payload mentions 2026-07-29T14:05,321 CET.",
+            "\tat org.example.Worker.run(Worker.java:42)",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let ingest_seq = 970 + index as u64;
+            let parsed = parse_line(line, Some(LogFormat::Plain), ingest_seq);
+            assert_eq!(parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.message, line, "line={line}");
+            assert_eq!(parsed.raw, line, "line={line}");
+        }
+    }
+
+    #[test]
+    fn elasticsearch_classic_record_auto_detects_and_preserves_normalized_fields() {
+        let line = "[2026-07-29 14:05:06,324][INFO][transport   ][fixture-node.example] synthetic node initialized";
+        assert_eq!(detect_format(line, None), LogFormat::Syslog);
+
+        let parsed = parse_line(line, Some(LogFormat::Plain), 37);
+        assert_eq!(parsed.format, LogFormat::Syslog);
+        assert_eq!(parsed.ts, Some(37));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29 14:05:06,324")
+        );
+        assert_eq!(parsed.level, "info");
+        assert_eq!(parsed.service.as_deref(), Some("transport"));
+        assert_eq!(parsed.host.as_deref(), Some("fixture-node.example"));
+        assert_eq!(parsed.message, "synthetic node initialized");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn elasticsearch_dot_fraction_and_padded_fields_are_trimmed() {
+        let line =
+            "[2026-07-29 14:05:07.004][WARN ][cluster.service ][node-b.example  ] synthetic queue pressure";
+        let parsed = parse_line(line, None, 38);
+
+        assert_eq!(parsed.ts, Some(38));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29 14:05:07.004")
+        );
+        assert_eq!(parsed.level, "warn");
+        assert_eq!(parsed.service.as_deref(), Some("cluster.service"));
+        assert_eq!(parsed.host.as_deref(), Some("node-b.example"));
+        assert_eq!(parsed.message, "synthetic queue pressure");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn elasticsearch_explicit_offsets_normalize_to_the_same_unix_second() {
+        let lines = [
+            "[2025-01-01 13:20:00,999Z][INFO][node][fixture-a.example] shared-z",
+            "[2025-01-01T14:20:00.250+01:00][WARN][node][fixture-b.example] shared-plus",
+            "[2025-01-01 08:20:00,001-0500][ERROR][node][fixture-c.example] shared-minus",
+        ];
+
+        for line in lines {
+            let parsed = parse_line(line, Some(LogFormat::Plain), 9999);
+            assert_eq!(parsed.format, LogFormat::Syslog, "line={line}");
+            assert_eq!(parsed.ts, Some(SHARED_INSTANT_SECS), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.service.as_deref(), Some("node"));
+            assert!(parsed
+                .host
+                .as_deref()
+                .is_some_and(|host| host.ends_with(".example")));
+            assert!(parsed.message.starts_with("shared-"));
+            assert_eq!(parsed.raw, line);
+        }
+    }
+
+    #[test]
+    fn elasticsearch_malformed_brackets_and_continuations_remain_whole() {
+        let lines = [
+            "[2026-13-29 14:05:06,324][INFO][node][fixture.example] impossible month",
+            "[2026-07-29 14:05:06,32][INFO][node][fixture.example] short fraction",
+            "[2026-07-29 14:05:06,324][NOTICE][node][fixture.example] unsupported level",
+            "[2026-07-29 14:05:06,324][INFO][][fixture.example] empty component",
+            "[2026-07-29 14:05:06,324][INFO][node] missing node field",
+            "[node][INFO] ordinary bracketed payload",
+            "\tat org.example.Worker.run(Worker.java:42)",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let ingest_seq = 900 + index as u64;
+            let parsed = parse_line(line, Some(LogFormat::Plain), ingest_seq);
+            assert_eq!(parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.message, line, "line={line}");
+            assert_eq!(parsed.raw, line, "line={line}");
+        }
+    }
+
+    #[test]
+    fn wildfly_offsetless_prefixes_preserve_structure_and_stay_order_only() {
+        let cases = [
+            (
+                "2026-07-29 09:14:05,123 INFO  [org.example.Startup] (ServerService Thread Pool -- 7) deployment ready",
+                41,
+                "info",
+                "[org.example.Startup] (ServerService Thread Pool -- 7) deployment ready",
+            ),
+            (
+                "2026-07-29 09:14:06.004 WARN [org.example.Queue] (default task-2) queue nearing capacity",
+                42,
+                "warn",
+                "[org.example.Queue] (default task-2) queue nearing capacity",
+            ),
+            (
+                "2026-07-29 09:14:07,999 ERROR [org.example.Worker] (default task-3) request failed",
+                43,
+                "error",
+                "[org.example.Worker] (default task-3) request failed",
+            ),
+            (
+                "2026-07-29 09:14:08,654 ERROR [org.jboss.remoting.remote.connection] (webworker I/O-175) JBREM000200: Remote connection failed: java.io.IOException: synthetic peer reset",
+                44,
+                "error",
+                "[org.jboss.remoting.remote.connection] (webworker I/O-175) JBREM000200: Remote connection failed: java.io.IOException: synthetic peer reset",
+            ),
+        ];
+
+        for (line, ingest_seq, level, message) in cases {
+            assert_eq!(detect_format(line, None), LogFormat::Syslog);
+            let parsed = parse_line(line, None, ingest_seq);
+            assert_eq!(parsed.format, LogFormat::Syslog);
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(
+                parsed.unresolved_local_timestamp.as_deref(),
+                line.get(..23),
+                "validated local calendar evidence should be exposed without becoming an instant"
+            );
+            assert_eq!(parsed.level, level);
+            assert_eq!(parsed.message, message);
+            assert_eq!(parsed.raw, line);
+        }
+    }
+
+    #[test]
+    fn wildfly_recognition_is_not_blocked_by_a_file_level_plain_hint() {
+        let line = "2026-07-29 09:14:05,123 INFO [org.example.Startup] (main) deployment ready";
+        let parsed = parse_line(line, Some(LogFormat::Plain), 75);
+        assert_eq!(parsed.format, LogFormat::Syslog);
+        assert_eq!(parsed.ts, Some(75));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29 09:14:05,123")
+        );
+        assert_eq!(
+            parsed.message,
+            "[org.example.Startup] (main) deployment ready"
+        );
+    }
+
+    #[test]
+    fn wildfly_explicit_offsets_normalize_to_the_same_unix_second() {
+        let lines = [
+            "2025-01-01 13:20:00,999Z INFO [org.example.Clock] (main) shared-z",
+            "2025-01-01 14:20:00.250+01:00 WARN [org.example.Clock] (main) shared-plus-colon",
+            "2025-01-01 08:20:00,001-0500 ERROR [org.example.Clock] (main) shared-minus-compact",
+            "2025-01-01 14:20:00.777 +0100 INFO [org.example.Clock] (main) shared-spaced-offset",
+        ];
+
+        for line in lines {
+            let parsed = parse_line(line, None, 9999);
+            assert_eq!(parsed.format, LogFormat::Syslog, "line={line}");
+            assert_eq!(parsed.ts, Some(SHARED_INSTANT_SECS), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.raw, line);
+            assert!(parsed.message.contains("[org.example.Clock]"));
+            assert!(parsed.message.contains("(main)"));
+            assert!(parsed.message.contains("shared-"));
+        }
+    }
+
+    #[test]
+    fn wildfly_malformed_and_timestamp_like_payloads_do_not_false_parse_or_drop() {
+        let lines = [
+            "2026-13-29 09:14:05,123 INFO [org.example.BadDate] (main) impossible month",
+            "2026-07-29 09:14:05,12 INFO [org.example.ShortMillis] (main) short millis",
+            "2026-07-29 09:14:05,123 NOTICE [org.example.Level] (main) unsupported level",
+            "2026-07-29 09:14:05,123 INFO org.example.MissingBrackets (main) malformed",
+            "INFO [org.example.Payload] (main) observed 2026-07-29 09:14:05,123 in a message",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let ingest_seq = 800 + index as u64;
+            let parsed = parse_line(line, None, ingest_seq);
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(parsed.raw, line);
+            assert_eq!(parsed.message, line, "malformed line must remain whole");
+            assert_eq!(parsed.format, LogFormat::Plain);
+            assert_eq!(parsed.unresolved_local_timestamp, None);
+        }
+    }
+
+    #[test]
+    fn wildfly_stack_trace_continuations_remain_complete_and_in_order() {
+        let records = [
+            "2026-07-29 09:14:07,999 ERROR [org.example.Worker] (default task-3) request failed",
+            "java.lang.IllegalStateException: synthetic failure",
+            "\tat org.example.Worker.run(Worker.java:42)",
+            "Caused by: java.io.IOException: synthetic downstream failure",
+        ];
+
+        let parsed = records
+            .iter()
+            .enumerate()
+            .map(|(index, line)| parse_line(line, Some(LogFormat::Syslog), 500 + index as u64))
+            .collect::<Vec<_>>();
+
+        assert_eq!(parsed[0].level, "error");
+        assert_eq!(
+            parsed[0].message,
+            "[org.example.Worker] (default task-3) request failed"
+        );
+        for (index, continuation) in parsed.iter().enumerate().skip(1) {
+            assert_eq!(continuation.format, LogFormat::Plain);
+            assert_eq!(continuation.ts, Some(500 + index as i64));
+            assert_eq!(continuation.message, records[index]);
+            assert_eq!(continuation.raw, records[index]);
+            assert_eq!(continuation.unresolved_local_timestamp, None);
+        }
     }
 
     /// Shared wall-clock instant used by same-instant / offset tests:

@@ -528,6 +528,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "wiremock",
  "zip 2.4.2",
 ]

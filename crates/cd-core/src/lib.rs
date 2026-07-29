@@ -81,8 +81,10 @@ pub use investigations::{
 };
 pub use permissions::{PermissionDecision, PermissionRequest, PermissionState};
 pub use providers::{
-    descriptor_for, ProviderConfig, ProviderDescriptor, ProviderKind, ProviderProfile,
+    descriptor_for, ProviderConfig, ProviderDeadlinePreference, ProviderDescriptor, ProviderKind,
+    ProviderProfile,
 };
+pub use router::AgentPhase;
 pub use tools::{ToolSideEffect, ToolSpec};
 
 /// Library version (cargo package version).

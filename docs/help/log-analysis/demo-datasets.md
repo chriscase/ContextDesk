@@ -28,11 +28,24 @@ employer, developer-machine, production, or third-party log material.
 > are evaluator-only answers and expectations. They must not enter a corpus,
 > analysis result, or chat context.
 
-## Where the fixtures are
+## Start with the packaged first-run demo
 
-The demo fixtures are checked into the source repository; they are not bundled
-inside an installed ContextDesk application. If you have only the installed
-app, first download or clone the matching ContextDesk source checkout.
+The installed desktop app bundles only the input logs for the pinned
+25,000-event investigation. On the first-run **Ready** step, select **Install
+demo log corpus**, choose **Install demo**, then choose **Enter app · Open
+Logs**. The option is off by default, reports progress and failures, and safely
+selects the existing managed demo if it was already installed.
+
+This convenience bundle does **not** contain evaluator truth, compact scenario
+fixtures, or the optional operational-metrics document. The trusted host sends
+the packaged input through the same bounded ingest, redaction, diagnostics, and
+cancellation path as **Import logs…**.
+
+## Where the source-checkout fixtures are
+
+All demo fixtures are checked into the source repository. Clone the matching
+source checkout when you want the compact scenarios, ZIP fixture, optional
+operational metrics, or a repeatable repository-relative import path.
 
 Paths below are relative to the repository root. To print a complete local path
 without relying on another person's home directory, open a terminal anywhere
@@ -82,6 +95,10 @@ For a longer repeatable investigation, select this exact folder:
 
 `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/`
 
+In an installed app, the first-run option imports this exact input directory
+without requiring a source checkout. Manual selection remains useful for
+development and fixture verification.
+
 The expected import is **25,000 events**, **10 files**, and **4,201,281 source
 bytes** spanning exactly **2025-01-01 12:00:00Z through 2025-01-08
 12:00:00Z** with wall-clock time quality. Expected levels are 23,984 INFO, 458
@@ -97,6 +114,73 @@ To exercise ZIP import instead of folder import, cancel the folder chooser
 after choosing **Import logs…**, then select
 `fixtures/log-lab/archives/checkout-cascade.zip` in the file chooser. It
 contains 6 entries and imports the same 35 events as `checkout-cascade`.
+
+## Generate the 250,000-event broad-triage lab
+
+Use `triage-stress` when you need to evaluate large-corpus opening, a high
+ERROR/WARN prevalence, broad questions such as “What problems do you see?”, or
+future exact-template de-noising without exposing company data. The bulk logs
+are generated on demand and are never checked into Git.
+
+From the repository root, estimate disk use without writing files:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile triage-stress \
+  --estimate-only
+```
+
+Then generate the default profile:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --output target/contextdesk-demo-lab/triage-stress-250k \
+  --profile triage-stress \
+  --record-perf
+```
+
+In **Logs → Import logs…**, select only:
+
+`target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/import/`
+
+Expected default import:
+
+| Property | Exact expectation |
+| --- | --- |
+| Events | 250,000 |
+| Sources/services/hosts | 12 synthetic sources · 12 services · 12 `.example` hosts |
+| Source bytes | 63,883,809 |
+| Time | 2025-01-01 12:00:00Z–20:40:49Z · wall clock |
+| Levels | 160,000 INFO · 7,500 DEBUG · 37,500 WARN · 45,000 ERROR |
+| Template truth | 650 generator families · 648 production parser templates |
+
+The corpus contains three deterministic multi-source incident windows:
+
+- **Database pool exhaustion:** 13:44:12Z–13:48:53Z. A pool-size reduction and
+  poison-job retry loop precede saturation, checkout timeout, an edge 504, and
+  rollback recovery.
+- **Incomplete signing-key rollout:** 16:30:52Z–16:35:33Z. Region-b rejects a
+  newly activated key until verifier state and the rollout converge.
+- **Cache refresh stampede:** 18:46:17Z–18:50:58Z. Hot-set eviction and refresh
+  contention precede a miss storm, database pressure, API timeout, an edge
+  503, and bounded-worker recovery.
+
+Each incident role occurs exactly 16 times. Useful opaque literal probes are
+`CDLAB2004`, `CDLAB3102`, and `CDLAB4203`; the corresponding trace probes are
+`trace-fixture-a17`, `trace-fixture-b29`, and `trace-fixture-c41`. Runtime log
+records intentionally contain no evaluator incident names or causal-role
+labels; those conclusions remain only in the separate truth manifest.
+
+The many repetitive ERROR events are intentional. A sound investigation must
+not hide all ERROR events. The generated evaluator manifest defines six narrow,
+exact-template candidates and records their counts, but that `truth/` sibling
+must never be imported or attached to chat. Any de-noising behavior under test
+must remain visible, reversible, count-honest, and scoped to an exact family.
+
+Generation refuses to overwrite a nonempty directory. The `target/` output is
+ignored by Git, and the generated performance template is for one-machine
+measurements only. You may lower `--events` to 10,000 for a faster product-path
+smoke test; the 250,000-event default is the literal scale acceptance vector.
 
 ## Add the optional operational metrics
 

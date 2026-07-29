@@ -15,6 +15,7 @@ The generator also produces scale and **behavior-rich** profiles outside Git:
 | `ui-medium` | Multi-day investigation corpus (#542) | 100,000 / 8 sources / 3 days |
 | `seven-day` | Sparse/burst lane + navigator corpus | 25,000 / 8 sources / 7 days |
 | `paging-stress` | Boundary sentinels for eviction/seek | 12,000 / 6 sources |
+| `triage-stress` | Error-heavy broad triage and exact-template de-noising | 250,000 / 12 sources / 8h 40m 49s |
 | `large` | Opt-in stress (never commit) | 1,000,000+ |
 
 Event count, wall-clock span, source count, and traffic shape are **independent**
@@ -72,6 +73,15 @@ cargo run -p cd-core --example generate_log_lab -- \
 cargo run -p cd-core --example generate_log_lab -- \
   --output /tmp/contextdesk-log-lab-paging \
   --profile paging-stress
+
+# Estimate, then generate the local-only 250k broad-triage corpus.
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile triage-stress \
+  --estimate-only
+cargo run -p cd-core --example generate_log_lab -- \
+  --output target/contextdesk-demo-lab/triage-stress-250k \
+  --profile triage-stress \
+  --record-perf
 
 # Disk estimate only (no files written).
 cargo run -p cd-core --example generate_log_lab -- \
@@ -202,6 +212,46 @@ claim that view already ships.
 
 A non-technical company-data trial procedure lives in
 `docs/COMPANY_LOG_DATA_TRIAL.md`.
+
+### Generated `triage-stress`
+
+This local-only #745 profile recreates the shape that challenged broad linked
+triage on a company corpus without copying company data. The default emits
+exactly 250,000 wall-clock events over 12 synthetic sources and services:
+160,000 INFO, 7,500 DEBUG, 37,500 WARN, and 45,000 ERROR.
+
+It deliberately combines:
+
+- four high-volume repetitive ERROR families and four repetitive WARN
+  families;
+- 620 lower-severity routine INFO families, one DEBUG family, and enough total
+  cardinality to cross the 512-template clustering candidate cap;
+- three seven-step, multi-source incident chains: database pool exhaustion,
+  incomplete signing-key rollout, and cache-refresh stampede; and
+- 16 occurrences of every incident role so high-value patterns are rare
+  relative to the corpus but still deterministic and independently searchable.
+
+The generator records 650 exact family identities. Production ingest currently
+reduces those to exactly 648 parser templates; the distinction is explicit in
+the generated truth manifest. The evaluator-only manifest also records exact
+per-source counts, safe exact-template noise candidates, incident windows,
+canonical probes, and a broad-chat rubric.
+
+Import only:
+
+```text
+target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/import/
+```
+
+Do not import or attach its sibling `truth/` directory. Useful opaque probes
+include `CDLAB2004`, `CDLAB3102`, `CDLAB4203`, `trace-fixture-a17`,
+`trace-fixture-b29`, and `trace-fixture-c41`. The imported records do not name
+the evaluator incidents or causal roles; those remain truth-only.
+
+The generated tree is ignored by Git and must remain local. `--events` may be
+overridden down to 10,000; source count and timestamp design are fixed so the
+truth contract remains meaningful. The command rejects nonempty output
+directories rather than overwriting prior work.
 
 ### Generated `scale` (legacy medium / large)
 

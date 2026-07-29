@@ -21,6 +21,8 @@ Produced by `cd_core::research::event_to_dto` — **snake_case** names:
 | `kind` | Payload highlights |
 |--------|--------------------|
 | `turn_started` | `session_id`, `model` |
+| `turn_phase` | `phase` (`choosing_evidence`/`retrieving_evidence`/`synthesizing_answer`) |
+| `linked_synthesis_retry` | Host-authored `available`, exact `session_id`, `corpus_id`, `provider_profile_id`, and `model_id`; evidence never crosses IPC |
 | `text_delta` | `text` |
 | `thought_delta` | `text` |
 | `tool` | single event with `phase` (`started`/`finished`), `id`, `name`, `summary`, `detail`, `ok` |

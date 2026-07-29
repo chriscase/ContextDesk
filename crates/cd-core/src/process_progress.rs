@@ -5,6 +5,90 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum Unicode scalar values retained for one privacy-safe evidence basename.
+pub const MAX_LOG_INGEST_EVIDENCE_BASENAME_CHARS: usize = 96;
+
+/// Stable omission/failure reason emitted by raw log intake.
+///
+/// This deliberately excludes free-form parser, filesystem, and ZIP errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogIngestEvidenceReason {
+    /// A NUL-bearing source was classified as binary.
+    Binary,
+    /// A completely read source contained no non-blank events.
+    Empty,
+    /// A hidden file or archive member was ignored.
+    Hidden,
+    /// A source exceeded the configured member-size bound.
+    Oversized,
+    /// Metadata, open, or bounded source reading failed.
+    ReadFailed,
+    /// A source or archive could not be parsed within the ingest contract.
+    ParseFailed,
+}
+
+/// One typed, bounded, privacy-safe raw-ingest evidence observation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogIngestEvidence {
+    /// Stable reason code.
+    pub reason: LogIngestEvidenceReason,
+    /// Final source component only, secret-scrubbed and bounded.
+    pub basename: String,
+}
+
+impl LogIngestEvidence {
+    /// Build evidence from a filesystem or virtual archive source identity.
+    ///
+    /// Parent paths and archive ancestry are discarded before redaction. Names
+    /// that resemble private hosts are replaced completely rather than exposed.
+    pub(crate) fn from_source(reason: LogIngestEvidenceReason, source: &std::path::Path) -> Self {
+        let raw = source.to_string_lossy();
+        let leaf = raw
+            .rsplit(['/', '\\'])
+            .find(|component| !component.is_empty())
+            .unwrap_or("item");
+        let redaction = crate::redact::redact_candidate(leaf);
+        let mut safe = if redaction.blocked {
+            "[REDACTED_BASENAME]".to_string()
+        } else {
+            redaction.text
+        };
+        safe.retain(|character| !character.is_control() && !matches!(character, '/' | '\\' | '!'));
+        safe = safe.trim().to_string();
+        if safe.is_empty() || resembles_private_host(&safe) {
+            safe = "[REDACTED_BASENAME]".into();
+        }
+        safe = safe
+            .chars()
+            .take(MAX_LOG_INGEST_EVIDENCE_BASENAME_CHARS)
+            .collect();
+        Self {
+            reason,
+            basename: safe,
+        }
+    }
+}
+
+fn resembles_private_host(value: &str) -> bool {
+    const PRIVATE_SUFFIXES: [&str; 7] = [
+        ".internal",
+        ".corp",
+        ".intranet",
+        ".local",
+        ".lan",
+        ".private",
+        ".ies",
+    ];
+    let lower = value.to_ascii_lowercase();
+    PRIVATE_SUFFIXES.iter().any(|suffix| {
+        lower.ends_with(suffix)
+            || lower.contains(&format!("{suffix}."))
+            || lower.contains(&format!("{suffix}-"))
+    })
+}
+
 /// Which long operation is reporting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +234,12 @@ impl ProcessProgress {
 pub trait ProcessProgressObserver: Send + Sync {
     /// Receive one progress update.
     fn progress(&self, update: ProcessProgress);
+
+    /// Receive one typed raw-log omission/failure observation.
+    ///
+    /// The default keeps existing observers source-compatible. Implementations
+    /// must not derive evidence by parsing [`ProcessProgress::message`].
+    fn log_ingest_evidence(&self, _evidence: LogIngestEvidence) {}
 }
 
 /// No-op observer.
@@ -246,6 +336,35 @@ mod tests {
     fn basename_never_leaks_parent() {
         let p = std::path::Path::new("/Users/secret-user/incidents/app.log");
         assert_eq!(progress_basename(p), "app.log");
+    }
+
+    #[test]
+    fn ingest_evidence_basename_drops_ancestry_scrubs_secrets_and_bounds_names() {
+        let nested = LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::ParseFailed,
+            std::path::Path::new(
+                "/Users/private/outer.zip!/inner.zip!/Bearer secret-token-value.log",
+            ),
+        );
+        assert!(!nested.basename.contains("/Users/"));
+        assert!(!nested.basename.contains("outer.zip"));
+        assert!(!nested.basename.contains("inner.zip"));
+        assert!(!nested.basename.contains("secret-token-value"));
+
+        let private_host = LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::ReadFailed,
+            std::path::Path::new("customer.private.log"),
+        );
+        assert_eq!(private_host.basename, "[REDACTED_BASENAME]");
+
+        let long = LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::Empty,
+            std::path::Path::new(&format!("{}.log", "x".repeat(300))),
+        );
+        assert_eq!(
+            long.basename.chars().count(),
+            MAX_LOG_INGEST_EVIDENCE_BASENAME_CHARS
+        );
     }
 
     #[test]
