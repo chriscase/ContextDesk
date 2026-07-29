@@ -9209,8 +9209,10 @@ mod chat_session_host_tests {
 
     #[test]
     fn learned_tool_rejection_is_scoped_to_one_provider_model() {
-        let mut cfg = AppConfig::default();
-        cfg.providers = ProviderConfig::with_local_ollama();
+        let mut cfg = AppConfig {
+            providers: ProviderConfig::with_local_ollama(),
+            ..AppConfig::default()
+        };
         let profile = cfg.providers.active().expect("local profile").clone();
 
         assert!(model_tools_enabled(&cfg, &profile, "mistral:latest"));
