@@ -21,8 +21,129 @@ pub const FIXED_SEED: u64 = 52_620_260_725;
 pub const SMALL_PROFILE: &str = "small";
 pub const MEDIUM_PROFILE: &str = "medium";
 pub const LARGE_PROFILE: &str = "large";
+pub const TRIAGE_STRESS_PROFILE: &str = "triage-stress";
 pub const MEDIUM_EVENT_COUNT: usize = 100_000;
 pub const DEFAULT_LARGE_EVENT_COUNT: usize = 1_000_000;
+pub const DEFAULT_TRIAGE_STRESS_EVENT_COUNT: usize = 250_000;
+pub const MIN_TRIAGE_STRESS_EVENT_COUNT: usize = 10_000;
+pub const TRIAGE_STRESS_SOURCE_COUNT: usize = 12;
+pub const TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES: usize = 629;
+pub const TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES: usize = 21;
+pub const TRIAGE_STRESS_TEMPLATE_FAMILIES: usize =
+    TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES + TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES;
+pub const TRIAGE_STRESS_INCIDENT_REPETITIONS: usize = 16;
+pub const TRIAGE_STRESS_PARSER_TEMPLATE_COUNT: usize = 641;
+
+const TRIAGE_STRESS_SCENARIO_ID: &str = "triage-stress";
+const TRIAGE_STRESS_BASE_TS: i64 = 1_735_732_800;
+const TRIAGE_STRESS_EVENTS_PER_SECOND: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+struct TriageSource {
+    path: &'static str,
+    service: &'static str,
+    host: &'static str,
+    logfmt: bool,
+}
+
+const TRIAGE_STRESS_SOURCES: [TriageSource; TRIAGE_STRESS_SOURCE_COUNT] = [
+    TriageSource {
+        path: "edge/access.jsonl",
+        service: "edge",
+        host: "edge-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "api/checkout.jsonl",
+        service: "checkout-api",
+        host: "api-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "worker/checkout.log",
+        service: "checkout-worker",
+        host: "worker-01.example",
+        logfmt: true,
+    },
+    TriageSource {
+        path: "db/database.log",
+        service: "database",
+        host: "db-01.example",
+        logfmt: true,
+    },
+    TriageSource {
+        path: "queue/events.jsonl",
+        service: "checkout-queue",
+        host: "queue-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "audit/deploy.jsonl",
+        service: "deploy-audit",
+        host: "control-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "auth/verify.jsonl",
+        service: "auth-service",
+        host: "auth-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "gateway/proxy.jsonl",
+        service: "gateway",
+        host: "gateway-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "cache/redis.log",
+        service: "cache",
+        host: "cache-01.example",
+        logfmt: true,
+    },
+    TriageSource {
+        path: "billing/ledger.jsonl",
+        service: "billing",
+        host: "billing-01.example",
+        logfmt: false,
+    },
+    TriageSource {
+        path: "inventory/service.log",
+        service: "inventory",
+        host: "inventory-01.example",
+        logfmt: true,
+    },
+    TriageSource {
+        path: "scheduler/jobs.log",
+        service: "scheduler",
+        host: "scheduler-01.example",
+        logfmt: true,
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct TriageIncidentSpec {
+    incident_id: &'static str,
+    target_permyriad: usize,
+    source_index: usize,
+    level: &'static str,
+    role: &'static str,
+    family_key: &'static str,
+    trace_id: &'static str,
+    message: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct TriageIncidentEvent {
+    source_index: usize,
+    level: &'static str,
+    incident_id: &'static str,
+    role: &'static str,
+    family_key: &'static str,
+    trace_id: &'static str,
+    message: &'static str,
+    occurrence: usize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationSummary {
@@ -235,6 +356,688 @@ pub fn generate_scale(
     )?;
     verify_safety(root)?;
     summarize_generation(root, profile, event_count)
+}
+
+/// Generate a large, high-error corpus for deterministic broad-triage and
+/// de-noising evaluation. Output is intentionally generated on demand.
+pub fn generate_triage_stress(root: &Path, event_count: usize) -> LabResult<GenerationSummary> {
+    if event_count < MIN_TRIAGE_STRESS_EVENT_COUNT {
+        return Err(format!(
+            "triage-stress requires at least {MIN_TRIAGE_STRESS_EVENT_COUNT} events"
+        )
+        .into());
+    }
+    ensure_empty_generation_target(root)?;
+    fs::create_dir_all(root)?;
+    let scenario_root = root.join("scenarios").join(TRIAGE_STRESS_SCENARIO_ID);
+    let import_root = scenario_root.join("import");
+    let mut writers = Vec::with_capacity(TRIAGE_STRESS_SOURCE_COUNT);
+    for source in TRIAGE_STRESS_SOURCES {
+        let path = import_root.join(source.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        writers.push(fs::File::create(path)?);
+    }
+
+    let incident_plan = triage_incident_plan(event_count)?;
+    let mut severity_counts = BTreeMap::<String, u64>::new();
+    let mut source_counts = BTreeMap::<String, u64>::new();
+    let mut template_counts = BTreeMap::<String, u64>::new();
+    let mut incident_windows = BTreeMap::<String, (i64, i64)>::new();
+    for index in 0..event_count {
+        let ts = TRIAGE_STRESS_BASE_TS + (index / TRIAGE_STRESS_EVENTS_PER_SECOND) as i64;
+        let baseline_level = triage_level(index);
+        let (source_index, level, trace_id, family_key, message) =
+            if let Some(special) = incident_plan.get(&index) {
+                let message = format!(
+                    "event_id=triage-{index:09} incident_id={} role={} {} occurrence={}",
+                    special.incident_id, special.role, special.message, special.occurrence
+                );
+                let window = incident_windows
+                    .entry(special.incident_id.to_string())
+                    .or_insert((ts, ts));
+                window.0 = window.0.min(ts);
+                window.1 = window.1.max(ts);
+                (
+                    special.source_index,
+                    special.level,
+                    special.trace_id.to_string(),
+                    special.family_key.to_string(),
+                    message,
+                )
+            } else {
+                let family_key = triage_routine_family_key(index, baseline_level);
+                (
+                    index % TRIAGE_STRESS_SOURCE_COUNT,
+                    baseline_level,
+                    format!("trace-routine-{:06}", index % 10_000),
+                    family_key.clone(),
+                    triage_routine_message(index, baseline_level, &family_key),
+                )
+            };
+        debug_assert_eq!(
+            level, baseline_level,
+            "incident plan must preserve exact severity prevalence"
+        );
+        let source = TRIAGE_STRESS_SOURCES[source_index];
+        let line = if source.logfmt {
+            logfmt(ts, level, source.service, source.host, &trace_id, &message)
+        } else {
+            json_line(ts, level, source.service, source.host, &trace_id, &message)
+        };
+        writeln!(writers[source_index], "{line}")?;
+        *severity_counts.entry(level.to_string()).or_default() += 1;
+        *source_counts.entry(source.path.to_string()).or_default() += 1;
+        *template_counts.entry(family_key).or_default() += 1;
+    }
+    drop(writers);
+
+    if template_counts.len() != TRIAGE_STRESS_TEMPLATE_FAMILIES {
+        return Err(format!(
+            "triage-stress template plan drifted: expected {TRIAGE_STRESS_TEMPLATE_FAMILIES}, got {}",
+            template_counts.len()
+        )
+        .into());
+    }
+    let import_paths = collect_regular_files(&import_root)?;
+    let file_hashes = hashes_for_paths(&import_root, &import_paths)?;
+    let import_bytes = import_paths.iter().try_fold(0u64, |total, path| {
+        fs::metadata(path).map(|meta| total.saturating_add(meta.len()))
+    })?;
+    let from_ts = TRIAGE_STRESS_BASE_TS;
+    let to_ts = TRIAGE_STRESS_BASE_TS
+        + (event_count.saturating_sub(1) / TRIAGE_STRESS_EVENTS_PER_SECOND) as i64;
+    let noise_candidates = triage_noise_truth(&template_counts);
+    let incidents = triage_incident_truth(&incident_plan, &incident_windows);
+    let template_counts_sha256 = sha256_bytes(&serde_json::to_vec(&template_counts)?);
+
+    write_json(
+        &scenario_root.join("truth/manifest.json"),
+        &json!({
+            "schema_version": TRUTH_SCHEMA_VERSION,
+            "scenario_version": 1,
+            "scenario_id": TRIAGE_STRESS_SCENARIO_ID,
+            "generator_version": GENERATOR_VERSION,
+            "seed": FIXED_SEED,
+            "profile": TRIAGE_STRESS_PROFILE,
+            "provenance": "Entirely synthetic and generated on demand by the ContextDesk repository; no customer, employer, developer-machine, production, or third-party log material.",
+            "local_only": true,
+            "expected": {
+                "files": TRIAGE_STRESS_SOURCE_COUNT,
+                "events": event_count,
+                "bytes": import_bytes,
+                "source_count": TRIAGE_STRESS_SOURCE_COUNT,
+                "sources": source_counts,
+                "services": TRIAGE_STRESS_SOURCES.iter().map(|source| source.service).collect::<Vec<_>>(),
+                "hosts": TRIAGE_STRESS_SOURCES.iter().map(|source| source.host).collect::<Vec<_>>(),
+                "severities": severity_counts,
+                "time_quality": "wall",
+                "from_ts": from_ts,
+                "to_ts": to_ts,
+                "time_span_secs": to_ts - from_ts,
+                "generator_template_families": TRIAGE_STRESS_TEMPLATE_FAMILIES,
+                "routine_template_families": TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES,
+                "incident_template_families": TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES,
+                "incident_family_repetitions": TRIAGE_STRESS_INCIDENT_REPETITIONS,
+                "parser_templates_after_import": TRIAGE_STRESS_PARSER_TEMPLATE_COUNT,
+                "template_family_counts": template_counts,
+                "template_family_counts_sha256": template_counts_sha256,
+                "files_by_path": file_hashes
+            },
+            "investigation": {
+                "canonical_broad_prompt": "What problems do you see in these logs? Separate repetitive background failures from high-value incidents, identify the strongest evidence, and cite the source events you used.",
+                "incidents": incidents,
+                "safe_exact_noise_candidates": noise_candidates,
+                "unsafe_broad_suppression": [
+                    {
+                        "predicate": "level=error",
+                        "reason": "Hides every decisive ERROR event in all three incidents together with repetitive background failures."
+                    },
+                    {
+                        "predicate": "contains timeout",
+                        "reason": "Hides causal and symptomatic timeout evidence across unrelated incidents."
+                    }
+                ],
+                "denoising_contract": "Noise labels are evaluator-only. A product may propose exact-template suppression, but must keep it inspectable, reversible, count-visible, and scoped. It must never silently suppress by level or feed this truth into runtime chat context.",
+                "canonical_queries": [
+                    {"kind": "structured", "level": "error", "semantic": false, "purpose": "bounded first evidence pass"},
+                    {"kind": "literal", "text": "TRIAGE_SIGNAL_POOL_SATURATION"},
+                    {"kind": "literal", "text": "TRIAGE_SIGNAL_KEY_REJECT"},
+                    {"kind": "literal", "text": "TRIAGE_SIGNAL_CACHE_STAMPEDE"},
+                    {"kind": "trace", "text": "trace-pool-exhaustion"},
+                    {"kind": "trace", "text": "trace-key-rollout"},
+                    {"kind": "trace", "text": "trace-cache-stampede"}
+                ],
+                "rubric": {
+                    "required": [
+                        "distinguishes exact repetitive background families from incident evidence without suppress-all-ERROR",
+                        "identifies the database pool shrink and poison-job amplification chain",
+                        "identifies the incomplete signing-key rollout and region-specific rejection chain",
+                        "identifies the cache eviction and refresh-stampede chain",
+                        "cites stable event identities from at least three sources for each claimed incident",
+                        "uses bounded deterministic tools before synthesis",
+                        "states correlation and uncertainty honestly"
+                    ],
+                    "exact_prose_required": false
+                },
+                "evaluator_isolation": "Everything under truth/ is an answer key. Import only the sibling import/ directory and never attach this manifest to chat."
+            },
+            "performance_claim_policy": "Record build, machine, event count, bytes, elapsed time, CPU, and memory. One machine's result is not a universal threshold."
+        }),
+    )?;
+    verify_safety(root)?;
+    summarize_generation(root, TRIAGE_STRESS_PROFILE, event_count)
+}
+
+pub fn triage_stress_estimated_bytes(event_count: usize) -> u64 {
+    (event_count as u64)
+        .saturating_mul(360)
+        .saturating_add(128 * 1024)
+}
+
+pub fn load_triage_stress_manifest(root: &Path) -> LabResult<Value> {
+    let bytes = fs::read(
+        root.join("scenarios")
+            .join(TRIAGE_STRESS_SCENARIO_ID)
+            .join("truth/manifest.json"),
+    )?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn write_triage_stress_performance_template(
+    root: &Path,
+    summary: &GenerationSummary,
+) -> LabResult<PathBuf> {
+    let path = root.join("performance-record.template.json");
+    write_json(
+        &path,
+        &json!({
+            "schema_version": 1,
+            "generator_version": GENERATOR_VERSION,
+            "seed": FIXED_SEED,
+            "profile": TRIAGE_STRESS_PROFILE,
+            "scenario_id": TRIAGE_STRESS_SCENARIO_ID,
+            "machine": {
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "notes": "Fill CPU model and memory manually; do not record a private hostname."
+            },
+            "build": {
+                "mode": "record at measurement time (debug vs release)",
+                "git_sha": "fill after measurement"
+            },
+            "corpus": {
+                "events": summary.events,
+                "files": TRIAGE_STRESS_SOURCE_COUNT,
+                "tree_sha256": summary.tree_sha256,
+                "source_bytes_estimate": triage_stress_estimated_bytes(summary.events),
+                "template_families": TRIAGE_STRESS_TEMPLATE_FAMILIES
+            },
+            "measurements": {
+                "generation_ms": null,
+                "import_ms": null,
+                "source_bytes": null,
+                "corpus_bytes": null,
+                "first_page_ms": null,
+                "facets_ms": null,
+                "timeline_ms": null,
+                "cluster_problems_ms": null,
+                "broad_chat_ms": null,
+                "peak_rss_bytes": null,
+                "peak_cpu_percent": null
+            },
+            "policy": "These are one-machine observations. Never promote them to universal performance claims."
+        }),
+    )?;
+    Ok(path)
+}
+
+fn triage_level(index: usize) -> &'static str {
+    match index % 100 {
+        0..=17 => "error",
+        18..=32 => "warn",
+        33..=35 => "debug",
+        _ => "info",
+    }
+}
+
+fn triage_routine_family_key(index: usize, level: &str) -> String {
+    match level {
+        "error" => format!("noise-error-{}", index % 4),
+        "warn" => format!("noise-warn-{}", index % 4),
+        "debug" => "routine-debug-scheduler-scan".to_string(),
+        _ => {
+            let cycle = index / 100;
+            let position = index % 100;
+            let info_ordinal = cycle
+                .saturating_mul(64)
+                .saturating_add(position.saturating_sub(36));
+            format!("routine-info-{:03}", info_ordinal % 620)
+        }
+    }
+}
+
+fn triage_routine_message(index: usize, level: &str, family_key: &str) -> String {
+    let event_id = format!("event_id=triage-{index:09}");
+    let changing = index % 10_000;
+    match family_key {
+        "noise-error-0" => format!(
+            "{event_id} probe client closed before response route=/health monitor=synthetic-probe elapsed_ms={changing}"
+        ),
+        "noise-error-1" => format!(
+            "{event_id} callback endpoint returned gone tenant=test-fixture delivery={changing} policy=expire"
+        ),
+        "noise-error-2" => format!(
+            "{event_id} stale session replay rejected actor=synthetic-client nonce={changing} action=deny"
+        ),
+        "noise-error-3" => format!(
+            "{event_id} scheduler lease already held job=inventory-refresh holder=fixture-worker-{changing}"
+        ),
+        "noise-warn-0" => format!(
+            "{event_id} retry budget backoff scheduled operation=telemetry-export delay_ms={changing}"
+        ),
+        "noise-warn-1" => format!(
+            "{event_id} cache refresh overlap skipped key=fixture-catalog-{changing} owner=background"
+        ),
+        "noise-warn-2" => format!(
+            "{event_id} slow consumer recovered stream=synthetic-audit lag_ms={changing}"
+        ),
+        "noise-warn-3" => format!(
+            "{event_id} metrics batch delayed destination=local-sink age_ms={changing}"
+        ),
+        "routine-debug-scheduler-scan" => format!(
+            "{event_id} scheduler scan completed partitions=12 candidates={changing} action=none"
+        ),
+        _ if level == "info" => {
+            let family = family_key
+                .rsplit_once('-')
+                .and_then(|(_, value)| value.parse::<usize>().ok())
+                .unwrap_or_default();
+            let code = triage_alpha_code(family);
+            format!(
+                "{event_id} routine operation completed signature=s{code} fingerprint=f{code} monitor=m{code} route=r{code} policy=p{code} zone=z{code} check=c{code} duration_ms={changing}"
+            )
+        }
+        _ => format!("{event_id} routine event family={family_key} value={changing}"),
+    }
+}
+
+fn triage_alpha_code(mut value: usize) -> String {
+    let mut chars = ['a'; 3];
+    for slot in chars.iter_mut().rev() {
+        *slot = (b'a' + (value % 26) as u8) as char;
+        value /= 26;
+    }
+    chars.into_iter().collect()
+}
+
+fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES] {
+    [
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_000,
+            source_index: 5,
+            level: "warn",
+            role: "configuration-change",
+            family_key: "incident-pool-config-shrink",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_CONFIG deploy changed db_pool_max old=48 new=6 release=fixture-204",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_015,
+            source_index: 4,
+            level: "warn",
+            role: "retry-trigger",
+            family_key: "incident-pool-poison-retry",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_RETRY poison job retried job=fixture-job-7f3a delivery=4",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_030,
+            source_index: 2,
+            level: "error",
+            role: "amplifier",
+            family_key: "incident-pool-transaction-held",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_WORKER poison job retained transaction job=fixture-job-7f3a transaction_open=true",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_045,
+            source_index: 3,
+            level: "error",
+            role: "resource-exhaustion",
+            family_key: "incident-pool-saturation",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_SATURATION database pool exhausted active=6 max=6 waiters=87",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_060,
+            source_index: 1,
+            level: "error",
+            role: "service-failure",
+            family_key: "incident-pool-checkout-timeout",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_TIMEOUT checkout database acquisition timeout request=fixture-request-7f3a",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_075,
+            source_index: 0,
+            level: "error",
+            role: "edge-symptom",
+            family_key: "incident-pool-edge-504",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_EDGE gateway returned status=504 request=fixture-request-7f3a",
+        },
+        TriageIncidentSpec {
+            incident_id: "pool-exhaustion",
+            target_permyriad: 2_090,
+            source_index: 5,
+            level: "info",
+            role: "recovery",
+            family_key: "incident-pool-rollback",
+            trace_id: "trace-pool-exhaustion",
+            message: "TRIAGE_SIGNAL_POOL_RECOVERY rollback restored db_pool_max=48 release=fixture-203",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_200,
+            source_index: 5,
+            level: "warn",
+            role: "partial-rollout",
+            family_key: "incident-key-partial-rollout",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_ROLLOUT signing key fixture-key-v17 activated region=region-a pending=region-b",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_215,
+            source_index: 6,
+            level: "error",
+            role: "verification-failure",
+            family_key: "incident-key-unknown-key",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_REJECT verifier rejected unknown signing key key=fixture-key-v17 region=region-b",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_230,
+            source_index: 7,
+            level: "error",
+            role: "client-symptom",
+            family_key: "incident-key-gateway-401",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_GATEWAY gateway authentication spike status=401 region=region-b",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_245,
+            source_index: 6,
+            level: "error",
+            role: "stale-cache",
+            family_key: "incident-key-cache-stale",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_CACHE verifier key cache stale expected=fixture-key-v17 loaded=fixture-key-v16",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_260,
+            source_index: 1,
+            level: "error",
+            role: "checkout-impact",
+            family_key: "incident-key-checkout-denied",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_CHECKOUT checkout denied valid synthetic session status=401 region=region-b",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_275,
+            source_index: 5,
+            level: "info",
+            role: "rollout-complete",
+            family_key: "incident-key-rollout-complete",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_RECOVERY signing key rollout completed key=fixture-key-v17 regions=all",
+        },
+        TriageIncidentSpec {
+            incident_id: "key-rollout",
+            target_permyriad: 5_290,
+            source_index: 6,
+            level: "info",
+            role: "observed-recovery",
+            family_key: "incident-key-verify-recovery",
+            trace_id: "trace-key-rollout",
+            message: "TRIAGE_SIGNAL_KEY_VERIFY_RECOVERY verifier accepted key=fixture-key-v17 region=region-b",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_800,
+            source_index: 8,
+            level: "warn",
+            role: "eviction-pressure",
+            family_key: "incident-cache-eviction",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_EVICTION catalog cache evicted hot set reason=memory-pressure keys=6400",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_815,
+            source_index: 11,
+            level: "warn",
+            role: "refresh-contention",
+            family_key: "incident-cache-refresh-contention",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_REFRESH refresh lease contention workers=48 keyspace=catalog-hot",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_830,
+            source_index: 10,
+            level: "error",
+            role: "miss-storm",
+            family_key: "incident-cache-miss-storm",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_STAMPEDE inventory cache miss storm misses_per_second=9200",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_845,
+            source_index: 3,
+            level: "error",
+            role: "database-overload",
+            family_key: "incident-cache-database-overload",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_DATABASE read replicas overloaded active_queries=384 queue=211",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_860,
+            source_index: 1,
+            level: "error",
+            role: "service-timeout",
+            family_key: "incident-cache-api-timeout",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_TIMEOUT catalog request exceeded deadline duration_ms=8000",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_875,
+            source_index: 0,
+            level: "error",
+            role: "edge-symptom",
+            family_key: "incident-cache-edge-503",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_EDGE gateway returned status=503 route=/catalog",
+        },
+        TriageIncidentSpec {
+            incident_id: "cache-stampede",
+            target_permyriad: 7_890,
+            source_index: 8,
+            level: "info",
+            role: "recovery",
+            family_key: "incident-cache-warm-recovery",
+            trace_id: "trace-cache-stampede",
+            message: "TRIAGE_SIGNAL_CACHE_RECOVERY hot set warmed refresh_workers=4 status=stable",
+        },
+    ]
+}
+
+fn triage_incident_plan(event_count: usize) -> LabResult<BTreeMap<usize, TriageIncidentEvent>> {
+    let mut plan = BTreeMap::new();
+    let mut previous = 0usize;
+    for spec in triage_incident_specs() {
+        let target = event_count
+            .saturating_mul(spec.target_permyriad)
+            .checked_div(10_000)
+            .unwrap_or_default()
+            .max(previous);
+        let mut candidate = target;
+        for occurrence in 0..TRIAGE_STRESS_INCIDENT_REPETITIONS {
+            while candidate < event_count && triage_level(candidate) != spec.level {
+                candidate += 1;
+            }
+            if candidate >= event_count {
+                return Err(format!(
+                    "triage-stress event_count {event_count} is too small to place {}",
+                    spec.family_key
+                )
+                .into());
+            }
+            plan.insert(
+                candidate,
+                TriageIncidentEvent {
+                    source_index: spec.source_index,
+                    level: spec.level,
+                    incident_id: spec.incident_id,
+                    role: spec.role,
+                    family_key: spec.family_key,
+                    trace_id: spec.trace_id,
+                    message: spec.message,
+                    occurrence,
+                },
+            );
+            candidate += 1;
+        }
+        previous = candidate;
+    }
+    Ok(plan)
+}
+
+fn triage_noise_truth(template_counts: &BTreeMap<String, u64>) -> Vec<Value> {
+    [
+        (
+            "noise-error-0",
+            "error",
+            "probe client closed before response",
+            "Exact synthetic liveness-probe disconnect family.",
+        ),
+        (
+            "noise-error-1",
+            "error",
+            "callback endpoint returned gone",
+            "Exact expired test-fixture callback family.",
+        ),
+        (
+            "noise-error-2",
+            "error",
+            "stale session replay rejected",
+            "Exact synthetic replay-rejection family.",
+        ),
+        (
+            "noise-error-3",
+            "error",
+            "scheduler lease already held",
+            "Exact expected single-owner scheduler family.",
+        ),
+        (
+            "noise-warn-0",
+            "warn",
+            "retry budget backoff scheduled",
+            "Exact background telemetry retry family.",
+        ),
+        (
+            "noise-warn-1",
+            "warn",
+            "cache refresh overlap skipped",
+            "Exact expected background overlap family.",
+        ),
+    ]
+    .into_iter()
+    .map(|(family, level, stable_fragment, rationale)| {
+        json!({
+            "template_family": family,
+            "level": level,
+            "stable_message_fragment": stable_fragment,
+            "expected_count": template_counts.get(family).copied().unwrap_or_default(),
+            "rationale": rationale,
+            "scope": "This exact generated template family only; do not generalize by level, substring fragments shared with incident evidence, source, or service."
+        })
+    })
+    .collect()
+}
+
+fn triage_incident_truth(
+    plan: &BTreeMap<usize, TriageIncidentEvent>,
+    windows: &BTreeMap<String, (i64, i64)>,
+) -> Vec<Value> {
+    let specs = triage_incident_specs();
+    [
+        (
+            "pool-exhaustion",
+            "Database pool shrink plus poison-job retries retained transactions, exhausted the six-connection pool, and produced checkout timeouts and edge 504s until rollback.",
+            "Configuration change and poison-job amplification are primary; checkout timeout and edge 504 are downstream symptoms.",
+        ),
+        (
+            "key-rollout",
+            "A signing key was activated only in region-a while region-b retained the prior verifier cache, producing valid-session 401s until rollout completed.",
+            "Incomplete regional rollout and stale verifier state are primary; gateway and checkout 401s are symptoms.",
+        ),
+        (
+            "cache-stampede",
+            "Memory-pressure eviction of a hot catalog set plus excessive refresh workers caused a cache-miss stampede and overloaded database reads until the hot set was rewarmed with bounded workers.",
+            "Eviction and refresh contention are primary; database overload, API timeout, and edge 503 are downstream symptoms.",
+        ),
+    ]
+    .into_iter()
+    .map(|(incident_id, summary, causal_honesty)| {
+        let (from_ts, to_ts) = windows
+            .get(incident_id)
+            .copied()
+            .unwrap_or((TRIAGE_STRESS_BASE_TS, TRIAGE_STRESS_BASE_TS));
+        let roles = specs
+            .iter()
+            .filter(|spec| spec.incident_id == incident_id)
+            .map(|spec| {
+                let count = plan
+                    .values()
+                    .filter(|event| event.family_key == spec.family_key)
+                    .count();
+                json!({
+                    "role": spec.role,
+                    "template_family": spec.family_key,
+                    "level": spec.level,
+                    "source": TRIAGE_STRESS_SOURCES[spec.source_index].path,
+                    "trace_id": spec.trace_id,
+                    "stable_message_token": spec.message.split_whitespace().next().unwrap_or_default(),
+                    "expected_count": count
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "incident_id": incident_id,
+            "summary": summary,
+            "causal_honesty": causal_honesty,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "roles": roles
+        })
+    })
+    .collect()
 }
 
 pub(super) fn ensure_empty_generation_target(root: &Path) -> LabResult<()> {
@@ -1760,11 +2563,8 @@ fn scan_fixture_bytes(
     }
     if let Some(now) = current_epoch_seconds {
         let start = now.saturating_sub(300);
-        let contains_current_clock = (start..=now.saturating_add(300)).any(|timestamp| {
-            text.contains(&timestamp.to_string())
-                || text.contains(&timestamp.saturating_mul(1_000).to_string())
-        });
-        if contains_current_clock {
+        let end = now.saturating_add(300);
+        if contains_epoch_window(bytes, start, end) {
             failures.push(format!("{label}: contains a current-clock epoch timestamp"));
         }
     }
@@ -1816,6 +2616,35 @@ fn scan_fixture_bytes(
             failures.push(format!("{label}: unapproved Bearer credential shape"));
         }
     }
+}
+
+fn contains_epoch_window(bytes: &[u8], start_secs: u64, end_secs: u64) -> bool {
+    fn decimal(window: &[u8]) -> Option<u64> {
+        window.iter().try_fold(0u64, |value, byte| {
+            if byte.is_ascii_digit() {
+                Some(
+                    value
+                        .saturating_mul(10)
+                        .saturating_add(u64::from(*byte - b'0')),
+                )
+            } else {
+                None
+            }
+        })
+    }
+
+    let second_digits = start_secs.to_string().len();
+    let millis_start = start_secs.saturating_mul(1_000);
+    let millis_end = end_secs.saturating_mul(1_000);
+    let millis_digits = millis_start.to_string().len();
+    bytes
+        .windows(second_digits)
+        .any(|window| decimal(window).is_some_and(|value| (start_secs..=end_secs).contains(&value)))
+        || bytes.windows(millis_digits).any(|window| {
+            decimal(window).is_some_and(|value| {
+                value.is_multiple_of(1_000) && (millis_start..=millis_end).contains(&value)
+            })
+        })
 }
 
 fn domain_like_host(token: &str) -> Option<String> {

@@ -115,6 +115,72 @@ after choosing **Import logs…**, then select
 `fixtures/log-lab/archives/checkout-cascade.zip` in the file chooser. It
 contains 6 entries and imports the same 35 events as `checkout-cascade`.
 
+## Generate the 250,000-event broad-triage lab
+
+Use `triage-stress` when you need to evaluate large-corpus opening, a high
+ERROR/WARN prevalence, broad questions such as “What problems do you see?”, or
+future exact-template de-noising without exposing company data. The bulk logs
+are generated on demand and are never checked into Git.
+
+From the repository root, estimate disk use without writing files:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile triage-stress \
+  --estimate-only
+```
+
+Then generate the default profile:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --output target/contextdesk-demo-lab/triage-stress-250k \
+  --profile triage-stress \
+  --record-perf
+```
+
+In **Logs → Import logs…**, select only:
+
+`target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/import/`
+
+Expected default import:
+
+| Property | Exact expectation |
+| --- | --- |
+| Events | 250,000 |
+| Sources/services/hosts | 12 synthetic sources · 12 services · 12 `.example` hosts |
+| Source bytes | 63,906,065 |
+| Time | 2025-01-01 12:00:00Z–20:40:49Z · wall clock |
+| Levels | 160,000 INFO · 7,500 DEBUG · 37,500 WARN · 45,000 ERROR |
+| Template truth | 650 generator families · 641 production parser templates |
+
+The corpus contains three deterministic multi-source incident windows:
+
+- **Database pool exhaustion:** 13:44:12Z–13:48:53Z. A pool-size reduction and
+  poison-job retry loop precede saturation, checkout timeout, an edge 504, and
+  rollback recovery.
+- **Incomplete signing-key rollout:** 16:30:52Z–16:35:33Z. Region-b rejects a
+  newly activated key until verifier state and the rollout converge.
+- **Cache refresh stampede:** 18:46:17Z–18:50:58Z. Hot-set eviction and refresh
+  contention precede a miss storm, database pressure, API timeout, an edge
+  503, and bounded-worker recovery.
+
+Each incident role occurs exactly 16 times. Useful literal probes are
+`TRIAGE_SIGNAL_POOL_SATURATION`, `TRIAGE_SIGNAL_KEY_REJECT`, and
+`TRIAGE_SIGNAL_CACHE_STAMPEDE`; the corresponding trace probes are
+`trace-pool-exhaustion`, `trace-key-rollout`, and `trace-cache-stampede`.
+
+The many repetitive ERROR events are intentional. A sound investigation must
+not hide all ERROR events. The generated evaluator manifest defines six narrow,
+exact-template candidates and records their counts, but that `truth/` sibling
+must never be imported or attached to chat. Any de-noising behavior under test
+must remain visible, reversible, count-honest, and scoped to an exact family.
+
+Generation refuses to overwrite a nonempty directory. The `target/` output is
+ignored by Git, and the generated performance template is for one-machine
+measurements only. You may lower `--events` to 10,000 for a faster product-path
+smoke test; the 250,000-event default is the literal scale acceptance vector.
+
 ## Add the optional operational metrics
 
 Operational metrics are a separate, optional session input. If you do not load

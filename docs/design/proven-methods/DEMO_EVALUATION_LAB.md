@@ -51,6 +51,7 @@ Out of scope:
 | Pinned seven-day 25k corpus | **Shipped** | [fixture README](../../../fixtures/log-lab/README.md) and `pinned_seven_day_acceptance_corpus_matches_generator_and_truth` in [`log_lab_fixtures.rs`](../../../crates/cd-core/tests/log_lab_fixtures.rs) | None for pinned fixture identity |
 | Optional first-run 25k install | **Local integration** | #732 packages only the 25k `import/` tree and delegates to ordinary bounded ingest with a managed idempotency marker | Exact packaged/native proof remains before promotion |
 | Generated seven-day 100k corpus | **Shipped** | [`generate_log_lab.rs`](../../../crates/cd-core/examples/generate_log_lab.rs) and ignored product-path test in [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) | Output is generated locally, not checked in |
+| Generated error-heavy 250k triage corpus | **Local integration** | #745 `triage-stress` generator, exact truth contract, minimum product-path test, and ignored literal 250k proof | Bulk output stays local; live linked-chat quality remains provider/build-specific |
 | Optional aligned metric document | **Shipped** | [`operational-metrics.v1.json`](../../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json) and [metric-track design](../OPERATIONAL_METRIC_TRACKS.md) | Session-only; durable attachment and chat metric context are not shipped |
 | Exact Find, Filter, bookmark, and evidence workflow | **Partial** | [Log Explorer Help](../../help/log-analysis/log-explorer.md) and [investigation method](INVESTIGATION_LOOP.md) | Remaining packaged acceptance and proposal/report work are tracked by #656/#646/#532 |
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
@@ -128,12 +129,13 @@ All paths are relative to the repository root.
 | Compact incident | `fixtures/log-lab/scenarios/checkout-cascade/import/` | 35 events; 6 files; 6,247 source bytes; 16 INFO, 12 WARN, 7 ERROR; wall clock | `fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json` |
 | Pinned seven-day 25k | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/` | 25,000 events; 10 files; 4,201,281 source bytes; 23,984 INFO, 458 DEBUG, 394 WARN, 164 ERROR; exact seven-day wall span | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/truth/manifest.json` |
 | Generated seven-day 100k | `target/contextdesk-demo-lab/seven-day-100k/scenarios/behavior-scale/import/` after generation | Exactly 100,000 requested events; generated manifest/console output is authoritative for files, bytes, severities, and hash | `target/contextdesk-demo-lab/seven-day-100k/scenarios/behavior-scale/truth/manifest.json` |
+| Generated triage-stress 250k | `target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/import/` after generation | 250,000 events; 12 files; 63,906,065 source bytes; 160,000 INFO, 7,500 DEBUG, 37,500 WARN, 45,000 ERROR; 650 generator families → 641 parser templates; wall clock | `target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/truth/manifest.json` |
 | Operational metrics | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json` | 3 wall-clock series over the full seven-day span; CPU 673 points at 16–98%, heap 668 points at 316,800,000–952,000,000 bytes with one explicit collector gap, clients 673 points at 12–180 | Sibling `truth/metric-correlations.v1.json` |
 
-The 100k generator is checked in; its generated output is intentionally not.
-`target/` is ignored by Git, and the generator requires its output directory
-to be absent or empty. Never present a locally generated 100k hash as the
-identity of the pinned 25k fixture.
+The 100k and 250k generators are checked in; their generated outputs are
+intentionally not. `target/` is ignored by Git, and the generator requires its
+output directory to be absent or empty. Never present a locally generated hash
+as the identity of the pinned 25k fixture.
 
 ### Evaluation input
 
@@ -199,8 +201,9 @@ become one immutable run descriptor; output is a run id and preflight verdict.
 **Bounds and trust:** record caps without secrets. The host, not the model,
 decides source eligibility and provider capability.
 
-**Decision points:** dev versus packaged build; compact versus 25k versus 100k;
-no model versus local versus remote model; metrics absent versus session-loaded.
+**Decision points:** dev versus packaged build; compact versus 25k versus 100k
+versus error-heavy 250k; no model versus local versus remote model; metrics
+absent versus session-loaded.
 
 **Alternatives:** a CI job can create the descriptor, a desktop tester can fill
 it manually, or a server can sign it. The essential behavior is immutable
@@ -222,6 +225,24 @@ cargo run -p cd-core --example generate_log_lab -- \
   --record-perf
 ```
 
+Generate the error-heavy 250k corpus when the question is broad-triage
+behavior, high template cardinality, or safe exact-template de-noising:
+
+```sh
+cargo run -p cd-core --example generate_log_lab -- \
+  --profile triage-stress \
+  --estimate-only
+cargo run -p cd-core --example generate_log_lab -- \
+  --output target/contextdesk-demo-lab/triage-stress-250k \
+  --profile triage-stress \
+  --record-perf
+```
+
+The 250k vector deliberately keeps 45,000 ERROR and 37,500 WARN events while
+embedding three multi-source incident chains. Its evaluator truth identifies
+only exact repetitive families as suppression candidates. Runtime chat sees
+the imported logs, never those labels or expected conclusions.
+
 **Portable input/output:** versioned generator controls produce runtime input,
 separate evaluator truth, and an identity summary.
 
@@ -236,8 +257,10 @@ test pass.
 **Alternatives:** download a signed fixture artifact or generate inside a
 container. Verify version/hash before use.
 
-**Proof:** pinned fixtures use checked-in hashes and exact tests. Generated 100k
-uses that run's printed summary and generated truth manifest.
+**Proof:** pinned fixtures use checked-in hashes and exact tests. Generated
+100k and 250k runs use their printed summaries and generated truth manifests.
+The 250k profile has a fast 10k minimum product-path test plus an ignored
+literal 250k import/analysis proof so default offline tests remain practical.
 
 ### 6.3 Verify deterministic product behavior first
 
@@ -539,13 +562,13 @@ entire configured model list.
 
 | Layer | Happy path | Boundary/adversarial path | Evidence |
 | --- | --- | --- | --- |
-| Fixture contract | Compact and 25k identities match | Generator drift, private path, unsafe credential shape | `log_lab_compact_generation_is_frozen_deterministic_and_safe`; `pinned_seven_day_acceptance_corpus_matches_generator_and_truth` |
-| Core integration | Import/query/page/bookmark round trip | ZIP traversal, cancellation, redaction, mixed time, 100k bounds | [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) |
+| Fixture contract | Compact, 25k, and generated triage identities match | Generator drift, private path, unsafe credential shape, nonempty output | `log_lab_compact_generation_is_frozen_deterministic_and_safe`; `pinned_seven_day_acceptance_corpus_matches_generator_and_truth`; `log_lab_triage_stress_is_deterministic_safe_and_truthful` |
+| Core integration | Import/query/page/bookmark round trip | ZIP traversal, cancellation, redaction, mixed time, 100k/250k bounds | [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) |
 | Host/tool loop | Linked search returns structured identities | Tools disabled, wrong corpus, malformed args, printed fake tool call | [`agent.rs`](../../../crates/cd-core/src/agent.rs), [`research.rs`](../../../crates/cd-core/src/research.rs) tests |
 | Component/UI | Find/Filter, evidence, linked chat, metrics | Truth absence, stale references, Escape/focus, narrow layout | [`LogExplorer.test.tsx`](../../../desktop/src/components/logExplorer/LogExplorer.test.tsx) and focused component tests |
 | Handbook | Chapter listed, linkable, exportable | Undeclared page, path escape, active HTML | [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs) tests and [`check_design_handbook.mjs`](../../../scripts/check_design_handbook.mjs) |
 | Packaged/native | Import, reopen, investigate, tools-enabled run | Tools-disabled profile, restart, normal/wide/narrow, privacy review | Issue-specific native proof |
-| Scale/benchmark | 25k pinned and 100k generated | Deep Find, backward paging, cancellation, bounded regex | Ignored 100k product-path test plus machine-scoped record |
+| Scale/benchmark | 25k pinned, 100k generated, and error-heavy 250k generated | Deep Find, backward paging, cancellation, bounded regex, >512 templates, repetitive errors versus rare signal | Ignored 100k/250k product-path tests plus machine-scoped records |
 | Provider/model | Grounded answer with resolvable citations | Hallucinated ids, no tool result, timeout, persuasive unsupported prose | Versioned evaluation record and offline rubric |
 
 Deterministic vectors should include exact counts, malformed roots, missing
@@ -562,9 +585,11 @@ recorded evidence for that provider/build, not a deterministic unit-test oracle.
 - [`generate_log_lab.rs`](../../../crates/cd-core/examples/generate_log_lab.rs):
   deterministic generator CLI.
 - [`log_lab_fixtures.rs`](../../../crates/cd-core/tests/log_lab_fixtures.rs):
-  fixture determinism, safety, and pinned 25k equality.
+  fixture determinism, safety, pinned 25k equality, and generated
+  `triage-stress` truth.
 - [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs): production ingest,
-  query, paging, bookmark, package, redaction, cancellation, and 100k proof.
+  query, paging, bookmark, package, redaction, cancellation, and 100k/250k
+  proof.
 - [Deterministic context assembly](DETERMINISTIC_CONTEXT_ASSEMBLY.md): source
   eligibility, budgets, tool loop, isolation, and grounding.
 - [Log evidence pipeline](LOG_EVIDENCE_PIPELINE.md): parsing, time truth,
@@ -588,6 +613,7 @@ recorded evidence for that provider/build, not a deterministic unit-test oracle.
 | Synthetic compact/25k input | **Shipped** | Pinned, deterministic, manifest-backed fixtures | Live-model correctness |
 | Optional packaged 25k seed | **Local integration** | #732 maps only runtime input, reuses ordinary ingest, and preserves one managed identity | Exact packaged/native install proof before promotion |
 | Seven-day 100k | **Shipped** | Deterministic on-demand generator and bounded product-path test | Checked-in 100k tree or universal latency |
+| Error-heavy triage-stress 250k | **Local integration** | Deterministic local-only generator, exact noise/incident truth, 641 parser-template assertion, and literal ignored proof | Checked-in bulk tree, automatic suppression, or universal model quality |
 | Deterministic Explorer evaluation | **Partial** | Find, Filter, timeline, lanes, bookmarks, evidence, paging, and source identity have production paths | Every open owner/native acceptance item complete |
 | Operational metrics | **Partial** | Explicit bounded session import, aligned tracks, shared cursor/range | Durable attachment, metric chat context, incident-bundle import |
 | Ordinary/linked isolation | **Shipped** | Ordinary chat has no ambient corpus; linked answer requires evidence | Multi-corpus chat |

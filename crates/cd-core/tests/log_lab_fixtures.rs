@@ -3,9 +3,14 @@ mod log_lab_generator;
 
 use chrono::{DateTime, NaiveDateTime};
 use log_lab_generator::{
-    generate_behavior, generate_compact, generate_scale, load_behavior_manifest, tree_hashes,
-    verify_safety, write_performance_template, BehaviorControls, LARGE_PROFILE,
-    PAGING_STRESS_PROFILE, SEVEN_DAY_PROFILE, UI_MEDIUM_PROFILE,
+    generate_behavior, generate_compact, generate_scale, generate_triage_stress,
+    load_behavior_manifest, load_triage_stress_manifest, tree_hashes,
+    triage_stress_estimated_bytes, verify_safety, write_performance_template, BehaviorControls,
+    DEFAULT_TRIAGE_STRESS_EVENT_COUNT, LARGE_PROFILE, MIN_TRIAGE_STRESS_EVENT_COUNT,
+    PAGING_STRESS_PROFILE, SEVEN_DAY_PROFILE, TRIAGE_STRESS_INCIDENT_REPETITIONS,
+    TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES, TRIAGE_STRESS_PARSER_TEMPLATE_COUNT,
+    TRIAGE_STRESS_PROFILE, TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES, TRIAGE_STRESS_SOURCE_COUNT,
+    TRIAGE_STRESS_TEMPLATE_FAMILIES, UI_MEDIUM_PROFILE,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -525,6 +530,161 @@ fn log_lab_configurable_large_profile_is_deterministic_at_test_scale() {
         tree_hashes(&second_root).unwrap()
     );
     verify_safety(&first_root).unwrap();
+}
+
+#[test]
+fn log_lab_triage_stress_is_deterministic_safe_and_truthful() {
+    let events = MIN_TRIAGE_STRESS_EVENT_COUNT;
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let first_root = first.path().join("triage-stress");
+    let second_root = second.path().join("triage-stress");
+    let first_summary = generate_triage_stress(&first_root, events).unwrap();
+    let second_summary = generate_triage_stress(&second_root, events).unwrap();
+
+    assert_eq!(first_summary, second_summary);
+    assert_eq!(first_summary.profile, TRIAGE_STRESS_PROFILE);
+    assert_eq!(first_summary.events, events);
+    assert_eq!(first_summary.files, TRIAGE_STRESS_SOURCE_COUNT + 1);
+    assert_eq!(
+        tree_hashes(&first_root).unwrap(),
+        tree_hashes(&second_root).unwrap()
+    );
+    verify_safety(&first_root).unwrap();
+
+    let manifest = load_triage_stress_manifest(&first_root).unwrap();
+    assert_eq!(manifest["profile"], TRIAGE_STRESS_PROFILE);
+    assert_eq!(manifest["local_only"], true);
+    assert_eq!(manifest["expected"]["events"], events as u64);
+    assert_eq!(
+        manifest["expected"]["source_count"],
+        TRIAGE_STRESS_SOURCE_COUNT as u64
+    );
+    assert_eq!(
+        manifest["expected"]["generator_template_families"],
+        TRIAGE_STRESS_TEMPLATE_FAMILIES as u64
+    );
+    assert_eq!(
+        manifest["expected"]["routine_template_families"],
+        TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES as u64
+    );
+    assert_eq!(
+        manifest["expected"]["incident_template_families"],
+        TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES as u64
+    );
+    assert_eq!(
+        manifest["expected"]["incident_family_repetitions"],
+        TRIAGE_STRESS_INCIDENT_REPETITIONS as u64
+    );
+    assert_eq!(
+        manifest["expected"]["parser_templates_after_import"],
+        TRIAGE_STRESS_PARSER_TEMPLATE_COUNT as u64
+    );
+    assert_eq!(manifest["expected"]["time_quality"], "wall");
+    assert_eq!(manifest["expected"]["severities"]["error"], 1_800);
+    assert_eq!(manifest["expected"]["severities"]["warn"], 1_500);
+    assert_eq!(manifest["expected"]["severities"]["debug"], 300);
+    assert_eq!(manifest["expected"]["severities"]["info"], 6_400);
+    assert_eq!(
+        manifest["expected"]["severities"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_u64().unwrap())
+            .sum::<u64>(),
+        events as u64
+    );
+    assert_eq!(
+        manifest["expected"]["sources"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_u64().unwrap())
+            .sum::<u64>(),
+        events as u64
+    );
+    assert_eq!(
+        manifest["expected"]["template_family_counts"]
+            .as_object()
+            .unwrap()
+            .len(),
+        TRIAGE_STRESS_TEMPLATE_FAMILIES
+    );
+    assert!(manifest["expected"]["template_family_counts_sha256"]
+        .as_str()
+        .is_some_and(|hash| hash.len() == 64));
+    let incidents = manifest["investigation"]["incidents"].as_array().unwrap();
+    assert_eq!(incidents.len(), 3);
+    for incident in incidents {
+        assert!(incident["to_ts"].as_i64().unwrap() >= incident["from_ts"].as_i64().unwrap());
+        assert_eq!(incident["roles"].as_array().unwrap().len(), 7);
+        assert!(incident["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|role| role["expected_count"] == TRIAGE_STRESS_INCIDENT_REPETITIONS as u64));
+    }
+    let noise = manifest["investigation"]["safe_exact_noise_candidates"]
+        .as_array()
+        .unwrap();
+    assert_eq!(noise.len(), 6);
+    assert!(noise.iter().all(|candidate| {
+        candidate["expected_count"].as_u64().unwrap() > 0
+            && candidate["scope"]
+                .as_str()
+                .is_some_and(|scope| scope.contains("exact generated template"))
+    }));
+    assert!(manifest["investigation"]["denoising_contract"]
+        .as_str()
+        .unwrap()
+        .contains("reversible"));
+    assert!(manifest["investigation"]["evaluator_isolation"]
+        .as_str()
+        .unwrap()
+        .contains("Import only"));
+
+    let import_root = first_root.join("scenarios/triage-stress/import");
+    let paths = walkdir_files(&import_root);
+    assert_eq!(paths.len(), TRIAGE_STRESS_SOURCE_COUNT);
+    assert!(paths.iter().all(|path| {
+        !path
+            .components()
+            .any(|component| component.as_os_str() == "truth")
+            && path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
+    }));
+    assert!(triage_stress_estimated_bytes(DEFAULT_TRIAGE_STRESS_EVENT_COUNT) > 80 * 1024 * 1024);
+
+    eprintln!(
+        "PASS triage-stress-test events={} sources={} template_families={} bytes={} tree_sha256={}",
+        events,
+        TRIAGE_STRESS_SOURCE_COUNT,
+        TRIAGE_STRESS_TEMPLATE_FAMILIES,
+        first_summary.bytes,
+        first_summary.tree_sha256
+    );
+}
+
+#[test]
+fn log_lab_triage_stress_rejects_undersized_and_nonempty_targets() {
+    let undersized = tempfile::tempdir().unwrap();
+    let diagnostic = generate_triage_stress(
+        &undersized.path().join("triage"),
+        MIN_TRIAGE_STRESS_EVENT_COUNT - 1,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(diagnostic.contains("requires at least"), "{diagnostic}");
+
+    let nonempty = tempfile::tempdir().unwrap();
+    fs::write(nonempty.path().join("keep.txt"), "user-owned").unwrap();
+    let diagnostic = generate_triage_stress(nonempty.path(), MIN_TRIAGE_STRESS_EVENT_COUNT)
+        .unwrap_err()
+        .to_string();
+    assert!(diagnostic.contains("absent or empty"), "{diagnostic}");
+    assert_eq!(
+        fs::read_to_string(nonempty.path().join("keep.txt")).unwrap(),
+        "user-owned"
+    );
 }
 
 #[test]
