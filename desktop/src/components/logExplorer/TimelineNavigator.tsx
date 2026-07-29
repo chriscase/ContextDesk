@@ -618,6 +618,7 @@ export function TimelineNavigator({
           style={{ maxHeight: "min(44vh, 30rem)", overflowY: "auto" }}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
+            if (event.target instanceof HTMLSelectElement) return;
             event.preventDefault();
             if (detailIndex != null || cursorReadingsVisible) {
               clearDetail();

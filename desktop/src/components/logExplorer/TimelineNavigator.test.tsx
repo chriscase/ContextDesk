@@ -590,10 +590,16 @@ describe("TimelineNavigator", () => {
       target: { files: [metricFile(sessionMetrics)] },
     });
     await screen.findByTestId("timeline-session-metrics");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Metric track size" }),
-      { target: { value: "detailed" } },
-    );
+    const trackSize = screen.getByRole("combobox", {
+      name: "Metric track size",
+    });
+    fireEvent.change(trackSize, { target: { value: "detailed" } });
+    fireEvent.keyDown(trackSize, { key: "Escape" });
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
 
     const body = document.getElementById("log-explorer-timeline-navigator");
     expect(body).toBeTruthy();
