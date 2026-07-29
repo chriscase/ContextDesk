@@ -2,6 +2,7 @@
  * Pipeline-style progress for long import/ingest (#445).
  */
 
+import { useEffect, useState } from "react";
 import {
   LOG_INGEST_PIPELINE,
   SESSION_IMPORT_PIPELINE,
@@ -17,7 +18,7 @@ type Props = {
   error?: string | null;
   className?: string;
   /** SoftWrite cancel (#498). */
-  onCancel?: () => void;
+  onCancel?: () => void | Promise<unknown>;
   /** Operation-specific accessible cancel label. */
   cancelLabel?: string;
 };
@@ -30,6 +31,7 @@ export function ProcessProgressPanel({
   onCancel,
   cancelLabel = "Cancel ingest",
 }: Props) {
+  const [cancelRequested, setCancelRequested] = useState(false);
   const k = kind ?? progress?.kind ?? "log_ingest";
   const pipeline: ProcessProgressPhase[] =
     k === "session_context_import"
@@ -50,6 +52,20 @@ export function ProcessProgressPanel({
   const terminal =
     active === "completed" || active === "failed" || active === "cancelled";
 
+  useEffect(() => {
+    setCancelRequested(false);
+  }, [active, progress?.cancellable]);
+
+  const requestCancel = async () => {
+    if (cancelRequested || !progress?.cancellable) return;
+    setCancelRequested(true);
+    try {
+      await onCancel?.();
+    } catch {
+      setCancelRequested(false);
+    }
+  };
+
   return (
     <div
       className={["process-progress", className].filter(Boolean).join(" ")}
@@ -63,7 +79,8 @@ export function ProcessProgressPanel({
             terminal && active === "completed"
               ? true
               : activeIdx >= 0 && i < activeIdx;
-          const current = phase === active || (activeIdx < 0 && i === 0 && !terminal);
+          const current =
+            phase === active || (activeIdx < 0 && i === 0 && !terminal);
           return (
             <li
               key={phase}
@@ -74,7 +91,9 @@ export function ProcessProgressPanel({
               <span className="process-progress__dot" aria-hidden>
                 {done ? "✓" : i + 1}
               </span>
-              <span className="process-progress__label">{phaseLabel(phase)}</span>
+              <span className="process-progress__label">
+                {phaseLabel(phase)}
+              </span>
             </li>
           );
         })}
@@ -85,7 +104,9 @@ export function ProcessProgressPanel({
           className="process-progress__bar-fill"
           style={{ width: `${Math.round(frac * 100)}%` }}
           data-indeterminate={
-            progress && progress.fraction == null && !terminal ? "true" : "false"
+            progress && progress.fraction == null && !terminal
+              ? "true"
+              : "false"
           }
         />
       </div>
@@ -93,8 +114,7 @@ export function ProcessProgressPanel({
       <p className="process-progress__message">
         {error
           ? error
-          : progress?.message ??
-            (terminal ? phaseLabel(active) : "Working…")}
+          : (progress?.message ?? (terminal ? phaseLabel(active) : "Working…"))}
       </p>
 
       {progress ? (
@@ -126,14 +146,15 @@ export function ProcessProgressPanel({
         </dl>
       ) : null}
 
-      {onCancel && !terminal && !error ? (
+      {onCancel && progress?.cancellable && !terminal && !error ? (
         <button
           type="button"
           className="btn btn--ghost"
           data-testid="cancel-log-ingest"
-          onClick={() => onCancel()}
+          disabled={cancelRequested}
+          onClick={() => void requestCancel()}
         >
-          {cancelLabel}
+          {cancelRequested ? "Cancel requested…" : cancelLabel}
         </button>
       ) : null}
     </div>

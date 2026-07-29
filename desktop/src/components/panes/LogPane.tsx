@@ -679,7 +679,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                   const cancel = reanalyzing
                     ? hostCancelLogReanalysis
                     : hostCancelLogIngest;
-                  void cancel().then((ok) => {
+                  return cancel().then((ok) => {
                     if (ok) setNote("Cancel requested…");
                   });
                 }

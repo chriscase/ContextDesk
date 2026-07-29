@@ -27,11 +27,12 @@ const hostMocks = vi.hoisted(() => ({
   getBranding: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
+  listenProgress: vi.fn(),
 }));
 
 vi.mock("../../lib/host", () => ({
   hostListLogCorpora: hostMocks.listCorpora,
-  hostListenProcessProgress: vi.fn(async () => () => {}),
+  hostListenProcessProgress: hostMocks.listenProgress,
   hostCancelLogIngest: vi.fn(async () => true),
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
   hostDiscardLogCorpus: hostMocks.discard,
@@ -91,6 +92,7 @@ describe("LogPane", () => {
     hostMocks.clusterProblems.mockResolvedValue([]);
     hostMocks.search.mockResolvedValue([]);
     hostMocks.timeline.mockResolvedValue([]);
+    hostMocks.listenProgress.mockResolvedValue(() => {});
     hostMocks.setActiveCorpus.mockResolvedValue(null);
     hostMocks.reanalyze.mockResolvedValue({
       state: "complete",
@@ -744,6 +746,23 @@ describe("LogPane", () => {
     const reanalyze = screen.getByTestId("reanalyze-log-corpus");
     await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(false));
     fireEvent.click(reanalyze);
+    await waitFor(() =>
+      expect(hostMocks.listenProgress).toHaveBeenCalledTimes(1),
+    );
+    const publishProgress = hostMocks.listenProgress.mock.calls[0]?.[0];
+    act(() => {
+      publishProgress({
+        kind: "log_ingest",
+        phase: "embed",
+        message: "Embedding templates",
+        fraction: 0.8,
+        lines_processed: 2,
+        files_processed: 1,
+        bytes_processed: 128,
+        templates: 1,
+        cancellable: true,
+      });
+    });
     const cancel = await screen.findByRole("button", {
       name: "Cancel re-analysis",
     });
