@@ -3716,6 +3716,61 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
   });
 
+  it("exposes sources beyond the old forty-item cutoff and makes all-sources membership explicit", async () => {
+    const sourcePaths = Array.from(
+      { length: 55 },
+      (_, index) => `region-${String(index).padStart(2, "0")}/service.log`,
+    );
+    vi.mocked(host.hostLogFacets).mockResolvedValue({
+      sources: Object.fromEntries(sourcePaths.map((source) => [source, 1])),
+      levels: { info: sourcePaths.length },
+      services: {},
+      hosts: {},
+      timeQuality: "wall",
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    const editor = await screen.findByTestId("lane-editor");
+    const lane = editor.querySelector(
+      ".log-explorer__lane-editor-row",
+    ) as HTMLElement;
+
+    expect(within(lane).getAllByRole("checkbox")).toHaveLength(55);
+    expect(
+      within(lane)
+        .getByRole("button", { name: "All sources active" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    const sourceSearch = within(editor).getByRole("searchbox", {
+      name: "Find source",
+    });
+    fireEvent.change(sourceSearch, { target: { value: "region-54/" } });
+    expect(within(lane).getAllByRole("checkbox")).toHaveLength(1);
+
+    fireEvent.click(
+      within(lane).getByRole("checkbox", {
+        name: "region-54/service.log",
+      }),
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+
+    fireEvent.click(
+      within(lane).getByRole("button", { name: "Use all sources" }),
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "All sources",
+    );
+    expect(
+      within(lane)
+        .getByRole("button", { name: "All sources active" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
   it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {

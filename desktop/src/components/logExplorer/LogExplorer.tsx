@@ -697,6 +697,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
   const [laneSourceCatalogUnavailable, setLaneSourceCatalogUnavailable] =
     useState(false);
+  const [laneSourceQuery, setLaneSourceQuery] = useState("");
   const [timeQuality, setTimeQuality] = useState<TimeQuality>("order_only");
   const [totalMatched, setTotalMatched] = useState(0);
   /** Unfiltered corpus event total for truthful count labeling (#534). */
@@ -1016,8 +1017,16 @@ export function LogExplorer({ corpusId }: Props) {
       ].sort(),
     [facets, laneSourceCatalog, lanes],
   );
+  const visibleLaneEditorSources = useMemo(() => {
+    const query = laneSourceQuery.trim().toLocaleLowerCase();
+    if (!query) return laneEditorSources;
+    return laneEditorSources.filter((source) =>
+      source.toLocaleLowerCase().includes(query),
+    );
+  }, [laneEditorSources, laneSourceQuery]);
   const closeLaneEditor = useCallback(() => {
     setLaneEditorOpen(false);
+    setLaneSourceQuery("");
     // Return focus after the activating or dismissal click has completed.
     window.setTimeout(() => laneEditorToggleRef.current?.focus(), 0);
   }, []);
@@ -3480,6 +3489,18 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
+  const selectAllLaneSources = (laneId: string) => {
+    setLanes((prev) => {
+      const next = prev.map((lane) =>
+        lane.id === laneId
+          ? { ...lane, label: "All sources", sources: [] }
+          : lane,
+      );
+      saveLanes(corpusId, next);
+      return next;
+    });
+  };
+
   const setTimeLinkMode = (mode: TimeLinkMode) => {
     if (mode === "align_time") setAlignedScrollTop(0);
     setLinkMode(mode);
@@ -4112,6 +4133,9 @@ export function LogExplorer({ corpusId }: Props) {
               </div>
               <div className="log-explorer__lane-editor-summary">
                 {laneCount} visible lane{laneCount === 1 ? "" : "s"} ·{" "}
+                {laneSourceQuery
+                  ? `${visibleLaneEditorSources.length} of `
+                  : ""}
                 {laneEditorSources.length} available source
                 {laneEditorSources.length === 1 ? "" : "s"}
               </div>
@@ -4140,9 +4164,19 @@ export function LogExplorer({ corpusId }: Props) {
             }}
           >
             <p className="log-explorer__lane-editor-help">
-              Empty membership means all sources. A source can belong to more
-              than one lane.
+              Choose specific source paths or use the explicit All sources
+              control. A source can belong to more than one lane.
             </p>
+            <label className="log-explorer__lane-source-search">
+              <span>Find source</span>
+              <input
+                className="log-explorer__input"
+                type="search"
+                value={laneSourceQuery}
+                placeholder="Filter source paths…"
+                onChange={(event) => setLaneSourceQuery(event.target.value)}
+              />
+            </label>
             {laneSourceCatalogUnavailable && (
               <p className="log-explorer__lane-editor-help" role="status">
                 Full source catalog unavailable; showing known lane and filter
@@ -4156,8 +4190,23 @@ export function LogExplorer({ corpusId }: Props) {
                 aria-label={`${lane.label} source membership`}
               >
                 <legend>{lane.label}</legend>
+                <button
+                  type="button"
+                  className={`log-explorer__btn ${
+                    lane.sources.length === 0
+                      ? "log-explorer__btn--active"
+                      : ""
+                  }`}
+                  aria-pressed={lane.sources.length === 0}
+                  disabled={lane.sources.length === 0}
+                  onClick={() => selectAllLaneSources(lane.id)}
+                >
+                  {lane.sources.length === 0
+                    ? "All sources active"
+                    : "Use all sources"}
+                </button>
                 <div className="log-explorer__facet">
-                  {laneEditorSources.slice(0, 40).map((src) => (
+                  {visibleLaneEditorSources.map((src) => (
                     <label key={src} className="log-explorer__facet-row">
                       <input
                         type="checkbox"
@@ -4167,6 +4216,11 @@ export function LogExplorer({ corpusId }: Props) {
                       <span title={src}>{src}</span>
                     </label>
                   ))}
+                  {visibleLaneEditorSources.length === 0 && (
+                    <p className="log-explorer__lane-editor-help" role="status">
+                      No source paths match this filter.
+                    </p>
+                  )}
                 </div>
                 <div
                   className="log-explorer__chat-preview"
