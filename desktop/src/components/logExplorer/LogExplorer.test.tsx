@@ -3907,6 +3907,21 @@ describe("LogExplorer shell", () => {
         .getByRole("button", { name: "All sources active" })
         .getAttribute("aria-pressed"),
     ).toBe("true");
+    fireEvent.click(
+      within(lane).getByRole("button", {
+        name: "Restore 1 selected source",
+      }),
+    );
+    expect(
+      (
+        within(lane).getByRole("checkbox", {
+          name: "region-54/service.log",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
   });
 
   it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {

@@ -93,9 +93,11 @@ import {
   defaultLanes,
   loadLanes,
   loadLinkMode,
+  restoreSpecificLaneSources,
   resizeLaneList,
   saveLanes,
   saveLinkMode,
+  selectAllLaneSources as selectAllSourcesForLane,
   toggleLaneSource,
   type TimeLinkMode,
 } from "../../lib/logExplorer/laneCompose";
@@ -3629,12 +3631,20 @@ export function LogExplorer({ corpusId }: Props) {
     });
   };
 
-  const selectAllLaneSources = (laneId: string) => {
+  const activateAllLaneSources = (laneId: string) => {
     setLanes((prev) => {
       const next = prev.map((lane) =>
-        lane.id === laneId
-          ? { ...lane, label: "All sources", sources: [] }
-          : lane,
+        lane.id === laneId ? selectAllSourcesForLane(lane) : lane,
+      );
+      saveLanes(corpusId, next);
+      return next;
+    });
+  };
+
+  const restoreLaneSpecificSources = (laneId: string) => {
+    setLanes((prev) => {
+      const next = prev.map((lane) =>
+        lane.id === laneId ? restoreSpecificLaneSources(lane) : lane,
       );
       saveLanes(corpusId, next);
       return next;
@@ -4348,12 +4358,23 @@ export function LogExplorer({ corpusId }: Props) {
                   }`}
                   aria-pressed={lane.sources.length === 0}
                   disabled={lane.sources.length === 0}
-                  onClick={() => selectAllLaneSources(lane.id)}
+                  onClick={() => activateAllLaneSources(lane.id)}
                 >
                   {lane.sources.length === 0
                     ? "All sources active"
                     : "Use all sources"}
                 </button>
+                {lane.sources.length === 0 &&
+                (lane.rememberedSources?.length ?? 0) > 0 ? (
+                  <button
+                    type="button"
+                    className="log-explorer__btn"
+                    onClick={() => restoreLaneSpecificSources(lane.id)}
+                  >
+                    Restore {lane.rememberedSources!.length} selected source
+                    {lane.rememberedSources!.length === 1 ? "" : "s"}
+                  </button>
+                ) : null}
                 <div className="log-explorer__facet">
                   {visibleLaneEditorSources.map((src) => (
                     <label key={src} className="log-explorer__facet-row">
