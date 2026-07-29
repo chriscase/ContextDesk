@@ -22,8 +22,8 @@ flowchart LR
   P --> V["Preview all track values"]
   P -->|"pointer release"| S["One bounded seek request"]
   S --> L["Nearby logs"]
-  P --> B["Brush a time range"]
-  B --> Z["Zoom all tracks + log histogram"]
+  P --> BR["Brush a time range"]
+  BR --> Z["Zoom all tracks + log histogram"]
   Z --> R["Reset to full range"]
 ```
 
@@ -114,7 +114,11 @@ domain; each zoom reissues the existing fixed-bucket backend summary rather than
 loading all matching log events. At every track size, the Timeline body is
 bounded to 44% of the viewport (and at most 30rem) and scrolls internally when
 its contents exceed that share, so a larger metric presentation never makes
-the log workspace unreachable.
+the log workspace unreachable. The bounded region is keyboard-focusable and
+named for assistive technology, so wheel, trackpad, Page Up, and Page Down
+navigation do not depend on an individual SVG plot receiving focus. A brush
+gesture suppresses native WebView text/SVG selection; only the shared,
+explicitly outlined time range may appear selected.
 
 ### 1. Separately imported metric bundle
 
