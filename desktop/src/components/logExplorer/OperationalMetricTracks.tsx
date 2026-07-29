@@ -203,10 +203,10 @@ type MetricTrackProps = {
   selection: OperationalMetricRange | null;
   maxRenderedPoints: number;
   showReading: boolean;
-  onReadingVisibilityChange: (visible: boolean) => void;
+  onInteractionChange: (key: string, active: boolean) => void;
   onPointerTimestamp: (
     timestamp: number,
-    phase: "start" | "move" | "end",
+    phase: "start" | "move" | "end" | "cancel",
   ) => void;
   onKeyboardTimestamp: (timestamp: number, extendRange: boolean) => void;
   onKeyboardCommit: () => void;
@@ -219,7 +219,7 @@ function MetricTrack({
   selection,
   maxRenderedPoints,
   showReading,
-  onReadingVisibilityChange,
+  onInteractionChange,
   onPointerTimestamp,
   onKeyboardTimestamp,
   onKeyboardCommit,
@@ -254,17 +254,8 @@ function MetricTrack({
   const cursorX = scaleTimestamp(cursor, bounds);
   const cursorY = cursorInGap ? 50 : scaleValue(currentPoint.value, domain);
   const gaps = series.gaps ?? [];
-  const pointerInside = useRef(false);
-  const keyboardFocused = useRef(false);
-  const pointerDragging = useRef(false);
-
-  const publishReadingVisibility = () => {
-    onReadingVisibilityChange(
-      pointerInside.current ||
-        keyboardFocused.current ||
-        pointerDragging.current,
-    );
-  };
+  const interactionKey = (kind: "pointer" | "focus" | "drag") =>
+    `${series.id}:${kind}`;
 
   const timestampFromPointer = (
     event: PointerEvent<HTMLDivElement>,
@@ -276,8 +267,9 @@ function MetricTrack({
   };
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    pointerDragging.current = true;
-    publishReadingVisibility();
+    // A brush gesture is chart input, never WebView text/SVG selection.
+    event.preventDefault();
+    onInteractionChange(interactionKey("drag"), true);
     event.currentTarget.setPointerCapture?.(event.pointerId);
     onPointerTimestamp(timestampFromPointer(event), "start");
   };
@@ -289,13 +281,12 @@ function MetricTrack({
   const onPointerUp = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     onPointerTimestamp(timestampFromPointer(event), "end");
-    pointerDragging.current = false;
-    publishReadingVisibility();
+    onInteractionChange(interactionKey("drag"), false);
   };
 
   const onPointerCancel = () => {
-    pointerDragging.current = false;
-    publishReadingVisibility();
+    onPointerTimestamp(cursor, "cancel");
+    onInteractionChange(interactionKey("drag"), false);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -355,24 +346,20 @@ function MetricTrack({
           } as CSSProperties
         }
         onPointerEnter={() => {
-          pointerInside.current = true;
-          publishReadingVisibility();
+          onInteractionChange(interactionKey("pointer"), true);
         }}
         onPointerLeave={() => {
-          pointerInside.current = false;
-          publishReadingVisibility();
+          onInteractionChange(interactionKey("pointer"), false);
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel}
         onFocus={() => {
-          keyboardFocused.current = true;
-          publishReadingVisibility();
+          onInteractionChange(interactionKey("focus"), true);
         }}
         onBlur={() => {
-          keyboardFocused.current = false;
-          publishReadingVisibility();
+          onInteractionChange(interactionKey("focus"), false);
         }}
         onKeyDown={onKeyDown}
       >
@@ -426,6 +413,7 @@ function MetricTrack({
                 scaleTimestamp(selection.from, bounds)
               }
               height={VIEWBOX_SIZE}
+              vectorEffect="non-scaling-stroke"
             />
           ) : null}
           {(series.thresholds ?? []).map((threshold) => (
@@ -566,6 +554,7 @@ export function OperationalMetricTracks({
   const [internalCursor, setInternalCursor] = useState(bounds.from);
   const [internalCursorReadingsVisible, setInternalCursorReadingsVisible] =
     useState(false);
+  const activeInteractions = useRef(new Set<string>());
   const [internalSelection, setInternalSelection] =
     useState<OperationalMetricRange | null>(null);
   const selectionStart = useRef<number | null>(null);
@@ -582,7 +571,12 @@ export function OperationalMetricTracks({
   const showCursorReadings =
     cursorReadingsVisible ?? internalCursorReadingsVisible;
 
-  const updateCursorReadingsVisible = (visible: boolean) => {
+  const updateInteraction = (key: string, active: boolean) => {
+    const next = new Set(activeInteractions.current);
+    if (active) next.add(key);
+    else next.delete(key);
+    activeInteractions.current = next;
+    const visible = next.size > 0;
     setInternalCursorReadingsVisible(visible);
     onCursorReadingsVisibleChange?.(visible);
   };
@@ -601,8 +595,13 @@ export function OperationalMetricTracks({
 
   const onPointerTimestamp = (
     timestamp: number,
-    phase: "start" | "move" | "end",
+    phase: "start" | "move" | "end" | "cancel",
   ) => {
+    if (phase === "cancel") {
+      selectionStart.current = null;
+      updateSelection(null);
+      return;
+    }
     if (phase === "end" && selectionStart.current == null) return;
     updateCursor(timestamp);
     if (phase === "start") {
@@ -674,7 +673,7 @@ export function OperationalMetricTracks({
             selection={selection}
             maxRenderedPoints={maxRenderedPointsPerTrack}
             showReading={showCursorReadings}
-            onReadingVisibilityChange={updateCursorReadingsVisible}
+            onInteractionChange={updateInteraction}
             onPointerTimestamp={onPointerTimestamp}
             onKeyboardTimestamp={onKeyboardTimestamp}
             onKeyboardCommit={onKeyboardCommit}

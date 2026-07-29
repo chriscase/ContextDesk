@@ -1,6 +1,7 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 mod handbook;
+mod log_diagnostics;
 
 use cd_core::branding::Branding;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
@@ -4950,6 +4951,12 @@ fn export_log_corpus_package(
     Ok(man.format_version)
 }
 
+/// Write one bounded, redacted diagnostic to a path chosen by the native dialog.
+#[tauri::command]
+fn save_log_diagnostic_report(path: String, format: String, content: String) -> Result<(), String> {
+    log_diagnostics::save_log_diagnostic_report(std::path::Path::new(&path), &format, &content)
+}
+
 /// Import a portable package zip (SoftWrite — creates disposable corpus).
 #[tauri::command]
 fn import_log_corpus_package_path(
@@ -7048,6 +7055,7 @@ pub fn run() {
             set_chat_linked_corpus,
             open_log_explorer,
             export_log_corpus_package,
+            save_log_diagnostic_report,
             import_log_corpus_package_path,
             write_memory_note,
             sql_ro_query,

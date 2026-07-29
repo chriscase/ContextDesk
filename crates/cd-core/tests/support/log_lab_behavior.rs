@@ -30,10 +30,14 @@ pub const PAGING_STRESS_DEFAULT_EVENTS: usize = 12_000;
 pub const BEHAVIOR_SCENARIO_ID: &str = "behavior-scale";
 pub const BEHAVIOR_SCENARIO_VERSION: u32 = 2;
 
-const BASE_TS: i64 = 1_735_732_800; // 2025-01-01T00:00:00Z fixed lab epoch
+const BASE_TS: i64 = 1_735_732_800; // 2025-01-01T12:00:00Z fixed lab epoch
 const DAY_SECS: i64 = 86_400;
 const BURST_EVENT_COUNT: usize = 40;
 const SOURCE_SKEW_SECS: i64 = 90;
+const LOAD_TEST_STEP_SECS: i64 = 15 * 60;
+const LOAD_TEST_OVERLOAD_START_SECS: i64 = 97 * 60 * 60;
+const LOAD_TEST_OVERLOAD_END_SECS: i64 = 104 * 60 * 60;
+const LOAD_TEST_MAJOR_GC_SECS: i64 = 101 * 60 * 60 + 15 * 60;
 
 /// Independent generation controls for behavior-rich profiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +266,7 @@ pub fn generate_behavior(
         let source_index = assignments[index];
         let source_path = sources[source_index];
         let ts = timestamps[index];
-        let level = pick_level(index, &mut rng);
+        let level = pick_level(index, ts, controls, &mut rng);
         *severity.entry(level.to_string()).or_insert(0) += 1;
 
         let marker = sentinel_marker(index, &sentinels);
@@ -471,6 +475,94 @@ fn metric_points(start: i64, step: i64, values: &[i64]) -> Vec<Value> {
         .collect()
 }
 
+fn interpolate_stages(sample: usize, stages: &[(usize, i64)]) -> i64 {
+    let Some(&(first_sample, first_value)) = stages.first() else {
+        return 0;
+    };
+    if sample <= first_sample {
+        return first_value;
+    }
+    for pair in stages.windows(2) {
+        let (from_sample, from_value) = pair[0];
+        let (to_sample, to_value) = pair[1];
+        if sample <= to_sample {
+            let width = to_sample.saturating_sub(from_sample).max(1);
+            let elapsed = sample.saturating_sub(from_sample);
+            return from_value + (to_value - from_value) * elapsed as i64 / width as i64;
+        }
+    }
+    stages
+        .last()
+        .map(|(_, value)| *value)
+        .unwrap_or(first_value)
+}
+
+fn seven_day_load_test_values(sample_count: usize) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+    // Quarter-hour stages across the seven-day run. Plateaus make each load
+    // level legible; short ramps avoid an implausible instant workload jump.
+    let client_stages = [
+        (0, 12),
+        (48, 12),
+        (96, 30),
+        (144, 30),
+        (192, 55),
+        (240, 55),
+        (288, 80),
+        (336, 80),
+        (384, 120),
+        (392, 120),
+        (400, 180),
+        (408, 180),
+        (420, 65),
+        (480, 65),
+        (528, 105),
+        (576, 105),
+        (624, 30),
+        (672, 20),
+    ];
+    let clients = (0..sample_count)
+        .map(|sample| interpolate_stages(sample, &client_stages))
+        .collect::<Vec<_>>();
+
+    let cpu_variation = [-2, 0, 1, -1, 2, 0, 3, -2];
+    let cpu = (0..sample_count)
+        .map(|sample| {
+            // CPU responds to the previous quarter-hour's load. A brief
+            // independent pulse around hour 52 and nonlinear overload pressure
+            // keep the fixture useful for both correlated and contrast cases.
+            let lagged_clients = clients[sample.saturating_sub(1)];
+            let contrast_distance = (sample as i64 - 208).unsigned_abs() as i64;
+            let contrast_pulse = (22 - contrast_distance * 4).max(0);
+            let overload_distance = (sample as i64 - 402).unsigned_abs() as i64;
+            let overload_pressure = (18 - overload_distance * 2).max(0);
+            (14 + lagged_clients * 38 / 100
+                + cpu_variation[sample % cpu_variation.len()]
+                + contrast_pulse
+                + overload_pressure)
+                .clamp(12, 98)
+        })
+        .collect::<Vec<_>>();
+
+    let heap = (0..sample_count)
+        .map(|sample| {
+            let clients = clients[sample];
+            let minor_gc_sawtooth = (sample % 32) as i64 * 4_000_000;
+            let overload_pressure = if (384..=404).contains(&sample) {
+                (sample - 384) as i64 * 16_000_000
+            } else if (405..=420).contains(&sample) {
+                // A major collection at sample 405 drops accumulated pressure;
+                // the remaining 50 MB then decays during load recovery.
+                (420 - sample) as i64 * 50_000_000 / 15
+            } else {
+                0
+            };
+            300_000_000 + clients * 1_400_000 + minor_gc_sawtooth + overload_pressure
+        })
+        .collect::<Vec<_>>();
+
+    (cpu, heap, clients)
+}
+
 fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<()> {
     if to - from != 7 * DAY_SECS {
         return Err("seven-day metric fixture requires an exact seven-day wall-clock span".into());
@@ -478,8 +570,20 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
     let scenario_root = root.join("scenarios").join(BEHAVIOR_SCENARIO_ID);
     let metrics_root = scenario_root.join("metrics");
     let truth_root = scenario_root.join("truth");
-    let main_start = from + 4 * DAY_SECS;
-    let main_step = 15 * 60;
+    if (to - from) % LOAD_TEST_STEP_SECS != 0 {
+        return Err("seven-day metric fixture span must divide into 15-minute samples".into());
+    }
+    let main_sample_count = ((to - from) / LOAD_TEST_STEP_SECS + 1) as usize;
+    let (cpu, heap, clients) = seven_day_load_test_values(main_sample_count);
+    let heap_gap_from = from + 61 * 60 * 60;
+    let heap_gap_to = from + 62 * 60 * 60;
+    let heap_points = metric_points(from, LOAD_TEST_STEP_SECS, &heap)
+        .into_iter()
+        .filter(|point| {
+            let timestamp = point["timestamp"].as_i64().unwrap_or_default();
+            timestamp < heap_gap_from || timestamp > heap_gap_to
+        })
+        .collect::<Vec<_>>();
     let pattern_step = (to - from) / 16;
     let pattern_ts = |index: i64| from + pattern_step * index;
     let gap = |after_index: i64, reason: &str| {
@@ -518,47 +622,12 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
         }),
     )?;
 
-    let cpu = [
-        22, 24, 27, 30, 34, 39, 46, 55, 64, 73, 82, 89, 93, 96, 91, 86, 77, 68, 58, 49, 41, 35, 31,
-        27, 24,
-    ];
-    let heap = [
-        410_000_000,
-        425_000_000,
-        441_000_000,
-        459_000_000,
-        480_000_000,
-        505_000_000,
-        533_000_000,
-        566_000_000,
-        604_000_000,
-        648_000_000,
-        695_000_000,
-        742_000_000,
-        781_000_000,
-        812_000_000,
-        824_000_000,
-        806_000_000,
-        765_000_000,
-        714_000_000,
-        662_000_000,
-        610_000_000,
-        565_000_000,
-        527_000_000,
-        495_000_000,
-        468_000_000,
-        446_000_000,
-    ];
-    let clients = [
-        10, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 120, 120, 110, 100, 90, 80, 70, 60,
-        50, 35, 20, 10,
-    ];
     write_json(
         &metrics_root.join("operational-metrics.v1.json"),
         &json!({
             "schemaVersion": 1,
             "id": "behavior-scale-performance-telemetry",
-            "name": "Checkout performance run telemetry",
+            "name": "Seven-day checkout load-test telemetry",
             "series": [
                 {
                     "id": "cpu-percent",
@@ -569,10 +638,10 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
                     "provenance": {
                         "source": "synthetic/performance-agent.csv",
                         "collector": "ContextDesk Log Lab",
-                        "query": "host CPU utilization at 15-minute resolution"
+                        "query": "host CPU utilization during the seven-day staged load test at 15-minute resolution"
                     },
                     "timeQuality": "wall",
-                    "points": metric_points(main_start, main_step, &cpu)
+                    "points": metric_points(from, LOAD_TEST_STEP_SECS, &cpu)
                 },
                 {
                     "id": "heap-used-bytes",
@@ -580,14 +649,14 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
                     "unit": "bytes",
                     "labels": {"service": "checkout-api", "pool": "application"},
                     "thresholds": [{"id": "heap-warning", "label": "Heap pressure warning", "value": 750000000, "severity": "warning"}],
-                    "gaps": [{"from": main_start + 5 * main_step, "to": main_start + 6 * main_step, "reason": "synthetic collector restart"}],
+                    "gaps": [{"from": heap_gap_from, "to": heap_gap_to, "reason": "intentional synthetic heap collector restart"}],
                     "provenance": {
                         "source": "synthetic/jvm-telemetry.jsonl",
                         "collector": "ContextDesk Log Lab",
-                        "query": "application heap used bytes at 15-minute resolution"
+                        "query": "application heap used bytes during the seven-day staged load test at 15-minute resolution"
                     },
                     "timeQuality": "wall",
-                    "points": metric_points(main_start, main_step, &heap)
+                    "points": heap_points
                 },
                 {
                     "id": "concurrent-clients",
@@ -597,10 +666,10 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
                     "provenance": {
                         "source": "synthetic/load-generator.csv",
                         "collector": "ContextDesk Log Lab",
-                        "query": "connected virtual clients at 15-minute resolution"
+                        "query": "connected virtual clients during the seven-day staged load test at 15-minute resolution"
                     },
                     "timeQuality": "wall",
-                    "points": metric_points(main_start, main_step, &clients)
+                    "points": metric_points(from, LOAD_TEST_STEP_SECS, &clients)
                 }
             ]
         }),
@@ -682,27 +751,36 @@ fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<
             "mustNotEnterProductChatContext": true,
             "metricBundle": "../metrics/manifest.v1.json",
             "incidentWindow": {
-                "from": main_start + 10 * main_step,
-                "to": main_start + 16 * main_step,
-                "description": "Synthetic client ramp reaches peak load, followed by CPU and heap pressure and a locally concentrated warning/error sequence."
+                "from": from + LOAD_TEST_OVERLOAD_START_SECS,
+                "to": from + LOAD_TEST_OVERLOAD_END_SECS,
+                "description": "The staged client ramp reaches overload while CPU and heap pressure rise and warning/error logs become more frequent; the aligned signals are evidence for investigation, not proof of causation."
+            },
+            "responseLagSeconds": LOAD_TEST_STEP_SECS,
+            "majorGcAt": from + LOAD_TEST_MAJOR_GC_SECS,
+            "intentionalGap": {
+                "from": heap_gap_from,
+                "to": heap_gap_to,
+                "seriesId": "heap-used-bytes",
+                "reason": "intentional synthetic heap collector restart"
             },
             "expectedCorrelations": [
                 {
                     "id": "clients-lead-pressure",
-                    "description": "Concurrent clients rise from 10 to 120 before CPU crosses 80 percent and heap crosses 750000000 bytes."
+                    "description": "Concurrent clients rise in stages from 12 to 180; CPU follows the prior 15-minute load sample with bounded variation, while heap pressure accumulates."
                 },
                 {
                     "id": "pressure-overlaps-log-signals",
-                    "description": "Peak pressure overlaps the checked-in queue-worker warning, checkout-queue error, and database warning.",
+                    "description": "The overload interval contains a denser warning/error sequence and an existing multiline stack sentinel. These co-occurring signals identify a useful inspection window without asserting cause.",
                     "logEvents": [
                         {"timestamp": from + 356701, "level": "warn", "source": "worker/worker.log", "stableMessageToken": "event_id=behavior-14744"},
+                        {"timestamp": from + 357070, "level": "error", "source": "api/app.jsonl", "stableMessageToken": "event_id=behavior-14763 STACK_TRACE_SENTINEL"},
                         {"timestamp": from + 357330, "level": "error", "source": "queue/events.jsonl", "stableMessageToken": "event_id=behavior-14770"},
                         {"timestamp": from + 358957, "level": "warn", "source": "db/database.log", "stableMessageToken": "event_id=behavior-14841"}
                     ]
                 },
                 {
-                    "id": "recovery-after-ramp",
-                    "description": "Clients, CPU, and heap all decline after the peak; the fixture asserts correlation only, not causation."
+                    "id": "gc-and-load-recovery",
+                    "description": "Heap drops sharply at the declared major-GC sample, then clients and CPU fall as the load stage ends; warning/error prevalence returns toward baseline. The fixture asserts correlation only, not causation."
                 }
             ],
             "safety": "Expected answers live outside both import/ and metrics/. Product context may include imported measurements and their provenance, but never this evaluator truth."
@@ -965,12 +1043,34 @@ fn output_source_path(controls: &BehaviorControls, source_path: &str, index: usi
     }
 }
 
-fn pick_level(index: usize, rng: &mut LabRng) -> &'static str {
+fn pick_level(
+    index: usize,
+    timestamp: i64,
+    controls: &BehaviorControls,
+    rng: &mut LabRng,
+) -> &'static str {
     if index.is_multiple_of(211) {
-        "error"
+        return "error";
     } else if index.is_multiple_of(97) {
+        return "warn";
+    }
+
+    // Preserve the baseline RNG sequence even when the load-test overlay
+    // raises severity, so recovery rows return to the original distribution.
+    let baseline_debug = rng.chance(2);
+    if controls.profile == SEVEN_DAY_PROFILE
+        && (BASE_TS + LOAD_TEST_OVERLOAD_START_SECS..=BASE_TS + LOAD_TEST_OVERLOAD_END_SECS)
+            .contains(&timestamp)
+        && (index.is_multiple_of(23) || index.is_multiple_of(777))
+    {
+        "error"
+    } else if controls.profile == SEVEN_DAY_PROFILE
+        && (BASE_TS + LOAD_TEST_OVERLOAD_START_SECS..=BASE_TS + LOAD_TEST_OVERLOAD_END_SECS)
+            .contains(&timestamp)
+        && index.is_multiple_of(7)
+    {
         "warn"
-    } else if rng.chance(2) {
+    } else if baseline_debug {
         "debug"
     } else {
         "info"

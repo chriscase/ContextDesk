@@ -867,6 +867,9 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneViewportAnchors, setLaneViewportAnchors] = useState<
     Record<string, LogBookmarkEventRefDto>
   >({});
+  const [timelineViewportTimestamp, setTimelineViewportTimestamp] = useState<
+    number | null
+  >(null);
   const [pendingViewApply, setPendingViewApply] = useState<{
     recipe: InvestigationViewRecipeDto;
     status: string;
@@ -5001,6 +5004,7 @@ export function LogExplorer({ corpusId }: Props) {
               })}
               emptySourceScope={navigatorSourceScope?.length === 0}
               residentEvents={Object.values(laneEvents).flat()}
+              viewportTimestamp={timelineViewportTimestamp}
               lanes={lanes.slice(0, laneCount).map((lane) => {
                 const sources = effectiveLaneSources(lane, filters);
                 return {
@@ -5241,6 +5245,7 @@ export function LogExplorer({ corpusId }: Props) {
                     }
                     onRowClick={onRowClick}
                     onViewportAnchor={(event) => {
+                      setTimelineViewportTimestamp(event.ts);
                       const anchor = investigationEventRef(corpusId, event);
                       setLaneViewportAnchors((current) => {
                         const previous = current[lane.id];

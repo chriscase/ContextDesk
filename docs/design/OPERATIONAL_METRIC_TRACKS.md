@@ -22,8 +22,8 @@ flowchart LR
   P --> V["Preview all track values"]
   P -->|"pointer release"| S["One bounded seek request"]
   S --> L["Nearby logs"]
-  P --> B["Brush a time range"]
-  B --> Z["Zoom all tracks + log histogram"]
+  P --> BR["Brush a time range"]
+  BR --> Z["Zoom all tracks + log histogram"]
   Z --> R["Reset to full range"]
 ```
 
@@ -110,11 +110,25 @@ existing nearby-log load. Compact is the default session track size, with
 standard and detailed choices in the metric header. In the stacked
 presentation, metric tracks precede the log-volume histogram so the histogram
 acts as the bottom evidence track. Brushing and zooming preserve that shared
-domain; each zoom reissues the existing fixed-bucket backend summary rather than
-loading all matching log events. At every track size, the Timeline body is
+domain, and the outlined brush appears at the same horizontal range on every
+metric track and the log histogram before zoom is applied. The Explorer treats
+the reliable log span as the authoritative visible domain; metric samples
+outside that span are clipped with an explicit disclosure instead of expanding
+the metric tracks onto a different horizontal scale. Each zoom reissues the
+existing fixed-bucket backend summary rather than loading all matching log
+events. At every track size, the Timeline body is
 bounded to 44% of the viewport (and at most 30rem) and scrolls internally when
 its contents exceed that share, so a larger metric presentation never makes
-the log workspace unreachable.
+the log workspace unreachable. The bounded region is keyboard-focusable and
+named for assistive technology, so wheel, trackpad, Page Up, and Page Down
+navigation do not depend on an individual SVG plot receiving focus. A brush
+gesture suppresses native WebView text/SVG selection; only the shared,
+explicitly outlined time range may appear selected.
+Ordinary resident-row scrolling reports only the first visible authoritative
+event to the already-mounted Timeline. That presentation-only signal moves the
+shared cursor and active bucket without recomputing the timeline, querying the
+backend, or performing an implicit seek; in multi-lane views, the lane most
+recently scrolled owns the cursor.
 
 ### 1. Separately imported metric bundle
 
@@ -279,11 +293,15 @@ fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/
 └── truth/                          # evaluator-only expected correlations
 ```
 
-The first metric fixture is a coherent rising-load incident: clients rise, CPU
-and heap pressure follow, and the peak overlaps checked-in warning/error log
-events. The second fixture is a pattern gallery with isolated CPU, heap, and
-client spikes, one overlapping spike, quiet periods, and explicit missing
-samples.
+The first metric fixture is a seven-day staged load test: client plateaus span
+the full log horizon, CPU follows load with a 15-minute response lag and
+bounded variation, and heap pressure includes ordinary sawtooth movement plus
+a major-GC recovery. Its primary overload window overlaps a denser
+warning/error sequence and a checked-in multiline stack sentinel. The fixture
+documents correlation and investigation steps, never a causal answer. One
+declared heap-collector restart remains visibly missing. The second fixture is
+a pattern gallery with isolated CPU, heap, and client spikes, one overlapping
+spike, quiet periods, and explicit missing samples.
 
 ## Validation and failure behavior
 

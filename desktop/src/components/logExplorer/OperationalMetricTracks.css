@@ -6,11 +6,7 @@
   --metric-muted: var(--fg-muted, var(--text-muted, #aab4c3));
   --metric-line: var(--accent, #64a8ff);
   --metric-cursor: var(--fg-primary, var(--text, #ffffff));
-  --metric-selection: color-mix(
-    in srgb,
-    var(--accent, #64a8ff) 22%,
-    transparent
-  );
+  --metric-selection: transparent;
   --metric-gap: color-mix(in srgb, var(--text-muted, #aab4c3) 20%, transparent);
   --metric-warning: var(--warning, #e7b341);
   --metric-critical: var(--danger, #f36b7a);
@@ -128,6 +124,8 @@
   border-radius: var(--radius-sm, 6px);
   cursor: crosshair;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .operational-metric-track__plot:focus-visible {
@@ -209,8 +207,9 @@
 
 .operational-metric-track__selection {
   fill: var(--metric-selection);
-  stroke: color-mix(in srgb, var(--metric-line) 70%, transparent);
-  stroke-width: 0.5;
+  stroke: color-mix(in srgb, var(--metric-line) 78%, var(--metric-text));
+  stroke-width: 0.75;
+  stroke-dasharray: 2 1;
 }
 
 .operational-metric-track__gap {

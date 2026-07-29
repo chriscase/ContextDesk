@@ -106,6 +106,7 @@ flowchart LR
 | Log evidence pipeline          | How do raw records become honest, searchable, scalable evidence?                       | **Partial**: batch single-corpus analysis ships; full timestamp policy, durable noise rules, and versioned cross-corpus application baselines remain #670/#671/#690 | [Log evidence pipeline](proven-methods/LOG_EVIDENCE_PIPELINE.md)                   |
 | Operational metric alignment   | How can unlike time-series signals share log time without implying comparable values?  | **Session slice**: schema, validation, bounded renderer, fixtures, and Explorer session import/seek ship locally; durable attachment, persistence, incident bundles, and responsive docking remain #706/#707 | [Operational metric tracks](OPERATIONAL_METRIC_TRACKS.md)                         |
 | Investigation loop             | How does an engineer preserve, revisit, and act on discoveries without losing control? | **Partial**: manual evidence/findings/notes and view recipes have production anchors; proposal history and reports remain #646/#532 | [Investigation loop](proven-methods/INVESTIGATION_LOOP.md)                         |
+| Deterministic demo and model evaluation | How can product behavior and provider/model grounding be compared without leaking the answer key? | **Local integration**: deterministic fixtures and production evaluation paths ship; the deep bundled/exportable lab chapter remains local until #719 merges | [Demo and model evaluation lab](proven-methods/DEMO_EVALUATION_LAB.md) |
 | Future method documentation    | How should another process be documented and challenged?                               | **Local integration** until this handbook is merged                                                                                 | [Method chapter template](proven-methods/METHOD_TEMPLATE.md)                       |
 
 ## From-scratch staged implementation path
@@ -238,5 +239,5 @@ This first version intentionally leaves several chapters for follow-up:
 - future chapters and diagrams for the remaining methods as their contracts and
   production evidence become stable enough to document without speculation.
 
-Those gaps do not change the status of the three methods documented here. They
+Those gaps do not change the status of the methods documented here. They
 are the next candidates for the template, not behavior to imply in advance.

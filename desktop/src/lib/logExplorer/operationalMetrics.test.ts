@@ -31,6 +31,63 @@ describe("operational metrics schema", () => {
     ]);
   });
 
+  it("spans the full seven-day log horizon with one explicit heap gap", () => {
+    const result = validateOperationalMetricsDocument(checkedInFixture);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected valid checked-in fixture");
+
+    const corpusFrom = 1_735_732_800;
+    const corpusTo = corpusFrom + 7 * 24 * 60 * 60;
+    expect(
+      result.data.series.map((series) => ({
+        id: series.id,
+        points: series.points.length,
+        from: series.points[0]?.timestamp,
+        to: series.points.at(-1)?.timestamp,
+      })),
+    ).toEqual([
+      {
+        id: "cpu-percent",
+        points: 673,
+        from: corpusFrom,
+        to: corpusTo,
+      },
+      {
+        id: "heap-used-bytes",
+        points: 668,
+        from: corpusFrom,
+        to: corpusTo,
+      },
+      {
+        id: "concurrent-clients",
+        points: 673,
+        from: corpusFrom,
+        to: corpusTo,
+      },
+    ]);
+
+    const gaps = result.data.series.flatMap((series) =>
+      (series.gaps ?? []).map((gap) => ({ seriesId: series.id, ...gap })),
+    );
+    expect(gaps).toEqual([
+      {
+        seriesId: "heap-used-bytes",
+        from: corpusFrom + 61 * 60 * 60,
+        to: corpusFrom + 62 * 60 * 60,
+        reason: "intentional synthetic heap collector restart",
+      },
+    ]);
+    const heap = result.data.series.find(
+      (series) => series.id === "heap-used-bytes",
+    );
+    expect(
+      heap?.points.some(
+        (point) =>
+          point.timestamp >= gaps[0]!.from && point.timestamp <= gaps[0]!.to,
+      ),
+    ).toBe(false);
+  });
+
   it("fails closed for unknown versions, unordered points, and nonnumeric data", () => {
     const invalid = structuredClone(checkedInFixture) as {
       schemaVersion: number;

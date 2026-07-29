@@ -450,6 +450,66 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("moves the timeline cursor with the visible log viewport without backend work", async () => {
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(
+      eventPage("api.log", "wall", 10, 1_700_000_000),
+    );
+    vi.mocked(host.hostLogSharedTimelineSummary).mockResolvedValue({
+      timeQuality: "wall",
+      spanFrom: 1_700_000_000,
+      spanTo: 1_700_000_010,
+      bucketWidth: 1,
+      bucketCount: 10,
+      totalMatched: 10,
+      buckets: Array.from({ length: 10 }, (_, index) => ({
+        index,
+        start: 1_700_000_000 + index,
+        end: 1_700_000_001 + index,
+      })),
+      counts: Array.from({ length: 10 }, () => 1),
+      severitySeries: [
+        { severity: "error", counts: Array.from({ length: 10 }, () => 0) },
+        { severity: "warn", counts: Array.from({ length: 10 }, () => 0) },
+        { severity: "info", counts: Array.from({ length: 10 }, () => 1) },
+        { severity: "debug", counts: Array.from({ length: 10 }, () => 0) },
+        { severity: "other", counts: Array.from({ length: 10 }, () => 0) },
+      ],
+      lanes: [],
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    const list = await screen.findByTestId("virtualized-event-list");
+    const bars = await screen.findByTestId("timeline-navigator-bars");
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("0%"),
+    );
+    const queryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls.length;
+    const summaryCalls = vi.mocked(host.hostLogSharedTimelineSummary).mock.calls
+      .length;
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 56 },
+      scrollHeight: { configurable: true, value: 280 },
+      scrollTop: { configurable: true, writable: true, value: 112 },
+    });
+    fireEvent.scroll(list);
+
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("40%"),
+    );
+    expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(queryCalls);
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(
+      summaryCalls,
+    );
+  });
+
   it("uses descriptive keyboard-accessible toolbar pickers with truthful dismissal", async () => {
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText(/auth failure/);
@@ -756,7 +816,9 @@ describe("LogExplorer shell", () => {
     fireEvent.keyDown(root, { key: "f", metaKey: true });
     expect(document.activeElement).toBe(input);
 
-    fireEvent.click(screen.getByRole("button", { name: "Help: Find vs Filter" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Help: Find vs Filter" }),
+    );
     expect(
       screen.getByText(/Find highlights matches and steps next\/previous/),
     ).toBeTruthy();
@@ -3284,9 +3346,7 @@ describe("LogExplorer shell", () => {
       '[data-row-message-seq="11"]',
     );
     expect(expandedMessage).toBeTruthy();
-    expect(
-      document.querySelector('[data-row-message-seq="21"]'),
-    ).toBeNull();
+    expect(document.querySelector('[data-row-message-seq="21"]')).toBeNull();
     Object.defineProperty(expandedMessage!, "scrollHeight", {
       configurable: true,
       value: 90,
@@ -4521,7 +4581,8 @@ describe("LogExplorer shell", () => {
       );
     });
 
-    fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
+    const timelinePosition = await screen.findByLabelText("Timeline position");
+    fireEvent.pointerUp(timelinePosition, { target: { value: "0" } });
 
     expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
       "c1",

@@ -186,11 +186,11 @@
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14249 step=4","service":"auth-service","trace_id":"trace-behavior-00014249","ts":1736077435}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14286 step=8","service":"auth-service","trace_id":"trace-behavior-00014286","ts":1736078330}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14547 step=5","service":"auth-service","trace_id":"trace-behavior-00014547","ts":1736084645}
-{"host":"host-06.example","level":"info","message":"event_id=behavior-14581 step=6","service":"auth-service","trace_id":"trace-behavior-00014581","ts":1736085467}
+{"host":"host-06.example","level":"warn","message":"event_id=behavior-14581 step=6","service":"auth-service","trace_id":"trace-behavior-00014581","ts":1736085467}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14615 step=7","service":"auth-service","trace_id":"trace-behavior-00014615","ts":1736086290}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14657 step=5","service":"auth-service","trace_id":"trace-behavior-00014657","ts":1736087306}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14690 step=5","service":"auth-service","trace_id":"trace-behavior-00014690","ts":1736088104}
-{"host":"host-06.example","level":"info","message":"event_id=behavior-14766 step=4","service":"auth-service","trace_id":"trace-behavior-00014766","ts":1736089943}
+{"host":"host-06.example","level":"error","message":"event_id=behavior-14766 step=4","service":"auth-service","trace_id":"trace-behavior-00014766","ts":1736089943}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14842 step=3","service":"auth-service","trace_id":"trace-behavior-00014842","ts":1736091782}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14856 step=6","service":"auth-service","trace_id":"trace-behavior-00014856","ts":1736092120}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-14891 step=8","service":"auth-service","trace_id":"trace-behavior-00014891","ts":1736092967}
@@ -202,7 +202,7 @@
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15131 step=6","service":"auth-service","trace_id":"trace-behavior-00015131","ts":1736098773}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15150 step=3","service":"auth-service","trace_id":"trace-behavior-00015150","ts":1736099233}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15244 step=9","service":"auth-service","trace_id":"trace-behavior-00015244","ts":1736101507}
-{"host":"host-06.example","level":"info","message":"event_id=behavior-15272 step=4","service":"auth-service","trace_id":"trace-behavior-00015272","ts":1736102185}
+{"host":"host-06.example","level":"error","message":"event_id=behavior-15272 step=4","service":"auth-service","trace_id":"trace-behavior-00015272","ts":1736102185}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15306 step=5","service":"auth-service","trace_id":"trace-behavior-00015306","ts":1736103007}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15411 step=0","service":"auth-service","trace_id":"trace-behavior-00015411","ts":1736105547}
 {"host":"host-06.example","level":"info","message":"event_id=behavior-15511 step=1","service":"auth-service","trace_id":"trace-behavior-00015511","ts":1736107967}

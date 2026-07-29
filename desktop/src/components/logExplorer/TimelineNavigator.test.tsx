@@ -111,6 +111,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function moveTimelineTo(index: number, commit = false) {
+  const scrubber = screen.getByLabelText("Timeline position");
+  fireEvent.change(scrubber, { target: { value: String(index) } });
+  if (commit) {
+    fireEvent.pointerUp(scrubber, { target: { value: String(index) } });
+  }
+  return scrubber;
+}
+
 describe("TimelineNavigator", () => {
   it("keeps the timeline on a full lane-strip row when adjacent disclosures can fit", async () => {
     render(
@@ -205,7 +214,15 @@ describe("TimelineNavigator", () => {
       />,
     );
     const scrubber = await screen.findByLabelText("Timeline position");
-    scrubber.focus();
+    fireEvent.focus(scrubber);
+    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    fireEvent.keyDown(scrubber, { key: "Escape" });
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
     fireEvent.keyDown(scrubber, { key: "Escape" });
     expect(
       screen
@@ -271,7 +288,7 @@ describe("TimelineNavigator", () => {
       />,
     );
     await screen.findByTestId("timeline-bucket-3");
-    fireEvent.click(screen.getByTestId("timeline-bucket-3"));
+    moveTimelineTo(3, true);
 
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
@@ -303,8 +320,7 @@ describe("TimelineNavigator", () => {
     const range = await screen.findByLabelText("Timeline position");
     fireEvent.change(range, { target: { value: "3" } });
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
-    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+    expect(screen.getByTestId("timeline-bucket-detail").textContent).toContain(
       "12 events",
     );
     fireEvent.pointerUp(range, { target: { value: "3" } });
@@ -337,7 +353,10 @@ describe("TimelineNavigator", () => {
     expect(first.querySelectorAll(".timeline-navigator__stack i")).toHaveLength(
       5,
     );
-    expect(first.getAttribute("aria-label")).toContain("Other 5");
+    expect(first.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      screen.getByLabelText("Timeline position").getAttribute("aria-valuetext"),
+    ).toContain("Other 5");
     expect(screen.getByTestId("timeline-bucket-1").className).toContain(
       "timeline-navigator__bucket--empty",
     );
@@ -368,19 +387,13 @@ describe("TimelineNavigator", () => {
     expect(screen.getByTestId("timeline-bucket-3").className).toContain(
       "timeline-navigator__bucket--has-error",
     );
+    const scrubber = screen.getByLabelText("Timeline position");
+    expect(scrubber.getAttribute("aria-valuetext")).toContain("Error 1");
+    moveTimelineTo(3);
+    expect(scrubber.getAttribute("aria-valuetext")).toContain("Error 12");
     expect(
-      screen
-        .getByTestId("timeline-bucket-0")
-        .style.getPropertyValue("--error-signal-height"),
-    ).toBe("4px");
-    expect(
-      screen
-        .getByTestId("timeline-bucket-3")
-        .style.getPropertyValue("--error-signal-height"),
-    ).toBe("12px");
-    expect(
-      screen.getByTestId("timeline-bucket-3").getAttribute("aria-label"),
-    ).toContain("Error 12");
+      screen.getByTestId("timeline-error-presence-rail").querySelectorAll("i"),
+    ).toHaveLength(2);
   });
 
   it("loads bounded session metrics and shares their committed cursor with log seeking", async () => {
@@ -457,6 +470,49 @@ describe("TimelineNavigator", () => {
     expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
   });
 
+  it("tracks the visible log viewport without querying or recomputing the timeline", async () => {
+    const { rerender } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        viewportTimestamp={1_700_000_005}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const bars = await screen.findByTestId("timeline-navigator-bars");
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("12.5%"),
+    );
+
+    rerender(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        viewportTimestamp={1_700_000_035}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("87.5%"),
+    );
+    expect(
+      (screen.getByLabelText("Timeline position") as HTMLInputElement).value,
+    ).toBe("3");
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1);
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+  });
+
   it("shares log-histogram hover with every metric readout without seeking", async () => {
     render(
       <TimelineNavigator
@@ -499,11 +555,6 @@ describe("TimelineNavigator", () => {
         ?.style.getPropertyValue("left"),
     ).toBe("90%");
     expect(
-      screen
-        .getByTestId("timeline-hover-reading")
-        .style.getPropertyValue("--timeline-detail-x"),
-    ).toBe("90%");
-    expect(
       screen.getByTestId("operational-metric-reading-cpu-percent").textContent,
     ).toContain("95 %");
     expect(
@@ -512,7 +563,7 @@ describe("TimelineNavigator", () => {
     expect(
       screen.getByTestId("operational-metric-reading-clients").textContent,
     ).toContain("120 clients");
-    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+    expect(screen.getByTestId("timeline-bucket-detail").textContent).toContain(
       "12 events",
     );
     for (const id of ["cpu-percent", "heap-bytes", "clients"]) {
@@ -527,15 +578,14 @@ describe("TimelineNavigator", () => {
       ).toBe("90%");
     }
     expect(
-      screen.getByTestId("timeline-hover-reading").getAttribute("aria-hidden"),
-    ).toBe("true");
-    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+      screen.getByTestId("timeline-bucket-detail").getAttribute("role"),
+    ).toBe("note");
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
 
     act(() => {
       fireEvent.pointerLeave(chart);
     });
-    expect(screen.queryByTestId("timeline-hover-reading")).toBeNull();
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
     expect(
       screen.queryAllByTestId(/operational-metric-hover-reading-/),
     ).toHaveLength(0);
@@ -559,14 +609,14 @@ describe("TimelineNavigator", () => {
     });
     fireEvent.pointerEnter(cpuPlot);
     fireEvent.pointerMove(cpuPlot, { clientX: 10, pointerId: 2 });
-    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+    expect(screen.getByTestId("timeline-bucket-detail").textContent).toContain(
       "30 events",
     );
     expect(
       screen.getAllByTestId(/operational-metric-hover-reading-/),
     ).toHaveLength(3);
     fireEvent.pointerLeave(cpuPlot);
-    expect(screen.queryByTestId("timeline-hover-reading")).toBeNull();
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
   });
 
   it("keeps detailed metric tracks inside a bounded scrollable timeline pane", async () => {
@@ -583,16 +633,26 @@ describe("TimelineNavigator", () => {
       target: { files: [metricFile(sessionMetrics)] },
     });
     await screen.findByTestId("timeline-session-metrics");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: "Metric track size" }),
-      { target: { value: "detailed" } },
-    );
+    const trackSize = screen.getByRole("combobox", {
+      name: "Metric track size",
+    });
+    fireEvent.change(trackSize, { target: { value: "detailed" } });
+    fireEvent.keyDown(trackSize, { key: "Escape" });
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
 
     const body = document.getElementById("log-explorer-timeline-navigator");
     expect(body).toBeTruthy();
     const style = getComputedStyle(body!);
     expect(style.overflowY).toBe("auto");
     expect((body as HTMLElement).style.maxHeight).toBe("min(44vh, 30rem)");
+    expect(body?.getAttribute("aria-label")).toBe(
+      "Timeline and aligned metric tracks",
+    );
+    expect(body?.getAttribute("tabindex")).toBe("0");
     expect(
       screen
         .getByTestId("timeline-session-metrics")
@@ -636,6 +696,11 @@ describe("TimelineNavigator", () => {
     fireEvent.pointerDown(cpu, { clientX: 25.5, pointerId: 1 });
     fireEvent.pointerMove(cpu, { clientX: 74.5, pointerId: 1 });
     fireEvent.pointerUp(cpu, { clientX: 74.5, pointerId: 1 });
+    const histogramSelection = screen.getByTestId(
+      "timeline-selection-range",
+    ) as HTMLElement;
+    expect(Number.parseFloat(histogramSelection.style.left)).toBeCloseTo(25.5);
+    expect(Number.parseFloat(histogramSelection.style.width)).toBeCloseTo(49);
     const zoom = screen.getByRole("button", { name: "Zoom to selection" });
     expect(zoom.hasAttribute("disabled")).toBe(false);
     fireEvent.click(zoom);
@@ -658,6 +723,7 @@ describe("TimelineNavigator", () => {
     expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010.2");
     expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000029.8");
     expect(screen.getByText(/zoomed/)).toBeTruthy();
+    expect(screen.queryByTestId("timeline-selection-range")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Zoom to selection" }),
     ).toBeNull();
@@ -676,6 +742,35 @@ describe("TimelineNavigator", () => {
     });
     expect(restoredCpu.getAttribute("aria-valuemin")).toBe("1700000000");
     expect(restoredCpu.getAttribute("aria-valuemax")).toBe("1700000040");
+  });
+
+  it("keeps partially overlapping metrics on the exact log timeline domain", async () => {
+    const extended = structuredClone(sessionMetrics);
+    for (const series of extended.series) {
+      series.points = [
+        { ...series.points[0]!, timestamp: 1_699_999_980 },
+        { ...series.points[1]!, timestamp: 1_700_000_060 },
+      ];
+    }
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(extended)] },
+    });
+
+    const cpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    expect(cpu.getAttribute("aria-valuemin")).toBe("1700000000");
+    expect(cpu.getAttribute("aria-valuemax")).toBe("1700000040");
+    expect(screen.getByText(/clipped to the shared log timeline/)).toBeTruthy();
   });
 
   it("fails closed when session metric time cannot align honestly", async () => {
@@ -733,40 +828,30 @@ describe("TimelineNavigator", () => {
     );
     const scrubber = await screen.findByLabelText("Timeline position");
     expect(scrubber.getAttribute("aria-valuetext")).toMatch(
-      /^\d{2}:\d{2}:\d{2}Z · 30 events · wall clock$/,
+      /^\d{2}:\d{2}:\d{2}Z · 30 events · Error 1, Info 29 · wall clock$/,
     );
     expect(scrubber.getAttribute("title")).toContain("2023-");
     expect(
       document.querySelectorAll(".timeline-navigator__axis span"),
     ).toHaveLength(2);
+    expect(
+      screen
+        .getAllByTestId(/^timeline-bucket-/)
+        .every((bucket) => bucket.getAttribute("aria-hidden") === "true"),
+    ).toBe(true);
     fireEvent.focus(scrubber);
+    const focusedDetail = screen.getByTestId("timeline-bucket-detail");
+    expect(focusedDetail.getAttribute("role")).toBe("note");
+    expect(focusedDetail.textContent).toContain("30 events");
+    expect(focusedDetail.textContent).toContain("Error 1");
+    expect(focusedDetail.textContent).toContain("2023-");
     fireEvent.keyDown(scrubber, { key: "F10", shiftKey: true });
     expect(scrubber.getAttribute("aria-describedby")).toBe(
       "timeline-bucket-detail",
     );
     fireEvent.keyDown(scrubber, { key: "Escape" });
-    expect(scrubber.getAttribute("aria-describedby")).toBeNull();
-
-    const bucket = screen.getByTestId("timeline-bucket-0");
-    fireEvent.focus(bucket);
-    expect(screen.getByTestId("timeline-hover-reading")).toBeTruthy();
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
-    fireEvent.contextMenu(bucket);
-    const detail = await screen.findByTestId("timeline-bucket-detail");
-    expect(bucket.getAttribute("aria-describedby")).toBe(
-      "timeline-bucket-detail",
-    );
-    expect(detail.getAttribute("role")).toBe("tooltip");
-    expect(detail.textContent).toContain("30 events");
-    expect(detail.textContent).toContain("Error 1");
-    expect(detail.textContent).toContain("2023-");
-
-    fireEvent.pointerDown(screen.getByTestId("timeline-navigator-bars"));
-    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
-
-    fireEvent.keyDown(bucket, { key: "F10", shiftKey: true });
-    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
-    fireEvent.keyDown(bucket, { key: "Escape" });
+    fireEvent.blur(scrubber);
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
     expect(
       screen
@@ -850,8 +935,9 @@ describe("TimelineNavigator", () => {
       96,
     );
     expect(coverage.querySelectorAll("i")).toHaveLength(8);
-    const bucket = screen.getByTestId("timeline-bucket-3");
-    fireEvent.contextMenu(bucket);
+    const scrubber = moveTimelineTo(3);
+    fireEvent.focus(scrubber);
+    fireEvent.keyDown(scrubber, { key: "F10", shiftKey: true });
     const detail = screen.getByTestId("timeline-bucket-detail");
     const breakdown = within(detail).getByRole("list", {
       name: "Bucket lane breakdown",
@@ -917,8 +1003,8 @@ describe("TimelineNavigator", () => {
       />,
     );
     await screen.findByTestId("timeline-bucket-0");
-    fireEvent.click(screen.getByTestId("timeline-bucket-0"));
-    fireEvent.click(screen.getByTestId("timeline-bucket-3"));
+    moveTimelineTo(0, true);
+    moveTimelineTo(3, true);
     await waitFor(() =>
       expect(onSeekSeq).toHaveBeenCalledWith(88, newerTarget),
     );
@@ -931,7 +1017,7 @@ describe("TimelineNavigator", () => {
     await Promise.resolve();
     expect(onSeekSeq).not.toHaveBeenCalledWith(77, target);
 
-    fireEvent.click(screen.getByTestId("timeline-bucket-2"));
+    moveTimelineTo(2, true);
     expect(await screen.findByText(/No event in/)).toBeTruthy();
   });
 
@@ -964,7 +1050,8 @@ describe("TimelineNavigator", () => {
         onSeekSeq={vi.fn()}
       />,
     );
-    fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
+    await screen.findByTestId("timeline-bucket-0");
+    moveTimelineTo(0, true);
     expect((await screen.findByRole("alert")).textContent).toContain(
       "seek unavailable",
     );

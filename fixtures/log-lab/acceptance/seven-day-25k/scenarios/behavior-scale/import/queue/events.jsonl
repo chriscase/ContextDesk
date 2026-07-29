@@ -194,11 +194,11 @@
 {"host":"host-05.example","level":"info","message":"event_id=behavior-14859 step=9","service":"checkout-queue","trace_id":"trace-behavior-00014859","ts":1736092283}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-14866 step=5","service":"checkout-queue","trace_id":"trace-behavior-00014866","ts":1736092452}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-14909 step=4","service":"checkout-queue","trace_id":"trace-behavior-00014909","ts":1736093492}
-{"host":"host-05.example","level":"info","message":"event_id=behavior-15141 step=5","service":"checkout-queue","trace_id":"trace-behavior-00015141","ts":1736099105}
-{"host":"host-05.example","level":"info","message":"event_id=behavior-15162 step=4","service":"checkout-queue","trace_id":"trace-behavior-00015162","ts":1736099613}
+{"host":"host-05.example","level":"warn","message":"event_id=behavior-15141 step=5","service":"checkout-queue","trace_id":"trace-behavior-00015141","ts":1736099105}
+{"host":"host-05.example","level":"warn","message":"event_id=behavior-15162 step=4","service":"checkout-queue","trace_id":"trace-behavior-00015162","ts":1736099613}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-15193 step=2","service":"checkout-queue","trace_id":"trace-behavior-00015193","ts":1736100363}
-{"host":"host-05.example","level":"info","message":"event_id=behavior-15288 step=9","service":"checkout-queue","trace_id":"trace-behavior-00015288","ts":1736102662}
-{"host":"host-05.example","level":"info","message":"event_id=behavior-15330 step=7","service":"checkout-queue","trace_id":"trace-behavior-00015330","ts":1736103678}
+{"host":"host-05.example","level":"warn","message":"event_id=behavior-15288 step=9","service":"checkout-queue","trace_id":"trace-behavior-00015288","ts":1736102662}
+{"host":"host-05.example","level":"warn","message":"event_id=behavior-15330 step=7","service":"checkout-queue","trace_id":"trace-behavior-00015330","ts":1736103678}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-15437 step=4","service":"checkout-queue","trace_id":"trace-behavior-00015437","ts":1736106266}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-15599 step=1","service":"checkout-queue","trace_id":"trace-behavior-00015599","ts":1736110186}
 {"host":"host-05.example","level":"info","message":"event_id=behavior-15625 step=5","service":"checkout-queue","trace_id":"trace-behavior-00015625","ts":1736110815}

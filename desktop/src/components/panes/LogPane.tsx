@@ -1,10 +1,20 @@
 /**
  * Log analysis surface: Memory-style list | detail + package import/export.
  */
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
+  hostGetBranding,
   hostImportLogCorpusPackagePath,
   hostCancelLogIngest,
   hostCancelLogReanalysis,
@@ -35,11 +45,18 @@ import {
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
+import {
+  diagnosticEnvironmentFromBranding,
+  portableDiagnosticOsHint,
+  type LogDiagnosticEnvironment,
+  type LogDiagnosticStatus,
+} from "../../lib/logDiagnosticReport";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
+import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -62,6 +79,22 @@ type Props = {
   onOpenHelp?: (pageId: string) => void;
 };
 
+function CorpusOverflowGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="3" r="1.25" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.25" fill="currentColor" />
+      <circle cx="8" cy="13" r="1.25" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [corpora, setCorpora] = useState<LogCorpusSummaryDto[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -79,6 +112,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<{
+    corpus: LogCorpusSummaryDto;
+    environment: LogDiagnosticEnvironment;
+    currentStatus: LogDiagnosticStatus | null;
+  } | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  const menuId = useId();
+  const menuRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingDiscardFocusRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -104,6 +153,123 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const closeCorpusMenu = useCallback(
+    (restoreFocus = true) => {
+      const closingId = openMenuId;
+      setOpenMenuId(null);
+      setMenuPosition(null);
+      if (restoreFocus && closingId) {
+        queueMicrotask(() => menuTriggerRefs.current.get(closingId)?.focus());
+      }
+    },
+    [openMenuId],
+  );
+
+  const positionCorpusMenu = useCallback(() => {
+    if (!openMenuId) return;
+    const trigger = menuTriggerRefs.current.get(openMenuId);
+    const menu = menuRef.current;
+    if (!trigger || !menu) return;
+
+    const gutter = 8;
+    const offset = 4;
+    const triggerRect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(
+      gutter,
+      window.innerWidth - menuRect.width - gutter,
+    );
+    const left = Math.min(
+      Math.max(gutter, triggerRect.right - menuRect.width),
+      maxLeft,
+    );
+    const below = triggerRect.bottom + offset;
+    const top =
+      below + menuRect.height <= window.innerHeight - gutter
+        ? below
+        : Math.max(gutter, triggerRect.top - menuRect.height - offset);
+
+    setMenuPosition({ left, top });
+  }, [openMenuId]);
+
+  useLayoutEffect(() => {
+    if (!openMenuId) return;
+    positionCorpusMenu();
+    menuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.focus();
+  }, [openMenuId, positionCorpusMenu]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const trigger = menuTriggerRefs.current.get(openMenuId);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        menuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      const otherTrigger =
+        target instanceof Element
+          ? target.closest("[data-log-corpus-menu-trigger]")
+          : null;
+      closeCorpusMenu(!otherTrigger);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeCorpusMenu();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        menuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      closeCorpusMenu(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("scroll", positionCorpusMenu, true);
+    window.addEventListener("resize", positionCorpusMenu);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("scroll", positionCorpusMenu, true);
+      window.removeEventListener("resize", positionCorpusMenu);
+    };
+  }, [closeCorpusMenu, openMenuId, positionCorpusMenu]);
+
+  useEffect(() => {
+    if (openMenuId && !corpora.some((corpus) => corpus.id === openMenuId)) {
+      setOpenMenuId(null);
+      setMenuPosition(null);
+    }
+  }, [corpora, openMenuId]);
+
+  useEffect(() => {
+    const pendingId = pendingDiscardFocusRef.current;
+    if (pendingId === undefined) return;
+    if (pendingId) {
+      const target = corpusButtonRefs.current.get(pendingId);
+      if (!target) return;
+      target.focus();
+    } else {
+      listRef.current?.focus();
+    }
+    pendingDiscardFocusRef.current = undefined;
+  }, [corpora]);
 
   const selectCorpus = useCallback(async (id: string) => {
     setActiveId(id);
@@ -204,7 +370,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setNote(null);
     try {
       const r = await hostImportLogCorpusPackagePath(path);
-      setNote(`Imported package → corpus ${r.corpusId} (from ${r.originCorpusId})`);
+      setNote(
+        `Imported package → corpus ${r.corpusId} (from ${r.originCorpusId})`,
+      );
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
@@ -217,9 +385,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   async function onExportPackage() {
     if (!activeId) return;
-    const path = await saveFileDialog("Export log corpus package", "corpus.cdlog.zip", [
-      { name: "ContextDesk package", extensions: ["zip"] },
-    ]);
+    const path = await saveFileDialog(
+      "Export log corpus package",
+      "corpus.cdlog.zip",
+      [{ name: "ContextDesk package", extensions: ["zip"] }],
+    );
     if (!path) return;
     setBusy(true);
     setError(null);
@@ -275,10 +445,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   }
 
   async function onDiscard(id: string) {
-    const ok = await dialogConfirm("Discard this disposable corpus?", {
-      title: "Discard corpus",
-    });
-    if (!ok) return;
+    const corpus = corpora.find((candidate) => candidate.id === id);
+    const trigger = menuTriggerRefs.current.get(id);
+    setOpenMenuId(null);
+    setMenuPosition(null);
+    queueMicrotask(() => trigger?.focus());
+
+    const ok = await dialogConfirm(
+      `Discard "${corpus?.name ?? "this corpus"}"? This removes the disposable analysis corpus from ContextDesk.`,
+      {
+        title: "Discard corpus",
+        kind: "warning",
+      },
+    );
+    if (!ok) {
+      queueMicrotask(() => trigger?.focus());
+      return;
+    }
+
+    const discardedIndex = corpora.findIndex(
+      (candidate) => candidate.id === id,
+    );
+    const remaining = corpora.filter((candidate) => candidate.id !== id);
+    pendingDiscardFocusRef.current =
+      remaining[Math.min(Math.max(discardedIndex, 0), remaining.length - 1)]
+        ?.id ?? null;
+
     setBusy(true);
     try {
       await hostDiscardLogCorpus(id);
@@ -290,12 +482,85 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       }
       await refresh();
     } catch (e) {
+      pendingDiscardFocusRef.current = undefined;
       setError(String(e));
+      queueMicrotask(() => trigger?.focus());
     } finally {
       setBusy(false);
     }
   }
 
+  async function onOpenDiagnostics(id: string) {
+    const corpus = corpora.find((candidate) => candidate.id === id);
+    if (!corpus) return;
+    const currentStatus: LogDiagnosticStatus | null = error
+      ? { kind: "error", message: error }
+      : note
+        ? { kind: "status", message: note }
+        : null;
+    setOpenMenuId(null);
+    setMenuPosition(null);
+    let environment: LogDiagnosticEnvironment = {
+      appVersion: "unknown",
+      channel: "unknown",
+      gitSha: null,
+      os: portableDiagnosticOsHint(),
+    };
+    try {
+      environment = diagnosticEnvironmentFromBranding(await hostGetBranding());
+    } catch {
+      /* Keep an honest unknown identity if host branding is unavailable. */
+    }
+    setDiagnostic({
+      corpus,
+      currentStatus,
+      environment,
+    });
+  }
+
+  function closeDiagnostics() {
+    const corpusId = diagnostic?.corpus.id;
+    setDiagnostic(null);
+    if (corpusId) {
+      queueMicrotask(() => menuTriggerRefs.current.get(corpusId)?.focus());
+    }
+  }
+
+  function openCorpusMenu(
+    id: string,
+    event?: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    event?.preventDefault();
+    setMenuPosition(null);
+    setOpenMenuId(id);
+  }
+
+  function onMenuItemKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp" ||
+      event.key === "Home" ||
+      event.key === "End"
+    ) {
+      event.preventDefault();
+      const items = Array.from(
+        menuRef.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]:not(:disabled)',
+        ) ?? [],
+      );
+      if (items.length === 0) return;
+      const current = Math.max(items.indexOf(event.currentTarget), 0);
+      const target =
+        event.key === "Home"
+          ? items[0]
+          : event.key === "End"
+            ? items.at(-1)
+            : event.key === "ArrowDown"
+              ? items[(current + 1) % items.length]
+              : items[(current - 1 + items.length) % items.length];
+      target?.focus();
+    }
+  }
 
   if (inAppExplorerId) {
     return (
@@ -323,10 +588,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       <header className="pane-chrome">
         <h2 className="pane-chrome__title">Logs</h2>
         <div className="pane-chrome__actions">
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportLogs()}>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportLogs()}
+          >
             Import logs…
           </button>
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportPackage()}>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportPackage()}
+          >
             Import package…
           </button>
           <button
@@ -404,7 +679,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                   const cancel = reanalyzing
                     ? hostCancelLogReanalysis
                     : hostCancelLogIngest;
-                  void cancel().then((ok) => {
+                  return cancel().then((ok) => {
                     if (ok) setNote("Cancel requested…");
                   });
                 }
@@ -421,7 +696,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       {note ? <p className="muted log-pane__note">{note}</p> : null}
 
       <div className="pane__split pane__split--logs">
-        <aside className="log-list" aria-label="Corpora">
+        <aside
+          ref={listRef}
+          className="log-list"
+          aria-label="Corpora"
+          tabIndex={-1}
+        >
           {corpora.length === 0 ? (
             <div className="pane-empty">
               <p className="muted">No corpora yet.</p>
@@ -437,6 +717,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 return (
                   <li key={c.id}>
                     <button
+                      ref={(node) => {
+                        if (node) corpusButtonRefs.current.set(c.id, node);
+                        else corpusButtonRefs.current.delete(c.id);
+                      }}
                       type="button"
                       className="log-card"
                       data-active={activeId === c.id ? "true" : "false"}
@@ -451,15 +735,38 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           : ""}
                       </span>
                       {size != null ? (
-                        <span className="log-card__size">{formatBytes(size)}</span>
+                        <span className="log-card__size">
+                          {formatBytes(size)}
+                        </span>
                       ) : null}
                     </button>
                     <button
+                      ref={(node) => {
+                        if (node) menuTriggerRefs.current.set(c.id, node);
+                        else menuTriggerRefs.current.delete(c.id);
+                      }}
                       type="button"
-                      className="btn btn--ghost log-card__discard"
-                      onClick={() => void onDiscard(c.id)}
+                      className="log-card__menu-trigger"
+                      data-log-corpus-menu-trigger
+                      aria-label={`More actions for ${c.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === c.id}
+                      aria-controls={openMenuId === c.id ? menuId : undefined}
+                      disabled={busy}
+                      onClick={() => {
+                        if (openMenuId === c.id) closeCorpusMenu();
+                        else openCorpusMenu(c.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === "ArrowDown" ||
+                          event.key === "ArrowUp"
+                        ) {
+                          openCorpusMenu(c.id, event);
+                        }
+                      }}
                     >
-                      Discard
+                      <CorpusOverflowGlyph />
                     </button>
                   </li>
                 );
@@ -509,7 +816,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 <div className="log-detail__body" data-testid="log-overview">
                   {active.stats ? (
                     <>
-                      <p className="log-detail__blurb">{statsBlurb(active.stats)}</p>
+                      <p className="log-detail__blurb">
+                        {statsBlurb(active.stats)}
+                      </p>
                       <dl className="log-stat-grid">
                         <div>
                           <dt>Lines</dt>
@@ -539,7 +848,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         </div>
                         <div>
                           <dt>Discovered files</dt>
-                          <dd>{active.stats.discoveredFiles.toLocaleString()}</dd>
+                          <dd>
+                            {active.stats.discoveredFiles.toLocaleString()}
+                          </dd>
                         </div>
                         <div>
                           <dt>Excluded</dt>
@@ -590,30 +901,38 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         >
                           <strong>Partial corpus</strong>
                           <span>
-                            Some selected content was excluded, ignored, or unreadable.
+                            Some selected content was excluded, ignored, or
+                            unreadable.
                           </span>
                           {active.stats.exclusionExamples.length > 0 ? (
                             <ul aria-label="Import exclusions">
-                              {active.stats.exclusionExamples.map((example, index) => (
-                                <li key={`${index}-${example}`}>{example}</li>
-                              ))}
+                              {active.stats.exclusionExamples.map(
+                                (example, index) => (
+                                  <li key={`${index}-${example}`}>{example}</li>
+                                ),
+                              )}
                             </ul>
                           ) : null}
                         </div>
                       ) : null}
                       <div className="log-levels">
-                        {levelEntries(active.stats.levelCounts).map(({ level, count }) => (
-                          <span key={level} className={`chip chip--level chip--${level}`}>
-                            {level} {count}
-                          </span>
-                        ))}
+                        {levelEntries(active.stats.levelCounts).map(
+                          ({ level, count }) => (
+                            <span
+                              key={level}
+                              className={`chip chip--level chip--${level}`}
+                            >
+                              {level} {count}
+                            </span>
+                          ),
+                        )}
                       </div>
                     </>
                   ) : (
                     <p className="muted">
                       {active.eventCount.toLocaleString()} events /{" "}
-                      {active.templateCount.toLocaleString()} templates (legacy meta —
-                      re-ingest for full stats).
+                      {active.templateCount.toLocaleString()} templates (legacy
+                      meta — re-ingest for full stats).
                     </p>
                   )}
                   {active.topTemplates?.length ? (
@@ -639,9 +958,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                     data-testid="log-overview-no-eager-timeline"
                   >
                     The Logs overview no longer loads a decorative volume chart
-                    on select (that path burned CPU without seeking or filtering).
-                    Use <strong>Open Explorer</strong> for backend-driven time
-                    navigation over events.
+                    on select (that path burned CPU without seeking or
+                    filtering). Use <strong>Open Explorer</strong> for
+                    backend-driven time navigation over events.
                   </p>
                 </div>
               ) : null}
@@ -669,7 +988,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         if (e.key === "Enter") void onSearch();
                       }}
                     />
-                    <button type="button" disabled={busy} onClick={() => void onSearch()}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void onSearch()}
+                    >
                       Search
                     </button>
                   </div>
@@ -678,9 +1001,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       <li key={h.templateId}>
                         <button
                           type="button"
-                          onClick={() => setExemplar(h.exemplars[0] ?? h.pattern)}
+                          onClick={() =>
+                            setExemplar(h.exemplars[0] ?? h.pattern)
+                          }
                         >
-                          t{h.templateId} score={h.score.toFixed(2)} — {h.pattern}
+                          t{h.templateId} score={h.score.toFixed(2)} —{" "}
+                          {h.pattern}
                         </button>
                       </li>
                     ))}
@@ -706,7 +1032,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <td>{t.count}</td>
                           <td>{t.severity}</td>
                           <td>
-                            <button type="button" onClick={() => setExemplar(t.pattern)}>
+                            <button
+                              type="button"
+                              onClick={() => setExemplar(t.pattern)}
+                            >
                               {t.pattern}
                             </button>
                           </td>
@@ -732,8 +1061,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                               setExemplar(cl.exemplars[0] ?? cl.label)
                             }
                           >
-                            sev={cl.severity} n={cl.count} score={cl.score.toFixed(1)} —{" "}
-                            {cl.label}
+                            sev={cl.severity} n={cl.count} score=
+                            {cl.score.toFixed(1)} — {cl.label}
                           </button>
                         </li>
                       ))}
@@ -756,6 +1085,53 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           )}
         </section>
       </div>
+      {diagnostic ? (
+        <LogDiagnosticDialog
+          corpus={diagnostic.corpus}
+          environment={diagnostic.environment}
+          currentStatus={diagnostic.currentStatus}
+          onDismiss={closeDiagnostics}
+        />
+      ) : null}
+      {openMenuId && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={menuId}
+              className="log-card__menu"
+              role="menu"
+              aria-label={`Actions for ${
+                corpora.find((corpus) => corpus.id === openMenuId)?.name ??
+                "corpus"
+              }`}
+              style={
+                menuPosition
+                  ? { left: menuPosition.left, top: menuPosition.top }
+                  : { left: 0, top: 0, visibility: "hidden" }
+              }
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item"
+                onKeyDown={onMenuItemKeyDown}
+                onClick={() => void onOpenDiagnostics(openMenuId)}
+              >
+                Export diagnostics…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item log-card__menu-item--danger"
+                onKeyDown={onMenuItemKeyDown}
+                onClick={() => void onDiscard(openMenuId)}
+              >
+                Discard corpus…
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

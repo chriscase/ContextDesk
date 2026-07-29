@@ -174,6 +174,7 @@ struct BehaviorRow {
     source: String,
     generation_index: usize,
     ts: i64,
+    level: String,
 }
 
 fn parse_behavior_rows(root: &Path) -> Vec<BehaviorRow> {
@@ -195,6 +196,15 @@ fn parse_behavior_rows(root: &Path) -> Vec<BehaviorRow> {
                         .find_map(|token| token.strip_prefix("ts=")?.parse().ok())
                 })
                 .unwrap_or_else(|| panic!("wall-time behavior row lacked ts: {line}"));
+            let level = json
+                .as_ref()
+                .and_then(|value| value["level"].as_str())
+                .map(str::to_owned)
+                .or_else(|| {
+                    line.split_whitespace()
+                        .find_map(|token| token.strip_prefix("level=").map(str::to_owned))
+                })
+                .unwrap_or_else(|| panic!("behavior row lacked level: {line}"));
             let event_marker = "event_id=behavior-";
             let marker_start = line
                 .find(event_marker)
@@ -209,6 +219,7 @@ fn parse_behavior_rows(root: &Path) -> Vec<BehaviorRow> {
                 source: source.clone(),
                 generation_index,
                 ts,
+                level,
             });
         }
     }
@@ -771,10 +782,10 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
 
     assert_eq!(summary.events, 25_000);
     assert_eq!(summary.files, 16);
-    assert_eq!(summary.bytes, 4_227_271);
+    assert_eq!(summary.bytes, 4_384_032);
     assert_eq!(
         summary.tree_sha256,
-        "2b6173f31036bc2a70fd365effa0c5a02db8644fd8e71642de49fe11e64c2bc4"
+        "948551a0ffcc32ce27cb0916027e36babb9b2282519c509c7c23592dbd3665c3"
     );
     assert_eq!(
         generated_seven_day_byte_hashes(&generated_root),
@@ -797,9 +808,49 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
     assert_eq!(manifest["expected"]["profile"], SEVEN_DAY_PROFILE);
     assert_eq!(manifest["expected"]["events"], 25_000);
     assert_eq!(manifest["expected"]["files"], 10);
-    assert_eq!(manifest["expected"]["bytes"], 4_201_238);
+    assert_eq!(manifest["expected"]["bytes"], 4_201_281);
     assert_eq!(manifest["expected"]["time_span_secs"], 604_800);
-    assert_eq!(manifest["expected"]["severities"]["error"], 119);
+    assert_eq!(manifest["expected"]["severities"]["error"], 164);
+    let canonical_readme =
+        fs::read_to_string(fixture_root().join("README.md")).expect("canonical Log Lab README");
+    let readme_without_commas = canonical_readme.replace(',', "");
+    assert!(
+        readme_without_commas.contains(&format!(
+            "| Import source bytes | {} |",
+            manifest["expected"]["bytes"].as_u64().unwrap()
+        )),
+        "canonical README byte count drifted from the pinned manifest"
+    );
+    assert!(
+        readme_without_commas.contains(&format!(
+            "| Levels | {} INFO · {} DEBUG · {} WARN · {} ERROR |",
+            manifest["expected"]["severities"]["info"].as_u64().unwrap(),
+            manifest["expected"]["severities"]["debug"]
+                .as_u64()
+                .unwrap(),
+            manifest["expected"]["severities"]["warn"].as_u64().unwrap(),
+            manifest["expected"]["severities"]["error"]
+                .as_u64()
+                .unwrap(),
+        )),
+        "canonical README severity counts drifted from the pinned manifest"
+    );
+    assert!(
+        canonical_readme.contains(&format!(
+            "| Generated tree SHA-256 | `{}` |",
+            summary.tree_sha256
+        )),
+        "canonical README tree identity drifted from deterministic generation"
+    );
+    assert!(
+        canonical_readme.contains(&format!(
+            "| Filter level ERROR | Reports {} matching events |",
+            manifest["expected"]["severities"]["error"]
+                .as_u64()
+                .unwrap()
+        )),
+        "canonical README ERROR-filter proof drifted from the pinned manifest"
+    );
 
     let rows = parse_behavior_rows(&pinned_root);
     assert_eq!(rows.len(), 25_000);
@@ -809,6 +860,118 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
         rows.iter().map(|row| row.ts).max().unwrap() - rows.iter().map(|row| row.ts).min().unwrap(),
         604_800
     );
+
+    let metrics: Value = serde_json::from_slice(
+        &fs::read(pinned_root.join("scenarios/behavior-scale/metrics/operational-metrics.v1.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let metric_series = metrics["series"].as_array().unwrap();
+    assert_eq!(
+        metric_series
+            .iter()
+            .map(|series| series["unit"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["%", "bytes", "clients"]
+    );
+    let corpus_from = rows.iter().map(|row| row.ts).min().unwrap();
+    let corpus_to = rows.iter().map(|row| row.ts).max().unwrap();
+    for series in metric_series {
+        let points = series["points"].as_array().unwrap();
+        assert_eq!(points.first().unwrap()["timestamp"], corpus_from);
+        assert_eq!(points.last().unwrap()["timestamp"], corpus_to);
+    }
+    let series = |id: &str| {
+        metric_series
+            .iter()
+            .find(|series| series["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(
+        series("cpu-percent")["points"].as_array().unwrap().len(),
+        673
+    );
+    assert_eq!(
+        series("heap-used-bytes")["points"]
+            .as_array()
+            .unwrap()
+            .len(),
+        668
+    );
+    assert_eq!(
+        series("concurrent-clients")["points"]
+            .as_array()
+            .unwrap()
+            .len(),
+        673
+    );
+    assert_eq!(
+        metric_series
+            .iter()
+            .map(|series| series["gaps"].as_array().map_or(0, Vec::len))
+            .sum::<usize>(),
+        1,
+        "the primary load-test fixture has one explicit collector gap"
+    );
+    let client_points = series("concurrent-clients")["points"].as_array().unwrap();
+    assert_eq!(client_points[384]["value"], 120);
+    assert_eq!(
+        client_points[400]["value"], 180,
+        "the staged workload must reach its deterministic overload plateau"
+    );
+    assert_eq!(client_points[408]["value"], 180);
+    assert_eq!(client_points[420]["value"], 65);
+    let cpu_points = series("cpu-percent")["points"].as_array().unwrap();
+    assert!(
+        cpu_points[400]["value"].as_i64().unwrap() > cpu_points[392]["value"].as_i64().unwrap(),
+        "CPU must follow the staged client ramp with its declared sample lag"
+    );
+    assert!(
+        series("heap-used-bytes")["points"]
+            .as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| {
+                pair[0]["value"].as_i64().unwrap() - pair[1]["value"].as_i64().unwrap()
+                    > 250_000_000
+            }),
+        "heap series must include a visible major-GC recovery"
+    );
+
+    let elevated_rate = |from: i64, to: i64| {
+        let in_window = rows
+            .iter()
+            .filter(|row| (from..to).contains(&row.ts))
+            .collect::<Vec<_>>();
+        let elevated = in_window
+            .iter()
+            .filter(|row| matches!(row.level.as_str(), "warn" | "error"))
+            .count();
+        (elevated, in_window.len())
+    };
+    let (before_elevated, before_total) =
+        elevated_rate(corpus_from + 90 * 3_600, corpus_from + 97 * 3_600);
+    let (overload_elevated, overload_total) =
+        elevated_rate(corpus_from + 97 * 3_600, corpus_from + 104 * 3_600);
+    let (recovery_elevated, recovery_total) =
+        elevated_rate(corpus_from + 104 * 3_600, corpus_from + 111 * 3_600);
+    assert!(
+        overload_elevated * before_total > before_elevated * overload_total * 4,
+        "warning/error prevalence must rise materially near overload"
+    );
+    assert!(
+        overload_elevated * recovery_total > recovery_elevated * overload_total * 4,
+        "warning/error prevalence must recover after the load drop"
+    );
+    eprintln!(
+        "PASS seven-day metrics samples=673/668/673 span_secs=604800 overload_elevated={overload_elevated}/{overload_total} before={before_elevated}/{before_total} recovery={recovery_elevated}/{recovery_total}"
+    );
+    let stack_incident = rows
+        .iter()
+        .find(|row| row.generation_index == 14_763)
+        .unwrap();
+    assert_eq!(stack_incident.source, "api/app.jsonl");
+    assert_eq!(stack_incident.level, "error");
 
     let import_root = pinned_root.join("scenarios/behavior-scale/import");
     let mut import_blob = String::new();

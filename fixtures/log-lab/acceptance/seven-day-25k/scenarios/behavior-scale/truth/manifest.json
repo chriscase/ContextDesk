@@ -1,35 +1,35 @@
 {
   "expected": {
-    "bytes": 4201238,
+    "bytes": 4201281,
     "events": 25000,
     "files": 10,
     "files_by_path": {
       "scenarios/behavior-scale/import/api/app.jsonl": {
-        "sha256": "7e446a99a7b41823c1b1ee86427a0d023d723eef9d545358aaebbc1643b41216"
+        "sha256": "daa9983c529b24d8768bf19b97b9a5c27c9c81a7078ce467952c109ba3a0b730"
       },
       "scenarios/behavior-scale/import/auth/auth.jsonl": {
-        "sha256": "3bea5018f0d2da542af63e771f3a5734e13b1f8b5f4acbed016318c91e01409a"
+        "sha256": "f2ce52d81dcb90abf275548041be4ed9f3a607eba2a9c6ff1d9e4358473bdfa1"
       },
       "scenarios/behavior-scale/import/db/database.log": {
-        "sha256": "e68576a45b5546b1945d8fdb4c1fbf0509860c11c553f0cc32b321ee6e7ef162"
+        "sha256": "9812816b6ad145c5a12058da23422148d96f840b868b5ab537f7063a333dc479"
       },
       "scenarios/behavior-scale/import/db/database.log.1": {
         "sha256": "84039ec216e0eb76eaaa8d6ac553f98ac453c61497b74f91877c04e2f6a6914d"
       },
       "scenarios/behavior-scale/import/edge/access.jsonl": {
-        "sha256": "881cf5b91a9e2a2d916e82912e0be256a0ba5900d7a7ec616a073edde7388c6a"
+        "sha256": "b239d6b28374e10a79063899f939e3ee62da3153c720cb638be9215148ca6322"
       },
       "scenarios/behavior-scale/import/queue/events.jsonl": {
-        "sha256": "caba82f363e9d5a2f21359a42d4320df30ef43a63efb92b14fafbdc6aeae5c31"
+        "sha256": "fd24ecdf65e0e4faf159f3b2dbf1d321487ff698068a35bb516f94f49dd6e35c"
       },
       "scenarios/behavior-scale/import/region-a/app.jsonl": {
-        "sha256": "0da6c5c35088d4d1def1eab72e54b18e0f86efb7a4f82a2f69eb7988a5a0c8a0"
+        "sha256": "8f3b86f157b629e5fddf8c0c6a388a372187ead992f45596c940276f4d86263f"
       },
       "scenarios/behavior-scale/import/region-b/app.jsonl": {
-        "sha256": "89af33bd53001bb2b8e41ccd715ed95d124ea536cd8541da04979afddd81d260"
+        "sha256": "5e788d2d03c86f484f22ee4d3bd5cc6c4ddc63671c2e06a461d08b8e2c498800"
       },
       "scenarios/behavior-scale/import/worker/worker.log": {
-        "sha256": "cfbbd40f0289ca5598bf9d70a3f8351e10f8c4308f6910ed5e7a6e5aa6db6649"
+        "sha256": "26bff700bf415f35d054270a0fc43785f476642bf4763bfa44069b5b0b5cf414"
       },
       "scenarios/behavior-scale/import/worker/worker.log.1": {
         "sha256": "94222d1ffa4ad30680762d910bf90fb72949c904e37bb55eb5f2cae74489fb93"
@@ -39,10 +39,10 @@
     "requested_events": 25000,
     "requested_time_span_secs": 604800,
     "severities": {
-      "debug": 460,
-      "error": 119,
-      "info": 24165,
-      "warn": 256
+      "debug": 458,
+      "error": 164,
+      "info": 23984,
+      "warn": 394
     },
     "source_count": 10,
     "sources": {

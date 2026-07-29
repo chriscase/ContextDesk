@@ -3,6 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -21,16 +22,22 @@ const hostMocks = vi.hoisted(() => ({
   setActiveCorpus: vi.fn(),
   reanalyze: vi.fn(),
   cancelReanalysis: vi.fn(),
+  discard: vi.fn(),
   confirm: vi.fn(),
+  getBranding: vi.fn(),
+  saveDiagnostic: vi.fn(),
+  saveFile: vi.fn(),
+  listenProgress: vi.fn(),
 }));
 
 vi.mock("../../lib/host", () => ({
   hostListLogCorpora: hostMocks.listCorpora,
-  hostListenProcessProgress: vi.fn(async () => () => {}),
+  hostListenProcessProgress: hostMocks.listenProgress,
   hostCancelLogIngest: vi.fn(async () => true),
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
-  hostDiscardLogCorpus: vi.fn(),
+  hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
+  hostGetBranding: hostMocks.getBranding,
   hostImportLogCorpusPackagePath: vi.fn(),
   hostIngestLogPath: vi.fn(),
   hostListLogTemplates: hostMocks.listTemplates,
@@ -39,6 +46,7 @@ vi.mock("../../lib/host", () => ({
   hostLogTimeline: hostMocks.timeline,
   hostOpenLogExplorer: vi.fn(),
   hostReanalyzeLogCorpus: hostMocks.reanalyze,
+  hostSaveLogDiagnosticReport: hostMocks.saveDiagnostic,
   hostSetActiveLogCorpus: hostMocks.setActiveCorpus,
 }));
 
@@ -46,8 +54,35 @@ vi.mock("../../lib/dialogs", () => ({
   dialogConfirm: hostMocks.confirm,
   openDirectoryDialog: vi.fn(async () => null),
   openFileDialog: vi.fn(async () => null),
-  saveFileDialog: vi.fn(async () => null),
+  saveFileDialog: hostMocks.saveFile,
 }));
+
+function corpusButtonName(name: string) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}(?:\\s|$)`);
+}
+
+function corpus(id: string, name: string): LogCorpusSummaryDto {
+  return {
+    id,
+    name,
+    eventCount: 12,
+    templateCount: 3,
+    engine: "duckdb",
+    createdAt: 1_700_000_000,
+    sourceLabel: `${id}.log`,
+    stats: null,
+    topTemplates: [],
+    embedding: {
+      state: "keyword_only",
+      modelId: null,
+      embeddedTemplates: 0,
+      totalTemplates: 3,
+      reason: "local_model_unavailable",
+      updatedAt: 1,
+    },
+  };
+}
 
 describe("LogPane", () => {
   beforeEach(() => {
@@ -57,6 +92,7 @@ describe("LogPane", () => {
     hostMocks.clusterProblems.mockResolvedValue([]);
     hostMocks.search.mockResolvedValue([]);
     hostMocks.timeline.mockResolvedValue([]);
+    hostMocks.listenProgress.mockResolvedValue(() => {});
     hostMocks.setActiveCorpus.mockResolvedValue(null);
     hostMocks.reanalyze.mockResolvedValue({
       state: "complete",
@@ -68,6 +104,20 @@ describe("LogPane", () => {
     });
     hostMocks.confirm.mockResolvedValue(false);
     hostMocks.cancelReanalysis.mockResolvedValue(true);
+    hostMocks.discard.mockResolvedValue(undefined);
+    hostMocks.getBranding.mockResolvedValue({
+      name: "ContextDesk",
+      slug: "contextdesk",
+      tagline: "Developer knowledge workbench",
+      version: "0.1.0",
+      protocol: "cd.v1",
+      channel: "dev",
+      git_sha: "de43caeba66df05068a50db9356efad3b64a4a45",
+      git_describe: null,
+      identity_line: "v0.1.0 · channel=dev",
+    });
+    hostMocks.saveDiagnostic.mockResolvedValue(undefined);
+    hostMocks.saveFile.mockResolvedValue(null);
   });
 
   it("renders toolbar import/export actions and empty state", async () => {
@@ -84,6 +134,356 @@ describe("LogPane", () => {
       screen.getByRole("button", { name: /Export package/i }),
     ).toBeTruthy();
     expect(await screen.findByText(/No corpora yet/i)).toBeTruthy();
+  });
+
+  it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
+    const first = corpus("corpus-a", "API incident");
+    const second = corpus("corpus-b", "Worker incident");
+    hostMocks.listCorpora.mockResolvedValue([first, second]);
+
+    render(<LogPane />);
+    const firstCard = await screen.findByRole("button", {
+      name: corpusButtonName(first.name),
+    });
+    fireEvent.click(firstCard);
+    await waitFor(() =>
+      expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(first.id),
+    );
+    expect(screen.queryByRole("menuitem")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Discard$/ })).toBeNull();
+
+    const firstTrigger = screen.getByRole("button", {
+      name: `More actions for ${first.name}`,
+    });
+    fireEvent.click(firstTrigger);
+    const firstMenu = await screen.findByRole("menu", {
+      name: `Actions for ${first.name}`,
+    });
+    expect(within(firstMenu).getAllByRole("menuitem")[0]).toBe(
+      document.activeElement,
+    );
+
+    const secondTrigger = screen.getByRole("button", {
+      name: `More actions for ${second.name}`,
+    });
+    fireEvent.click(secondTrigger);
+    expect(
+      await screen.findByRole("menu", {
+        name: `Actions for ${second.name}`,
+      }),
+    ).toBeTruthy();
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(firstTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(secondTrigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("dismisses the corpus menu with Escape or outside pointer input and restores focus", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Logs" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("dismisses the corpus menu when keyboard focus leaves it", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+
+    const logsHeading = screen.getByRole("heading", { name: "Logs" });
+    const outsideButton = screen.getByRole("button", {
+      name: /Import package/i,
+    });
+    act(() => outsideButton.focus());
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(outsideButton);
+    expect(logsHeading).toBeTruthy();
+  });
+
+  it("opens from the keyboard and clamps the menu inside a narrow viewport", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const originalWidth = window.innerWidth;
+    const originalHeight = window.innerHeight;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 240,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 180,
+    });
+
+    try {
+      render(<LogPane />);
+      const trigger = await screen.findByRole("button", {
+        name: `More actions for ${item.name}`,
+      });
+      trigger.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            left: 210,
+            right: 238,
+            top: 150,
+            bottom: 178,
+            width: 28,
+            height: 28,
+            x: 210,
+            y: 150,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      fireEvent.keyDown(trigger, { key: "ArrowDown" });
+      const menu = await screen.findByRole("menu");
+      menu.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            left: 0,
+            right: 160,
+            top: 0,
+            bottom: 80,
+            width: 160,
+            height: 80,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => {
+        expect(menu.style.left).toBe("72px");
+        expect(menu.style.top).toBe("66px");
+      });
+      expect(within(menu).getAllByRole("menuitem")[0]).toBe(
+        document.activeElement,
+      );
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: originalHeight,
+      });
+    }
+  });
+
+  it("previews, copies, and safely saves privacy-bounded corpus diagnostics", async () => {
+    const item: LogCorpusSummaryDto = {
+      ...corpus("corpus-a", "API private.internal"),
+      sourceLabel: "/Users/chris/Company/private.log",
+      stats: {
+        files: 1,
+        discoveredFiles: 3,
+        excludedFiles: 1,
+        failedFiles: 1,
+        ignoredFiles: 0,
+        exclusionCounts: { binary: 1, open_failed: 1 },
+        exclusionExamples: [
+          "binary: /Users/chris/Company/core.bin",
+          "open_failed: C:\\Company\\secret.log",
+        ],
+        partial: true,
+        lines: 12,
+        templates: 3,
+        reductionRatio: 4,
+        embedded: 0,
+        sourceBytes: 64,
+        corpusBytes: 128,
+        levelCounts: { info: 10, error: 2 },
+        tsMin: 1,
+        tsMax: 12,
+        formatCounts: { json: 12 },
+      },
+      topTemplates: [
+        {
+          id: 1,
+          pattern: "PRIVATE_TEMPLATE_PAYLOAD customer=secret",
+          count: 12,
+          severity: 5,
+        },
+      ],
+      embedding: {
+        state: "partial",
+        modelId: "embarrassing-private-model",
+        embeddedTemplates: 1,
+        totalTemplates: 3,
+        reason: "private-provider",
+        updatedAt: 1,
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const writeText = vi.fn(async (_value: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    hostMocks.saveFile
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("/tmp/corpus-diagnostic.md")
+      .mockResolvedValueOnce("/tmp/corpus-diagnostic.json");
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole("menu");
+    const exportItem = within(menu).getByRole("menuitem", {
+      name: "Export diagnostics…",
+    });
+    const discardItem = within(menu).getByRole("menuitem", {
+      name: "Discard corpus…",
+    });
+    expect(document.activeElement).toBe(exportItem);
+    fireEvent.keyDown(exportItem, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(discardItem);
+    fireEvent.keyDown(discardItem, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(exportItem);
+    fireEvent.click(exportItem);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export corpus diagnostics",
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+    const note = within(dialog).getByLabelText(/Optional reproduction note/);
+    await waitFor(() => expect(document.activeElement).toBe(note));
+    expect(dialog.textContent).toContain("Raw logs and event payloads");
+    expect(dialog.textContent).toContain("provider/model inventories");
+    fireEvent.change(note, {
+      target: {
+        value: "Repro at /Users/chris/Company with Bearer secret-token-value",
+      },
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy Markdown" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain("[REDACTED_PATH]");
+    expect(copied).not.toContain("secret-token-value");
+    expect(copied).not.toContain("PRIVATE_TEMPLATE_PAYLOAD");
+    expect(copied).not.toContain("embarrassing-private-model");
+    expect(copied).not.toContain("private-provider");
+    expect(copied).not.toContain(item.sourceLabel);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save Markdown…" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText("Save cancelled. No file was written."),
+      ).toBeTruthy(),
+    );
+    expect(hostMocks.saveDiagnostic).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save Markdown…" }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
+        "/tmp/corpus-diagnostic.md",
+        "markdown",
+        expect.stringContaining("# ContextDesk corpus diagnostic"),
+      ),
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    expect(
+      within(dialog).getByLabelText("JSON diagnostic preview").textContent,
+    ).toContain('"schemaVersion": 1');
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save JSON…" }));
+    await waitFor(() =>
+      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
+        "/tmp/corpus-diagnostic.json",
+        "json",
+        expect.stringContaining('"schemaVersion": 1'),
+      ),
+    );
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("requires discard confirmation, preserves the corpus on cancel, and restores trigger focus", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.confirm.mockResolvedValue(false);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Discard corpus…" }),
+    );
+
+    await waitFor(() =>
+      expect(hostMocks.confirm).toHaveBeenCalledWith(
+        expect.stringContaining(item.name),
+        expect.objectContaining({ kind: "warning" }),
+      ),
+    );
+    expect(hostMocks.discard).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(
+      screen.getByRole("button", { name: corpusButtonName(item.name) }),
+    ).toBeTruthy();
+  });
+
+  it("discards only after confirmation and moves focus to the next corpus", async () => {
+    const first = corpus("corpus-a", "API incident");
+    const second = corpus("corpus-b", "Worker incident");
+    hostMocks.listCorpora
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValue([second]);
+    hostMocks.confirm.mockResolvedValue(true);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${first.name}`,
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Discard corpus…" }),
+    );
+
+    await waitFor(() =>
+      expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
+    );
+    const secondCard = await screen.findByRole("button", {
+      name: corpusButtonName(second.name),
+    });
+    await waitFor(() => expect(document.activeElement).toBe(secondCard));
+    expect(
+      screen.queryByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    ).toBeNull();
   });
 
   it("renders persisted partial counters and bounded exclusion reasons", async () => {
@@ -139,7 +539,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Partial incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Partial incident"),
+      }),
     );
 
     const overview = await screen.findByTestId("log-overview");
@@ -209,16 +611,16 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Busy incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Busy incident"),
+      }),
     );
     const overview = await screen.findByTestId("log-overview");
     await waitFor(() => {
       expect(hostMocks.clusterProblems).toHaveBeenCalledWith(corpus.id, 12);
       expect(hostMocks.listTemplates).toHaveBeenCalledWith(corpus.id, 100);
     });
-    expect(
-      within(overview).getByText("250 avg. events/template"),
-    ).toBeTruthy();
+    expect(within(overview).getByText("250 avg. events/template")).toBeTruthy();
     fireEvent.click(
       within(overview).getByRole("button", {
         name: "Help: Events per template",
@@ -243,11 +645,15 @@ describe("LogPane", () => {
     ).toBeTruthy();
     expect(overview.querySelector(".log-timeline-bars")).toBeNull();
     // Multiple selects must not re-introduce the query.
-    fireEvent.click(screen.getByRole("button", { name: /Busy incident/i }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName("Busy incident"),
+      }),
+    );
     await waitFor(() =>
-      expect(hostMocks.clusterProblems.mock.calls.length).toBeGreaterThanOrEqual(
-        1,
-      ),
+      expect(
+        hostMocks.clusterProblems.mock.calls.length,
+      ).toBeGreaterThanOrEqual(1),
     );
     expect(hostMocks.timeline).not.toHaveBeenCalled();
   });
@@ -277,7 +683,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Keyword incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Keyword incident"),
+      }),
     );
     const reanalyze = screen.getByTestId("reanalyze-log-corpus");
     await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(false));
@@ -331,11 +739,30 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Deferred incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Deferred incident"),
+      }),
     );
     const reanalyze = screen.getByTestId("reanalyze-log-corpus");
     await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(false));
     fireEvent.click(reanalyze);
+    await waitFor(() =>
+      expect(hostMocks.listenProgress).toHaveBeenCalledTimes(1),
+    );
+    const publishProgress = hostMocks.listenProgress.mock.calls[0]?.[0];
+    act(() => {
+      publishProgress({
+        kind: "log_ingest",
+        phase: "embed",
+        message: "Embedding templates",
+        fraction: 0.8,
+        lines_processed: 2,
+        files_processed: 1,
+        bytes_processed: 128,
+        templates: 1,
+        cancellable: true,
+      });
+    });
     const cancel = await screen.findByRole("button", {
       name: "Cancel re-analysis",
     });
@@ -352,8 +779,6 @@ describe("LogPane", () => {
       reason: "trusted_local_reanalysis",
       updatedAt: 2,
     });
-    expect(
-      await screen.findByText(/Local re-analysis complete:/),
-    ).toBeTruthy();
+    expect(await screen.findByText(/Local re-analysis complete:/)).toBeTruthy();
   });
 });

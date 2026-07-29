@@ -51,6 +51,7 @@ The reusable method is a layered evidence plane:
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | First-class richer timeline is still being promoted/refined |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
+| Privacy-reviewed corpus diagnostic handoff                  | **Local integration**                     | `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs` on the current acceptance branch                               | Active-Explorer state and failed-ingest handoff remain #713/#527 |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -216,6 +217,10 @@ Every public query defines:
 11. **Never make blank timeline buckets disappear if gaps are semantically
     important.**
 12. **Never apply a noise rule invisibly to evidence or model retrieval.**
+13. **Never treat a support diagnostic as a corpus package.** Diagnostics use an
+    explicit metadata allowlist, exclude event/template payloads and private
+    configuration, reapply redaction at the native write boundary, and remain
+    bounded and user-reviewed.
 
 Trust boundaries:
 
@@ -318,6 +323,29 @@ identity, ambiguity state, and non-destructive skew overlays.
   shared axis for severity and lane tracks.
 - A long blank duration must remain a gap; future compressed-gap views need
   explicit nonlinear-axis disclosure.
+
+### 6.8 Portable diagnostic handoff
+
+A support diagnostic and a shareable `.cdlog.zip` corpus package solve different
+problems. The package intentionally carries analyzed corpus data. The diagnostic
+is a small metadata report for reproducing product behavior across an isolated
+workstation and a support machine.
+
+The current local integration slice builds diagnostics from an explicit
+allowlist: application identity, OS, corpus identity/name, safe scalar counts,
+parse/level summaries, bounded basename-only omission examples, embedding state,
+and an optional bounded reproduction note or current UI status. It does not
+serialize the corpus DTO. That structural choice keeps top-template patterns,
+event payloads, source labels and absolute paths, chats, provider/model
+inventories, evaluator truth, and secrets outside the report.
+
+The user previews the exact Markdown or JSON before saving. The native writer
+accepts only a bounded payload and a user-selected `.md` or `.json` destination,
+reapplies redaction, refuses symlink destinations, and writes no hidden cache.
+Cancel therefore creates no file, and a later trial cannot inherit a prior
+diagnostic. This is still **partial**: active Explorer view configuration and a
+failed ingest's bounded transient reason set are not yet available through this
+slice and remain open under #713 and #527.
 
 ## 7. Performance and bounds
 

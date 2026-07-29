@@ -51,11 +51,17 @@
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 0.25rem 0.55rem;
+  min-height: 0;
   width: 100%;
   padding-right: 0.15rem;
   overflow-x: hidden;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.timeline-navigator .timeline-navigator__body:focus-visible {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: -2px;
 }
 
 .timeline-navigator__track {
@@ -159,6 +165,11 @@
   font-size: 0.5rem;
 }
 
+.timeline-navigator__error-key b {
+  border-color: var(--danger, #e06c75);
+  color: var(--danger, #e06c75);
+}
+
 .timeline-navigator__chart {
   position: relative;
   height: 3.15rem;
@@ -180,23 +191,25 @@
   display: none;
 }
 
-.timeline-navigator__bucket--has-error::before {
-  content: "";
+.timeline-navigator__error-rail {
   position: absolute;
-  z-index: 3;
-  top: 0.15rem;
-  left: 50%;
-  width: 0.2rem;
-  height: var(--error-signal-height, 0.2rem);
+  z-index: 5;
+  top: 0.12rem;
+  right: 0.3rem;
+  left: 0.3rem;
+  height: 0.42rem;
+  pointer-events: none;
+}
+
+.timeline-navigator__error-rail i {
+  position: absolute;
+  top: 0.02rem;
+  width: 0.32rem;
+  height: 0.32rem;
   border: 1px solid var(--bg-app, #0b0c0e);
-  border-radius: 999px;
+  border-radius: 1px;
   background: var(--danger, #e06c75);
-  background-image: repeating-linear-gradient(
-    0deg,
-    transparent 0 2px,
-    rgb(0 0 0 / 28%) 2px 3px
-  );
-  transform: translateX(-50%);
+  transform: translateX(-50%) rotate(45deg);
 }
 
 .timeline-navigator__stack {
@@ -274,6 +287,17 @@
   pointer-events: none;
 }
 
+.timeline-navigator__selection-range {
+  position: absolute;
+  z-index: 3;
+  inset-block: 0.2rem;
+  border: 1px dashed
+    color-mix(in srgb, var(--accent, #5b9fd4) 78%, var(--fg, #e8eaed));
+  border-radius: 0.2rem;
+  background: transparent;
+  pointer-events: none;
+}
+
 .timeline-navigator__preview-marker,
 .timeline-navigator__committed-marker {
   position: absolute;
@@ -307,40 +331,6 @@
   opacity: 0;
 }
 
-.timeline-navigator__hover-reading {
-  --timeline-reading-half-width: min(9.5rem, calc(50% - 0.5rem));
-
-  position: absolute;
-  z-index: 7;
-  top: clamp(0.85rem, var(--timeline-reading-y, 50%), calc(100% - 0.85rem));
-  left: clamp(
-    var(--timeline-reading-half-width),
-    var(--timeline-detail-x),
-    calc(100% - var(--timeline-reading-half-width))
-  );
-  width: max-content;
-  max-width: min(19rem, calc(100% - 1rem));
-  padding: 0.18rem 0.34rem;
-  overflow: hidden;
-  border: 1px solid
-    color-mix(
-      in srgb,
-      var(--accent, #5b9fd4) 50%,
-      var(--border-subtle, #2a2d33)
-    );
-  border-radius: 0.22rem;
-  background: color-mix(in srgb, var(--bg-elevated, #121418) 94%, transparent);
-  box-shadow: 0 0.3rem 0.75rem rgb(0 0 0 / 32%);
-  color: var(--fg, #e8eaed);
-  font-family: var(--font-mono, monospace);
-  font-size: 0.61rem;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  pointer-events: none;
-  transform: translate(-50%, -50%);
-}
-
 .timeline-navigator__axis {
   display: flex;
   justify-content: space-between;
@@ -353,20 +343,14 @@
 }
 
 .timeline-navigator__bucket-detail {
-  --detail-width: min(19rem, calc(100% - 1rem));
-
-  position: absolute;
-  z-index: 20;
-  top: 1.45rem;
-  left: clamp(
-    calc(var(--detail-width) / 2),
-    var(--timeline-detail-x),
-    calc(100% - var(--detail-width) / 2)
-  );
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, auto)) minmax(8rem, 1fr);
+  align-items: baseline;
   gap: 0.22rem;
-  width: var(--detail-width);
-  padding: 0.55rem 0.65rem;
+  box-sizing: border-box;
+  width: calc(100% - 0.6rem);
+  margin: 0.3rem;
+  padding: 0.4rem 0.55rem;
   border: 1px solid
     color-mix(
       in srgb,
@@ -375,12 +359,9 @@
     );
   border-radius: 0.45rem;
   background: color-mix(in srgb, var(--bg-elevated, #121418) 96%, transparent);
-  box-shadow: 0 0.8rem 2rem rgb(0 0 0 / 44%);
   color: var(--fg, #e8eaed);
   font-size: 0.68rem;
   line-height: 1.35;
-  pointer-events: none;
-  transform: translateX(-50%);
 }
 
 .timeline-navigator__bucket-detail > span,
@@ -390,11 +371,13 @@
 }
 
 .timeline-navigator__bucket-detail > code {
+  grid-column: 1 / -1;
   overflow-wrap: anywhere;
   font-size: 0.61rem;
 }
 
 .timeline-navigator__bucket-detail ul {
+  grid-column: 1 / -1;
   display: grid;
   gap: 0.12rem;
   margin: 0.15rem 0;
@@ -406,6 +389,16 @@
   display: flex;
   justify-content: space-between;
   gap: 0.6rem;
+}
+
+.timeline-navigator__bucket-detail > small {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 680px) {
+  .timeline-navigator__bucket-detail {
+    grid-template-columns: 1fr;
+  }
 }
 
 .timeline-navigator__metric-error,

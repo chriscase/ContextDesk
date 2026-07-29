@@ -508,6 +508,29 @@
   text-transform: uppercase;
 }
 
+.handbook-code__copy {
+  min-height: 1.65rem;
+  padding: 0.18rem 0.52rem;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.handbook-code__copy:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.handbook-code__copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .handbook-code pre,
 .handbook-diagram pre {
   overflow: auto;

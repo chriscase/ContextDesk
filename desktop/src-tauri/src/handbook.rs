@@ -16,6 +16,7 @@ const HANDBOOK_CHAPTERS: &[&str] = &[
     "docs/design/proven-methods/LOG_EVIDENCE_PIPELINE.md",
     "docs/design/OPERATIONAL_METRIC_TRACKS.md",
     "docs/design/proven-methods/INVESTIGATION_LOOP.md",
+    "docs/design/proven-methods/DEMO_EVALUATION_LAB.md",
     "docs/design/proven-methods/METHOD_TEMPLATE.md",
 ];
 
@@ -354,6 +355,12 @@ mod tests {
             page.body,
             include_str!("../../../docs/design/PROVEN_METHODS.md")
         );
+        let lab_id = "docs/design/proven-methods/DEMO_EVALUATION_LAB.md";
+        assert!(manifest.chapters.iter().any(|chapter| chapter.id == lab_id));
+        assert_eq!(
+            index.page(lab_id).expect("demo evaluation lab").body,
+            include_str!("../../../docs/design/proven-methods/DEMO_EVALUATION_LAB.md")
+        );
     }
 
     #[test]
@@ -414,6 +421,7 @@ mod tests {
         assert!(complete.contains("# Deterministic context assembly before model synthesis"));
         assert!(complete.contains("# Log evidence pipeline"));
         assert!(complete.contains("# Durable investigation loop"));
+        assert!(complete.contains("# Deterministic demo and model evaluation lab"));
         assert!(complete.contains("# Proven method chapter template"));
         assert!(index
             .export_markdown("current", Some("docs/ARCHITECTURE.md"))
