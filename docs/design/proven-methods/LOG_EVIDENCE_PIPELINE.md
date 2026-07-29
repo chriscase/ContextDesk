@@ -4,11 +4,10 @@
 pipeline: bounded ingest, redaction, parsing, Drain-style templates, DuckDB
 events, template-scale vectors, structured/keyword/semantic search, facets,
 analysis tools, packages, and Log Explorer query APIs. Bounded redacted
-Original records and broader timeline presentation are local integration work
-in the current acceptance branch. Explicit-offset logfmt/RFC5424 normalization
-for #681 is also local integration, not yet shipped on `main`. Full timestamp
-provenance, subsecond precision, timezone rules, and clock-skew review remain
-#670; durable noise policy remains #671.
+Original records, explicit-offset logfmt/RFC5424 normalization, and the shared
+timeline/metric presentation are present on `main`. Full timestamp provenance,
+subsecond precision, timezone rules, and clock-skew review remain #670; durable
+noise policy remains #671.
 
 ## 1. Problem
 
@@ -42,16 +41,16 @@ The reusable method is a layered evidence plane:
 | ----------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Streaming batch ingest and omission accounting              | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs)                                                                              | Live tailing remains later work                             |
 | Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
-| Bounded redacted Original representation                    | **Local integration**                     | `prepare_original_record` and additive store fields on the acceptance branch                                                                   | Must be promoted and natively verified before “shipped”     |
+| Bounded redacted Original representation                    | **Shipped**                               | `prepare_original_record` and additive store fields in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) and [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | Bounded redacted fidelity, not unbounded raw retention      |
 | JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
-| Explicit-offset logfmt/RFC5424 normalization                | **Local integration**                     | #681, local commit on the acceptance branch                                                                                                    | Keep #681 open until promotion/proof                        |
-| Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**, preserved by local #681 work | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Per-source timezone/year policy remains #670                |
+| Explicit-offset logfmt/RFC5424 normalization                | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) and current-main proof on #681                                                  | Whole-second storage and full #670 provenance policy        |
+| Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Per-source timezone/year policy remains #670                |
 | Full timestamp provenance, precision, DST, skew policy      | **Planned**                               | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
 | DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
-| Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | First-class richer timeline is still being promoted/refined |
+| Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
-| Privacy-reviewed corpus diagnostic handoff                  | **Local integration**                     | `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs` on the current acceptance branch                               | Active-Explorer state and failed-ingest handoff remain #713/#527 |
+| Privacy-reviewed corpus diagnostic handoff                  | **Partial**                               | `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs`                                                                 | Active-Explorer state and failed-ingest handoff remain #713/#527 |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -331,13 +330,13 @@ problems. The package intentionally carries analyzed corpus data. The diagnostic
 is a small metadata report for reproducing product behavior across an isolated
 workstation and a support machine.
 
-The current local integration slice builds diagnostics from an explicit
+The shipped successful-corpus slice builds diagnostics from an explicit
 allowlist: application identity, OS, corpus identity/name, safe scalar counts,
-parse/level summaries, bounded basename-only omission examples, embedding state,
-and an optional bounded reproduction note or current UI status. It does not
-serialize the corpus DTO. That structural choice keeps top-template patterns,
-event payloads, source labels and absolute paths, chats, provider/model
-inventories, evaluator truth, and secrets outside the report.
+parse/level summaries, bounded basename-only omission examples, embedding
+state, and an optional bounded reproduction note or current UI status. It does
+not serialize the corpus DTO. That structural choice keeps top-template
+patterns, event payloads, source labels and absolute paths, chats,
+provider/model inventories, evaluator truth, and secrets outside the report.
 
 The user previews the exact Markdown or JSON before saving. The native writer
 accepts only a bounded payload and a user-selected `.md` or `.json` destination,
@@ -352,7 +351,7 @@ slice and remain open under #713 and #527.
 | Dimension                              |                            ContextDesk bound/policy | Behavior                                               |
 | -------------------------------------- | --------------------------------------------------: | ------------------------------------------------------ |
 | Source ingest memory                   |                        Streamed record/file buffers | Does not load whole corpus                             |
-| Original (local integration)           |                     64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction     |
+| Original (redacted)                    |                     64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction     |
 | Ordinary event page                    |             200 default; core hard cap in query API | Keyset page                                            |
 | Timeline buckets                       |                                         256 maximum | Clamp; no event bodies                                 |
 | Find/regex pattern                     |                                      256 characters | Reject                                                 |
@@ -498,12 +497,12 @@ instant while ambiguous controls remain order-only.
 | Slice                          | Status                        | What is true now                                              | What is not claimed                     |
 | ------------------------------ | ----------------------------- | ------------------------------------------------------------- | --------------------------------------- |
 | Batch ingest/store/templates   | **Shipped**                   | Embedded local pipeline and deterministic states              | Live sources/tailing                    |
-| Redacted Original              | **Local integration**         | Implemented and tested on the acceptance branch                | Availability on `main` before promotion is not claimed |
+| Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
-| Explicit-offset logfmt/RFC5424 | **Local integration**         | Implementation and parser tests exist on the acceptance branch | Availability on `main` and full #670 policy are not claimed |
+| Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
-| Timeline                       | **Local integration over shipped summaries** | Full-width shared-axis timeline, chart-wide scrubber, severity stacks, sparse-error signal, resident range, and lane coverage are implemented on the acceptance branch | Metric tracks (#667), full #670 time policy, and promotion proof are not claimed |
+| Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |
 | Noise suppression              | **Planned**                   | Temporary filters exist                                       | Durable auditable squelch policy (#671) |
 | Template “reduction”           | **Shipped**                   | Events/templates ratio                                        | Storage compression claim               |
 

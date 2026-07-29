@@ -27,6 +27,24 @@ const STATUS_TERMS = [
   "Accepted design",
   "Planned",
 ];
+const TEMPORARY_PROMOTION_WORDING = [
+  /\buntil (?:issue )?#?\d+ is merged\b/i,
+  /\b(?:remains |is )?local until\b/i,
+  /\buntil this handbook is merged\b/i,
+  /\bcurrent acceptance branch\b/i,
+  /\bon (?:this|the) (?:current )?(?:acceptance|integration) branch\b/i,
+  /\bcurrent-main\/package availability until merged\b/i,
+];
+
+export function assertReleaseStableHandbookWording(relativePath, text) {
+  for (const pattern of TEMPORARY_PROMOTION_WORDING) {
+    if (pattern.test(text)) {
+      throw new Error(
+        `${relativePath}: contains temporary promotion wording that becomes stale after merge`,
+      );
+    }
+  }
+}
 
 function isInside(parent, candidate) {
   const relative = path.relative(parent, candidate);
@@ -56,6 +74,7 @@ function validateMarkdownFile(repositoryRoot, relativePath, text) {
   if (/\/Users\/|[A-Za-z]:\\Users\\/.test(text)) {
     throw new Error(`${relativePath}: contains a private absolute user path`);
   }
+  assertReleaseStableHandbookWording(relativePath, text);
 
   const fences = text.match(/^```mermaid\s*$|^```\s*$/gm) ?? [];
   let open = false;
