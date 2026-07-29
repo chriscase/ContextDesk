@@ -1,0 +1,19 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "bad-metric-ref",
+  "createdAt": "2024-01-15T12:00:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": { "redactionDeclared": true, "containsCredentials": false, "containsPii": false },
+  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "components": [
+    {
+      "id": "metrics-missing",
+      "role": "operational_metrics",
+      "path": "metrics/does-not-exist.v1.json",
+      "mediaType": "application/json",
+      "bytes": 2,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

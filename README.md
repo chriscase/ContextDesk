@@ -39,6 +39,22 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
 
+**Hand off incident evidence with a versioned contract.** Producers can build a
+directory-form **Incident Evidence Bundle** (`contextdesk.incident_evidence.v1`)
+with hashed logs, optional operational-metrics v1 documents, and privacy
+declarations. Validate offline before transfer:
+
+```bash
+cargo run -p cd-core --bin cd-validate-incident-evidence -- ./my-bundle
+```
+
+Normative spec: [`docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md`](docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md) ·
+templates: [`examples/incident-evidence-producers/`](examples/incident-evidence-producers/) ·
+fixtures: [`fixtures/incident-evidence/`](fixtures/incident-evidence/). Product
+import/attachment UX remains a later slice of
+[#763](https://github.com/chriscase/ContextDesk/issues/763); this repository
+ships the conformance foundation ([#764](https://github.com/chriscase/ContextDesk/issues/764)).
+
 **Start with repeatable evidence.** Install the bundled synthetic corpus during
 first-run setup, inspect its import summary, and open it directly in Log
 Explorer.

@@ -1,0 +1,25 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "synthetic-minimal-log-only",
+  "createdAt": "2024-01-15T12:05:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": {
+    "redactionDeclared": true,
+    "containsCredentials": false,
+    "containsPii": false,
+    "notes": "synthetic fixture only"
+  },
+  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "components": [
+    {
+      "id": "log-app",
+      "role": "log",
+      "path": "logs/app.log",
+      "mediaType": "text/plain",
+      "bytes": 67,
+      "sha256": "4e1b19c24653d49f4d66583dbefb8ee630ebc4cd1675e3c20608b41e551b2a2c",
+      "sourceLabel": "app"
+    }
+  ]
+}

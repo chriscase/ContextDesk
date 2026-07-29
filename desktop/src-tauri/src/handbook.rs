@@ -17,6 +17,7 @@ const HANDBOOK_CHAPTERS: &[&str] = &[
     "docs/design/OPERATIONAL_METRIC_TRACKS.md",
     "docs/design/proven-methods/INVESTIGATION_LOOP.md",
     "docs/design/proven-methods/DEMO_EVALUATION_LAB.md",
+    "docs/design/proven-methods/INCIDENT_EVIDENCE_BUNDLE.md",
     "docs/design/proven-methods/METHOD_TEMPLATE.md",
 ];
 

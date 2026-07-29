@@ -1,0 +1,13 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "bad-dup-paths",
+  "createdAt": "2024-01-15T12:00:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": { "redactionDeclared": true, "containsCredentials": false, "containsPii": false },
+  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "components": [
+    { "id": "a", "role": "log", "path": "logs/app.log", "mediaType": "text/plain", "bytes": 32, "sha256": "2463367fc04fe698fcfb4af7ce13c4aa83f635670ea077d4add2fd92c90e3122" },
+    { "id": "b", "role": "log", "path": "logs/app.log", "mediaType": "text/plain", "bytes": 32, "sha256": "2463367fc04fe698fcfb4af7ce13c4aa83f635670ea077d4add2fd92c90e3122" }
+  ]
+}

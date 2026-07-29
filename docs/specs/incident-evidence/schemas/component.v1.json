@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contextdesk.local/schemas/incident_evidence/component.v1.json",
+  "title": "ContextDesk Incident Evidence Component Types v1",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[A-Za-z0-9._@+/-]+$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["redactionDeclared", "containsCredentials", "containsPii"],
+      "properties": {
+        "redactionDeclared": { "type": "boolean" },
+        "containsCredentials": { "type": "boolean" },
+        "containsPii": { "type": "boolean" },
+        "notes": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "timeBasis": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["timezoneResolved"],
+      "properties": {
+        "timezone": {
+          "type": ["string", "null"],
+          "maxLength": 128
+        },
+        "timezoneResolved": { "type": "boolean" }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "role", "path", "mediaType", "bytes", "sha256"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "role": {
+          "type": "string",
+          "enum": ["log", "operational_metrics", "attachment", "readme"]
+        },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 536870912 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "sourceLabel": { "type": "string", "maxLength": 128 },
+        "timeBasis": { "$ref": "#/$defs/timeBasis" },
+        "lineage": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "parentId": { "type": "string", "maxLength": 128 },
+            "note": { "type": "string", "maxLength": 512 }
+          }
+        }
+      }
+    },
+    "logComponent": {
+      "allOf": [
+        { "$ref": "#/$defs/component" },
+        {
+          "properties": {
+            "role": { "const": "log" }
+          }
+        }
+      ]
+    },
+    "metricsComponent": {
+      "allOf": [
+        { "$ref": "#/$defs/component" },
+        {
+          "properties": {
+            "role": { "const": "operational_metrics" },
+            "mediaType": { "const": "application/json" }
+          }
+        }
+      ]
+    },
+    "attachmentComponent": {
+      "allOf": [
+        { "$ref": "#/$defs/component" },
+        {
+          "properties": {
+            "role": { "const": "attachment" }
+          }
+        }
+      ]
+    }
+  }
+}

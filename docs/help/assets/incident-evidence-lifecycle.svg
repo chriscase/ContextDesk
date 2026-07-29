@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="160" viewBox="0 0 720 160" role="img" aria-labelledby="title" aria-label="Producer builds a bundle, offline validation gates transfer, product import remains residual">
+  <title id="title">Producer validates and transfers an Incident Evidence Bundle</title>
+  <rect width="720" height="160" fill="none"/>
+  <rect x="16" y="40" width="150" height="80" rx="8" fill="none" stroke="currentColor" stroke-width="2"/>
+  <text x="91" y="75" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="currentColor">Producer</text>
+  <text x="91" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="currentColor">logs + metrics</text>
+  <path d="M174 80 H220" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <rect x="228" y="40" width="150" height="80" rx="8" fill="none" stroke="currentColor" stroke-width="2"/>
+  <text x="303" y="75" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="currentColor">Offline validate</text>
+  <text x="303" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="currentColor">hashes + paths</text>
+  <path d="M386 80 H432" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <rect x="440" y="40" width="120" height="80" rx="8" fill="none" stroke="currentColor" stroke-width="2"/>
+  <text x="500" y="85" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="currentColor">Transfer</text>
+  <path d="M568 80 H614" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#a)"/>
+  <rect x="622" y="40" width="82" height="80" rx="8" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3"/>
+  <text x="663" y="75" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" fill="currentColor">Import</text>
+  <text x="663" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="currentColor">residual</text>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="currentColor"/>
+    </marker>
+  </defs>
+</svg>

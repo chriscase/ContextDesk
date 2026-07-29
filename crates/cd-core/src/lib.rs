@@ -28,6 +28,7 @@ pub mod harvest;
 pub mod help;
 pub mod home_source;
 pub mod http_preset;
+pub mod incident_evidence;
 pub mod index;
 pub mod index_watch;
 pub mod injection;
