@@ -4322,6 +4322,7 @@ async fn agent_turn(
                 }
             };
             let corpus_id = context.corpus_id.clone();
+            let log_corpus_handles = Arc::clone(&state.log_corpus_handles);
             let capability_profile =
                 (!req.force_local && linked_synthesis_retry.is_none()).then_some(profile.clone());
             let capability_session_id = req.session_id.clone();
@@ -4331,7 +4332,7 @@ async fn agent_turn(
                 turn_started_at,
                 deadline_plan,
                 cancel.as_ref(),
-                move || validate_linked_log_corpus_at(&cache, &corpus_id),
+                move || log_corpus_handles.open(&cache, &corpus_id).map(|_| ()),
                 move || {
                     capability_profile.as_ref().and_then(|profile| {
                         cd_core::research::linked_tools_unavailable_events(
