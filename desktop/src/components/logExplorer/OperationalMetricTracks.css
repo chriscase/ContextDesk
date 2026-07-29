@@ -124,6 +124,8 @@
   border-radius: var(--radius-sm, 6px);
   cursor: crosshair;
   touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .operational-metric-track__plot:focus-visible {

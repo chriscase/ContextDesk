@@ -267,6 +267,8 @@ function MetricTrack({
   };
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    // A brush gesture is chart input, never WebView text/SVG selection.
+    event.preventDefault();
     onInteractionChange(interactionKey("drag"), true);
     event.currentTarget.setPointerCapture?.(event.pointerId);
     onPointerTimestamp(timestampFromPointer(event), "start");

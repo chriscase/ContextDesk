@@ -253,7 +253,9 @@ describe("OperationalMetricTracks", () => {
     fireEvent.pointerUp(cpuPlot, { clientX: 90, pointerId: 1 });
     expect(onSeekTimestamp).not.toHaveBeenCalled();
 
-    fireEvent.pointerDown(cpuPlot, { clientX: 20, pointerId: 1 });
+    expect(fireEvent.pointerDown(cpuPlot, { clientX: 20, pointerId: 1 })).toBe(
+      false,
+    );
     fireEvent.pointerMove(cpuPlot, {
       buttons: 1,
       clientX: 70,
