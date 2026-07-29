@@ -1,7 +1,16 @@
 /**
  * Log analysis surface: Memory-style list | detail + package import/export.
  */
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
@@ -62,6 +71,22 @@ type Props = {
   onOpenHelp?: (pageId: string) => void;
 };
 
+function CorpusOverflowGlyph() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="3" r="1.25" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.25" fill="currentColor" />
+      <circle cx="8" cy="13" r="1.25" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [corpora, setCorpora] = useState<LogCorpusSummaryDto[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -79,6 +104,17 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  const menuId = useId();
+  const menuRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingDiscardFocusRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -104,6 +140,110 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const closeCorpusMenu = useCallback(
+    (restoreFocus = true) => {
+      const closingId = openMenuId;
+      setOpenMenuId(null);
+      setMenuPosition(null);
+      if (restoreFocus && closingId) {
+        queueMicrotask(() => menuTriggerRefs.current.get(closingId)?.focus());
+      }
+    },
+    [openMenuId],
+  );
+
+  const positionCorpusMenu = useCallback(() => {
+    if (!openMenuId) return;
+    const trigger = menuTriggerRefs.current.get(openMenuId);
+    const menu = menuRef.current;
+    if (!trigger || !menu) return;
+
+    const gutter = 8;
+    const offset = 4;
+    const triggerRect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(
+      gutter,
+      window.innerWidth - menuRect.width - gutter,
+    );
+    const left = Math.min(
+      Math.max(gutter, triggerRect.right - menuRect.width),
+      maxLeft,
+    );
+    const below = triggerRect.bottom + offset;
+    const top =
+      below + menuRect.height <= window.innerHeight - gutter
+        ? below
+        : Math.max(gutter, triggerRect.top - menuRect.height - offset);
+
+    setMenuPosition({ left, top });
+  }, [openMenuId]);
+
+  useLayoutEffect(() => {
+    if (!openMenuId) return;
+    positionCorpusMenu();
+    menuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.focus();
+  }, [openMenuId, positionCorpusMenu]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+
+    const trigger = menuTriggerRefs.current.get(openMenuId);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        menuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      const otherTrigger =
+        target instanceof Element
+          ? target.closest("[data-log-corpus-menu-trigger]")
+          : null;
+      closeCorpusMenu(!otherTrigger);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeCorpusMenu();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("scroll", positionCorpusMenu, true);
+    window.addEventListener("resize", positionCorpusMenu);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("scroll", positionCorpusMenu, true);
+      window.removeEventListener("resize", positionCorpusMenu);
+    };
+  }, [closeCorpusMenu, openMenuId, positionCorpusMenu]);
+
+  useEffect(() => {
+    if (openMenuId && !corpora.some((corpus) => corpus.id === openMenuId)) {
+      setOpenMenuId(null);
+      setMenuPosition(null);
+    }
+  }, [corpora, openMenuId]);
+
+  useEffect(() => {
+    const pendingId = pendingDiscardFocusRef.current;
+    if (pendingId === undefined) return;
+    if (pendingId) {
+      const target = corpusButtonRefs.current.get(pendingId);
+      if (!target) return;
+      target.focus();
+    } else {
+      listRef.current?.focus();
+    }
+    pendingDiscardFocusRef.current = undefined;
+  }, [corpora]);
 
   const selectCorpus = useCallback(async (id: string) => {
     setActiveId(id);
@@ -275,10 +415,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   }
 
   async function onDiscard(id: string) {
-    const ok = await dialogConfirm("Discard this disposable corpus?", {
-      title: "Discard corpus",
-    });
-    if (!ok) return;
+    const corpus = corpora.find((candidate) => candidate.id === id);
+    const trigger = menuTriggerRefs.current.get(id);
+    setOpenMenuId(null);
+    setMenuPosition(null);
+    queueMicrotask(() => trigger?.focus());
+
+    const ok = await dialogConfirm(
+      `Discard "${corpus?.name ?? "this corpus"}"? This removes the disposable analysis corpus from ContextDesk.`,
+      {
+        title: "Discard corpus",
+        kind: "warning",
+      },
+    );
+    if (!ok) {
+      queueMicrotask(() => trigger?.focus());
+      return;
+    }
+
+    const discardedIndex = corpora.findIndex(
+      (candidate) => candidate.id === id,
+    );
+    const remaining = corpora.filter((candidate) => candidate.id !== id);
+    pendingDiscardFocusRef.current =
+      remaining[Math.min(Math.max(discardedIndex, 0), remaining.length - 1)]
+        ?.id ?? null;
+
     setBusy(true);
     try {
       await hostDiscardLogCorpus(id);
@@ -290,12 +452,34 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       }
       await refresh();
     } catch (e) {
+      pendingDiscardFocusRef.current = undefined;
       setError(String(e));
+      queueMicrotask(() => trigger?.focus());
     } finally {
       setBusy(false);
     }
   }
 
+  function openCorpusMenu(
+    id: string,
+    event?: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    event?.preventDefault();
+    setMenuPosition(null);
+    setOpenMenuId(id);
+  }
+
+  function onMenuItemKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp" ||
+      event.key === "Home" ||
+      event.key === "End"
+    ) {
+      event.preventDefault();
+      event.currentTarget.focus();
+    }
+  }
 
   if (inAppExplorerId) {
     return (
@@ -421,7 +605,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       {note ? <p className="muted log-pane__note">{note}</p> : null}
 
       <div className="pane__split pane__split--logs">
-        <aside className="log-list" aria-label="Corpora">
+        <aside
+          ref={listRef}
+          className="log-list"
+          aria-label="Corpora"
+          tabIndex={-1}
+        >
           {corpora.length === 0 ? (
             <div className="pane-empty">
               <p className="muted">No corpora yet.</p>
@@ -437,6 +626,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 return (
                   <li key={c.id}>
                     <button
+                      ref={(node) => {
+                        if (node) corpusButtonRefs.current.set(c.id, node);
+                        else corpusButtonRefs.current.delete(c.id);
+                      }}
                       type="button"
                       className="log-card"
                       data-active={activeId === c.id ? "true" : "false"}
@@ -455,11 +648,32 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       ) : null}
                     </button>
                     <button
+                      ref={(node) => {
+                        if (node) menuTriggerRefs.current.set(c.id, node);
+                        else menuTriggerRefs.current.delete(c.id);
+                      }}
                       type="button"
-                      className="btn btn--ghost log-card__discard"
-                      onClick={() => void onDiscard(c.id)}
+                      className="log-card__menu-trigger"
+                      data-log-corpus-menu-trigger
+                      aria-label={`More actions for ${c.name}`}
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === c.id}
+                      aria-controls={openMenuId === c.id ? menuId : undefined}
+                      disabled={busy}
+                      onClick={() => {
+                        if (openMenuId === c.id) closeCorpusMenu();
+                        else openCorpusMenu(c.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === "ArrowDown" ||
+                          event.key === "ArrowUp"
+                        ) {
+                          openCorpusMenu(c.id, event);
+                        }
+                      }}
                     >
-                      Discard
+                      <CorpusOverflowGlyph />
                     </button>
                   </li>
                 );
@@ -756,6 +970,36 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           )}
         </section>
       </div>
+      {openMenuId && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={menuId}
+              className="log-card__menu"
+              role="menu"
+              aria-label={`Actions for ${
+                corpora.find((corpus) => corpus.id === openMenuId)?.name ??
+                "corpus"
+              }`}
+              style={
+                menuPosition
+                  ? { left: menuPosition.left, top: menuPosition.top }
+                  : { left: 0, top: 0, visibility: "hidden" }
+              }
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item log-card__menu-item--danger"
+                onKeyDown={onMenuItemKeyDown}
+                onClick={() => void onDiscard(openMenuId)}
+              >
+                Discard corpus…
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

@@ -21,6 +21,7 @@ const hostMocks = vi.hoisted(() => ({
   setActiveCorpus: vi.fn(),
   reanalyze: vi.fn(),
   cancelReanalysis: vi.fn(),
+  discard: vi.fn(),
   confirm: vi.fn(),
 }));
 
@@ -29,7 +30,7 @@ vi.mock("../../lib/host", () => ({
   hostListenProcessProgress: vi.fn(async () => () => {}),
   hostCancelLogIngest: vi.fn(async () => true),
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
-  hostDiscardLogCorpus: vi.fn(),
+  hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
   hostImportLogCorpusPackagePath: vi.fn(),
   hostIngestLogPath: vi.fn(),
@@ -48,6 +49,33 @@ vi.mock("../../lib/dialogs", () => ({
   openFileDialog: vi.fn(async () => null),
   saveFileDialog: vi.fn(async () => null),
 }));
+
+function corpusButtonName(name: string) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}(?:\\s|$)`);
+}
+
+function corpus(id: string, name: string): LogCorpusSummaryDto {
+  return {
+    id,
+    name,
+    eventCount: 12,
+    templateCount: 3,
+    engine: "duckdb",
+    createdAt: 1_700_000_000,
+    sourceLabel: `${id}.log`,
+    stats: null,
+    topTemplates: [],
+    embedding: {
+      state: "keyword_only",
+      modelId: null,
+      embeddedTemplates: 0,
+      totalTemplates: 3,
+      reason: "local_model_unavailable",
+      updatedAt: 1,
+    },
+  };
+}
 
 describe("LogPane", () => {
   beforeEach(() => {
@@ -68,6 +96,7 @@ describe("LogPane", () => {
     });
     hostMocks.confirm.mockResolvedValue(false);
     hostMocks.cancelReanalysis.mockResolvedValue(true);
+    hostMocks.discard.mockResolvedValue(undefined);
   });
 
   it("renders toolbar import/export actions and empty state", async () => {
@@ -84,6 +113,189 @@ describe("LogPane", () => {
       screen.getByRole("button", { name: /Export package/i }),
     ).toBeTruthy();
     expect(await screen.findByText(/No corpora yet/i)).toBeTruthy();
+  });
+
+  it("preserves primary corpus selection and keeps only one named overflow menu open", async () => {
+    const first = corpus("corpus-a", "API incident");
+    const second = corpus("corpus-b", "Worker incident");
+    hostMocks.listCorpora.mockResolvedValue([first, second]);
+
+    render(<LogPane />);
+    const firstCard = await screen.findByRole("button", {
+      name: corpusButtonName(first.name),
+    });
+    fireEvent.click(firstCard);
+    await waitFor(() =>
+      expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(first.id),
+    );
+    expect(screen.queryByRole("menuitem")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Discard$/ })).toBeNull();
+
+    const firstTrigger = screen.getByRole("button", {
+      name: `More actions for ${first.name}`,
+    });
+    fireEvent.click(firstTrigger);
+    const firstMenu = await screen.findByRole("menu", {
+      name: `Actions for ${first.name}`,
+    });
+    expect(within(firstMenu).getByRole("menuitem")).toBe(
+      document.activeElement,
+    );
+
+    const secondTrigger = screen.getByRole("button", {
+      name: `More actions for ${second.name}`,
+    });
+    fireEvent.click(secondTrigger);
+    expect(
+      await screen.findByRole("menu", {
+        name: `Actions for ${second.name}`,
+      }),
+    ).toBeTruthy();
+    expect(screen.getAllByRole("menu")).toHaveLength(1);
+    expect(firstTrigger.getAttribute("aria-expanded")).toBe("false");
+    expect(secondTrigger.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("dismisses the corpus menu with Escape or outside pointer input and restores focus", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Logs" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("opens from the keyboard and clamps the menu inside a narrow viewport", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const originalWidth = window.innerWidth;
+    const originalHeight = window.innerHeight;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 240,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 180,
+    });
+
+    try {
+      render(<LogPane />);
+      const trigger = await screen.findByRole("button", {
+        name: `More actions for ${item.name}`,
+      });
+      trigger.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            left: 210,
+            right: 238,
+            top: 150,
+            bottom: 178,
+            width: 28,
+            height: 28,
+            x: 210,
+            y: 150,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      fireEvent.keyDown(trigger, { key: "ArrowDown" });
+      const menu = await screen.findByRole("menu");
+      menu.getBoundingClientRect = vi.fn(
+        () =>
+          ({
+            left: 0,
+            right: 160,
+            top: 0,
+            bottom: 80,
+            width: 160,
+            height: 80,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      fireEvent(window, new Event("resize"));
+      await waitFor(() => {
+        expect(menu.style.left).toBe("72px");
+        expect(menu.style.top).toBe("66px");
+      });
+      expect(within(menu).getByRole("menuitem")).toBe(document.activeElement);
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: originalHeight,
+      });
+    }
+  });
+
+  it("requires discard confirmation, preserves the corpus on cancel, and restores trigger focus", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.confirm.mockResolvedValue(false);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("menuitem"));
+
+    await waitFor(() =>
+      expect(hostMocks.confirm).toHaveBeenCalledWith(
+        expect.stringContaining(item.name),
+        expect.objectContaining({ kind: "warning" }),
+      ),
+    );
+    expect(hostMocks.discard).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(
+      screen.getByRole("button", { name: corpusButtonName(item.name) }),
+    ).toBeTruthy();
+  });
+
+  it("discards only after confirmation and moves focus to the next corpus", async () => {
+    const first = corpus("corpus-a", "API incident");
+    const second = corpus("corpus-b", "Worker incident");
+    hostMocks.listCorpora
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValue([second]);
+    hostMocks.confirm.mockResolvedValue(true);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${first.name}`,
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("menuitem"));
+
+    await waitFor(() =>
+      expect(hostMocks.discard).toHaveBeenCalledWith(first.id),
+    );
+    const secondCard = await screen.findByRole("button", {
+      name: corpusButtonName(second.name),
+    });
+    await waitFor(() => expect(document.activeElement).toBe(secondCard));
+    expect(
+      screen.queryByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    ).toBeNull();
   });
 
   it("renders persisted partial counters and bounded exclusion reasons", async () => {
@@ -139,7 +351,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Partial incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Partial incident"),
+      }),
     );
 
     const overview = await screen.findByTestId("log-overview");
@@ -209,7 +423,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Busy incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Busy incident"),
+      }),
     );
     const overview = await screen.findByTestId("log-overview");
     await waitFor(() => {
@@ -243,7 +459,11 @@ describe("LogPane", () => {
     ).toBeTruthy();
     expect(overview.querySelector(".log-timeline-bars")).toBeNull();
     // Multiple selects must not re-introduce the query.
-    fireEvent.click(screen.getByRole("button", { name: /Busy incident/i }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName("Busy incident"),
+      }),
+    );
     await waitFor(() =>
       expect(hostMocks.clusterProblems.mock.calls.length).toBeGreaterThanOrEqual(
         1,
@@ -277,7 +497,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Keyword incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Keyword incident"),
+      }),
     );
     const reanalyze = screen.getByTestId("reanalyze-log-corpus");
     await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(false));
@@ -331,7 +553,9 @@ describe("LogPane", () => {
 
     render(<LogPane />);
     fireEvent.click(
-      await screen.findByRole("button", { name: /Deferred incident/i }),
+      await screen.findByRole("button", {
+        name: corpusButtonName("Deferred incident"),
+      }),
     );
     const reanalyze = screen.getByTestId("reanalyze-log-corpus");
     await waitFor(() => expect(reanalyze.hasAttribute("disabled")).toBe(false));
