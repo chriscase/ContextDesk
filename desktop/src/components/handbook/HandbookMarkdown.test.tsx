@@ -59,6 +59,30 @@ describe("HandbookMarkdown", () => {
     expect(container.querySelector("a")).toBeNull();
   });
 
+  it("copies a complete handbook code or prompt block", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <HandbookMarkdown
+        body={"```text\nDesign <your architecture> with explicit proof.\n```"}
+        headings={[]}
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy text block" }),
+    );
+
+    expect(writeText).toHaveBeenCalledWith(
+      "Design <your architecture> with explicit proof.",
+    );
+    expect(await screen.findByText("Copied")).toBeTruthy();
+  });
+
   it("presents Mermaid as an accessible semantic card and readable source", () => {
     const headings = collectHandbookHeadings(body);
     const { container } = render(

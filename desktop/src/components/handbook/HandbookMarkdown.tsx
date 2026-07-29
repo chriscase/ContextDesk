@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type ReactNode } from "react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
 
 export type HandbookHeading = {
   id: string;
@@ -35,6 +35,53 @@ type MermaidModel = {
   nodes: MermaidNode[];
   edges: MermaidEdge[];
 };
+
+function HandbookCodeBlock({
+  language,
+  source,
+}: {
+  language: string;
+  source: string;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
+    "idle",
+  );
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1_400);
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  return (
+    <div className="handbook-code">
+      <div>
+        <span>{language || "text"}</span>
+        <button
+          type="button"
+          className="handbook-code__copy"
+          aria-label={`Copy ${language || "text"} block`}
+          onClick={() => void copy()}
+        >
+          {copyState === "copied"
+            ? "Copied"
+            : copyState === "error"
+              ? "Copy failed"
+              : "Copy"}
+        </button>
+      </div>
+      <pre>
+        <code className={language ? `language-${language}` : undefined}>
+          {source}
+        </code>
+      </pre>
+    </div>
+  );
+}
 
 const INLINE_PATTERN =
   /(\[[^\]\n]+\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_)/g;
@@ -682,17 +729,11 @@ export function HandbookMarkdown({ body, headings, onNavigate }: Props) {
             index={blockIndex}
           />
         ) : (
-          <div className="handbook-code" key={`code-${blockIndex}`}>
-            <div>
-              <span>{language || "text"}</span>
-              <span>Read-only</span>
-            </div>
-            <pre>
-              <code className={language ? `language-${language}` : undefined}>
-                {source}
-              </code>
-            </pre>
-          </div>
+          <HandbookCodeBlock
+            key={`code-${blockIndex}`}
+            language={language}
+            source={source}
+          />
         ),
       );
       blockIndex += 1;
