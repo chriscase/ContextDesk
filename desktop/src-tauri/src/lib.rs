@@ -6494,18 +6494,24 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
 }
 
 /// List disposable log corpora under app cache.
-#[tauri::command]
-fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
-    let cache = log_cache_dir(&state)?;
+fn list_log_corpora_at(cache: &std::path::Path) -> Result<Vec<LogCorpusSummaryDto>, String> {
     let summaries =
-        cd_core::log_analysis::LogCorpus::list_summaries(&cache).map_err(|e| e.to_string())?;
+        cd_core::log_analysis::LogCorpus::list_summaries(cache).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for s in summaries {
-        if let Ok(c) = cd_core::log_analysis::LogCorpus::open(&cache, &s.id) {
-            out.push(summary_dto(&c));
+    for summary in summaries {
+        if let Ok(corpus) = cd_core::log_analysis::LogCorpus::open(cache, &summary.id) {
+            out.push(summary_dto(&corpus));
         }
     }
     Ok(out)
+}
+
+#[tauri::command]
+async fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDto>, String> {
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || list_log_corpora_at(&cache))
+        .await
+        .map_err(|error| format!("log corpus list task join: {error}"))?
 }
 
 /// Full summary for one corpus (detail header).
@@ -6530,28 +6536,38 @@ async fn get_log_corpus(
 }
 
 /// List templates for a corpus (UI table).
+fn list_log_templates_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    limit: Option<u32>,
+) -> Result<Vec<LogTemplateRowDto>, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(200) as usize;
+    let mut rows = corpus.list_templates();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.info.count));
+    Ok(rows
+        .into_iter()
+        .take(lim)
+        .map(|row| LogTemplateRowDto {
+            id: row.info.template_id,
+            pattern: row.info.pattern,
+            count: row.info.count,
+            severity: row.info.severity,
+        })
+        .collect())
+}
+
 #[tauri::command]
-fn list_log_templates(
+async fn list_log_templates(
     state: State<'_, AppState>,
     corpus_id: String,
     limit: Option<u32>,
 ) -> Result<Vec<LogTemplateRowDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let lim = limit.unwrap_or(200) as usize;
-    let mut rows = c.list_templates();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.info.count));
-    Ok(rows
-        .into_iter()
-        .take(lim)
-        .map(|r| LogTemplateRowDto {
-            id: r.info.template_id,
-            pattern: r.info.pattern,
-            count: r.info.count,
-            severity: r.info.severity,
-        })
-        .collect())
+    tokio::task::spawn_blocking(move || list_log_templates_at(&cache, &corpus_id, limit))
+        .await
+        .map_err(|error| format!("log template list task join: {error}"))?
 }
 
 /// Export a corpus package zip to a user path (full analysis package).
@@ -7452,56 +7468,108 @@ fn cancel_log_ingest(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 /// Problem clusters for a corpus.
+fn log_cluster_problems_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    max_clusters: Option<u32>,
+) -> Result<Vec<LogClusterDto>, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let clusters =
+        cd_core::log_analysis::cluster_problems(&corpus, max_clusters.unwrap_or(10) as usize)
+            .map_err(|e| e.to_string())?;
+    Ok(clusters
+        .into_iter()
+        .map(|cluster| LogClusterDto {
+            cluster_id: cluster.cluster_id,
+            label: cluster.label,
+            count: cluster.count,
+            severity: cluster.severity,
+            score: cluster.score,
+            template_ids: cluster.template_ids,
+            exemplars: cluster.exemplars,
+        })
+        .collect())
+}
+
 #[tauri::command]
-fn log_cluster_problems(
+async fn log_cluster_problems(
     state: State<'_, AppState>,
     corpus_id: String,
     max_clusters: Option<u32>,
 ) -> Result<Vec<LogClusterDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let clusters = cd_core::log_analysis::cluster_problems(&c, max_clusters.unwrap_or(10) as usize)
+    tokio::task::spawn_blocking(move || log_cluster_problems_at(&cache, &corpus_id, max_clusters))
+        .await
+        .map_err(|error| format!("log problem cluster task join: {error}"))?
+}
+
+/// Timeline buckets for a corpus.
+fn log_timeline_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    width_secs: Option<i64>,
+) -> Result<Vec<LogTimelineBucketDto>, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let buckets = cd_core::log_analysis::timeline(&corpus, width_secs.unwrap_or(60), None, None)
         .map_err(|e| e.to_string())?;
-    Ok(clusters
+    Ok(buckets
         .into_iter()
-        .map(|cl| LogClusterDto {
-            cluster_id: cl.cluster_id,
-            label: cl.label,
-            count: cl.count,
-            severity: cl.severity,
-            score: cl.score,
-            template_ids: cl.template_ids,
-            exemplars: cl.exemplars,
+        .map(|bucket| LogTimelineBucketDto {
+            start: bucket.start,
+            width: bucket.width,
+            count: bucket.count,
         })
         .collect())
 }
 
-/// Timeline buckets for a corpus.
 #[tauri::command]
-fn log_timeline(
+async fn log_timeline(
     state: State<'_, AppState>,
     corpus_id: String,
     width_secs: Option<i64>,
 ) -> Result<Vec<LogTimelineBucketDto>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let buckets = cd_core::log_analysis::timeline(&c, width_secs.unwrap_or(60), None, None)
+    tokio::task::spawn_blocking(move || log_timeline_at(&cache, &corpus_id, width_secs))
+        .await
+        .map_err(|error| format!("log analysis timeline task join: {error}"))?
+}
+
+/// Hybrid log search (paraphrase-capable when embed backend present).
+fn log_search_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: String,
+    k: Option<u32>,
+    embed_backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
+) -> Result<Vec<LogSearchHitDto>, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let request = cd_core::log_analysis::SearchLogsQuery {
+        query: Some(query),
+        semantic: true,
+        k: k.unwrap_or(8) as usize,
+        ..Default::default()
+    };
+    let hits = cd_core::log_analysis::search_logs(&corpus, &request, embed_backend.as_deref())
         .map_err(|e| e.to_string())?;
-    Ok(buckets
+    Ok(hits
         .into_iter()
-        .map(|b| LogTimelineBucketDto {
-            start: b.start,
-            width: b.width,
-            count: b.count,
+        .map(|hit| LogSearchHitDto {
+            template_id: hit.template_id,
+            pattern: hit.pattern,
+            score: hit.score,
+            semantic_score: hit.semantic_score,
+            count: hit.count,
+            severity: hit.severity,
+            exemplars: hit.exemplars,
         })
         .collect())
 }
 
-/// Hybrid log search (paraphrase-capable when embed backend present).
 #[tauri::command]
-fn log_search(
+async fn log_search(
     state: State<'_, AppState>,
     corpus_id: String,
     query: String,
@@ -7509,28 +7577,9 @@ fn log_search(
 ) -> Result<Vec<LogSearchHitDto>, String> {
     let cache = log_cache_dir(&state)?;
     let embed_backend = log_embed_backend_snapshot_nonblocking(&state);
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let q = cd_core::log_analysis::SearchLogsQuery {
-        query: Some(query),
-        semantic: true,
-        k: k.unwrap_or(8) as usize,
-        ..Default::default()
-    };
-    let hits = cd_core::log_analysis::search_logs(&c, &q, embed_backend.as_deref())
-        .map_err(|e| e.to_string())?;
-    Ok(hits
-        .into_iter()
-        .map(|h| LogSearchHitDto {
-            template_id: h.template_id,
-            pattern: h.pattern,
-            score: h.score,
-            semantic_score: h.semantic_score,
-            count: h.count,
-            severity: h.severity,
-            exemplars: h.exemplars,
-        })
-        .collect())
+    tokio::task::spawn_blocking(move || log_search_at(&cache, &corpus_id, query, k, embed_backend))
+        .await
+        .map_err(|error| format!("log analysis search task join: {error}"))?
 }
 
 /// Discard a disposable corpus.
@@ -9751,9 +9800,34 @@ mod log_explorer_async_query_host_tests {
         let src = include_str!("lib.rs");
         for (signature, boundary, helper) in [
             (
+                "async fn list_log_corpora(",
+                "/// Full summary for one corpus",
+                "list_log_corpora_at",
+            ),
+            (
                 "async fn get_log_corpus(",
                 "/// List templates for a corpus",
                 "get_log_corpus_at",
+            ),
+            (
+                "async fn list_log_templates(",
+                "/// Export a corpus package zip",
+                "list_log_templates_at",
+            ),
+            (
+                "async fn log_cluster_problems(",
+                "/// Timeline buckets for a corpus",
+                "log_cluster_problems_at",
+            ),
+            (
+                "async fn log_timeline(",
+                "/// Hybrid log search",
+                "log_timeline_at",
+            ),
+            (
+                "async fn log_search(",
+                "/// Discard a disposable corpus",
+                "log_search_at",
             ),
             (
                 "async fn log_query_events(",
@@ -9821,6 +9895,14 @@ mod log_explorer_async_query_host_tests {
         let summary = get_log_corpus_at(&cache, &report.corpus_id).expect("corpus summary");
         assert_eq!(summary.event_count, 2);
 
+        let corpora = list_log_corpora_at(&cache).expect("corpus list");
+        assert_eq!(corpora.len(), 1);
+        assert_eq!(corpora[0].id, report.corpus_id);
+
+        let templates =
+            list_log_templates_at(&cache, &report.corpus_id, Some(1)).expect("template list");
+        assert_eq!(templates.len(), 1);
+
         let page = query_log_events_at(&cache, &report.corpus_id, &query).expect("event page");
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.total_matched, 2);
@@ -9846,6 +9928,24 @@ mod log_explorer_async_query_host_tests {
         )
         .expect("shared timeline");
         assert_eq!(shared_timeline.total_matched, 2);
+
+        let clusters =
+            log_cluster_problems_at(&cache, &report.corpus_id, Some(10)).expect("clusters");
+        assert!(!clusters.is_empty());
+
+        let analysis_timeline =
+            log_timeline_at(&cache, &report.corpus_id, Some(60)).expect("analysis timeline");
+        assert_eq!(
+            analysis_timeline
+                .iter()
+                .map(|bucket| bucket.count)
+                .sum::<u64>(),
+            2
+        );
+
+        let search = log_search_at(&cache, &report.corpus_id, "failed".into(), Some(8), None)
+            .expect("analysis search");
+        assert!(!search.is_empty());
 
         let bookmarks =
             list_log_bookmarks_at(&cache, &report.corpus_id).expect("resolved bookmarks");
