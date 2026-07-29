@@ -1,10 +1,16 @@
 /**
  * Capability qualification panel (#724) — explicit start, no auto-run on mount.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
 import type { QualificationReportDto } from "../../lib/host";
+import { SKINS } from "../../lib/skins";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const getQual = vi.fn();
 const startQual = vi.fn();
@@ -193,5 +199,93 @@ describe("CapabilityQualificationPanel (#724)", () => {
       ).toBe("true");
     });
     expect(screen.getByTestId("cap-qual-report").textContent).toMatch(/stale/i);
+  });
+
+  it("retry clears then re-starts qualification", async () => {
+    getQual.mockResolvedValue(sampleReport({ stale: true }));
+    startQual.mockResolvedValue(sampleReport({ stale: false }));
+    render(
+      <CapabilityQualificationPanel
+        baseId="t"
+        modelId="gpt-4o"
+        baseUrl="https://gateway.example/v1"
+        apiKeyDraft=""
+        enabled
+      />,
+    );
+    await waitFor(() => screen.getByTestId("cap-qual-retry"));
+    fireEvent.click(screen.getByTestId("cap-qual-retry"));
+    await waitFor(() => expect(clearQual).toHaveBeenCalled());
+    await waitFor(() => expect(startQual).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("cap-qual-report").getAttribute("data-stale"),
+      ).toBe("false");
+    });
+  });
+
+  it("exposes keyboard focus and live status for the start control", async () => {
+    render(
+      <CapabilityQualificationPanel
+        baseId="t"
+        modelId="gpt-4o"
+        baseUrl="https://gateway.example/v1"
+        apiKeyDraft=""
+        enabled
+      />,
+    );
+    await waitFor(() => expect(getQual).toHaveBeenCalled());
+    const btn = screen.getByTestId("cap-qual-start") as HTMLButtonElement;
+    expect(btn.type).toBe("button");
+    expect(btn.getAttribute("aria-describedby")).toBeTruthy();
+    const statusId = btn.getAttribute("aria-describedby")!;
+    const status = document.getElementById(statusId);
+    expect(status).not.toBeNull();
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    btn.focus();
+    expect(document.activeElement).toBe(btn);
+    // Enter activates the focused button (native button keyboard contract).
+    fireEvent.keyDown(btn, { key: "Enter", code: "Enter" });
+    fireEvent.click(btn);
+    await waitFor(() => expect(startQual).toHaveBeenCalled());
+  });
+
+  it("uses theme tokens under every shipped skin", () => {
+    const css = readFileSync(
+      join(here, "../../styles/components/settings.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/\.cap-qual[\s\S]*var\(--border/);
+    expect(css).toMatch(/\.cap-qual__status--pass[\s\S]*var\(--ok/);
+    expect(css).toMatch(/\.cap-qual__status--fail[\s\S]*var\(--danger/);
+    expect(css).toMatch(/\.cap-qual__meta[\s\S]*var\(--text-muted/);
+
+    for (const skin of SKINS) {
+      const themeCss = readFileSync(
+        join(here, "../../styles/themes", `${skin.id}.css`),
+        "utf8",
+      );
+      for (const token of ["border", "text-muted", "text"]) {
+        expect(themeCss, `${skin.id} --${token}`).toMatch(
+          new RegExp(`--${token}\\s*:`),
+        );
+      }
+      document.documentElement.dataset.theme = skin.id;
+      const view = render(
+        <CapabilityQualificationPanel
+          baseId={`theme-${skin.id}`}
+          modelId="gpt-4o"
+          baseUrl="https://gateway.example/v1"
+          apiKeyDraft=""
+          enabled
+        />,
+      );
+      const root = screen.getByTestId("capability-qualification");
+      expect(document.documentElement.dataset.theme).toBe(skin.id);
+      expect(root.classList.contains("cap-qual")).toBe(true);
+      expect(root.getAttribute("style")).toBeNull();
+      view.unmount();
+    }
   });
 });

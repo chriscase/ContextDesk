@@ -11,8 +11,9 @@ use cd_core::capability_qualification::{
     QualificationKey, QualificationReport, QualificationStore, QualificationTransport,
     SyntheticChatRequest, SyntheticChatResponse, SyntheticEmbeddingResponse, SyntheticMessage,
     SyntheticRerankResponse, SyntheticToolCall, TransportError, INERT_PROBE_TOOL_NAME,
-    QUALIFICATION_SCHEMA_VERSION,
 };
+#[cfg(test)]
+use cd_core::capability_qualification::QUALIFICATION_SCHEMA_VERSION;
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
@@ -104,21 +105,17 @@ pub fn gate_from_profile(
 }
 
 /// Lookup cached report; mark stale when key identity diverges from current selection.
+///
+/// Exact key hit preferred. Same profile+model under a previous endpoint or
+/// schema is returned as **stale** so the UI can prompt Retry without inventing
+/// a measured pass. Sibling models never overwrite each other (#650).
 pub fn get_cached_report(
     store: &mut QualificationStore,
     current: &QualificationKey,
 ) -> Option<QualificationReportDto> {
-    // Refresh staleness for any report that shares storage id mismatch patterns.
-    if let Some(existing) = store.get(current).cloned() {
-        let mut report = existing;
-        if report.key.schema_version != QUALIFICATION_SCHEMA_VERSION {
-            report.stale = true;
-        }
-        return Some(QualificationReportDto::from(&report));
-    }
-    // Exact miss — no sibling leakage.
-    let _ = current;
-    None
+    store
+        .get_for_selection(current)
+        .map(QualificationReportDto::from)
 }
 
 /// Store a finished report (sibling keys untouched).
@@ -398,12 +395,13 @@ impl LiveQualificationTransport {
         } else {
             Some(specs.as_slice())
         };
-        // Ollama client has complete; stream path reuses non-stream when stream requested.
+        // Ollama client uses non-stream complete only. Never claim streamed=true
+        // without observing real stream deltas — Streaming probe must degrade/fail honestly.
         match client.complete(&messages, tools).await {
             Ok(comp) => Ok(Self::map_completion(
                 comp.content,
                 comp.tool_calls,
-                req.stream,
+                false,
                 cancel.load(Ordering::SeqCst),
             )),
             Err(e) => Err(TransportError {
@@ -937,5 +935,32 @@ mod tests {
         assert!(r.contains("abc"));
         assert!(execute_inert_probe_tool("rm", "{}").is_err());
         assert!(execute_inert_probe_tool(INERT_PROBE_TOOL_NAME, r#"{"token":"../etc"}"#).is_err());
+    }
+
+    #[test]
+    fn get_cached_report_surfaces_stale_after_endpoint_change() {
+        let mut store = QualificationStore::default();
+        let old = qualification_key("p1", "https://a.example.com/v1", "model-x");
+        let current = qualification_key("p1", "https://b.example.com/v1", "model-x");
+        put_report(
+            &mut store,
+            QualificationReport {
+                key: old,
+                checks: vec![],
+                role_hint: "chat".into(),
+                cancelled: false,
+                stale: false,
+                finished_at: 0,
+            },
+        );
+        let dto = get_cached_report(&mut store, &current).expect("near-miss stale");
+        assert!(dto.stale);
+        assert_eq!(dto.model_id, "model-x");
+        // Different model: no exact or near-miss (near-miss requires same model_id).
+        assert!(get_cached_report(
+            &mut store,
+            &qualification_key("p1", "https://b.example.com/v1", "other-model")
+        )
+        .is_none());
     }
 }

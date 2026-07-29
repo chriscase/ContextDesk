@@ -219,6 +219,43 @@ impl QualificationStore {
         false
     }
 
+    /// Mark every stored report for the same profile as stale when it no longer
+    /// matches the current selection (endpoint, model, or schema version).
+    ///
+    /// Returns how many reports were marked. Exact matches are left alone.
+    pub fn mark_stale_for_selection(&mut self, current: &QualificationKey) -> usize {
+        let mut n = 0;
+        for report in self.by_key.values_mut() {
+            if report.key.profile_id != current.profile_id {
+                continue;
+            }
+            if report.key != *current && !report.stale {
+                report.stale = true;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Best cached report for the current selection: exact hit, else a near-miss
+    /// (same profile + model, different endpoint/schema) returned as stale.
+    pub fn get_for_selection(
+        &mut self,
+        current: &QualificationKey,
+    ) -> Option<&QualificationReport> {
+        self.mark_stale_for_selection(current);
+        if self.by_key.contains_key(&current.storage_id()) {
+            return self.by_key.get(&current.storage_id());
+        }
+        // Near miss: same profile + model under a previous endpoint/schema.
+        let near_id = self
+            .by_key
+            .values()
+            .find(|r| r.key.profile_id == current.profile_id && r.key.model_id == current.model_id)
+            .map(|r| r.key.storage_id());
+        near_id.and_then(|id| self.by_key.get(&id))
+    }
+
     /// Drop one exact model result only.
     pub fn remove(&mut self, key: &QualificationKey) -> bool {
         self.by_key.remove(&key.storage_id()).is_some()
@@ -458,6 +495,9 @@ fn check(
 }
 
 /// Run a qualification suite against an injectable transport.
+///
+/// `cancel` is the **user** cancel flag only. The cancellation *capability*
+/// probe uses a probe-local signal and must never set this flag.
 pub fn run_qualification(
     key: QualificationKey,
     gate: ProfileCapabilityGate,
@@ -469,6 +509,7 @@ pub fn run_qualification(
     let mut checks = Vec::new();
 
     for kind in offered {
+        // User cancel (or residual flag): fill remaining as untested — never skip rows.
         if cancel.load(Ordering::SeqCst) {
             checks.push(check(
                 kind,
@@ -534,12 +575,11 @@ pub fn run_qualification(
             CapabilityKind::RerankerContract => probe_reranker(transport, &key, cancel),
         };
         checks.push(result);
-        if cancel.load(Ordering::SeqCst) {
-            break;
-        }
+        // Do not break: remaining kinds are filled as untested on the next iterations.
     }
 
     // Name hint must never appear as a measured pass source — only role_hint field.
+    // report.cancelled means the *user* cancel flag only (not the cancellation probe).
     QualificationReport {
         key,
         checks,
@@ -902,11 +942,21 @@ fn probe_streaming(
 fn probe_cancellation(
     transport: &mut dyn QualificationTransport,
     key: &QualificationKey,
-    cancel: &AtomicBool,
+    user_cancel: &AtomicBool,
 ) -> CapabilityCheckResult {
     let start = std::time::Instant::now();
-    // Signal cancel before/during the call so transport must honor it.
-    cancel.store(true, Ordering::SeqCst);
+    // User cancel before this probe: leave untested (do not measure).
+    if user_cancel.load(Ordering::SeqCst) {
+        return check(
+            CapabilityKind::Cancellation,
+            CapabilityStatus::Untested,
+            start,
+            "cancelled before probe",
+        );
+    }
+    // Probe-local cancel signal only — never store into the user-cancel flag.
+    // report.cancelled must mean the user cancelled the qualification run.
+    let probe_cancel = AtomicBool::new(true);
     let req = SyntheticChatRequest {
         model_id: key.model_id.clone(),
         messages: vec![SyntheticMessage {
@@ -919,14 +969,14 @@ fn probe_cancellation(
         stream: true,
         expect_json_object: false,
     };
-    match transport.chat_complete(&req, cancel) {
+    match transport.chat_complete(&req, &probe_cancel) {
         Ok(resp) if resp.cancelled => check(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
             "transport reported cancelled",
         ),
-        Err(e) if e.reason.contains("cancel") => check(
+        Err(e) if e.reason.to_ascii_lowercase().contains("cancel") => check(
             CapabilityKind::Cancellation,
             CapabilityStatus::Pass,
             start,
@@ -1243,6 +1293,11 @@ mod tests {
             report.status_of(CapabilityKind::Cancellation),
             CapabilityStatus::Pass
         );
+        // Cancellation *probe* must not set report.cancelled (user-cancel only).
+        assert!(
+            !report.cancelled,
+            "cancellation probe must not mark the run as user-cancelled"
+        );
     }
 
     #[test]
@@ -1546,10 +1601,402 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         let report = run_qualification(key("gpt-4"), gate_full(), &mut t, &cancel);
         assert!(report.cancelled);
+        let offered = probes_for_role_hint(ModelRoleHint::Investigator);
+        assert_eq!(report.checks.len(), offered.len());
         assert!(report
             .checks
             .iter()
             .all(|c| c.status == CapabilityStatus::Untested));
+    }
+
+    #[test]
+    fn user_cancel_mid_run_fills_remaining_as_untested() {
+        /// Transport that cancels the *user* flag after the first chat call.
+        struct CancelAfterFirst {
+            cancel: Arc<AtomicBool>,
+            inner: ScriptedQualificationTransport,
+            calls: usize,
+        }
+        impl QualificationTransport for CancelAfterFirst {
+            fn chat_complete(
+                &mut self,
+                req: &SyntheticChatRequest,
+                cancel: &AtomicBool,
+            ) -> Result<SyntheticChatResponse, TransportError> {
+                // Raise user-cancel only *after* the first probe has fully returned,
+                // so the first measured check is not reclassified as untested.
+                if self.calls >= 1 {
+                    self.cancel.store(true, Ordering::SeqCst);
+                }
+                self.calls += 1;
+                self.inner.chat_complete(req, cancel)
+            }
+            fn embed(
+                &mut self,
+                model_id: &str,
+                text: &str,
+                cancel: &AtomicBool,
+            ) -> Result<SyntheticEmbeddingResponse, TransportError> {
+                self.inner.embed(model_id, text, cancel)
+            }
+            fn rerank(
+                &mut self,
+                model_id: &str,
+                query: &str,
+                document_ids: &[&str],
+                cancel: &AtomicBool,
+            ) -> Result<SyntheticRerankResponse, TransportError> {
+                self.inner.rerank(model_id, query, document_ids, cancel)
+            }
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut t = CancelAfterFirst {
+            cancel: cancel.clone(),
+            inner: ScriptedQualificationTransport {
+                chat_queue: vec![Ok(SyntheticChatResponse {
+                    content: SYNTH_GENERATION_MARKER.into(),
+                    ..Default::default()
+                })],
+                honor_cancel: true,
+                ..Default::default()
+            },
+            calls: 0,
+        };
+        let report = run_qualification(key("gpt-4o"), gate_full(), &mut t, &cancel);
+        assert!(report.cancelled);
+        let offered = probes_for_role_hint(ModelRoleHint::Investigator);
+        assert_eq!(report.checks.len(), offered.len());
+        assert_eq!(
+            report.status_of(CapabilityKind::BasicGeneration),
+            CapabilityStatus::Pass
+        );
+        // All remaining after first must be untested (not omitted).
+        let untested = report
+            .checks
+            .iter()
+            .filter(|c| c.status == CapabilityStatus::Untested)
+            .count();
+        assert!(
+            untested >= offered.len() - 1,
+            "expected remaining untested after user cancel, got {:?}",
+            report.checks
+        );
+    }
+
+    #[test]
+    fn cancellation_probe_does_not_set_user_cancelled_flag() {
+        let mut t = ScriptedQualificationTransport {
+            honor_cancel: true,
+            chat_queue: {
+                let mut q = vec![
+                    Ok(SyntheticChatResponse {
+                        content: SYNTH_GENERATION_MARKER.into(),
+                        ..Default::default()
+                    }),
+                    Ok(SyntheticChatResponse {
+                        tool_calls: vec![SyntheticToolCall {
+                            id: "c1".into(),
+                            name: INERT_PROBE_TOOL_NAME.into(),
+                            arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                        }],
+                        ..Default::default()
+                    }),
+                    Ok(SyntheticChatResponse {
+                        content: "continued".into(),
+                        ..Default::default()
+                    }),
+                    Ok(SyntheticChatResponse {
+                        content: r#"{"qualify":"ok","v":1}"#.into(),
+                        ..Default::default()
+                    }),
+                    Ok(SyntheticChatResponse {
+                        content: "s".into(),
+                        streamed: true,
+                        ..Default::default()
+                    }),
+                    Ok(SyntheticChatResponse {
+                        cancelled: true,
+                        ..Default::default()
+                    }),
+                ];
+                q.reverse();
+                q
+            },
+            ..Default::default()
+        };
+        let user_cancel = Arc::new(AtomicBool::new(false));
+        let report = run_qualification(key("gpt-4o"), gate_full(), &mut t, &user_cancel);
+        assert!(
+            !user_cancel.load(Ordering::SeqCst),
+            "cancellation probe must not store into the user-cancel flag"
+        );
+        assert!(!report.cancelled);
+        assert_eq!(
+            report.status_of(CapabilityKind::Cancellation),
+            CapabilityStatus::Pass
+        );
+    }
+
+    #[test]
+    fn timeout_fails_basic_generation() {
+        let mut t = ScriptedQualificationTransport::default();
+        t.chat_queue.push(Err(TransportError {
+            reason: "timeout after 30s".into(),
+        }));
+        // fill remaining with fails
+        for _ in 0..5 {
+            t.chat_queue.insert(
+                0,
+                Ok(SyntheticChatResponse {
+                    content: String::new(),
+                    ..Default::default()
+                }),
+            );
+        }
+        let report = run_qualification(
+            key("gpt-4o"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::BasicGeneration),
+            CapabilityStatus::Fail
+        );
+        assert!(report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::BasicGeneration)
+            .unwrap()
+            .reason
+            .contains("timeout"));
+        assert!(!report.cancelled);
+    }
+
+    #[test]
+    fn streaming_interruption_marks_stream_untested() {
+        let mut t = ScriptedQualificationTransport {
+            honor_cancel: true,
+            ..Default::default()
+        };
+        // gen, tool, cont, struct, stream(cancelled), cancel-probe
+        let mut responses = vec![
+            Ok(SyntheticChatResponse {
+                content: SYNTH_GENERATION_MARKER.into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                tool_calls: vec![SyntheticToolCall {
+                    id: "c1".into(),
+                    name: INERT_PROBE_TOOL_NAME.into(),
+                    arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                }],
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: "continued".into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: r#"{"qualify":"ok","v":1}"#.into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: "partial".into(),
+                streamed: true,
+                cancelled: true,
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                cancelled: true,
+                ..Default::default()
+            }),
+        ];
+        responses.reverse();
+        t.chat_queue = responses;
+        let report = run_qualification(
+            key("gpt-4o"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::Streaming),
+            CapabilityStatus::Untested
+        );
+        assert!(!report.cancelled);
+    }
+
+    #[test]
+    fn malformed_structured_output_fails() {
+        let mut t = ScriptedQualificationTransport {
+            honor_cancel: true,
+            ..Default::default()
+        };
+        let mut responses = vec![
+            Ok(SyntheticChatResponse {
+                content: SYNTH_GENERATION_MARKER.into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                tool_calls: vec![SyntheticToolCall {
+                    id: "c1".into(),
+                    name: INERT_PROBE_TOOL_NAME.into(),
+                    arguments_json: r#"{"token":"QUALIFY_TOOL_V1"}"#.into(),
+                }],
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: "continued".into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: "this is not json at all".into(),
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                content: "s".into(),
+                streamed: true,
+                ..Default::default()
+            }),
+            Ok(SyntheticChatResponse {
+                cancelled: true,
+                ..Default::default()
+            }),
+        ];
+        responses.reverse();
+        t.chat_queue = responses;
+        let report = run_qualification(
+            key("gpt-4o"),
+            gate_full(),
+            &mut t,
+            &Arc::new(AtomicBool::new(false)),
+        );
+        assert_eq!(
+            report.status_of(CapabilityKind::StructuredOutput),
+            CapabilityStatus::Fail
+        );
+        assert!(report
+            .checks
+            .iter()
+            .find(|c| c.kind == CapabilityKind::StructuredOutput)
+            .unwrap()
+            .reason
+            .contains("not a JSON"));
+    }
+
+    #[test]
+    fn store_retry_overwrites_previous_result() {
+        let mut store = QualificationStore::default();
+        let k = key("model-retry");
+        store.put(QualificationReport {
+            key: k.clone(),
+            checks: vec![check(
+                CapabilityKind::BasicGeneration,
+                CapabilityStatus::Fail,
+                std::time::Instant::now(),
+                "first fail",
+            )],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+        assert_eq!(
+            store
+                .get(&k)
+                .unwrap()
+                .status_of(CapabilityKind::BasicGeneration),
+            CapabilityStatus::Fail
+        );
+        // Retry: replace with pass (clear+put or put overwrite).
+        store.remove(&k);
+        store.put(QualificationReport {
+            key: k.clone(),
+            checks: vec![check(
+                CapabilityKind::BasicGeneration,
+                CapabilityStatus::Pass,
+                std::time::Instant::now(),
+                "retry pass",
+            )],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+        assert_eq!(
+            store
+                .get(&k)
+                .unwrap()
+                .status_of(CapabilityKind::BasicGeneration),
+            CapabilityStatus::Pass
+        );
+        assert_eq!(store.by_key.len(), 1);
+    }
+
+    #[test]
+    fn endpoint_change_marks_prior_report_stale_for_selection() {
+        let mut store = QualificationStore::default();
+        let old = QualificationKey::new("profile-a", "https://a.example.com/v1", "model-x");
+        let current = QualificationKey::new("profile-a", "https://b.example.com/v1", "model-x");
+        store.put(QualificationReport {
+            key: old.clone(),
+            checks: vec![check(
+                CapabilityKind::BasicGeneration,
+                CapabilityStatus::Pass,
+                std::time::Instant::now(),
+                "old endpoint",
+            )],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+        assert!(store.get(&current).is_none());
+        let n = store.mark_stale_for_selection(&current);
+        assert_eq!(n, 1);
+        assert!(store.get(&old).unwrap().stale);
+        let near = store.get_for_selection(&current).unwrap();
+        assert!(near.stale);
+        assert_eq!(near.key.model_id, "model-x");
+        // Sibling model not stale when selection is different model only... wait,
+        // mark_stale_for_selection marks all same-profile non-exact as stale.
+        // Sibling isolation: get exact sibling still exists.
+        let sib = QualificationKey::new("profile-a", "https://a.example.com/v1", "model-y");
+        store.put(QualificationReport {
+            key: sib.clone(),
+            checks: vec![],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+        // Selecting model-x at new endpoint should not remove model-y entry.
+        assert!(store.get(&sib).is_some());
+        store.mark_stale_for_selection(&current);
+        assert!(store.get(&sib).unwrap().stale); // same profile, different key → stale
+                                                 // Clearing current-key miss does not clear sibling storage id.
+        assert!(store.remove(&sib));
+        assert!(store.get(&old).is_some());
+    }
+
+    #[test]
+    fn mark_stale_if_mismatch_requires_key_lookup() {
+        let mut store = QualificationStore::default();
+        let old = key("m1");
+        let current = QualificationKey::new("profile-a", "https://other.example.com/v1", "m1");
+        store.put(QualificationReport {
+            key: old.clone(),
+            checks: vec![],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+        assert!(store.mark_stale_if_mismatch(&old, &current));
+        assert!(store.get(&old).unwrap().stale);
+        assert!(!store.mark_stale_if_mismatch(&current, &current)); // miss
     }
 
     #[test]
