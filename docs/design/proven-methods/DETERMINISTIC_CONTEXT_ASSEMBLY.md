@@ -413,7 +413,7 @@ assert the sentinel is absent from model-facing messages.
 | Slice                       | Status      | What is true now                                                           | What is not claimed                                                       |
 | --------------------------- | ----------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Ordinary chat isolation     | **Shipped** | No ambient log-tool inheritance                                            | No claim that every future source is automatically isolated without tests |
-| Main-chat log attachment    | **Local integration** | One host-validated durable corpus, bounded linked-log tools, and reversible detach | Multi-corpus context remains #693; no hidden all-corpus fallback |
+| Main-chat log attachment    | **Shipped** | One host-validated durable corpus, bounded linked-log tools, and reversible detach | Multi-corpus context remains #693; no hidden all-corpus fallback |
 | Linked log grounding        | **Shipped** | Required bounded log result and evidence identity                          | No success under tools-disabled profile                                   |
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |

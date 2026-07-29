@@ -38,7 +38,9 @@ Paths below are relative to the repository root. To print a complete local path
 without relying on another person's home directory, open a terminal anywhere
 inside your ContextDesk checkout and copy:
 
-`cd "$(git rev-parse --show-toplevel)/fixtures/log-lab/scenarios/checkout-cascade/import" && pwd`
+```sh
+cd "$(git rev-parse --show-toplevel)/fixtures/log-lab/scenarios/checkout-cascade/import" && pwd
+```
 
 Use the printed path in the folder chooser. Replace the part after
 `fixtures/log-lab/` with another path from this page. A complete path is

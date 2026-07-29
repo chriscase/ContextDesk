@@ -4,8 +4,9 @@
 fixtures, a reproducible scale generator, bounded Log Explorer workflows,
 ordinary-versus-linked chat isolation, required linked-log grounding, and
 optional session-only operational metric tracks. A real provider comparison
-still depends on the selected model and a tools-enabled profile. This bundled
-handbook chapter is **Local integration** until issue #719 is merged.
+still depends on the selected model and a tools-enabled profile. The bundled
+chapter, its read-only in-app route, and complete Markdown/HTML export are
+shipped; #719 retains the current-main proof record.
 
 The quick in-app procedure remains
 [Try the demo log datasets](../../help/log-analysis/demo-datasets.md). This
@@ -54,12 +55,13 @@ Out of scope:
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
 | Tools-enabled provider/model evaluation | **Partial** | Bounded tool loop and evidence validation ship in [`agent.rs`](../../../crates/cd-core/src/agent.rs) | Requires a real tools-enabled profile; provider quality is environment-dependent |
-| Quick in-app demo guide | **Local integration** | [demo Help page](../../help/log-analysis/demo-datasets.md), issue #715 | Must merge and receive its remaining native-width proof |
-| Deep in-app handbook chapter/export | **Local integration** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), issue #719 | Must merge and receive current-main packaged proof |
+| Quick in-app demo guide | **Partial** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and packaged responsive proof | Fixtures remain source-checkout assets rather than installed-app content |
+| Deep in-app handbook chapter/export | **Shipped** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), current-main proof on #719 | Live provider evaluation remains environment-dependent |
 
 Status applies to each row, not to the lab as one undifferentiated feature.
-Tests prove a named production path only when that path is on `main`; a local
-chapter or guide remains local until merged.
+Tests prove a named production path only when that path is on `main`. Feature
+branches use **Local integration** without embedding a future merge event into
+the permanent exported prose.
 
 ## 3. Reusable method
 
@@ -589,8 +591,8 @@ recorded evidence for that provider/build, not a deterministic unit-test oracle.
 | Ordinary/linked isolation | **Shipped** | Ordinary chat has no ambient corpus; linked answer requires evidence | Multi-corpus chat |
 | Tools-disabled evaluation | **Shipped** | Honest unavailable state before provider contact | Grounded log answer |
 | Tools-enabled provider comparison | **Partial** | Host tool/evidence contracts ship | Every provider/model proven; #649 lifecycle residuals |
-| Quick Help guide | **Local integration** | #715 guide exists on this integration branch | Current-main/package availability until merged |
-| Deep handbook lab | **Local integration** | #719 chapter, manifest, export, and tests on this branch | Current-main/package availability until merged |
+| Quick Help guide | **Partial** | Searchable demo guide, explicit fenced-command copy, and responsive package rendering ship | Fixtures remain source-checkout assets rather than installed-app content |
+| Deep handbook lab | **Shipped** | #719 chapter, manifest, export, tests, and packaged proof | Live tools-enabled provider quality remains environment-dependent |
 | Finding proposals/reports | **Planned** | Manual evidence-led investigation exists | #646 model proposal queue and #532 report workflow |
 
 ## 15. Reimplementation notes
@@ -808,10 +810,8 @@ complete.
 
 ## 16. Open residuals
 
-- #719 must merge before this chapter is available on current `main` and in a
-  promoted handbook export.
-- #715 remains the distinct quick in-app Help guide and needs its own
-  current-main/native proof.
+- Demo fixtures remain source-checkout assets rather than installed-app content;
+  the quick Help guide says so and provides a portable path command.
 - #649 retains phase-aware provider deadline and evidence-preserving retry work.
 - #656 retains the complete native investigation acceptance matrix.
 - #646 retains typed model/detector finding proposals, review history, ranking,

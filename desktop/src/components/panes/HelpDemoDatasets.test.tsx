@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRef } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { HelpTocEntryDto } from "../../lib/host";
 import { HelpMarkdown } from "./HelpMarkdown";
@@ -123,6 +123,28 @@ describe("rendered demo-dataset Help (#715)", () => {
     expect(steps.textContent).toContain("Choose Import logs");
     expect(steps.textContent).toContain(
       "select the scenario's exact import directory",
+    );
+  });
+
+  it("copies the portable repository-relative path command", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderDemoHelp();
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy sh block" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Copied sh block" }),
+      ).toBeTruthy(),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      'cd "$(git rev-parse --show-toplevel)/fixtures/log-lab/scenarios/checkout-cascade/import" && pwd',
+    );
+    expect(screen.getByRole("status").textContent).toBe(
+      "sh block copied to clipboard",
     );
   });
 
