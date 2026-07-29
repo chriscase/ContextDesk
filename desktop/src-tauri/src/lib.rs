@@ -6509,15 +6509,24 @@ fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSummaryDt
 }
 
 /// Full summary for one corpus (detail header).
+fn get_log_corpus_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<LogCorpusSummaryDto, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    Ok(summary_dto(&corpus))
+}
+
 #[tauri::command]
-fn get_log_corpus(
+async fn get_log_corpus(
     state: State<'_, AppState>,
     corpus_id: String,
 ) -> Result<LogCorpusSummaryDto, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    Ok(summary_dto(&c))
+    tokio::task::spawn_blocking(move || get_log_corpus_at(&cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log corpus metadata task join: {error}"))?
 }
 
 /// List templates for a corpus (UI table).
@@ -7553,16 +7562,26 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
 // ── Log Explorer (#480–#487) ────────────────────────────────────────────────
 
 /// Paged/keyset event query for the Log Explorer.
+fn query_log_events_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventPage, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_events(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_query_events(
+async fn log_query_events(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventPage, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || query_log_events_at(&cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log event query task join: {error}"))?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -7643,29 +7662,49 @@ fn log_query_event_original(
 }
 
 /// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
+fn query_log_timeline_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::TimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::TimelineSummary, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_timeline_summary(
+async fn log_timeline_summary(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::TimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::TimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_timeline_summary(&c, &query).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || query_log_timeline_at(&cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log timeline task join: {error}"))?
 }
 
 /// One bounded global timeline axis with canonical severity and lane tracks.
+fn query_log_shared_timeline_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::SharedTimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_shared_timeline_summary(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_shared_timeline_summary(
+async fn log_shared_timeline_summary(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::SharedTimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_shared_timeline_summary(&c, &query).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || query_log_shared_timeline_at(&cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("shared log timeline task join: {error}"))?
 }
 
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
@@ -7682,16 +7721,26 @@ fn log_query_event_neighborhood(
 }
 
 /// Facets under filters for explorer filter rail.
+fn query_log_facets_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::LogFacets, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_facets(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_facets(
+async fn log_facets(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::LogFacets, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || query_log_facets_at(&cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log facets task join: {error}"))?
 }
 
 fn query_log_source_catalog_at(
@@ -7706,13 +7755,15 @@ fn query_log_source_catalog_at(
 
 /// Dedicated, stable, paginated full-path source catalog for lane composition.
 #[tauri::command]
-fn log_source_catalog(
+async fn log_source_catalog(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::LogSourceCatalogQuery,
 ) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
     let cache = log_cache_dir(&state)?;
-    query_log_source_catalog_at(&cache, &corpus_id, &query)
+    tokio::task::spawn_blocking(move || query_log_source_catalog_at(&cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log source catalog task join: {error}"))?
 }
 
 /// IPC args for advanced log search (#523).
@@ -7811,15 +7862,24 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
 }
 
 /// List bookmarks for a corpus.
+fn list_log_bookmarks_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::list_resolved_bookmarks(&corpus).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_list_bookmarks(
+async fn log_list_bookmarks(
     state: State<'_, AppState>,
     corpus_id: String,
 ) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::list_resolved_bookmarks(&c).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || list_log_bookmarks_at(&cache, &corpus_id))
+        .await
+        .map_err(|error| format!("log bookmarks task join: {error}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -7903,22 +7963,34 @@ fn active_investigation_for_corpus(
 }
 
 /// Load the newest active durable Investigation linked to a corpus.
-#[tauri::command]
-fn log_load_active_investigation(
-    state: State<'_, AppState>,
-    corpus_id: String,
+fn load_active_log_investigation_at(
+    store: &cd_core::investigations::InvestigationStore,
+    cache: &std::path::Path,
+    corpus_id: &str,
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
-    let store = investigation_store(&state)?;
-    let Some(summary) = active_investigation_for_corpus(&store, &corpus_id)? else {
+    let Some(summary) = active_investigation_for_corpus(store, corpus_id)? else {
         return Ok(None);
     };
-    let cache = log_cache_dir(&state)?;
     let corpus =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
     store
         .load(&summary.id, &corpus)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_load_active_investigation(
+    state: State<'_, AppState>,
+    corpus_id: String,
+) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
+    let store = investigation_store(&state)?;
+    let cache = log_cache_dir(&state)?;
+    tokio::task::spawn_blocking(move || {
+        load_active_log_investigation_at(&store, &cache, &corpus_id)
+    })
+    .await
+    .map_err(|error| format!("log investigation task join: {error}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -9650,6 +9722,156 @@ mod log_ingest_cancel_registry_tests {
 }
 
 #[cfg(test)]
+mod log_explorer_async_query_host_tests {
+    use super::*;
+
+    fn assert_async_blocking_command(src: &str, signature: &str, boundary: &str, helper: &str) {
+        let start = src.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let end = src[start..]
+            .find(boundary)
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("{signature} boundary"));
+        let command = &src[start..end];
+        assert!(
+            command.contains("tokio::task::spawn_blocking"),
+            "{signature} must move blocking reads off the app event loop"
+        );
+        assert!(
+            command.contains(helper),
+            "{signature} must call its blocking helper"
+        );
+        assert!(
+            !command.contains("LogCorpus::open"),
+            "{signature} must not open DuckDB on the app event loop"
+        );
+    }
+
+    #[test]
+    fn explorer_startup_queries_are_async_and_leave_duckdb_work_off_the_event_loop() {
+        let src = include_str!("lib.rs");
+        for (signature, boundary, helper) in [
+            (
+                "async fn get_log_corpus(",
+                "/// List templates for a corpus",
+                "get_log_corpus_at",
+            ),
+            (
+                "async fn log_query_events(",
+                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "query_log_events_at",
+            ),
+            (
+                "async fn log_timeline_summary(",
+                "/// One bounded global timeline axis",
+                "query_log_timeline_at",
+            ),
+            (
+                "async fn log_shared_timeline_summary(",
+                "/// Bounded neighborhood around a stable event identity",
+                "query_log_shared_timeline_at",
+            ),
+            (
+                "async fn log_facets(",
+                "fn query_log_source_catalog_at(",
+                "query_log_facets_at",
+            ),
+            (
+                "async fn log_source_catalog(",
+                "/// IPC args for advanced log search",
+                "query_log_source_catalog_at",
+            ),
+            (
+                "async fn log_list_bookmarks(",
+                "#[derive(Debug, Deserialize)]",
+                "list_log_bookmarks_at",
+            ),
+            (
+                "async fn log_load_active_investigation(",
+                "#[derive(Debug, Deserialize)]",
+                "load_active_log_investigation_at",
+            ),
+        ] {
+            assert_async_blocking_command(src, signature, boundary, helper);
+        }
+    }
+
+    #[test]
+    fn blocking_helpers_preserve_startup_read_results() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::write(
+            logs.join("events.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-07-29T12:00:00Z\",\"level\":\"INFO\",",
+                "\"service\":\"api\",\"host\":\"node-1\",\"message\":\"started\"}\n",
+                "{\"timestamp\":\"2026-07-29T12:00:01Z\",\"level\":\"ERROR\",",
+                "\"service\":\"api\",\"host\":\"node-1\",\"message\":\"failed\"}\n",
+            ),
+        )
+        .expect("fixture");
+        let cache = root.path().join("cache");
+        let report = cd_core::log_analysis::ingest_path(&cache, &logs, "async-query", None, "none")
+            .expect("ingest");
+        let query = cd_core::log_analysis::EventQuery {
+            limit: 10,
+            ..Default::default()
+        };
+
+        let summary = get_log_corpus_at(&cache, &report.corpus_id).expect("corpus summary");
+        assert_eq!(summary.event_count, 2);
+
+        let page = query_log_events_at(&cache, &report.corpus_id, &query).expect("event page");
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.total_matched, 2);
+
+        let facets = query_log_facets_at(&cache, &report.corpus_id, &query).expect("facets");
+        assert_eq!(facets.levels.values().sum::<u64>(), 2);
+        assert_eq!(facets.services.values().sum::<u64>(), 2);
+        assert_eq!(facets.hosts.values().sum::<u64>(), 2);
+        assert_eq!(facets.sources.get("events.jsonl"), Some(&2));
+
+        let timeline = query_log_timeline_at(
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::TimelineSummaryQuery::default(),
+        )
+        .expect("timeline");
+        assert_eq!(timeline.total_matched, 2);
+
+        let shared_timeline = query_log_shared_timeline_at(
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::SharedTimelineSummaryQuery::default(),
+        )
+        .expect("shared timeline");
+        assert_eq!(shared_timeline.total_matched, 2);
+
+        let bookmarks =
+            list_log_bookmarks_at(&cache, &report.corpus_id).expect("resolved bookmarks");
+        assert!(bookmarks.is_empty());
+
+        let investigation_store =
+            cd_core::investigations::InvestigationStore::new(root.path().join("investigations"));
+        assert!(
+            load_active_log_investigation_at(&investigation_store, &cache, &report.corpus_id)
+                .expect("no investigation")
+                .is_none()
+        );
+        let corpus =
+            cd_core::log_analysis::LogCorpus::open(&cache, &report.corpus_id).expect("open corpus");
+        investigation_store
+            .create("Async startup proof", &corpus)
+            .expect("create investigation");
+        let investigation =
+            load_active_log_investigation_at(&investigation_store, &cache, &report.corpus_id)
+                .expect("load investigation")
+                .expect("active investigation");
+        assert_eq!(investigation.document.title, "Async startup proof");
+    }
+}
+
+#[cfg(test)]
 mod log_original_host_tests {
     use super::*;
 
@@ -9815,6 +10037,7 @@ mod log_source_catalog_host_tests {
     fn source_catalog_command_is_registered_local_and_independent_of_facets() {
         let source = include_str!("lib.rs");
         assert!(source.contains("log_source_catalog,"));
+        assert!(source.contains("async fn log_source_catalog("));
         let command_start = source
             .find("fn log_source_catalog(")
             .expect("source catalog command");
@@ -9823,6 +10046,7 @@ mod log_source_catalog_host_tests {
             .map(|offset| command_start + offset)
             .expect("source catalog command boundary");
         let command = &source[command_start..command_end];
+        assert!(command.contains("tokio::task::spawn_blocking"));
         assert!(command.contains("query_log_source_catalog_at"));
         assert!(!command.contains("query_facets"));
         assert!(!command.contains("ensure_host("));
