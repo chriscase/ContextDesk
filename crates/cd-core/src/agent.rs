@@ -501,6 +501,7 @@ describe a plan, or substitute another tool.";
 const BROAD_TRIAGE_MAX_SEARCH_RESULTS: usize = 20;
 
 fn linked_broad_log_triage_requested(user_text: &str) -> bool {
+    let raw_lower = user_text.to_ascii_lowercase();
     let normalized = user_text
         .chars()
         .map(|ch| {
@@ -519,20 +520,22 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
     let has_focused_cue = [
         " trace ",
         " trace id ",
+        " trace_id ",
         " event id ",
+        " event_id ",
         " request id ",
+        " request_id ",
+        " sequence ",
         " seq ",
-        " source ",
-        " around ",
-        " between ",
-        " before ",
-        " after ",
-        " at ",
         " job ",
         " error code ",
+        " error_code ",
     ]
     .iter()
     .any(|cue| padded.contains(cue))
+        || ["source=", "service=", "host=", ".log", ".jsonl"]
+            .iter()
+            .any(|cue| raw_lower.contains(cue))
         || normalized
             .split_whitespace()
             .any(|word| word.chars().any(|ch| ch.is_ascii_digit()));
@@ -540,18 +543,51 @@ fn linked_broad_log_triage_requested(user_text: &str) -> bool {
         return false;
     }
 
-    [
-        "what problems do you see in these logs",
-        "what issues do you see in these logs",
-        "what is wrong in these logs",
-        "find problems in these logs",
-        "find issues in these logs",
-        "triage these logs",
-        "analyze these logs for problems",
-        "analyse these logs for problems",
+    let has_broad_action = [
+        " triage ",
+        " analyze ",
+        " analyse ",
+        " review ",
+        " inspect ",
+        " summarize ",
+        " summarise ",
+        " overview ",
+        " what ",
+        " find ",
+        " identify ",
+        " tell ",
+        " show ",
     ]
     .iter()
-    .any(|prompt| normalized == *prompt)
+    .any(|cue| padded.contains(cue));
+    let has_problem_cue = [
+        " problem",
+        " issue",
+        " wrong ",
+        " error",
+        " failure",
+        " warn",
+        " anomal",
+        " root cause",
+        " stand out",
+        " interesting",
+        " concern",
+        " unhealthy",
+    ]
+    .iter()
+    .any(|cue| padded.contains(cue));
+    let names_log_scope = [
+        " log ",
+        " logs ",
+        " corpus ",
+        " these ",
+        " everything ",
+        " overall ",
+    ]
+    .iter()
+    .any(|cue| padded.contains(cue));
+
+    has_broad_action && names_log_scope && (has_problem_cue || padded.contains(" triage "))
 }
 
 fn broad_triage_search_is_constrained(args: &Value, max_k: usize) -> bool {
@@ -3157,6 +3193,15 @@ mod tests {
         assert!(linked_broad_log_triage_requested(
             "Analyze these logs for problems"
         ));
+        assert!(linked_broad_log_triage_requested(
+            "Could you tell me what stands out as concerning in this corpus?"
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "Please review the logs and identify the most important failures."
+        ));
+        assert!(linked_broad_log_triage_requested(
+            "Give me an overview of errors and anomalies across everything."
+        ));
 
         assert!(!linked_broad_log_triage_requested(
             "What caused the checkout incident?"
@@ -3168,6 +3213,12 @@ mod tests {
             "Find problems in these logs after 2026-07-29 10:15"
         ));
         assert!(!linked_broad_log_triage_requested("Why did job-7f3a fail?"));
+        assert!(!linked_broad_log_triage_requested(
+            "Review errors from source=api/app.jsonl"
+        ));
+        assert!(!linked_broad_log_triage_requested(
+            "What errors mention request_id=req-a?"
+        ));
     }
 
     #[test]
