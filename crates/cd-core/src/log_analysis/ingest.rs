@@ -629,6 +629,26 @@ fn check_ingest_fault(hook: IngestFaultHook<'_>, checkpoint: IngestCheckpoint) -
     }
 }
 
+fn reconcile_ingest_cleanup<T>(
+    ingest_result: CoreResult<T>,
+    cleanup_result: CoreResult<()>,
+) -> CoreResult<(T, bool)> {
+    match (ingest_result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok((value, false)),
+        (Ok(value), Err(_)) => {
+            // Publication is the commit point. A later private-staging cleanup
+            // failure must not make the host report that an import which is
+            // already visible did not happen. The completion event carries a
+            // bounded maintenance warning, and Drop retries cleanup.
+            Ok((value, true))
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(CoreError::Message(format!(
+            "{error}; private ingest staging cleanup also failed: {cleanup_error}"
+        ))),
+    }
+}
+
 fn is_zip_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
@@ -2110,26 +2130,25 @@ fn ingest_path_inner_with_limits_and_fault(
         Ok(report)
     })();
     let cleanup_result = staging.cleanup_checked();
-    let report = match (ingest_result, cleanup_result) {
-        (Ok(report), Ok(())) => report,
-        (Err(error), Ok(())) => return Err(error),
-        (Ok(_), Err(cleanup_error)) => return Err(cleanup_error),
-        (Err(error), Err(cleanup_error)) => {
-            return Err(CoreError::Message(format!(
-                "{error}; private ingest staging cleanup also failed: {cleanup_error}"
-            )))
+    let (report, cleanup_deferred) = reconcile_ingest_cleanup(ingest_result, cleanup_result)?;
+    let completion_message = format!(
+        "ingested {} events → {} learned templates ({:.1} avg. events/template){}",
+        report.stats.lines,
+        report.stats.templates,
+        report.stats.reduction_ratio,
+        if cleanup_deferred {
+            "; private staging cleanup deferred"
+        } else {
+            ""
         }
-    };
+    );
 
     emit(
         progress,
         ProcessProgress::phase(
             kind,
             ProcessProgressPhase::Completed,
-            format!(
-                "ingested {} events → {} learned templates ({:.1} avg. events/template)",
-                report.stats.lines, report.stats.templates, report.stats.reduction_ratio
-            ),
+            completion_message,
             false,
         )
         .with_fraction(1.0)
@@ -4751,6 +4770,25 @@ mod tests {
         assert_eq!(reopened.event_count() as u64, report.stats.lines);
         assert_eq!(reopened.template_count(), report.stats.templates);
         assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
+    fn published_ingest_remains_successful_when_private_cleanup_is_deferred() {
+        let cleanup_error = CoreError::Message("injected cleanup failure".into());
+        let (value, cleanup_deferred) =
+            reconcile_ingest_cleanup::<u8>(Ok(7), Err(cleanup_error)).unwrap();
+
+        assert_eq!(value, 7);
+        assert!(cleanup_deferred);
+
+        let ingest_error = CoreError::Message("injected ingest failure".into());
+        let cleanup_error = CoreError::Message("injected cleanup failure".into());
+        let error =
+            reconcile_ingest_cleanup::<u8>(Err(ingest_error), Err(cleanup_error)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "injected ingest failure; private ingest staging cleanup also failed: injected cleanup failure"
+        );
     }
 
     #[test]
