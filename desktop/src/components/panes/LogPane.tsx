@@ -615,6 +615,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   async function onReanalyze() {
     if (!activeId) return;
+    const corpusId = activeId;
     const ok = await dialogConfirm(
       "Re-analyze this corpus with the local ONNX model? Log content stays on this machine, events are not reparsed, and the current keyword corpus remains usable until the new index is complete.",
       { title: "Local template re-analysis" },
@@ -626,16 +627,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setNote(null);
     setProgress(null);
     try {
-      const status = await hostReanalyzeLogCorpus(activeId);
+      const status = await hostReanalyzeLogCorpus(corpusId);
       setNote(
         `Local re-analysis complete: ${status.embeddedTemplates.toLocaleString()}/${status.totalTemplates.toLocaleString()} templates embedded.`,
       );
       // A successful re-analysis can change clusters/templates without changing
       // the corpus row count or host summary timestamp. Never retain the prior
       // optional-analysis snapshot in that case.
-      clearAnalysisForCorpus(activeId);
+      clearAnalysisForCorpus(corpusId);
       await refresh();
-      await selectCorpus(activeId);
+      // Corpus cards intentionally remain usable during local analysis. Do
+      // not let a late completion for A override a newer user selection B.
+      if (activeIdRef.current === corpusId) {
+        await selectCorpus(corpusId);
+      }
     } catch (e) {
       setError(String(e));
     } finally {

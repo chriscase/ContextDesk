@@ -1615,6 +1615,59 @@ describe("LogPane", () => {
     ).toBeNull();
   });
 
+  it("does not restore an older corpus when its re-analysis finishes late (#743)", async () => {
+    const first = corpus("corpus-a", "Analysis pending");
+    const second = corpus("corpus-b", "Newest selection");
+    const pending = deferred<{
+      state: "complete";
+      modelId: string;
+      embeddedTemplates: number;
+      totalTemplates: number;
+      reason: string;
+      updatedAt: number;
+    }>();
+    hostMocks.listCorpora.mockResolvedValue([first, second]);
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.reanalyze.mockReturnValue(pending.promise);
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    );
+    fireEvent.click(screen.getByTestId("reanalyze-log-corpus"));
+    await waitFor(() =>
+      expect(hostMocks.reanalyze).toHaveBeenCalledWith(first.id),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName(second.name),
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: second.name }),
+    ).toBeTruthy();
+
+    await act(async () => {
+      pending.resolve({
+        state: "complete",
+        modelId: "fixture-local",
+        embeddedTemplates: 3,
+        totalTemplates: 3,
+        reason: "trusted_local_reanalysis",
+        updatedAt: 2,
+      });
+      await pending.promise;
+    });
+    await screen.findByText(/Local re-analysis complete:/);
+    expect(screen.getByRole("heading", { name: second.name })).toBeTruthy();
+    expect(
+      hostMocks.setActiveCorpus.mock.calls.map(([id]) => id).at(-1),
+    ).toBe(second.id);
+  });
+
   it("shows progress and routes cancellation to re-analysis", async () => {
     let resolveReanalysis!: (value: {
       state: "complete";
