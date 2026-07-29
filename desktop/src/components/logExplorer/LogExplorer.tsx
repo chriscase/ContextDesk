@@ -708,6 +708,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [facetsLoading, setFacetsLoading] = useState(true);
+  const [timelineReady, setTimelineReady] = useState(false);
   const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
   const [laneSourceCatalogNextCursor, setLaneSourceCatalogNextCursor] =
     useState<string | null>(null);
@@ -1457,6 +1458,7 @@ export function LogExplorer({ corpusId }: Props) {
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
     let loadedCurrentView = false;
+    setTimelineReady(false);
     setFacetsLoading(true);
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
@@ -1607,6 +1609,7 @@ export function LogExplorer({ corpusId }: Props) {
     } finally {
       if (requestId === eventsRequestRef.current) {
         setBusy(false);
+        setTimelineReady(loadedCurrentView);
         // Keep first useful rows on the critical path. Facet aggregation can
         // scan a large corpus and is useful only after the evidence page is
         // available, so start it in the background after the current page.
@@ -5347,6 +5350,7 @@ export function LogExplorer({ corpusId }: Props) {
           <div className="log-explorer__lane-strip">
             <TimelineNavigator
               corpusId={corpusId}
+              ready={timelineReady}
               filter={filtersToQuery(filters, {
                 afterSeq: null,
                 afterTs: null,

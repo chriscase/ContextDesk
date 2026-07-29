@@ -121,6 +121,37 @@ function moveTimelineTo(index: number, commit = false) {
 }
 
 describe("TimelineNavigator", () => {
+  it("waits for first evidence rows before requesting the timeline", async () => {
+    const { rerender } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        ready={false}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Waiting for first evidence rows…"),
+    ).toBeTruthy();
+    expect(host.hostLogSharedTimelineSummary).not.toHaveBeenCalled();
+
+    rerender(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        ready
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1),
+    );
+  });
+
   it("keeps the timeline on a full lane-strip row when adjacent disclosures can fit", async () => {
     render(
       <TimelineNavigator
