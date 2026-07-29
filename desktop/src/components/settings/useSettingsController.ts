@@ -116,6 +116,8 @@ export function useSettingsController({
   const baseId = useId();
   /** True after an open→true transition; avoids wiping typed secrets on setup re-renders (#157). */
   const wasOpenRef = useRef(false);
+  /** Last host-authoritative or successfully saved draft; user edits compare against this. */
+  const cleanDraftRef = useRef(setup);
 
   useEffect(() => {
     if (!open) {
@@ -127,6 +129,7 @@ export function useSettingsController({
       return;
     }
     wasOpenRef.current = true;
+    cleanDraftRef.current = setup;
     setDraft(setup);
     setSection(initialSection);
     setCfTokenDraft("");
@@ -135,6 +138,12 @@ export function useSettingsController({
     setXStatus(null);
     setApiKeyDraft("");
     void (async () => {
+      const hydrateDraft = (
+        update: (current: AppSetupState) => AppSetupState,
+      ) => {
+        cleanDraftRef.current = update(cleanDraftRef.current);
+        setDraft(update);
+      };
       // Abort if modal closed before host fetches return.
       const stillOpen = () => wasOpenRef.current;
       const cf = await hostGetConfluence();
@@ -157,7 +166,7 @@ export function useSettingsController({
         setConnectorKinds(ckinds);
         setNewConnectorKind(ckinds[0] ?? "sqlite");
       }
-      setDraft((d) => ({
+      hydrateDraft((d) => ({
         ...d,
         confluence: cf
           ? {
@@ -192,7 +201,7 @@ export function useSettingsController({
           ) {
             saveLastGatewayUrl(active.base_url);
           }
-          setDraft((d) => ({
+          hydrateDraft((d) => ({
             ...d,
             providerKind: kind,
             providerLabel: active.label || d.providerLabel,
@@ -209,7 +218,7 @@ export function useSettingsController({
         const keyOk = await hostProviderHasSecret(pid);
         if (!stillOpen()) return;
         if (keyOk !== null) {
-          setDraft((d) => ({ ...d, hasApiKey: keyOk }));
+          hydrateDraft((d) => ({ ...d, hasApiKey: keyOk }));
         }
       }
       const cands = await hostListLocalCandidates();
@@ -250,8 +259,8 @@ export function useSettingsController({
 
   const dirty = useMemo(() => {
     if (apiKeyDraft.trim() || cfTokenDraft.trim() || xTokenDraft.trim()) return true;
-    return JSON.stringify(draft) !== JSON.stringify(setup);
-  }, [draft, setup, apiKeyDraft, cfTokenDraft, xTokenDraft]);
+    return JSON.stringify(draft) !== JSON.stringify(cleanDraftRef.current);
+  }, [draft, apiKeyDraft, cfTokenDraft, xTokenDraft]);
 
   // Must stay above any early return — Rules of Hooks.
   const confluenceUrlError = useMemo(() => {
@@ -285,6 +294,7 @@ export function useSettingsController({
         );
         if (!ok) return;
       }
+      setDraft(cleanDraftRef.current);
       setApiKeyDraft("");
       setCfTokenDraft("");
       setXTokenDraft("");
@@ -302,7 +312,7 @@ export function useSettingsController({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // requestClose closes over dirty/setup — rebind when those change
+    // requestClose closes over the current dirty state and clean baseline.
   });
 
   const recheck = async () => {
@@ -446,6 +456,7 @@ export function useSettingsController({
       };
       setDraft(next);
       if (opts?.persist) {
+        cleanDraftRef.current = next;
         onSaveSetup(next);
       }
     } finally {
@@ -515,6 +526,7 @@ export function useSettingsController({
     const savedAi = await persistAiProvider(next, key);
     if (!savedAi) return;
     next = savedAi;
+    cleanDraftRef.current = next;
     setDraft(next);
     setApiKeyDraft("");
     onSaveSetup(next);
@@ -654,6 +666,8 @@ export function useSettingsController({
     setApiKeyDraft("");
     setCfTokenDraft("");
     setXTokenDraft("");
+    cleanDraftRef.current = next;
+    setDraft(next);
     onSaveSetup(next);
     onClose();
   };
