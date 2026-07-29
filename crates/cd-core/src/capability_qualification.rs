@@ -219,17 +219,26 @@ impl QualificationStore {
         false
     }
 
-    /// Mark every stored report for the same profile as stale when it no longer
-    /// matches the current selection (endpoint, model, or schema version).
+    /// Mark prior reports for the **same profile + same model** as stale when
+    /// endpoint fingerprint or schema version diverges from the current selection.
     ///
-    /// Returns how many reports were marked. Exact matches are left alone.
+    /// Sibling models on the same profile are never touched (#650 isolation).
+    /// Returns how many reports were newly marked stale.
     pub fn mark_stale_for_selection(&mut self, current: &QualificationKey) -> usize {
         let mut n = 0;
         for report in self.by_key.values_mut() {
-            if report.key.profile_id != current.profile_id {
+            // Same exact model identity only — never sibling model_ids.
+            if report.key.profile_id != current.profile_id
+                || report.key.model_id != current.model_id
+            {
                 continue;
             }
-            if report.key != *current && !report.stale {
+            // Exact match (including schema) stays fresh.
+            if report.key == *current {
+                continue;
+            }
+            // Endpoint and/or schema diverged for this exact model.
+            if !report.stale {
                 report.stale = true;
                 n += 1;
             }
@@ -238,7 +247,9 @@ impl QualificationStore {
     }
 
     /// Best cached report for the current selection: exact hit, else a near-miss
-    /// (same profile + model, different endpoint/schema) returned as stale.
+    /// (same profile + **same model**, different endpoint/schema) returned as stale.
+    ///
+    /// Never returns or mutates a sibling model_id (#650).
     pub fn get_for_selection(
         &mut self,
         current: &QualificationKey,
@@ -247,11 +258,15 @@ impl QualificationStore {
         if self.by_key.contains_key(&current.storage_id()) {
             return self.by_key.get(&current.storage_id());
         }
-        // Near miss: same profile + model under a previous endpoint/schema.
+        // Near miss: same profile + model under a previous endpoint/schema only.
         let near_id = self
             .by_key
             .values()
-            .find(|r| r.key.profile_id == current.profile_id && r.key.model_id == current.model_id)
+            .find(|r| {
+                r.key.profile_id == current.profile_id
+                    && r.key.model_id == current.model_id
+                    && r.key != *current
+            })
             .map(|r| r.key.storage_id());
         near_id.and_then(|id| self.by_key.get(&id))
     }
@@ -1960,25 +1975,68 @@ mod tests {
         let near = store.get_for_selection(&current).unwrap();
         assert!(near.stale);
         assert_eq!(near.key.model_id, "model-x");
-        // Sibling model not stale when selection is different model only... wait,
-        // mark_stale_for_selection marks all same-profile non-exact as stale.
-        // Sibling isolation: get exact sibling still exists.
-        let sib = QualificationKey::new("profile-a", "https://a.example.com/v1", "model-y");
+    }
+
+    #[test]
+    fn sibling_model_not_marked_stale_when_selecting_other_model() {
+        // #650: selecting model-A (new endpoint) must never mutate model-B's report.
+        let mut store = QualificationStore::default();
+        let model_a_old = QualificationKey::new("profile-a", "https://a.example.com/v1", "model-a");
+        let model_a_new = QualificationKey::new("profile-a", "https://b.example.com/v1", "model-a");
+        let model_b = QualificationKey::new("profile-a", "https://a.example.com/v1", "model-b");
         store.put(QualificationReport {
-            key: sib.clone(),
-            checks: vec![],
+            key: model_a_old.clone(),
+            checks: vec![check(
+                CapabilityKind::BasicGeneration,
+                CapabilityStatus::Pass,
+                std::time::Instant::now(),
+                "a",
+            )],
             role_hint: "chat".into(),
             cancelled: false,
             stale: false,
             finished_at: now_secs(),
         });
-        // Selecting model-x at new endpoint should not remove model-y entry.
-        assert!(store.get(&sib).is_some());
-        store.mark_stale_for_selection(&current);
-        assert!(store.get(&sib).unwrap().stale); // same profile, different key → stale
-                                                 // Clearing current-key miss does not clear sibling storage id.
-        assert!(store.remove(&sib));
-        assert!(store.get(&old).is_some());
+        store.put(QualificationReport {
+            key: model_b.clone(),
+            checks: vec![check(
+                CapabilityKind::BasicGeneration,
+                CapabilityStatus::Fail,
+                std::time::Instant::now(),
+                "b",
+            )],
+            role_hint: "chat".into(),
+            cancelled: false,
+            stale: false,
+            finished_at: now_secs(),
+        });
+
+        let n = store.mark_stale_for_selection(&model_a_new);
+        assert_eq!(n, 1, "only model-a's prior endpoint should go stale");
+        assert!(store.get(&model_a_old).unwrap().stale);
+        assert!(
+            !store.get(&model_b).unwrap().stale,
+            "sibling model-b must remain non-stale under #650"
+        );
+        assert_eq!(
+            store
+                .get(&model_b)
+                .unwrap()
+                .status_of(CapabilityKind::BasicGeneration),
+            CapabilityStatus::Fail,
+            "sibling measured result must be unchanged"
+        );
+
+        // get_for_selection for model-a must not return or touch model-b.
+        let near = store.get_for_selection(&model_a_new).unwrap();
+        assert_eq!(near.key.model_id, "model-a");
+        assert!(near.stale);
+        assert!(!store.get(&model_b).unwrap().stale);
+
+        // Selecting model-b exactly still hits its non-stale report.
+        let b_hit = store.get_for_selection(&model_b).unwrap();
+        assert!(!b_hit.stale);
+        assert_eq!(b_hit.key.model_id, "model-b");
     }
 
     #[test]

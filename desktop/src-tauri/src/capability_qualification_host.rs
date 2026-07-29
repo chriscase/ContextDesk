@@ -963,4 +963,50 @@ mod tests {
         )
         .is_none());
     }
+
+    #[test]
+    fn sibling_model_cache_not_mutated_when_selecting_other_model() {
+        // #650 host path: get_cached_report for model-a must not stale model-b.
+        let mut store = QualificationStore::default();
+        put_report(
+            &mut store,
+            QualificationReport {
+                key: qualification_key("p1", "https://a.example.com/v1", "model-a"),
+                checks: vec![],
+                role_hint: "chat".into(),
+                cancelled: false,
+                stale: false,
+                finished_at: 0,
+            },
+        );
+        put_report(
+            &mut store,
+            QualificationReport {
+                key: qualification_key("p1", "https://a.example.com/v1", "model-b"),
+                checks: vec![],
+                role_hint: "chat".into(),
+                cancelled: false,
+                stale: false,
+                finished_at: 0,
+            },
+        );
+        let dto = get_cached_report(
+            &mut store,
+            &qualification_key("p1", "https://b.example.com/v1", "model-a"),
+        )
+        .expect("stale near-miss for model-a");
+        assert!(dto.stale);
+        assert_eq!(dto.model_id, "model-a");
+        let sib = store
+            .get(&qualification_key(
+                "p1",
+                "https://a.example.com/v1",
+                "model-b",
+            ))
+            .expect("sibling retained");
+        assert!(
+            !sib.stale,
+            "sibling model-b must not be marked stale when selecting model-a"
+        );
+    }
 }
