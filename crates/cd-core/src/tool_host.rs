@@ -2342,7 +2342,7 @@ impl ToolHost {
             if c.partial {
                 raw.push_str(&format!(
                     "- cluster={} score={:.2} sev={} n_considered={} \
-                     templates_total={} templates_sample={:?}: {}\n",
+                     templates_considered_in_cluster={} templates_sample={:?}: {}\n",
                     c.cluster_id,
                     c.score,
                     c.severity,

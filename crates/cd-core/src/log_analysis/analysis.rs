@@ -5,7 +5,7 @@ use crate::error::{CoreError, CoreResult};
 use duckdb::params;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Maximum number of templates admitted to pairwise problem clustering.
 ///
@@ -122,54 +122,15 @@ pub fn cluster_problems(
         }
     }
 
-    let candidate_ids: HashSet<_> = candidate_indices
-        .iter()
-        .map(|&index| all_templates[index].info.template_id)
-        .collect();
-    let mut omitted_indices: Vec<_> = all_templates
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            (!candidate_ids.contains(&row.info.template_id)).then_some(index)
-        })
-        .collect();
-    omitted_indices.sort_by(|&a, &b| template_impact_cmp(&all_templates[a], &all_templates[b]));
-
-    // Candidate clustering stays O(512²). Every omitted template then makes a
-    // single deterministic pass over at most 512 prototypes. It joins only an
-    // eligible prototype, choosing the highest similarity and then the
-    // earliest prototype for ties. Unmatched templates remain explicitly
-    // disclosed instead of being silently folded into an unrelated family.
-    let mut assigned_omitted = vec![Vec::<usize>::new(); clusters.len()];
-    let mut unmatched_omitted = 0usize;
-    for omitted_index in omitted_indices {
-        let omitted_tokens = tokenize(&all_templates[omitted_index].info.pattern);
-        let mut best: Option<(usize, f32)> = None;
-        for (cluster_index, cluster) in clusters.iter().enumerate() {
-            let prototype_position = cluster[0];
-            let similarity = jaccard(&omitted_tokens, &candidate_tokens[prototype_position]);
-            if similarity < CLUSTER_SIMILARITY_THRESHOLD {
-                continue;
-            }
-            if best
-                .as_ref()
-                .map(|(_, best_similarity)| similarity > *best_similarity)
-                .unwrap_or(true)
-            {
-                best = Some((cluster_index, similarity));
-            }
-        }
-        if let Some((cluster_index, _)) = best {
-            assigned_omitted[cluster_index].push(omitted_index);
-        } else {
-            unmatched_omitted += 1;
-        }
-    }
-    let templates_considered = templates_available - unmatched_omitted;
-    let partial = unmatched_omitted > 0;
+    // Clustering work is now strictly capped: omitted templates are neither
+    // tokenized nor compared with prototypes. Their exclusion is explicit in
+    // every summary, and each count is exact only for the candidate members
+    // actually considered.
+    let templates_considered = candidate_indices.len();
+    let partial = templates_considered < templates_available;
 
     let mut out = Vec::new();
-    for (cluster_index, c) in clusters.into_iter().enumerate() {
+    for c in clusters {
         let mut tids = Vec::new();
         let mut count = 0u64;
         let mut severity = 0u8;
@@ -178,8 +139,7 @@ pub fn cluster_problems(
         let mut min_id = u64::MAX;
         let member_indices = c
             .into_iter()
-            .map(|candidate_position| candidate_indices[candidate_position])
-            .chain(assigned_omitted[cluster_index].iter().copied());
+            .map(|candidate_position| candidate_indices[candidate_position]);
         for index in member_indices {
             let t = &all_templates[index];
             tids.push(t.info.template_id);
@@ -225,8 +185,11 @@ fn select_cluster_candidate_indices(templates: &[super::store::TemplateRow]) -> 
         return (0..templates.len()).collect();
     }
 
-    let mut ranked: Vec<_> = (0..templates.len()).collect();
-    ranked.sort_by(|&a, &b| template_impact_cmp(&templates[a], &templates[b]));
+    let ranked =
+        bounded_ranked_indices(templates, MAX_CLUSTER_TEMPLATE_CANDIDATES, false, |_| true);
+    let rare = bounded_ranked_indices(templates, MAX_CLUSTER_TEMPLATE_CANDIDATES, true, |row| {
+        row.info.count <= RARE_TEMPLATE_MAX_COUNT
+    });
 
     let impact_slots =
         MAX_CLUSTER_TEMPLATE_CANDIDATES.saturating_sub(RARE_TEMPLATE_CANDIDATE_RESERVE);
@@ -236,19 +199,6 @@ fn select_cluster_candidate_indices(templates: &[super::store::TemplateRow]) -> 
         .map(|&index| templates[index].info.template_id)
         .collect();
 
-    let mut rare: Vec<_> = templates
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.info.count <= RARE_TEMPLATE_MAX_COUNT)
-        .map(|(index, _)| index)
-        .collect();
-    rare.sort_by(|&a, &b| {
-        templates[b]
-            .info
-            .severity
-            .cmp(&templates[a].info.severity)
-            .then_with(|| template_impact_cmp(&templates[a], &templates[b]))
-    });
     for index in rare {
         if selected_ids.len() >= MAX_CLUSTER_TEMPLATE_CANDIDATES {
             break;
@@ -267,6 +217,101 @@ fn select_cluster_candidate_indices(templates: &[super::store::TemplateRow]) -> 
         .collect();
     selected.sort_by(|&a, &b| template_impact_cmp(&templates[a], &templates[b]));
     selected
+}
+
+#[derive(Debug, Clone)]
+struct TemplateRank {
+    index: usize,
+    score: f32,
+    severity: u8,
+    count: u64,
+    template_id: u64,
+}
+
+impl TemplateRank {
+    fn new(index: usize, row: &super::store::TemplateRow, severity_first: bool) -> Self {
+        Self {
+            index,
+            score: if severity_first {
+                row.info.severity as f32
+            } else {
+                problem_score(row.info.severity, row.info.count)
+            },
+            severity: row.info.severity,
+            count: row.info.count,
+            template_id: row.info.template_id,
+        }
+    }
+}
+
+impl PartialEq for TemplateRank {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+            && self.score.to_bits() == other.score.to_bits()
+            && self.severity == other.severity
+            && self.count == other.count
+            && self.template_id == other.template_id
+    }
+}
+
+impl Eq for TemplateRank {}
+
+impl PartialOrd for TemplateRank {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TemplateRank {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap keeps the greatest value at its root. Reverse the impact
+        // fields so the worst retained candidate is evicted first.
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| other.severity.cmp(&self.severity))
+            .then_with(|| other.count.cmp(&self.count))
+            .then_with(|| self.template_id.cmp(&other.template_id))
+            .then_with(|| self.index.cmp(&other.index))
+    }
+}
+
+fn bounded_ranked_indices(
+    templates: &[super::store::TemplateRow],
+    limit: usize,
+    severity_first: bool,
+    include: impl Fn(&super::store::TemplateRow) -> bool,
+) -> Vec<usize> {
+    let mut retained = BinaryHeap::with_capacity(limit.saturating_add(1));
+    for (index, row) in templates.iter().enumerate() {
+        if !include(row) {
+            continue;
+        }
+        let rank = TemplateRank::new(index, row, severity_first);
+        if retained.len() < limit {
+            retained.push(rank);
+        } else if retained.peek().is_some_and(|worst| rank < *worst) {
+            retained.pop();
+            retained.push(rank);
+        }
+    }
+
+    let mut indices = retained
+        .into_iter()
+        .map(|rank| rank.index)
+        .collect::<Vec<_>>();
+    indices.sort_by(|&a, &b| {
+        if severity_first {
+            templates[b]
+                .info
+                .severity
+                .cmp(&templates[a].info.severity)
+                .then_with(|| template_impact_cmp(&templates[a], &templates[b]))
+        } else {
+            template_impact_cmp(&templates[a], &templates[b])
+        }
+    });
+    indices
 }
 
 fn template_impact_cmp(a: &super::store::TemplateRow, b: &super::store::TemplateRow) -> Ordering {
@@ -586,14 +631,14 @@ mod tests {
             .iter()
             .find(|cluster| !cluster.template_ids.contains(&9_999))
             .expect("the repetitive error cluster remains represented");
-        let expected_repetitive_count: u64 = (1..=700).map(|id| 50_000 + id).sum();
+        let expected_repetitive_count: u64 = (190..=700).map(|id| 50_000 + id).sum();
         assert_eq!(
             repetitive.count, expected_repetitive_count,
-            "the linear assignment pass must restore the exact repetitive family count"
+            "candidate-only count must be exact for the 511 considered repetitive templates"
         );
-        assert_eq!(repetitive.template_ids.len(), 700);
-        assert!(!repetitive.partial);
-        assert_eq!(repetitive.templates_considered, 701);
+        assert_eq!(repetitive.template_ids.len(), 511);
+        assert!(repetitive.partial);
+        assert_eq!(repetitive.templates_considered, 512);
         assert_eq!(repetitive.templates_available, 701);
     }
 
