@@ -178,9 +178,78 @@ publication gate tracked by
 
 ---
 
-## Quickstart
+## Install
 
-Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](https://v2.tauri.app/start/prerequisites/).
+ContextDesk is early software. The repository currently has **no published
+general-availability installer assets**, so the dependable installation path
+today is a source checkout. The
+[GitHub Releases page](https://github.com/chriscase/ContextDesk/releases) is
+the authority for future reviewed binary releases; an empty page means there
+is no binary release to install yet.
+
+### Run from source
+
+1. Install **Rust (stable)**, **Node 20+**, Git, and the
+   [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/)
+   for your operating system.
+2. Clone, install the locked frontend dependencies, and launch the desktop
+   application:
+
+   ```sh
+   git clone https://github.com/chriscase/ContextDesk.git
+   cd ContextDesk
+   cargo test -p cd-core
+   cd desktop
+   npm ci
+   npm run tauri:dev
+   ```
+
+   The core test is offline and needs no provider credentials. `tauri:dev`
+   starts a source-run development build and selects a free local frontend
+   port.
+3. Complete preflight in the application. You can install the entirely
+   synthetic 25,000-event demo corpus there, then choose **Enter app · Open
+   Logs** to verify Logs and Log Explorer without private data.
+
+### Build a local packaged desktop app
+
+From a clean checkout with the same prerequisites:
+
+```sh
+cd desktop
+npm ci
+npm run tauri:build
+```
+
+Platform bundles are written below
+`desktop/src-tauri/target/release/bundle/` (`.app`/`.dmg` on macOS,
+`.msi` or NSIS `.exe` on Windows, and `.AppImage`/`.deb` on Linux, depending
+on the host). Updater artifacts require the project release-signing private
+key. Without it, the command may report a signing-key error **after** a usable
+unsigned local application or installer has already been written; inspect the
+bundle directory before treating that local build as failed. Never create,
+request, or commit a release key merely to run a local package.
+
+See [Packaging & release](docs/PACKAGING.md) for exact bundle behavior,
+operator-owned signing/notarization, and the draft release workflow.
+
+### Install a published binary
+
+When the [Releases page](https://github.com/chriscase/ContextDesk/releases)
+contains a published release, use the asset for your operating system and
+follow that release's notes. Draft releases and CI artifacts are not supported
+end-user installers. Until reviewed assets are present, build from source
+instead. ContextDesk never requires an application account; provider
+credentials are configured after launch and stored by the trusted host in the
+OS keychain.
+
+---
+
+## Configure a provider
+
+ContextDesk supports local models, company/self-hosted or hosted gateways, and
+direct provider APIs. Tool capability is detected per profile; a compatible
+chat endpoint is not automatically assumed to support native tool calls.
 
 ### Option A — Ollama only (no account, no API key)
 
@@ -189,13 +258,7 @@ Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](http
    ollama pull mistral
    curl -s http://127.0.0.1:11434/api/tags | head   # should list your models
    ```
-2. **Clone and launch the desktop host:**
-   ```sh
-   git clone https://github.com/chriscase/ContextDesk.git
-   cd ContextDesk
-   cargo test -p cd-core          # offline library gate — no network, no keys
-   cd desktop && npm install && npm run tauri:dev   # free-port aware launcher
-   ```
+2. Launch ContextDesk using a source or published-binary path above.
 3. **Configure in the app (Settings-first, no config files):**
    - Preflight / Settings → pick a **workspace folder** to allowlist. Try the bundled [`fixtures/kb/`](fixtures/kb) folder (`auth.md`, `billing.md`, `deploy_runbook.md`, …).
    - Provider **Ollama (local)**, base `http://127.0.0.1:11434`, model `mistral` → Save.
@@ -206,7 +269,7 @@ Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](http
 Use this route for a company AI gateway, a self-hosted compatible server, or a
 hosted provider that exposes OpenAI-compatible chat endpoints.
 
-1. Launch ContextDesk as in Option A.
+1. Launch ContextDesk using a source or published-binary path above.
 2. **Settings → AI** → provider **OpenAI-compatible**.
 3. Enter the gateway's HTTPS base URL, API key, and model id, then **Save**.
    The key is stored by the Rust host in the OS keychain and is never returned
@@ -236,7 +299,7 @@ than treating them as OpenAI-compatible responses.
 If you already use **Grok Build** / the Grok CLI on this machine, ContextDesk can talk to xAI models using that session — **without pasting an API key into the UI**.
 
 1. Sign in on the machine: run `grok login` (or use Grok Build) so `~/.grok/auth.json` exists.
-2. Launch ContextDesk (`cd desktop && npm run tauri:dev` as above).
+2. Launch ContextDesk using a source or published-binary path above.
 3. **Settings → AI** → provider **Grok Build session** → confirm the opt-in dialog → pick a chat model (e.g. `grok-3`) → **Save**.
 4. Allowlist a workspace folder and ask a grounded question the same way as Option A.
 
