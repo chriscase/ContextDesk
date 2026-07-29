@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -733,6 +734,19 @@ fn sanitize_text(value: &str, max_chars: usize) -> String {
         .collect()
 }
 
+fn markdown_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii_punctuation() {
+            write!(&mut escaped, "&#{};", character as u32)
+                .expect("writing a character reference to a String cannot fail");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 fn nullable(value: Option<String>) -> String {
     value.unwrap_or_else(|| "unknown".into())
 }
@@ -743,7 +757,7 @@ fn count_lines(values: &BTreeMap<String, u64>) -> Vec<String> {
     } else {
         values
             .iter()
-            .map(|(key, value)| format!("- {key}: {value}"))
+            .map(|(key, value)| format!("- {}: {value}", markdown_literal(key)))
             .collect()
     }
 }
@@ -760,23 +774,35 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
         "> Excludes raw logs/event payloads, absolute paths, chats, provider/model inventories, secrets, and evaluator truth.".into(),
         String::new(),
         "## Application".into(),
-        format!("- Version: {}", manifest.application.version),
-        format!("- Channel: {}", manifest.application.channel),
-        format!("- Git: {}", nullable(manifest.application.git_sha.clone())),
-        format!("- OS: {}", manifest.application.os),
-        format!("- Generated: {}", manifest.generated_at),
+        format!(
+            "- Version: {}",
+            markdown_literal(&manifest.application.version)
+        ),
+        format!(
+            "- Channel: {}",
+            markdown_literal(&manifest.application.channel)
+        ),
+        format!(
+            "- Git: {}",
+            markdown_literal(&nullable(manifest.application.git_sha.clone()))
+        ),
+        format!("- OS: {}", markdown_literal(&manifest.application.os)),
+        format!("- Generated: {}", markdown_literal(&manifest.generated_at)),
         String::new(),
     ];
     if let Some(corpus) = &manifest.corpus {
         lines.extend([
             "## Corpus".into(),
-            format!("- ID: {}", corpus.id),
-            format!("- Name: {}", corpus.name),
+            format!("- ID: {}", markdown_literal(&corpus.id)),
+            format!("- Name: {}", markdown_literal(&corpus.name)),
             format!("- Created (Unix seconds): {}", corpus.created_at),
-            format!("- Engine: {}", corpus.engine),
+            format!("- Engine: {}", markdown_literal(&corpus.engine)),
             format!("- Events: {}", corpus.event_count),
             format!("- Templates: {}", corpus.template_count),
-            format!("- Embedding state: {}", corpus.embedding.state),
+            format!(
+                "- Embedding state: {}",
+                markdown_literal(&corpus.embedding.state)
+            ),
         ]);
         if let Some(stats) = &corpus.stats {
             lines.extend([
@@ -799,7 +825,7 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
                     nullable(stats.stored_time_min.map(|value| value.to_string())),
                     nullable(stats.stored_time_max.map(|value| value.to_string()))
                 ),
-                format!("- Time quality: {}", stats.time_quality),
+                format!("- Time quality: {}", markdown_literal(&stats.time_quality)),
                 String::new(),
                 "### Level counts".into(),
             ]);
@@ -816,7 +842,7 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
                     stats
                         .basename_examples
                         .iter()
-                        .map(|example| format!("- {example}")),
+                        .map(|example| format!("- {}", markdown_literal(example))),
                 );
             }
         } else {
@@ -827,14 +853,17 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
     if let Some(failure) = &manifest.failed_ingest {
         lines.extend([
             "## Failed ingest".into(),
-            format!("- Reason: {}", failure.reason_code),
-            format!("- Summary: {}", failure.summary),
-            format!("- Source kind: {}", failure.source_kind),
+            format!("- Reason: {}", markdown_literal(&failure.reason_code)),
+            format!("- Summary: {}", markdown_literal(&failure.summary)),
+            format!("- Source kind: {}", markdown_literal(&failure.source_kind)),
             format!(
                 "- Cancelled: {}",
                 if failure.cancelled { "yes" } else { "no" }
             ),
-            format!("- Last phase: {}", failure.progress.last_phase),
+            format!(
+                "- Last phase: {}",
+                markdown_literal(&failure.progress.last_phase)
+            ),
             format!(
                 "- Lines observed: {}",
                 nullable(
@@ -886,13 +915,13 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
         if failure.evidence.transcript.is_empty() {
             lines.push("- none recorded".into());
         } else {
-            lines.extend(
-                failure
-                    .evidence
-                    .transcript
-                    .iter()
-                    .map(|entry| format!("- {}: {}", entry.reason, entry.basename)),
-            );
+            lines.extend(failure.evidence.transcript.iter().map(|entry| {
+                format!(
+                    "- {}: {}",
+                    markdown_literal(&entry.reason),
+                    markdown_literal(&entry.basename)
+                )
+            }));
         }
         if failure.evidence.omitted_entries > 0 {
             lines.push(format!(
@@ -909,12 +938,22 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
     if let Some(active) = &manifest.active_view {
         lines.extend([
             "## Active Explorer view (payload-free)".into(),
-            format!("- Layout: {} / {}", active.breakpoint, active.density),
+            format!(
+                "- Layout: {} / {}",
+                markdown_literal(&active.breakpoint),
+                markdown_literal(&active.density)
+            ),
             format!(
                 "- Rows: {} / {} metadata / {} focus",
-                active.row_mode, active.metadata_presentation, active.field_emphasis
+                markdown_literal(&active.row_mode),
+                markdown_literal(&active.metadata_presentation),
+                markdown_literal(&active.field_emphasis)
             ),
-            format!("- Time: {} / {}", active.time_quality, active.link_mode),
+            format!(
+                "- Time: {} / {}",
+                markdown_literal(&active.time_quality),
+                markdown_literal(&active.link_mode)
+            ),
             format!(
                 "- Lanes: {} visible; source counts {}",
                 active.visible_lane_count,
@@ -966,9 +1005,9 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
             format!(
                 "- Find: {}; {} resident identities",
                 if active.find.active {
-                    active.find.match_mode.as_str()
+                    markdown_literal(&active.find.match_mode)
                 } else {
-                    "off"
+                    "off".into()
                 },
                 active.find.resident_matches
             ),
@@ -992,14 +1031,16 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
                     active
                         .viewport_anchors
                         .iter()
-                        .map(|anchor| format!("{}:{}", anchor.lane_id, anchor.seq))
+                        .map(|anchor| {
+                            format!("{}:{}", markdown_literal(&anchor.lane_id), anchor.seq)
+                        })
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
             ),
             format!(
                 "- UI state: {}; busy {}; error present {}",
-                active.ui_state.category,
+                markdown_literal(&active.ui_state.category),
                 if active.ui_state.busy { "yes" } else { "no" },
                 if active.ui_state.has_error {
                     "yes"
@@ -1015,7 +1056,13 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
         manifest
             .current_status
             .as_ref()
-            .map(|status| format!("- {}: {}", status.kind, status.message))
+            .map(|status| {
+                format!(
+                    "- {}: {}",
+                    markdown_literal(&status.kind),
+                    markdown_literal(&status.message)
+                )
+            })
             .unwrap_or_else(|| "- none captured".into()),
     );
     lines.extend([
@@ -1023,7 +1070,8 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
         "## User reproduction note (redacted)".into(),
         manifest
             .user_note
-            .clone()
+            .as_deref()
+            .map(markdown_literal)
             .unwrap_or_else(|| "(none)".into()),
         String::new(),
         "## Privacy boundary".into(),
@@ -1033,7 +1081,7 @@ fn render_markdown(manifest: &LogDiagnosticManifest) -> String {
             .privacy
             .excluded
             .iter()
-            .map(|item| format!("- Excluded: {item}")),
+            .map(|item| format!("- Excluded: {}", markdown_literal(item))),
     );
     lines.extend([
         String::new(),
@@ -1165,6 +1213,105 @@ mod tests {
                 .expect("stored json"),
             prepared.json
         );
+    }
+
+    #[test]
+    fn markdown_literal_neutralizes_ascii_syntax_and_encoded_delimiters() {
+        let active = r#"![image](https://example.com/pixel) <script> `code` [ref]: <user@example.com> &#91;link&#93;"#;
+        let escaped = markdown_literal(active);
+
+        assert_eq!(
+            escaped,
+            "&#33;&#91;image&#93;&#40;https&#58;&#47;&#47;example&#46;com&#47;pixel&#41; \
+&#60;script&#62; &#96;code&#96; &#91;ref&#93;&#58; \
+&#60;user&#64;example&#46;com&#62; &#38;&#35;91&#59;link&#38;&#35;93&#59;"
+        );
+        for active_sequence in [
+            "![",
+            "](",
+            "https://",
+            "<script>",
+            "`code`",
+            "[ref]:",
+            "<user@example.com>",
+        ] {
+            assert!(!escaped.contains(active_sequence), "{escaped}");
+        }
+    }
+
+    #[test]
+    fn host_markdown_neutralizes_active_content_without_changing_json_values() {
+        let corpus_name = "Incident ![status](https://example.com/pixel)";
+        let user_note = "Line one\n\
+![remote](https://example.com/pixel)\n\
+[link](https://example.com/report)\n\
+<https://example.com/autolink> <script>alert(1)</script>\n\
+[ref]: https://example.com/reference\n\
+`inline` ``` fence break [brackets] <angles>\n\
+&#91;encoded reference&#93;";
+        let normalized_note = user_note.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut value = safe_manifest_value();
+        value["corpus"]["name"] = serde_json::json!(corpus_name);
+        value["currentStatus"]["message"] =
+            serde_json::json!("<b>Retry</b> at https://example.com/status");
+        value["userNote"] = serde_json::json!(user_note);
+
+        let manifest = serde_json::from_value(value).expect("manifest");
+        let prepared = LogDiagnosticReportStore::default()
+            .prepare(manifest)
+            .expect("prepare");
+
+        for active_sequence in [
+            "![status](",
+            "![remote](",
+            "[link](",
+            "<https://",
+            "<script>",
+            "[ref]:",
+            "`inline`",
+            "```",
+            "[brackets]",
+            "<angles>",
+            "&#91;encoded",
+        ] {
+            assert!(
+                !prepared.markdown.contains(active_sequence),
+                "{active_sequence}\n{}",
+                prepared.markdown
+            );
+        }
+        assert!(
+            prepared
+                .markdown
+                .contains("Incident &#33;&#91;status&#93;&#40;https&#58;&#47;&#47;example&#46;com"),
+            "{}",
+            prepared.markdown
+        );
+        assert!(
+            prepared
+                .markdown
+                .contains("&#96;&#96;&#96; fence break &#91;brackets&#93;"),
+            "{}",
+            prepared.markdown
+        );
+        assert!(prepared
+            .markdown
+            .starts_with("# ContextDesk corpus diagnostic\n"));
+        assert!(prepared
+            .markdown
+            .contains("\n## User reproduction note (redacted)\n"));
+        assert!(prepared.markdown.ends_with(
+            "_Generated by ContextDesk. This bounded report is redacted, but the user must review it before sharing._"
+        ));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&prepared.json).expect("valid diagnostic JSON");
+        assert_eq!(json["corpus"]["name"], corpus_name);
+        assert_eq!(
+            json["currentStatus"]["message"],
+            "<b>Retry</b> at https://example.com/status"
+        );
+        assert_eq!(json["userNote"], normalized_note);
     }
 
     #[test]
