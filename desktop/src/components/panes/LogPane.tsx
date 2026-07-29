@@ -225,14 +225,27 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       event.preventDefault();
       closeCorpusMenu();
     };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node | null;
+      if (
+        !target ||
+        menuRef.current?.contains(target) ||
+        trigger?.contains(target)
+      ) {
+        return;
+      }
+      closeCorpusMenu(false);
+    };
 
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("scroll", positionCorpusMenu, true);
     window.addEventListener("resize", positionCorpusMenu);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("scroll", positionCorpusMenu, true);
       window.removeEventListener("resize", positionCorpusMenu);
     };
@@ -357,7 +370,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setNote(null);
     try {
       const r = await hostImportLogCorpusPackagePath(path);
-      setNote(`Imported package → corpus ${r.corpusId} (from ${r.originCorpusId})`);
+      setNote(
+        `Imported package → corpus ${r.corpusId} (from ${r.originCorpusId})`,
+      );
       await refresh();
       await selectCorpus(r.corpusId);
     } catch (e) {
@@ -370,9 +385,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   async function onExportPackage() {
     if (!activeId) return;
-    const path = await saveFileDialog("Export log corpus package", "corpus.cdlog.zip", [
-      { name: "ContextDesk package", extensions: ["zip"] },
-    ]);
+    const path = await saveFileDialog(
+      "Export log corpus package",
+      "corpus.cdlog.zip",
+      [{ name: "ContextDesk package", extensions: ["zip"] }],
+    );
     if (!path) return;
     setBusy(true);
     setError(null);
@@ -490,9 +507,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       os: portableDiagnosticOsHint(),
     };
     try {
-      environment = diagnosticEnvironmentFromBranding(
-        await hostGetBranding(),
-      );
+      environment = diagnosticEnvironmentFromBranding(await hostGetBranding());
     } catch {
       /* Keep an honest unknown identity if host branding is unavailable. */
     }
@@ -573,10 +588,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       <header className="pane-chrome">
         <h2 className="pane-chrome__title">Logs</h2>
         <div className="pane-chrome__actions">
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportLogs()}>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportLogs()}
+          >
             Import logs…
           </button>
-          <button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void onImportPackage()}>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy}
+            onClick={() => void onImportPackage()}
+          >
             Import package…
           </button>
           <button
@@ -710,7 +735,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           : ""}
                       </span>
                       {size != null ? (
-                        <span className="log-card__size">{formatBytes(size)}</span>
+                        <span className="log-card__size">
+                          {formatBytes(size)}
+                        </span>
                       ) : null}
                     </button>
                     <button
@@ -789,7 +816,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                 <div className="log-detail__body" data-testid="log-overview">
                   {active.stats ? (
                     <>
-                      <p className="log-detail__blurb">{statsBlurb(active.stats)}</p>
+                      <p className="log-detail__blurb">
+                        {statsBlurb(active.stats)}
+                      </p>
                       <dl className="log-stat-grid">
                         <div>
                           <dt>Lines</dt>
@@ -819,7 +848,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         </div>
                         <div>
                           <dt>Discovered files</dt>
-                          <dd>{active.stats.discoveredFiles.toLocaleString()}</dd>
+                          <dd>
+                            {active.stats.discoveredFiles.toLocaleString()}
+                          </dd>
                         </div>
                         <div>
                           <dt>Excluded</dt>
@@ -870,30 +901,38 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         >
                           <strong>Partial corpus</strong>
                           <span>
-                            Some selected content was excluded, ignored, or unreadable.
+                            Some selected content was excluded, ignored, or
+                            unreadable.
                           </span>
                           {active.stats.exclusionExamples.length > 0 ? (
                             <ul aria-label="Import exclusions">
-                              {active.stats.exclusionExamples.map((example, index) => (
-                                <li key={`${index}-${example}`}>{example}</li>
-                              ))}
+                              {active.stats.exclusionExamples.map(
+                                (example, index) => (
+                                  <li key={`${index}-${example}`}>{example}</li>
+                                ),
+                              )}
                             </ul>
                           ) : null}
                         </div>
                       ) : null}
                       <div className="log-levels">
-                        {levelEntries(active.stats.levelCounts).map(({ level, count }) => (
-                          <span key={level} className={`chip chip--level chip--${level}`}>
-                            {level} {count}
-                          </span>
-                        ))}
+                        {levelEntries(active.stats.levelCounts).map(
+                          ({ level, count }) => (
+                            <span
+                              key={level}
+                              className={`chip chip--level chip--${level}`}
+                            >
+                              {level} {count}
+                            </span>
+                          ),
+                        )}
                       </div>
                     </>
                   ) : (
                     <p className="muted">
                       {active.eventCount.toLocaleString()} events /{" "}
-                      {active.templateCount.toLocaleString()} templates (legacy meta —
-                      re-ingest for full stats).
+                      {active.templateCount.toLocaleString()} templates (legacy
+                      meta — re-ingest for full stats).
                     </p>
                   )}
                   {active.topTemplates?.length ? (
@@ -919,9 +958,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                     data-testid="log-overview-no-eager-timeline"
                   >
                     The Logs overview no longer loads a decorative volume chart
-                    on select (that path burned CPU without seeking or filtering).
-                    Use <strong>Open Explorer</strong> for backend-driven time
-                    navigation over events.
+                    on select (that path burned CPU without seeking or
+                    filtering). Use <strong>Open Explorer</strong> for
+                    backend-driven time navigation over events.
                   </p>
                 </div>
               ) : null}
@@ -949,7 +988,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                         if (e.key === "Enter") void onSearch();
                       }}
                     />
-                    <button type="button" disabled={busy} onClick={() => void onSearch()}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void onSearch()}
+                    >
                       Search
                     </button>
                   </div>
@@ -958,9 +1001,12 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                       <li key={h.templateId}>
                         <button
                           type="button"
-                          onClick={() => setExemplar(h.exemplars[0] ?? h.pattern)}
+                          onClick={() =>
+                            setExemplar(h.exemplars[0] ?? h.pattern)
+                          }
                         >
-                          t{h.templateId} score={h.score.toFixed(2)} — {h.pattern}
+                          t{h.templateId} score={h.score.toFixed(2)} —{" "}
+                          {h.pattern}
                         </button>
                       </li>
                     ))}
@@ -986,7 +1032,10 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                           <td>{t.count}</td>
                           <td>{t.severity}</td>
                           <td>
-                            <button type="button" onClick={() => setExemplar(t.pattern)}>
+                            <button
+                              type="button"
+                              onClick={() => setExemplar(t.pattern)}
+                            >
                               {t.pattern}
                             </button>
                           </td>
@@ -1012,8 +1061,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                               setExemplar(cl.exemplars[0] ?? cl.label)
                             }
                           >
-                            sev={cl.severity} n={cl.count} score={cl.score.toFixed(1)} —{" "}
-                            {cl.label}
+                            sev={cl.severity} n={cl.count} score=
+                            {cl.score.toFixed(1)} — {cl.label}
                           </button>
                         </li>
                       ))}

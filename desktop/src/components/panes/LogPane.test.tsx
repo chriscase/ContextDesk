@@ -3,6 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -195,6 +196,28 @@ describe("LogPane", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("dismisses the corpus menu when keyboard focus leaves it", async () => {
+    const item = corpus("corpus-a", "API incident");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+
+    const logsHeading = screen.getByRole("heading", { name: "Logs" });
+    const outsideButton = screen.getByRole("button", {
+      name: /Import package/i,
+    });
+    act(() => outsideButton.focus());
+
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(outsideButton);
+    expect(logsHeading).toBeTruthy();
+  });
+
   it("opens from the keyboard and clamps the menu inside a narrow viewport", async () => {
     const item = corpus("corpus-a", "API incident");
     hostMocks.listCorpora.mockResolvedValue([item]);
@@ -348,8 +371,7 @@ describe("LogPane", () => {
     expect(dialog.textContent).toContain("provider/model inventories");
     fireEvent.change(note, {
       target: {
-        value:
-          "Repro at /Users/chris/Company with Bearer secret-token-value",
+        value: "Repro at /Users/chris/Company with Bearer secret-token-value",
       },
     });
 
@@ -390,9 +412,7 @@ describe("LogPane", () => {
     expect(
       within(dialog).getByLabelText("JSON diagnostic preview").textContent,
     ).toContain('"schemaVersion": 1');
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Save JSON…" }),
-    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save JSON…" }));
     await waitFor(() =>
       expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
         "/tmp/corpus-diagnostic.json",
@@ -598,9 +618,7 @@ describe("LogPane", () => {
       expect(hostMocks.clusterProblems).toHaveBeenCalledWith(corpus.id, 12);
       expect(hostMocks.listTemplates).toHaveBeenCalledWith(corpus.id, 100);
     });
-    expect(
-      within(overview).getByText("250 avg. events/template"),
-    ).toBeTruthy();
+    expect(within(overview).getByText("250 avg. events/template")).toBeTruthy();
     fireEvent.click(
       within(overview).getByRole("button", {
         name: "Help: Events per template",
@@ -631,9 +649,9 @@ describe("LogPane", () => {
       }),
     );
     await waitFor(() =>
-      expect(hostMocks.clusterProblems.mock.calls.length).toBeGreaterThanOrEqual(
-        1,
-      ),
+      expect(
+        hostMocks.clusterProblems.mock.calls.length,
+      ).toBeGreaterThanOrEqual(1),
     );
     expect(hostMocks.timeline).not.toHaveBeenCalled();
   });
@@ -742,8 +760,6 @@ describe("LogPane", () => {
       reason: "trusted_local_reanalysis",
       updatedAt: 2,
     });
-    expect(
-      await screen.findByText(/Local re-analysis complete:/),
-    ).toBeTruthy();
+    expect(await screen.findByText(/Local re-analysis complete:/)).toBeTruthy();
   });
 });
