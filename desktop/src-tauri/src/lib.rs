@@ -10563,8 +10563,16 @@ mod startup_host_tests {
     }
 
     #[tokio::test]
-    async fn linked_setup_behavior_orders_validation_capability_then_host() {
+    async fn linked_tools_disabled_preflight_validates_corpus_before_refusal_and_precedes_host_readiness(
+    ) {
         use std::sync::atomic::AtomicBool;
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum SetupStep {
+            ValidateCorpus,
+            CheckToolCapability,
+            BeginHostReadiness,
+        }
 
         let plan = cd_core::router::TurnDeadlinePlan {
             total_ms: 1_000,
@@ -10584,50 +10592,80 @@ mod startup_host_tests {
             plan,
             &cancel,
             move || {
-                validate_order.lock().unwrap().push("validate");
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
                 Err("invalid corpus".into())
             },
             move || {
-                capability_order.lock().unwrap().push("capability");
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
                 None
             },
             move || {
-                host_order.lock().unwrap().push("host");
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
                 Ok(7)
             },
         )
         .await
         .unwrap();
         assert!(matches!(invalid, LinkedTurnPreparation::Terminal(_)));
-        assert_eq!(*invalid_order.lock().unwrap(), ["validate"]);
+        assert_eq!(*invalid_order.lock().unwrap(), [SetupStep::ValidateCorpus]);
 
         let refusal_order = Arc::new(Mutex::new(Vec::new()));
         let validate_order = refusal_order.clone();
         let capability_order = refusal_order.clone();
         let host_order = refusal_order.clone();
+        let mut tools_disabled = ProviderProfile::ollama_local();
+        tools_disabled.capabilities.tools = false;
         let refused = prepare_linked_turn_with(
             tokio::time::Instant::now(),
             plan,
             &cancel,
             move || {
-                validate_order.lock().unwrap().push("validate");
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
                 Ok(())
             },
             move || {
-                capability_order.lock().unwrap().push("capability");
-                Some(vec![StreamEvent::TurnCompleted {
-                    reason: "linked_tools_unavailable".into(),
-                }])
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
+                cd_core::research::linked_tools_unavailable_events(
+                    &tools_disabled,
+                    "linked-session",
+                )
             },
             move || {
-                host_order.lock().unwrap().push("host");
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
                 Ok(7)
             },
         )
         .await
         .unwrap();
-        assert!(matches!(refused, LinkedTurnPreparation::Terminal(_)));
-        assert_eq!(*refusal_order.lock().unwrap(), ["validate", "capability"]);
+        let LinkedTurnPreparation::Terminal(events) = refused else {
+            panic!("tools-disabled linked turn must terminate before host readiness");
+        };
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { code, .. } if code == "linked_tools_unavailable"
+        )));
+        assert_eq!(
+            *refusal_order.lock().unwrap(),
+            [SetupStep::ValidateCorpus, SetupStep::CheckToolCapability]
+        );
 
         let ready_order = Arc::new(Mutex::new(Vec::new()));
         let validate_order = ready_order.clone();
@@ -10638,15 +10676,24 @@ mod startup_host_tests {
             plan,
             &cancel,
             move || {
-                validate_order.lock().unwrap().push("validate");
+                validate_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::ValidateCorpus);
                 Ok(())
             },
             move || {
-                capability_order.lock().unwrap().push("capability");
+                capability_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::CheckToolCapability);
                 None
             },
             move || {
-                host_order.lock().unwrap().push("host");
+                host_order
+                    .lock()
+                    .unwrap()
+                    .push(SetupStep::BeginHostReadiness);
                 Ok(7)
             },
         )
@@ -10655,7 +10702,11 @@ mod startup_host_tests {
         assert!(matches!(ready, LinkedTurnPreparation::Ready(7)));
         assert_eq!(
             *ready_order.lock().unwrap(),
-            ["validate", "capability", "host"]
+            [
+                SetupStep::ValidateCorpus,
+                SetupStep::CheckToolCapability,
+                SetupStep::BeginHostReadiness
+            ]
         );
     }
 
