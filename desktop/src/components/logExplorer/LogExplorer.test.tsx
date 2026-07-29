@@ -756,7 +756,9 @@ describe("LogExplorer shell", () => {
     fireEvent.keyDown(root, { key: "f", metaKey: true });
     expect(document.activeElement).toBe(input);
 
-    fireEvent.click(screen.getByRole("button", { name: "Help: Find vs Filter" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Help: Find vs Filter" }),
+    );
     expect(
       screen.getByText(/Find highlights matches and steps next\/previous/),
     ).toBeTruthy();
@@ -3284,9 +3286,7 @@ describe("LogExplorer shell", () => {
       '[data-row-message-seq="11"]',
     );
     expect(expandedMessage).toBeTruthy();
-    expect(
-      document.querySelector('[data-row-message-seq="21"]'),
-    ).toBeNull();
+    expect(document.querySelector('[data-row-message-seq="21"]')).toBeNull();
     Object.defineProperty(expandedMessage!, "scrollHeight", {
       configurable: true,
       value: 90,
@@ -4521,7 +4521,8 @@ describe("LogExplorer shell", () => {
       );
     });
 
-    fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
+    const timelinePosition = await screen.findByLabelText("Timeline position");
+    fireEvent.pointerUp(timelinePosition, { target: { value: "0" } });
 
     expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
       "c1",
