@@ -22,6 +22,7 @@ import {
   hostLogAddInvestigationEvidence,
   hostLogAddInvestigationFinding,
   hostLogAddInvestigationNote,
+  hostLogCountEvents,
   hostLogDeleteBookmark,
   hostLogEditInvestigationFinding,
   hostLogEditInvestigationNote,
@@ -32,10 +33,11 @@ import {
   hostLogPreviewInvestigationFindingView,
   hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
-  hostLogQueryEvents,
+  hostLogQueryEventRows,
   hostLogSearchEventsAdvanced,
   hostLogSourceCatalog,
   type EventPageDto,
+  type EventRowsPageDto,
   type EventOriginalRepresentationDto,
   type SearchMatchMode,
   type EventQueryDto,
@@ -531,16 +533,24 @@ function filtersToQuery(
   };
 }
 
-function emptyEventPage(timeQuality: TimeQuality = "order_only"): EventPageDto {
+function emptyEventRowsPage(
+  timeQuality: TimeQuality = "order_only",
+): EventRowsPageDto {
   return {
     events: [],
     nextCursor: null,
     nextTs: null,
     prevCursor: null,
     prevTs: null,
-    totalMatched: 0,
     timeQuality,
   };
+}
+
+function rowsWithKnownCount(
+  page: EventRowsPageDto,
+  totalMatched: number,
+): EventPageDto {
+  return { ...page, totalMatched };
 }
 
 /**
@@ -803,10 +813,13 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
-  /** Exact matched count for each lane query; null means unavailable/failed. */
+  /** Exact matched count for each lane query; null means not resolved. */
   const [laneMatched, setLaneMatched] = useState<Record<string, number | null>>(
     {},
   );
+  const [laneCountStates, setLaneCountStates] = useState<
+    Record<string, "pending" | "ready" | "error">
+  >({});
   const [laneTimeStates, setLaneTimeStates] = useState<
     Record<string, LaneTimeState>
   >({});
@@ -1015,6 +1028,7 @@ export function LogExplorer({ corpusId }: Props) {
   const laneSourceRequestRef = useRef(0);
   const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
+  const countRequestRef = useRef(0);
   const summaryRequestRef = useRef(0);
   const bookmarkRequestRef = useRef(0);
   const bookmarkMetadataStartedRef = useRef(false);
@@ -1043,6 +1057,11 @@ export function LogExplorer({ corpusId }: Props) {
     }
     if (autoStatusLockRef.current === "bookmark-reveal") return;
     setStatus(nextStatus);
+  }, []);
+  const finishRowLoadStatus = useCallback((nextStatus: string) => {
+    setStatus((current) =>
+      current === "Loading first evidence rows…" ? nextStatus : current,
+    );
   }, []);
   const activeFilterCount =
     filters.levels.length +
@@ -1511,7 +1530,14 @@ export function LogExplorer({ corpusId }: Props) {
 
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
+    const countRequestId = ++countRequestRef.current;
     let loadedCurrentView = false;
+    let shown = 0;
+    const countPlans: Array<{
+      laneId: string;
+      query: EventQueryDto | null;
+    }> = [];
+    const countUnavailableLaneIds = new Set<string>();
     if (facetAfterPaintFrameRef.current != null) {
       window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
       facetAfterPaintFrameRef.current = null;
@@ -1531,34 +1557,36 @@ export function LogExplorer({ corpusId }: Props) {
     );
     setBusy(true);
     setError(null);
+    setAutoStatus("Loading first evidence rows…");
     setLanePaging({});
     setLaneTimeStates(unloaded);
     setLaneMatched(
       Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
     );
+    setLaneCountStates(
+      Object.fromEntries(visibleLanes.map((lane) => [lane.id, "pending"])),
+    );
+    setTotalMatched(0);
     setGaps([]);
     try {
       if (laneCount <= 1) {
         const sourceFilter = effectiveLaneSources(visibleLanes[0], filters);
+        const query = filtersToQuery(filters, { sources: sourceFilter });
         const page =
           sourceFilter?.length === 0
-            ? emptyEventPage()
-            : await hostLogQueryEvents(
-                corpusId,
-                filtersToQuery(filters, { sources: sourceFilter }),
-              );
+            ? emptyEventRowsPage()
+            : await hostLogQueryEventRows(corpusId, query);
         if (requestId !== eventsRequestRef.current) return;
         const laneState: LaneTimeState =
           page.events.length > 0
             ? { status: "loaded", quality: page.timeQuality }
             : { status: "empty", quality: page.timeQuality };
         const states = { "lane-0": laneState };
-        setTotalMatched(page.totalMatched);
-        setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
         setTimeQuality(aggregateViewTimeQuality(["lane-0"], states));
-        const seeded = seedFromPage(page);
+        const seeded = seedFromPage(rowsWithKnownCount(page, 0));
+        shown = seeded.events.length;
         setLaneEvents({ "lane-0": seeded.events });
         setLaneCursors({
           "lane-0": {
@@ -1570,8 +1598,12 @@ export function LogExplorer({ corpusId }: Props) {
             hasNewer: page.nextCursor != null,
           },
         });
-        setAutoStatus(
-          `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
+        countPlans.push({
+          laneId: "lane-0",
+          query: sourceFilter?.length === 0 ? null : query,
+        });
+        finishRowLoadStatus(
+          `${seeded.events.length} resident rows loaded (bounded)`,
         );
       } else {
         const byLane: Record<string, ExplorerEventDto[]> = {};
@@ -1588,20 +1620,22 @@ export function LogExplorer({ corpusId }: Props) {
         > = {};
         const states: Record<string, LaneTimeState> = {};
         const matchedByLane: Record<string, number | null> = {};
-        let maxLaneMatched = 0;
-        let shown = 0;
         const requests = visibleLanes.map(async (lane) => {
           const sourceFilter = effectiveLaneSources(lane, filters);
           if (sourceFilter?.length === 0) {
-            return { lane, page: emptyEventPage() };
+            return {
+              lane,
+              page: emptyEventRowsPage(),
+              countQuery: null,
+            };
           }
           const q = filtersToQuery(filters, {
             sources: sourceFilter,
             limit: 100,
             sortByTime: true,
           });
-          const page = await hostLogQueryEvents(corpusId, q);
-          return { lane, page };
+          const page = await hostLogQueryEventRows(corpusId, q);
+          return { lane, page, countQuery: q };
         });
         const results = await Promise.allSettled(requests);
         if (requestId !== eventsRequestRef.current) return;
@@ -1621,10 +1655,11 @@ export function LogExplorer({ corpusId }: Props) {
             };
             states[lane.id] = { status: "error", quality: null };
             matchedByLane[lane.id] = null;
+            countUnavailableLaneIds.add(lane.id);
             continue;
           }
-          const { page } = result.value;
-          const seeded = seedFromPage(page);
+          const { page, countQuery } = result.value;
+          const seeded = seedFromPage(rowsWithKnownCount(page, 0));
           byLane[lane.id] = seeded.events;
           cursors[lane.id] = {
             afterSeq: seeded.afterSeq,
@@ -1634,8 +1669,8 @@ export function LogExplorer({ corpusId }: Props) {
             hasOlder: page.prevCursor != null,
             hasNewer: page.nextCursor != null,
           };
-          matchedByLane[lane.id] = page.totalMatched;
-          maxLaneMatched = Math.max(maxLaneMatched, page.totalMatched);
+          matchedByLane[lane.id] = null;
+          countPlans.push({ laneId: lane.id, query: countQuery });
           shown += page.events.length;
           states[lane.id] =
             page.events.length > 0
@@ -1644,6 +1679,14 @@ export function LogExplorer({ corpusId }: Props) {
         }
         setLaneEvents(byLane);
         setLaneMatched(matchedByLane);
+        setLaneCountStates(
+          Object.fromEntries(
+            visibleLanes.map((lane) => [
+              lane.id,
+              countUnavailableLaneIds.has(lane.id) ? "error" : "pending",
+            ]),
+          ),
+        );
         setLaneCursors(cursors);
         setLaneTimeStates(states);
         // No global unique matched total is derivable from overlapping lanes.
@@ -1660,14 +1703,17 @@ export function LogExplorer({ corpusId }: Props) {
             `${failed} evidence lane${failed === 1 ? "" : "s"} failed to load; time linking remains off`,
           );
         }
-        setAutoStatus(
-          `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
+        finishRowLoadStatus(
+          `${laneCount} lanes · ${shown} resident rows loaded (bounded)`,
         );
       }
       loadedCurrentView = true;
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
+      setLaneCountStates(
+        Object.fromEntries(visibleLanes.map((lane) => [lane.id, "error"])),
+      );
     } finally {
       if (requestId === eventsRequestRef.current) {
         setBusy(false);
@@ -1683,6 +1729,45 @@ export function LogExplorer({ corpusId }: Props) {
             facetStartFrameRef.current = window.requestAnimationFrame(() => {
               facetStartFrameRef.current = null;
               if (requestId !== eventsRequestRef.current) return;
+              const applyCount = (laneId: string, total: number) => {
+                if (
+                  requestId !== eventsRequestRef.current ||
+                  countRequestId !== countRequestRef.current
+                ) {
+                  return;
+                }
+                setLaneMatched((previous) => ({
+                  ...previous,
+                  [laneId]: total,
+                }));
+                setLaneCountStates((previous) => ({
+                  ...previous,
+                  [laneId]: "ready",
+                }));
+                if (laneCount <= 1 && laneId === "lane-0") {
+                  setTotalMatched(total);
+                }
+              };
+              for (const plan of countPlans) {
+                if (plan.query == null) {
+                  applyCount(plan.laneId, 0);
+                  continue;
+                }
+                void hostLogCountEvents(corpusId, plan.query)
+                  .then((count) => applyCount(plan.laneId, count.totalMatched))
+                  .catch(() => {
+                    if (
+                      requestId !== eventsRequestRef.current ||
+                      countRequestId !== countRequestRef.current
+                    ) {
+                      return;
+                    }
+                    setLaneCountStates((previous) => ({
+                      ...previous,
+                      [plan.laneId]: "error",
+                    }));
+                  });
+              }
               void loadFacets();
               loadOptionalMetadata();
             });
@@ -1697,6 +1782,7 @@ export function LogExplorer({ corpusId }: Props) {
     filters,
     laneCount,
     lanes,
+    finishRowLoadStatus,
     loadFacets,
     loadOptionalMetadata,
     setAutoStatus,
@@ -1753,6 +1839,7 @@ export function LogExplorer({ corpusId }: Props) {
     void loadEvents();
     return () => {
       eventsRequestRef.current += 1;
+      countRequestRef.current += 1;
       facetRequestRef.current += 1;
       if (facetAfterPaintFrameRef.current != null) {
         window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
@@ -3625,7 +3712,7 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     try {
-      const page = await hostLogQueryEvents(
+      const page = await hostLogQueryEventRows(
         corpusId,
         filtersToQuery(filters, {
           sources: sourceFilter,
@@ -3642,15 +3729,14 @@ export function LogExplorer({ corpusId }: Props) {
         afterTs: cur.afterTs,
         beforeSeq: cur.beforeSeq,
         beforeTs: cur.beforeTs,
-        totalMatched: totalMatched,
+        totalMatched: laneMatched[laneId] ?? 0,
       };
       const { window, droppedFromHead } = appendNewer(
         resident,
-        page,
+        rowsWithKnownCount(page, laneMatched[laneId] ?? 0),
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
-      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -3729,7 +3815,7 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     try {
-      const page = await hostLogQueryEvents(
+      const page = await hostLogQueryEventRows(
         corpusId,
         filtersToQuery(filters, {
           sources: sourceFilter,
@@ -3746,15 +3832,14 @@ export function LogExplorer({ corpusId }: Props) {
         afterTs: cur.afterTs,
         beforeSeq: cur.beforeSeq,
         beforeTs: cur.beforeTs,
-        totalMatched: totalMatched,
+        totalMatched: laneMatched[laneId] ?? 0,
       };
       const { window, droppedFromTail } = prependOlder(
         resident,
-        page,
+        rowsWithKnownCount(page, laneMatched[laneId] ?? 0),
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
-      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -4101,9 +4186,18 @@ export function LogExplorer({ corpusId }: Props) {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
     const matched = laneMatched[laneId];
-    if (busy && matched == null) return "Loading first evidence rows…";
+    const countState = laneCountStates[laneId];
+    if (busy && countState === "pending") {
+      return "Loading first evidence rows…";
+    }
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
-    return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
+    const countLabel =
+      countState === "error"
+        ? "matched unavailable"
+        : matched == null
+          ? "counting matches…"
+          : `${matched} matched`;
+    return `${countLabel} · ${n}${more} resident`;
   };
   const navigatorSourceScope = visibleLaneSourceScope(
     lanes,
@@ -4236,7 +4330,13 @@ export function LogExplorer({ corpusId }: Props) {
           </span>
           {laneCount === 1 && (
             <span className="log-explorer__badge">
-              {totalMatched.toLocaleString()} matched
+              {laneMatched["lane-0"] == null
+                ? busy
+                  ? "Evidence loading…"
+                  : laneCountStates["lane-0"] === "error"
+                    ? "Match count unavailable"
+                    : "Counting matches…"
+                : `${totalMatched.toLocaleString()} matched`}
             </span>
           )}
           {laneCount > 1 && (
@@ -5267,7 +5367,11 @@ export function LogExplorer({ corpusId }: Props) {
                 Corpus{" "}
                 {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·{" "}
                 {laneCount === 1
-                  ? `matched ${totalMatched.toLocaleString()} · `
+                  ? laneMatched["lane-0"] == null
+                    ? laneCountStates["lane-0"] === "error"
+                      ? "matched unavailable · "
+                      : "matched count pending · "
+                    : `matched ${totalMatched.toLocaleString()} · `
                   : "matched per lane below · "}
                 resident rows{" "}
                 {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
@@ -5611,15 +5715,20 @@ export function LogExplorer({ corpusId }: Props) {
               const cursor = laneCursors[lane.id];
               const paging = lanePaging[lane.id];
               const matched = laneMatched[lane.id];
+              const countState = laneCountStates[lane.id];
               const boundaryLabel =
                 cursor == null || laneTime.status === "unloaded"
                   ? null
                   : laneTime.status === "error"
                     ? "Paging unavailable"
                     : !cursor.hasOlder && !cursor.hasNewer
-                      ? matched === 0
-                        ? "No matching logs"
-                        : "All matched logs loaded"
+                      ? matched == null
+                        ? countState === "error"
+                          ? "Exact match count unavailable"
+                          : "Exact match count pending"
+                        : matched === 0
+                          ? "No matching logs"
+                          : "All matched logs loaded"
                       : !cursor.hasOlder
                         ? "Start of matched logs"
                         : !cursor.hasNewer
@@ -5634,11 +5743,15 @@ export function LogExplorer({ corpusId }: Props) {
                       ? matched == null
                         ? "All matching events for this lane are in the resident window."
                         : `All ${matched} events matching this lane are in the resident window.`
-                      : boundaryLabel === "No matching logs"
-                        ? "No events match this lane's sources and active filters."
-                        : boundaryLabel === "Paging unavailable"
-                          ? "This lane did not load, so its paging boundaries are unknown."
-                          : undefined;
+                      : boundaryLabel === "Exact match count pending"
+                        ? "The bounded evidence rows are ready; the exact match count is still loading."
+                        : boundaryLabel === "Exact match count unavailable"
+                          ? "The bounded evidence rows are ready, but the exact match count could not be loaded."
+                          : boundaryLabel === "No matching logs"
+                            ? "No events match this lane's sources and active filters."
+                            : boundaryLabel === "Paging unavailable"
+                              ? "This lane did not load, so its paging boundaries are unknown."
+                              : undefined;
               return (
                 <section
                   key={lane.id}
