@@ -33,6 +33,7 @@ const requiredFiles = [
   "docs/specs/incident-evidence/schemas/manifest.v1.json",
   "docs/specs/incident-evidence/schemas/component.v1.json",
   "crates/cd-core/src/incident_evidence.rs",
+  "crates/cd-core/src/incident_evidence_archive.rs",
   "crates/cd-core/src/bin/cd-validate-incident-evidence.rs",
   "docs/help/log-analysis/incident-evidence-bundle.md",
   "docs/design/proven-methods/INCIDENT_EVIDENCE_BUNDLE.md",
@@ -106,9 +107,19 @@ mustContain(
   "import residual",
 );
 mustContain(
-  "crates/cd-core/src/incident_evidence.rs",
-  "archive_validation_residual",
-  "archive residual",
+  "crates/cd-core/src/incident_evidence_archive.rs",
+  "MAX_ARCHIVE_COMPRESSED_BYTES",
+  "archive compressed limit",
+);
+mustContain(
+  "crates/cd-core/src/incident_evidence_archive.rs",
+  "CompressionMethod::Stored",
+  "deterministic Stored compression",
+);
+mustContain(
+  "docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md",
+  "MAX_ARCHIVE_COMPRESSED_BYTES",
+  "spec archive limits",
 );
 
 // Handbook index links chapter

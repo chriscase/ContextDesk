@@ -1,7 +1,7 @@
-//! Offline Incident Evidence Bundle v1 validator (#764 / #763).
+//! Offline Incident Evidence Bundle v1 validator (#764 / #765 / #763).
 //!
-//! Schema id: [`SCHEMA_ID`]. Directory-form validation only in this slice;
-//! deterministic archive production/import is residual (documented, not faked).
+//! Schema id: [`SCHEMA_ID`]. Directory and deterministic ZIP transport are
+//! supported offline. Product import/attachment UX remains residual.
 //!
 //! No network I/O. No product corpus publication. Streams SHA-256 over payloads.
 
@@ -50,7 +50,12 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn new(code: impl Into<String>, path: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Construct a diagnostic (shared with archive transport).
+    pub fn new(
+        code: impl Into<String>,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             code: code.into(),
             path: path.into(),
@@ -59,12 +64,12 @@ impl Diagnostic {
     }
 }
 
-/// Result of validating a bundle directory.
+/// Result of validating a bundle directory or archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
     /// Whether validation succeeded.
     pub ok: bool,
-    /// Bundle root that was validated.
+    /// Bundle root or archive path that was validated.
     pub root: String,
     /// Schema id observed (if parsed).
     pub schema_id: Option<String>,
@@ -72,6 +77,19 @@ pub struct ValidationReport {
     pub bundle_id: Option<String>,
     /// Sorted diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+    /// Transport: `directory` or `archive`.
+    #[serde(default = "default_transport_directory")]
+    pub transport: String,
+    /// Component count when manifest parsed.
+    #[serde(default)]
+    pub component_count: Option<usize>,
+    /// Total declared component bytes validated (streamed).
+    #[serde(default)]
+    pub total_validated_bytes: Option<u64>,
+}
+
+fn default_transport_directory() -> String {
+    "directory".into()
 }
 
 /// Manifest time basis.
@@ -478,19 +496,18 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
         ));
     }
 
+    let component_count = Some(manifest.components.len());
+    let total_validated_bytes = Some(aggregate);
     let ok = diagnostics.is_empty();
-    finish(ok, root_display, schema_id, bundle_id, diagnostics)
-}
-
-/// Archive form is residual — return a clear residual diagnostic (do not fake support).
-pub fn validate_archive_residual(path: &Path) -> ValidationReport {
-    let diagnostics = vec![Diagnostic::new(
-        "archive_validation_residual",
-        path.display().to_string(),
-        "deterministic archive validation/production is residual for a later #763 slice; \
-         validate the directory form with validate_directory",
-    )];
-    finish(false, path.display().to_string(), None, None, diagnostics)
+    finish_with_counts(
+        ok,
+        root_display,
+        schema_id,
+        bundle_id,
+        component_count,
+        total_validated_bytes,
+        diagnostics,
+    )
 }
 
 fn finish(
@@ -498,6 +515,18 @@ fn finish(
     root: String,
     schema_id: Option<String>,
     bundle_id: Option<String>,
+    diagnostics: Vec<Diagnostic>,
+) -> ValidationReport {
+    finish_with_counts(ok, root, schema_id, bundle_id, None, None, diagnostics)
+}
+
+fn finish_with_counts(
+    ok: bool,
+    root: String,
+    schema_id: Option<String>,
+    bundle_id: Option<String>,
+    component_count: Option<usize>,
+    total_validated_bytes: Option<u64>,
     mut diagnostics: Vec<Diagnostic>,
 ) -> ValidationReport {
     diagnostics.sort_by(|a, b| (&a.code, &a.path, &a.message).cmp(&(&b.code, &b.path, &b.message)));
@@ -507,17 +536,20 @@ fn finish(
         schema_id,
         bundle_id,
         diagnostics,
+        transport: "directory".into(),
+        component_count,
+        total_validated_bytes,
     }
 }
 
-fn is_known_role(role: &str) -> bool {
+pub(crate) fn is_known_role(role: &str) -> bool {
     matches!(
         role,
         "log" | "operational_metrics" | "attachment" | "readme"
     )
 }
 
-fn is_lowercase_sha256(s: &str) -> bool {
+pub(crate) fn is_lowercase_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -547,7 +579,7 @@ fn created_at_has_explicit_offset(s: &str) -> bool {
     false
 }
 
-fn validate_time_basis(tb: &TimeBasis, json_path: &str, out: &mut Vec<Diagnostic>) {
+pub(crate) fn validate_time_basis(tb: &TimeBasis, json_path: &str, out: &mut Vec<Diagnostic>) {
     let tz = tb
         .timezone
         .as_deref()
@@ -638,7 +670,7 @@ fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
 /// Catches leaf symlinks **and** intermediate directory symlinks (e.g.
 /// `logs -> /tmp/outside` with path `logs/app.log`). Must run before any
 /// payload open/hash.
-fn ensure_within_bundle_root(
+pub(crate) fn ensure_within_bundle_root(
     root: &Path,
     candidate: &Path,
 ) -> Result<PathBuf, (&'static str, String)> {
@@ -670,7 +702,7 @@ fn ensure_within_bundle_root(
     Ok(real)
 }
 
-fn stream_sha256_hex(path: &Path) -> Result<String, String> {
+pub(crate) fn stream_sha256_hex(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
@@ -701,6 +733,13 @@ pub fn format_report_text(report: &ValidationReport) -> String {
     }
     if let Some(b) = &report.bundle_id {
         lines.push(format!("bundleId={b}"));
+    }
+    lines.push(format!("transport={}", report.transport));
+    if let Some(n) = report.component_count {
+        lines.push(format!("components={n}"));
+    }
+    if let Some(b) = report.total_validated_bytes {
+        lines.push(format!("totalBytes={b}"));
     }
     lines.push(format!("diagnostics={}", report.diagnostics.len()));
     for d in &report.diagnostics {
@@ -883,13 +922,6 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == "byte_count_mismatch"));
-    }
-
-    #[test]
-    fn archive_residual_is_explicit() {
-        let r = validate_archive_residual(Path::new("bundle.zip"));
-        assert!(!r.ok);
-        assert_eq!(r.diagnostics[0].code, "archive_validation_residual");
     }
 
     #[test]

@@ -46,16 +46,42 @@ README.md                     # optional human notes (never evaluator truth)
 
 Logical layout is illustrative; the **manifest component inventory** is authoritative. Empty role directories without components **MAY** be omitted.
 
-### 2.2 Deterministic archive form (residual for production tooling)
+### 2.2 Deterministic archive form (#765)
 
-A future deterministic zip of the directory form **SHOULD**:
+A conforming ZIP transport **MUST**:
 
-- store only relative, non-absolute, non-traversing entry names;
-- reject duplicate entry names;
+- place `manifest.json` at the **archive root** (canonical path `manifest.json`);
+- store only relative, non-absolute, non-traversing UTF-8 entry names using `/`;
+- reject duplicate entry names and case-insensitive portable collisions;
 - preserve component relative paths as zip entry paths;
-- apply the same size/hash caps as directory validation.
+- apply directory form size/hash caps **and** archive caps below;
+- stream component SHA-256 from zip entry readers without extracting the tree to temp.
 
-**This conformance slice ( #764 ) validates the directory form offline.** Archive *production* and product *import* of archives are **residuals** of later #763 slices. A validator **MAY** refuse zip input with a clear residual message rather than faking support.
+#### Archive safety limits
+
+| Limit | Value | Constant |
+| --- | --- | --- |
+| Max compressed archive size | 2 GiB | `MAX_ARCHIVE_COMPRESSED_BYTES` |
+| Max zip entries | 513 (512 components + manifest) | `MAX_ARCHIVE_ENTRIES` |
+| Max expanded/compressed ratio (Deflated) | 100 | `MAX_COMPRESSION_RATIO` |
+
+#### Deterministic pack guarantees
+
+`cd-validate-incident-evidence pack` **MUST** produce **byte-identical** archives for identical directory inputs across independent runs:
+
+- lexicographic entry order by path;
+- `CompressionMethod::Stored` (documented; no nondeterministic deflate);
+- fixed DOS timestamp 1980-01-01 00:00:00;
+- unix permissions `0o644`;
+- no machine-specific comments or extra fields;
+- atomic write (temp `.<name>.partial` then rename); no partial left on failure;
+- refuse overwrite unless `--force`.
+
+Packing **MUST NOT** follow filesystem symlinks (leaf or intermediate). Nested `.zip` files declared as `attachment` components are **opaque payloads** (hashed, never recursively expanded).
+
+#### Product import residual
+
+Product import/attachment of archives remains a later #763 slice. Offline pack/validate ship under #765.
 
 ---
 
@@ -264,6 +290,6 @@ Diagnostics **MUST** be deterministic and suitable for CI:
 
 ## 16. Residual
 
-1. **Product import/attachment UX** for directory and archive forms.
-2. **Deterministic archive production** CLI (zip write) if not implemented beside directory validation.
-3. Round-trip product tests once import ships.
+1. **Product import/attachment UX** for directory and archive forms (#763).
+2. Round-trip product tests once import ships.
+3. #532 Investigation/Case portable bundles (distinct format).

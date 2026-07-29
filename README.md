@@ -45,15 +45,18 @@ with hashed logs, optional operational-metrics v1 documents, and privacy
 declarations. Validate offline before transfer:
 
 ```bash
-cargo run -p cd-core --bin cd-validate-incident-evidence -- ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- pack ./my-bundle --output ./my-bundle.zip
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle.zip
 ```
 
 Normative spec: [`docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md`](docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md) ·
 templates: [`examples/incident-evidence-producers/`](examples/incident-evidence-producers/) ·
-fixtures: [`fixtures/incident-evidence/`](fixtures/incident-evidence/). Product
-import/attachment UX remains a later slice of
-[#763](https://github.com/chriscase/ContextDesk/issues/763); this repository
-ships the conformance foundation ([#764](https://github.com/chriscase/ContextDesk/issues/764)).
+fixtures: [`fixtures/incident-evidence/`](fixtures/incident-evidence/). Directory
+conformance is [#764](https://github.com/chriscase/ContextDesk/issues/764);
+deterministic ZIP pack/validate is [#765](https://github.com/chriscase/ContextDesk/issues/765).
+Product import/attachment UX remains residual on
+[#763](https://github.com/chriscase/ContextDesk/issues/763).
 
 **Start with repeatable evidence.** Install the bundled synthetic corpus during
 first-run setup, inspect its import summary, and open it directly in Log

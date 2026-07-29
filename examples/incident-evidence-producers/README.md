@@ -16,7 +16,9 @@ architecture.
 6. Validate offline:
 
 ```bash
-cargo run -p cd-core --bin cd-validate-incident-evidence -- ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- pack ./my-bundle --output ./my-bundle.zip
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle.zip
 ```
 
 ## Files

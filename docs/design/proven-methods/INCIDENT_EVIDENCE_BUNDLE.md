@@ -1,9 +1,8 @@
 # Incident Evidence Bundle interchange
 
 **Method status:** **Partial.** Normative v1 schema, JSON Schemas, frozen
-fixtures, offline directory validator, producer templates, Help, and drift
-checks ship under #764. Product import/attachment UX and deterministic archive
-production remain residual on #763.
+fixtures, offline directory validator (#764), and deterministic ZIP pack/validate
+(#765) ship. Product import/attachment UX remains residual on #763.
 
 ## 1. Problem
 
@@ -26,7 +25,8 @@ import UI (later #763 slices).
 | Normative schema id + RFC specification | **Shipped** | [`INCIDENT_EVIDENCE_BUNDLE_V1.md`](../../specs/INCIDENT_EVIDENCE_BUNDLE_V1.md) | — |
 | JSON Schemas | **Shipped** | [`docs/specs/incident-evidence/schemas/`](../../specs/incident-evidence/schemas/) | — |
 | Frozen valid/invalid fixtures | **Shipped** | [`fixtures/incident-evidence/`](../../../fixtures/incident-evidence/) | — |
-| Offline directory validator + CLI | **Shipped** | [`incident_evidence.rs`](../../../crates/cd-core/src/incident_evidence.rs), `cd-validate-incident-evidence` | Archive validate/produce residual |
+| Offline directory validator + CLI | **Shipped** | [`incident_evidence.rs`](../../../crates/cd-core/src/incident_evidence.rs), `cd-validate-incident-evidence` | — |
+| Deterministic ZIP pack/validate | **Shipped** | [`incident_evidence_archive.rs`](../../../crates/cd-core/src/incident_evidence_archive.rs) (#765) | Product import residual |
 | Producer templates | **Shipped** | [`examples/incident-evidence-producers/`](../../../examples/incident-evidence-producers/) | — |
 | Help discoverability | **Shipped** | [`incident-evidence-bundle.md`](../../help/log-analysis/incident-evidence-bundle.md) | — |
 | Product import/attachment UX | **Planned** | — | #763 later slices |
@@ -171,8 +171,8 @@ be claimed shipped by this chapter. Diagrams use theme-safe SVG with
 | --- | --- |
 | Interchange contract + offline validate | **Shipped** (#764) |
 | Producer templates + Help/Handbook | **Shipped** (#764) |
-| Directory import UX | **Planned** (#763) |
-| Deterministic archive produce/validate | **Planned** / residual |
+| Directory/ZIP import UX | **Planned** (#763) |
+| Deterministic archive produce/validate (offline) | **Shipped** (#765) |
 | Investigation/Case bundles | **Planned** (#532) |
 
 ## 15. Reimplementation notes
@@ -186,6 +186,5 @@ be claimed shipped by this chapter. Diagrams use theme-safe SVG with
 ## 16. Open residuals
 
 - Product import/attachment UX for directory and archive forms (#763).
-- Deterministic archive production CLI if not co-shipped with import.
 - Round-trip product tests once import lands.
 - #532 Investigation/Case portable bundles remain a separate contract.

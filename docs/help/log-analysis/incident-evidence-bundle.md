@@ -41,11 +41,16 @@ See help://log-portable-package for analysis packages.
 1. Create a directory with relative paths under `logs/` (and optional `metrics/`).
 2. Hash each file (SHA-256, lowercase hex) and record exact byte counts.
 3. Write `manifest.json` with schema id `contextdesk.incident_evidence.v1`.
-4. Validate offline before transfer:
+4. Validate offline before transfer (directory or ZIP):
 
 ```text
-cargo run -p cd-core --bin cd-validate-incident-evidence -- ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- pack ./my-bundle --output ./my-bundle.zip
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle.zip
 ```
+
+Pack is deterministic (Stored compression, fixed timestamps, sorted paths). Use
+`--force` only when intentionally replacing an existing zip.
 
 Copy/paste templates live in `examples/incident-evidence-producers/`.
 
@@ -85,7 +90,9 @@ does not create a product attachment.
 | `hash_mismatch` / `byte_count_mismatch` | File changed after hashing, or wrong digest case |
 | `timezone_dishonest` | `timezoneResolved=true` without a timezone value |
 | `payload_missing` | Manifest path does not match an on-disk relative file |
-| `archive_validation_residual` | Zip validation not shipped in this slice — use directory form |
+| `undeclared_payload` | ZIP contains a file not listed in the manifest |
+| `output_exists` | Pack refused to overwrite without `--force` |
+| `symlink_refused` | Pack refused a symlink path component |
 
 ## Importing later
 
