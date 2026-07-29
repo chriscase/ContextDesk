@@ -163,8 +163,13 @@ Opening Explorer prioritizes bounded evidence rows over aggregate metadata:
 
 Pagination also uses the count-free row API and retains the last known exact
 count. Event-revision changes invalidate a bounded per-open-corpus count cache.
-Every asynchronous result is guarded by the current corpus/view lifecycle so a
-stale response cannot reactivate or overwrite a newer Explorer.
+Concurrent identical count requests recheck and publish that cache while
+holding the corpus connection lock, so lanes sharing one filter snapshot
+perform one exact scan. Every asynchronous result is guarded by the current
+corpus/view lifecycle so a stale response cannot reactivate or overwrite a
+newer Explorer. If a mounted Explorer is reused for another corpus, prior rows,
+selection, highlights, and the inspector are cleared before the new corpus can
+paint.
 
 The integrated Timeline is visible by default per the later owner design
 decision. It is not part of the first-evidence request and starts its bounded
