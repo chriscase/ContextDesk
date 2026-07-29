@@ -1883,6 +1883,20 @@ export async function hostExportLogCorpusPackage(
   return invoke<string>("export_log_corpus_package", { corpusId, path });
 }
 
+/** Write one bounded, privacy-reviewed corpus diagnostic to a user-selected path. */
+export async function hostSaveLogDiagnosticReport(
+  path: string,
+  format: "markdown" | "json",
+  content: string,
+): Promise<void> {
+  if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
+  await invoke<void>("save_log_diagnostic_report", {
+    path,
+    format,
+    content,
+  });
+}
+
 // ── Log Explorer (#480) ─────────────────────────────────────────────────────
 
 export type TimeQuality = "wall" | "mixed" | "order_only";

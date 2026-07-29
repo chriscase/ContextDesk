@@ -23,6 +23,9 @@ const hostMocks = vi.hoisted(() => ({
   cancelReanalysis: vi.fn(),
   discard: vi.fn(),
   confirm: vi.fn(),
+  getBranding: vi.fn(),
+  saveDiagnostic: vi.fn(),
+  saveFile: vi.fn(),
 }));
 
 vi.mock("../../lib/host", () => ({
@@ -32,6 +35,7 @@ vi.mock("../../lib/host", () => ({
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
   hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
+  hostGetBranding: hostMocks.getBranding,
   hostImportLogCorpusPackagePath: vi.fn(),
   hostIngestLogPath: vi.fn(),
   hostListLogTemplates: hostMocks.listTemplates,
@@ -40,6 +44,7 @@ vi.mock("../../lib/host", () => ({
   hostLogTimeline: hostMocks.timeline,
   hostOpenLogExplorer: vi.fn(),
   hostReanalyzeLogCorpus: hostMocks.reanalyze,
+  hostSaveLogDiagnosticReport: hostMocks.saveDiagnostic,
   hostSetActiveLogCorpus: hostMocks.setActiveCorpus,
 }));
 
@@ -47,7 +52,7 @@ vi.mock("../../lib/dialogs", () => ({
   dialogConfirm: hostMocks.confirm,
   openDirectoryDialog: vi.fn(async () => null),
   openFileDialog: vi.fn(async () => null),
-  saveFileDialog: vi.fn(async () => null),
+  saveFileDialog: hostMocks.saveFile,
 }));
 
 function corpusButtonName(name: string) {
@@ -97,6 +102,19 @@ describe("LogPane", () => {
     hostMocks.confirm.mockResolvedValue(false);
     hostMocks.cancelReanalysis.mockResolvedValue(true);
     hostMocks.discard.mockResolvedValue(undefined);
+    hostMocks.getBranding.mockResolvedValue({
+      name: "ContextDesk",
+      slug: "contextdesk",
+      tagline: "Developer knowledge workbench",
+      version: "0.1.0",
+      protocol: "cd.v1",
+      channel: "dev",
+      git_sha: "de43caeba66df05068a50db9356efad3b64a4a45",
+      git_describe: null,
+      identity_line: "v0.1.0 · channel=dev",
+    });
+    hostMocks.saveDiagnostic.mockResolvedValue(undefined);
+    hostMocks.saveFile.mockResolvedValue(null);
   });
 
   it("renders toolbar import/export actions and empty state", async () => {
@@ -138,7 +156,7 @@ describe("LogPane", () => {
     const firstMenu = await screen.findByRole("menu", {
       name: `Actions for ${first.name}`,
     });
-    expect(within(firstMenu).getByRole("menuitem")).toBe(
+    expect(within(firstMenu).getAllByRole("menuitem")[0]).toBe(
       document.activeElement,
     );
 
@@ -231,7 +249,9 @@ describe("LogPane", () => {
         expect(menu.style.left).toBe("72px");
         expect(menu.style.top).toBe("66px");
       });
-      expect(within(menu).getByRole("menuitem")).toBe(document.activeElement);
+      expect(within(menu).getAllByRole("menuitem")[0]).toBe(
+        document.activeElement,
+      );
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,
@@ -244,6 +264,148 @@ describe("LogPane", () => {
     }
   });
 
+  it("previews, copies, and safely saves privacy-bounded corpus diagnostics", async () => {
+    const item: LogCorpusSummaryDto = {
+      ...corpus("corpus-a", "API private.internal"),
+      sourceLabel: "/Users/chris/Company/private.log",
+      stats: {
+        files: 1,
+        discoveredFiles: 3,
+        excludedFiles: 1,
+        failedFiles: 1,
+        ignoredFiles: 0,
+        exclusionCounts: { binary: 1, open_failed: 1 },
+        exclusionExamples: [
+          "binary: /Users/chris/Company/core.bin",
+          "open_failed: C:\\Company\\secret.log",
+        ],
+        partial: true,
+        lines: 12,
+        templates: 3,
+        reductionRatio: 4,
+        embedded: 0,
+        sourceBytes: 64,
+        corpusBytes: 128,
+        levelCounts: { info: 10, error: 2 },
+        tsMin: 1,
+        tsMax: 12,
+        formatCounts: { json: 12 },
+      },
+      topTemplates: [
+        {
+          id: 1,
+          pattern: "PRIVATE_TEMPLATE_PAYLOAD customer=secret",
+          count: 12,
+          severity: 5,
+        },
+      ],
+      embedding: {
+        state: "partial",
+        modelId: "embarrassing-private-model",
+        embeddedTemplates: 1,
+        totalTemplates: 3,
+        reason: "private-provider",
+        updatedAt: 1,
+      },
+    };
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    const writeText = vi.fn(async (_value: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    hostMocks.saveFile
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce("/tmp/corpus-diagnostic.md")
+      .mockResolvedValueOnce("/tmp/corpus-diagnostic.json");
+
+    render(<LogPane />);
+    const trigger = await screen.findByRole("button", {
+      name: `More actions for ${item.name}`,
+    });
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole("menu");
+    const exportItem = within(menu).getByRole("menuitem", {
+      name: "Export diagnostics…",
+    });
+    const discardItem = within(menu).getByRole("menuitem", {
+      name: "Discard corpus…",
+    });
+    expect(document.activeElement).toBe(exportItem);
+    fireEvent.keyDown(exportItem, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(discardItem);
+    fireEvent.keyDown(discardItem, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(exportItem);
+    fireEvent.click(exportItem);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export corpus diagnostics",
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+    const note = within(dialog).getByLabelText(/Optional reproduction note/);
+    await waitFor(() => expect(document.activeElement).toBe(note));
+    expect(dialog.textContent).toContain("Raw logs and event payloads");
+    expect(dialog.textContent).toContain("provider/model inventories");
+    fireEvent.change(note, {
+      target: {
+        value:
+          "Repro at /Users/chris/Company with Bearer secret-token-value",
+      },
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy Markdown" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain("[REDACTED_PATH]");
+    expect(copied).not.toContain("secret-token-value");
+    expect(copied).not.toContain("PRIVATE_TEMPLATE_PAYLOAD");
+    expect(copied).not.toContain("embarrassing-private-model");
+    expect(copied).not.toContain("private-provider");
+    expect(copied).not.toContain(item.sourceLabel);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save Markdown…" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText("Save cancelled. No file was written."),
+      ).toBeTruthy(),
+    );
+    expect(hostMocks.saveDiagnostic).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save Markdown…" }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
+        "/tmp/corpus-diagnostic.md",
+        "markdown",
+        expect.stringContaining("# ContextDesk corpus diagnostic"),
+      ),
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    expect(
+      within(dialog).getByLabelText("JSON diagnostic preview").textContent,
+    ).toContain('"schemaVersion": 1');
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save JSON…" }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
+        "/tmp/corpus-diagnostic.json",
+        "json",
+        expect.stringContaining('"schemaVersion": 1'),
+      ),
+    );
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("requires discard confirmation, preserves the corpus on cancel, and restores trigger focus", async () => {
     const item = corpus("corpus-a", "API incident");
     hostMocks.listCorpora.mockResolvedValue([item]);
@@ -254,7 +416,9 @@ describe("LogPane", () => {
       name: `More actions for ${item.name}`,
     });
     fireEvent.click(trigger);
-    fireEvent.click(await screen.findByRole("menuitem"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Discard corpus…" }),
+    );
 
     await waitFor(() =>
       expect(hostMocks.confirm).toHaveBeenCalledWith(
@@ -282,7 +446,9 @@ describe("LogPane", () => {
       name: `More actions for ${first.name}`,
     });
     fireEvent.click(trigger);
-    fireEvent.click(await screen.findByRole("menuitem"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Discard corpus…" }),
+    );
 
     await waitFor(() =>
       expect(hostMocks.discard).toHaveBeenCalledWith(first.id),

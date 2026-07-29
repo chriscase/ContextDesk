@@ -6,6 +6,7 @@ import {
   hostResolveHandbookLink,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
+  hostSaveLogDiagnosticReport,
   modelSelectionKey,
   normalizeProviderKind,
   parseModelSelectionKey,
@@ -52,6 +53,24 @@ describe("hostLogSharedTimelineSummary", () => {
         lanes: [{ sources: ["api.log", "worker.log"] }],
         maxBuckets: 96,
       },
+    });
+  });
+});
+
+describe("hostSaveLogDiagnosticReport", () => {
+  it("sends only the selected path, explicit format, and bounded report content", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await hostSaveLogDiagnosticReport(
+      "/tmp/contextdesk-diagnostic.md",
+      "markdown",
+      "# redacted diagnostic",
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("save_log_diagnostic_report", {
+      path: "/tmp/contextdesk-diagnostic.md",
+      format: "markdown",
+      content: "# redacted diagnostic",
     });
   });
 });

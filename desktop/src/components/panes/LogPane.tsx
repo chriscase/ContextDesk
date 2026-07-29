@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
+  hostGetBranding,
   hostImportLogCorpusPackagePath,
   hostCancelLogIngest,
   hostCancelLogReanalysis,
@@ -44,11 +45,18 @@ import {
   levelEntries,
   statsBlurb,
 } from "../../lib/logStats";
+import {
+  diagnosticEnvironmentFromBranding,
+  portableDiagnosticOsHint,
+  type LogDiagnosticEnvironment,
+  type LogDiagnosticStatus,
+} from "../../lib/logDiagnosticReport";
 import { HELP_TEMPLATE_GROUPING } from "../../lib/helpContent";
 import { HelpTip } from "../HelpTip";
 import { ProcessProgressPanel } from "../wizards/ProcessProgressPanel";
 import type { ProcessProgressDto as WizardProgressDto } from "../wizards/types";
 import { LogExplorer } from "../logExplorer/LogExplorer";
+import { LogDiagnosticDialog } from "./LogDiagnosticDialog";
 
 function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
   return {
@@ -105,6 +113,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<{
+    corpus: LogCorpusSummaryDto;
+    environment: LogDiagnosticEnvironment;
+    currentStatus: LogDiagnosticStatus | null;
+  } | null>(null);
   const [menuPosition, setMenuPosition] = useState<{
     left: number;
     top: number;
@@ -460,6 +473,44 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
   }
 
+  async function onOpenDiagnostics(id: string) {
+    const corpus = corpora.find((candidate) => candidate.id === id);
+    if (!corpus) return;
+    const currentStatus: LogDiagnosticStatus | null = error
+      ? { kind: "error", message: error }
+      : note
+        ? { kind: "status", message: note }
+        : null;
+    setOpenMenuId(null);
+    setMenuPosition(null);
+    let environment: LogDiagnosticEnvironment = {
+      appVersion: "unknown",
+      channel: "unknown",
+      gitSha: null,
+      os: portableDiagnosticOsHint(),
+    };
+    try {
+      environment = diagnosticEnvironmentFromBranding(
+        await hostGetBranding(),
+      );
+    } catch {
+      /* Keep an honest unknown identity if host branding is unavailable. */
+    }
+    setDiagnostic({
+      corpus,
+      currentStatus,
+      environment,
+    });
+  }
+
+  function closeDiagnostics() {
+    const corpusId = diagnostic?.corpus.id;
+    setDiagnostic(null);
+    if (corpusId) {
+      queueMicrotask(() => menuTriggerRefs.current.get(corpusId)?.focus());
+    }
+  }
+
   function openCorpusMenu(
     id: string,
     event?: ReactKeyboardEvent<HTMLButtonElement>,
@@ -477,7 +528,22 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       event.key === "End"
     ) {
       event.preventDefault();
-      event.currentTarget.focus();
+      const items = Array.from(
+        menuRef.current?.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]:not(:disabled)',
+        ) ?? [],
+      );
+      if (items.length === 0) return;
+      const current = Math.max(items.indexOf(event.currentTarget), 0);
+      const target =
+        event.key === "Home"
+          ? items[0]
+          : event.key === "End"
+            ? items.at(-1)
+            : event.key === "ArrowDown"
+              ? items[(current + 1) % items.length]
+              : items[(current - 1 + items.length) % items.length];
+      target?.focus();
     }
   }
 
@@ -970,6 +1036,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
           )}
         </section>
       </div>
+      {diagnostic ? (
+        <LogDiagnosticDialog
+          corpus={diagnostic.corpus}
+          environment={diagnostic.environment}
+          currentStatus={diagnostic.currentStatus}
+          onDismiss={closeDiagnostics}
+        />
+      ) : null}
       {openMenuId && typeof document !== "undefined"
         ? createPortal(
             <div
@@ -987,6 +1061,15 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
                   : { left: 0, top: 0, visibility: "hidden" }
               }
             >
+              <button
+                type="button"
+                role="menuitem"
+                className="log-card__menu-item"
+                onKeyDown={onMenuItemKeyDown}
+                onClick={() => void onOpenDiagnostics(openMenuId)}
+              >
+                Export diagnostics…
+              </button>
               <button
                 type="button"
                 role="menuitem"
