@@ -5145,17 +5145,12 @@ async fn list_models_for_draft(
             || req.base_url.to_lowercase().contains("localhost");
         let result =
             cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
-        // Prefer chat candidates; fall back to full model list.
-        let mut ids: Vec<String> = if !result.chat_candidates.is_empty() {
-            result.chat_candidates.into_iter().map(|m| m.id).collect()
-        } else {
-            result
-                .models
-                .into_iter()
-                .filter(|m| m.kind != "embedding")
-                .map(|m| m.id)
-                .collect()
-        };
+        // Full inventory for the picker: specialty ids remain selectable but are
+        // ranked last by the role-hint catalog (#723). Never drop embed/rerank.
+        let mut ids: Vec<String> = result.models.into_iter().map(|m| m.id).collect();
+        if ids.is_empty() {
+            ids = result.chat_candidates.into_iter().map(|m| m.id).collect();
+        }
         // If user forced a flavor that didn't match probe, still return what we got.
         if matches!(kind, ProviderKind::Ollama) && result.flavor.as_deref() != Some("ollama") {
             // Probe may have hit remote — still return ids if any.
@@ -5167,10 +5162,10 @@ async fn list_models_for_draft(
             .filter(|s| !s.is_empty())
         {
             if !ids.iter().any(|x| x == cm) {
-                ids.insert(0, cm.to_string());
+                ids.push(cm.to_string());
             }
         }
-        ids.sort();
+        ids = cd_core::model_role_hints::sort_ids_for_chat_picker(&ids);
         ids.dedup();
         return Ok(ids);
     }
@@ -7768,6 +7763,56 @@ async fn log_query_events(
         .map_err(|error| format!("log event query task join: {error}"))?
 }
 
+/// Count-free bounded event rows for hosts that load exact totals independently.
+fn query_log_event_rows_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventRowsPage, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_rows(&corpus, query).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_query_event_rows(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventRowsPage, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_rows_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log event rows task join: {error}"))?
+}
+
+/// Exact cursor-independent count for one event filter.
+fn count_log_events_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventCount, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_count(&corpus, query).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_count_events(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventCount, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || count_log_events_at(&handles, &cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log event count task join: {error}"))?
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum LogEventOriginalDto {
@@ -9634,6 +9679,8 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_query_event_rows,
+            log_count_events,
             log_query_event_original,
             log_timeline_summary,
             log_shared_timeline_summary,
@@ -10000,8 +10047,18 @@ mod log_explorer_async_query_host_tests {
             ),
             (
                 "async fn log_query_events(",
-                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "/// Count-free bounded event rows",
                 "query_log_events_at",
+            ),
+            (
+                "async fn log_query_event_rows(",
+                "/// Exact cursor-independent count",
+                "query_log_event_rows_at",
+            ),
+            (
+                "async fn log_count_events(",
+                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "count_log_events_at",
             ),
             (
                 "async fn log_query_event_original(",
@@ -10088,6 +10145,14 @@ mod log_explorer_async_query_host_tests {
             query_log_events_at(&handles, &cache, &report.corpus_id, &query).expect("event page");
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.total_matched, 2);
+
+        let rows = query_log_event_rows_at(&handles, &cache, &report.corpus_id, &query)
+            .expect("count-free event rows");
+        assert_eq!(rows.events.len(), 2);
+        assert!(rows.next_cursor.is_none());
+        let count = count_log_events_at(&handles, &cache, &report.corpus_id, &query)
+            .expect("independent exact event count");
+        assert_eq!(count.total_matched, 2);
 
         let facets =
             query_log_facets_at(&handles, &cache, &report.corpus_id, &query).expect("facets");

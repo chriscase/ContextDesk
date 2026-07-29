@@ -1,5 +1,10 @@
 /** Client-side preflight mirror (host will call cd-core later). */
 
+import {
+  classifyModelRole,
+  recommendationBasisLabel,
+} from "./modelRoleHints";
+
 export type PreflightLevel = "pass" | "warn" | "fail" | "off";
 
 export type PreflightItem = {
@@ -127,11 +132,13 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
         fixAction: "ai",
       });
     } else {
+      // Name-hint role line (#723) — mirrors host preflight when shell has no host report.
+      const hint = classifyModelRole(s.chatModel);
       items.push({
         id: "provider.model",
         title: "Chat model",
         level: "pass",
-        detail: `Model: ${s.chatModel}`,
+        detail: `Model: ${s.chatModel} · ${hint.suggestedFor} · Basis: ${recommendationBasisLabel(hint.source)} (${hint.confidence} confidence; not measured capability)`,
         fixAction: "ai",
       });
     }

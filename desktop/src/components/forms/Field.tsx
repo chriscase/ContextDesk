@@ -40,6 +40,18 @@ function describedByIds(
   return parts.length ? parts.join(" ") : undefined;
 }
 
+function mergeDescribedBy(
+  generated: string | undefined,
+  supplied: string | undefined,
+): string | undefined {
+  const ids = `${generated ?? ""} ${supplied ?? ""}`
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const unique = [...new Set(ids)];
+  return unique.length ? unique.join(" ") : undefined;
+}
+
 export function Field({
   label,
   hint,
@@ -162,14 +174,18 @@ export function SelectField({
   children,
   ...rest
 }: BaseProps & SelectHTMLAttributes<HTMLSelectElement>) {
+  const suppliedDescribedBy = rest["aria-describedby"];
   return (
     <Field label={label} hint={hint} error={error} id={id} help={help}>
       <select
+        {...rest}
         id={id}
         className="field__control"
         aria-invalid={error ? true : undefined}
-        aria-describedby={describedByIds(id, hint, error, null, null)}
-        {...rest}
+        aria-describedby={mergeDescribedBy(
+          describedByIds(id, hint, error, null, null),
+          suppliedDescribedBy,
+        )}
       >
         {children}
       </select>

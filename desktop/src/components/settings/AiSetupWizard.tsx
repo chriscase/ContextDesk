@@ -13,9 +13,15 @@ import {
   hostProbeAiGateway,
   type LocalCandidateDto,
 } from "../../lib/host";
+import {
+  classifyModelRole,
+  initialChatPickerSelection,
+  sortIdsForChatPicker,
+} from "../../lib/modelRoleHints";
 import type { AppSetupState } from "../../lib/preflight";
 import { ProbeDiagnostics } from "../launch/ProbeDiagnostics";
 import { SecretField, SelectField, TextField } from "../forms";
+import { ModelRoleHintLine } from "./ModelRoleHintLine";
 
 type WizardStep = "start" | "configure" | "results";
 type WizardPath = "ollama" | "grok" | "gateway";
@@ -84,16 +90,25 @@ const GATEWAY_PRESETS: { id: string; label: string; base: string; hint: string }
   },
 ];
 
+/**
+ * Order discovered ids for the chat picker using the versioned role-hint
+ * catalog (#723). Embedding/reranker ids sort last but remain listed so
+ * users can still select them intentionally. Does not change an existing
+ * default until the user confirms apply.
+ */
 function preferChatModels(ids: string[]): string[] {
-  const score = (id: string) => {
-    const l = id.toLowerCase();
-    if (l.includes("embed") || l.includes("whisper") || l.includes("tts")) return -10;
-    if (l.includes("grok-3") || l.includes("mistral") || l.includes("sonnet")) return 5;
-    if (l.includes("gpt-4") || l.includes("claude") || l.includes("grok")) return 4;
-    if (l.includes("mini") || l.includes("haiku")) return 2;
-    return 1;
-  };
-  return [...ids].sort((a, b) => score(b) - score(a) || a.localeCompare(b));
+  // Classification changes ordering only. A private or unfamiliar deployment
+  // id must never disappear because its text resembles a specialty family.
+  return sortIdsForChatPicker(ids);
+}
+
+/**
+ * Initial model selection for the wizard results step.
+ * Prefers ordinary chat defaults; falls back to first listed id so specialty
+ * and unknown inventories remain confirmable via Apply (#723 AC).
+ */
+function pickPreferredChatModel(models: string[]): string {
+  return initialChatPickerSelection(models);
 }
 
 function initialWizardPath(draft: AppSetupState): WizardPath {
@@ -239,10 +254,11 @@ export function AiSetupWizard({
         } else {
           noteBuf.push(...result.notes);
           errBuf.push(...result.errors);
+          // Full inventory sorted: specialty ids last but still listed (#723).
           const models = preferChatModels(
-            (result.chat_candidates.length
-              ? result.chat_candidates
-              : result.models.filter((m) => m.kind !== "embedding")
+            (result.models.length
+              ? result.models
+              : result.chat_candidates
             ).map((m) => m.id),
           );
           if (models.length) {
@@ -325,21 +341,13 @@ export function AiSetupWizard({
         } else {
           noteBuf.push(...result.notes);
           errBuf.push(...result.errors.slice(0, 6));
-          const chatIds = preferChatModels(
-            (result.chat_candidates.length
-              ? result.chat_candidates
-              : result.models.filter((m) => m.kind !== "embedding")
+          // Full catalog sorted: embed/rerank last, still selectable (#723).
+          const models = preferChatModels(
+            (result.models.length
+              ? result.models
+              : result.chat_candidates
             ).map((m) => m.id),
           );
-          // Prefer full catalog when chat_candidates is only a sorted subset of "known" names.
-          // Unknown enterprise ids are still chat-capable — use full non-embed list if larger.
-          const fullIds = preferChatModels(
-            result.models
-              .filter((m) => m.kind !== "embedding")
-              .map((m) => m.id),
-          );
-          const models =
-            fullIds.length > chatIds.length ? fullIds : chatIds;
 
           if (result.ok && models.length) {
             const flavor = result.flavor;
@@ -403,10 +411,11 @@ export function AiSetupWizard({
       if (found.length) {
         const first = found[0]!;
         setPickedKind(first.kind);
+        // Keep existing user choice when present; never auto-pick embed/rerank.
         setPickedModel(
           draft.chatModel && first.models.includes(draft.chatModel)
             ? draft.chatModel
-            : (first.models[0] ?? ""),
+            : pickPreferredChatModel(first.models),
         );
         setStep("results");
       }
@@ -729,7 +738,7 @@ export function AiSetupWizard({
                     data-selected={pickedKind === o.kind ? "true" : "false"}
                     onClick={() => {
                       setPickedKind(o.kind);
-                      setPickedModel(o.models[0] ?? "");
+                      setPickedModel(pickPreferredChatModel(o.models));
                     }}
                   >
                     <span className="ai-wizard__option-label">{o.label}</span>
@@ -747,23 +756,46 @@ export function AiSetupWizard({
           ) : null}
 
           {activeOption && activeOption.models.length > 0 ? (
-            <SelectField
-              id={`${baseId}-wiz-model`}
-              label="Chat model"
-              hint="Sorted toward likely chat models; you can change later in Advanced."
-              value={
-                activeOption.models.includes(pickedModel)
-                  ? pickedModel
-                  : activeOption.models[0]
-              }
-              onChange={(e) => setPickedModel(e.target.value)}
-            >
-              {activeOption.models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </SelectField>
+            <>
+              <SelectField
+                id={`${baseId}-wiz-model`}
+                label="Chat model"
+                hint="Sorted toward likely chat models (name hints only). Embedding and reranker ids sort last; you confirm any change."
+                value={
+                  activeOption.models.includes(pickedModel)
+                    ? pickedModel
+                    : pickPreferredChatModel(activeOption.models)
+                }
+                onChange={(e) => setPickedModel(e.target.value)}
+                aria-describedby={`${baseId}-wiz-model-role-hint`}
+              >
+                {activeOption.models.map((m) => {
+                  const role = classifyModelRole(m).role;
+                  const suffix =
+                    role === "embedding"
+                      ? " · embedding"
+                      : role === "reranker"
+                        ? " · reranker"
+                        : role === "unknown"
+                          ? " · unqualified"
+                          : "";
+                  return (
+                    <option key={m} value={m}>
+                      {m}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </SelectField>
+              <ModelRoleHintLine
+                id={`${baseId}-wiz-model-role-hint`}
+                modelId={
+                  activeOption.models.includes(pickedModel)
+                    ? pickedModel
+                    : pickPreferredChatModel(activeOption.models)
+                }
+              />
+            </>
           ) : null}
 
           <div className="field-row">

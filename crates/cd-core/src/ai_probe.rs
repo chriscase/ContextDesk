@@ -102,38 +102,10 @@ fn expand_base_candidates(raw: &str) -> Vec<String> {
 }
 
 fn classify_model_id(id: &str) -> &'static str {
-    let s = id.to_lowercase();
-    if s.contains("embed")
-        || s.contains("nomic")
-        || s.contains("e5-")
-        || s.contains("bge-")
-        || s.contains("gte-")
-        || s.contains("text-embedding")
-        || s.contains("voyage")
-    {
-        return "embedding";
-    }
-    if s.contains("gpt")
-        || s.contains("claude")
-        || s.contains("mistral")
-        || s.contains("llama")
-        || s.contains("sonnet")
-        || s.contains("opus")
-        || s.contains("haiku")
-        || s.contains("command")
-        || s.contains("gemini")
-        || s.contains("qwen")
-        || s.contains("phi")
-        || s.contains("deepseek")
-        || s.contains("o1")
-        || s.contains("o3")
-        || s.contains("chat")
-        || s.contains("instruct")
-        || s.contains("grok")
-    {
-        return "chat";
-    }
-    "unknown"
+    // Shared versioned catalog (#723) — name hints only, not measured capability.
+    crate::model_role_hints::classify_model_role(id)
+        .role
+        .as_kind_str()
 }
 
 fn rank_chat(id: &str) -> i32 {
@@ -306,7 +278,7 @@ pub async fn probe_ai_gateway(
         if local_ok {
             let mut chat: Vec<_> = local_models
                 .iter()
-                .filter(|m| m.kind != "embedding")
+                .filter(|m| m.kind == "chat" || m.kind == "unknown")
                 .cloned()
                 .collect();
             chat.sort_by_key(|m| std::cmp::Reverse(rank_chat(&m.id)));
@@ -565,5 +537,7 @@ mod tests {
         assert_eq!(classify_model_id("text-embedding-3-small"), "embedding");
         assert_eq!(classify_model_id("gpt-4o-mini"), "chat");
         assert_eq!(classify_model_id("claude-sonnet-4"), "chat");
+        assert_eq!(classify_model_id("qwen3-reranker-0.6b"), "reranker");
+        assert_eq!(classify_model_id("corp-private-alias"), "unknown");
     }
 }

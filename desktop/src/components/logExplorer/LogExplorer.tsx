@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -22,6 +23,7 @@ import {
   hostLogAddInvestigationEvidence,
   hostLogAddInvestigationFinding,
   hostLogAddInvestigationNote,
+  hostLogCountEvents,
   hostLogDeleteBookmark,
   hostLogEditInvestigationFinding,
   hostLogEditInvestigationNote,
@@ -32,11 +34,11 @@ import {
   hostLogPreviewInvestigationFindingView,
   hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
-  hostLogQueryEvents,
+  hostLogQueryEventRows,
   hostLogSearchEventsAdvanced,
   hostLogSourceCatalog,
-  hostSetActiveLogCorpus,
   type EventPageDto,
+  type EventRowsPageDto,
   type EventOriginalRepresentationDto,
   type SearchMatchMode,
   type EventQueryDto,
@@ -532,16 +534,24 @@ function filtersToQuery(
   };
 }
 
-function emptyEventPage(timeQuality: TimeQuality = "order_only"): EventPageDto {
+function emptyEventRowsPage(
+  timeQuality: TimeQuality = "order_only",
+): EventRowsPageDto {
   return {
     events: [],
     nextCursor: null,
     nextTs: null,
     prevCursor: null,
     prevTs: null,
-    totalMatched: 0,
     timeQuality,
   };
+}
+
+function rowsWithKnownCount(
+  page: EventRowsPageDto,
+  totalMatched: number,
+): EventPageDto {
+  return { ...page, totalMatched };
 }
 
 /**
@@ -705,6 +715,10 @@ function investigationBookmarkViews(
 
 export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
+  const [summaryLoadState, setSummaryLoadState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [facetsLoading, setFacetsLoading] = useState(true);
@@ -764,6 +778,7 @@ export function LogExplorer({ corpusId }: Props) {
     | { status: "error"; message: string }
   >({ status: "idle" });
   const detailOriginalRequestRef = useRef(0);
+  const renderedCorpusRef = useRef(corpusId);
   const detailSeqRef = useRef<number | null>(null);
   const detailRepresentationRef = useRef<"formatted" | "original">("formatted");
   const showDetail = useCallback((event: ExplorerEventDto) => {
@@ -800,10 +815,13 @@ export function LogExplorer({ corpusId }: Props) {
   const [laneEvents, setLaneEvents] = useState<
     Record<string, ExplorerEventDto[]>
   >({});
-  /** Exact matched count for each lane query; null means unavailable/failed. */
+  /** Exact matched count for each lane query; null means not resolved. */
   const [laneMatched, setLaneMatched] = useState<Record<string, number | null>>(
     {},
   );
+  const [laneCountStates, setLaneCountStates] = useState<
+    Record<string, "pending" | "ready" | "error">
+  >({});
   const [laneTimeStates, setLaneTimeStates] = useState<
     Record<string, LaneTimeState>
   >({});
@@ -824,8 +842,17 @@ export function LogExplorer({ corpusId }: Props) {
   >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
+  const [bookmarksLoadState, setBookmarksLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [bookmarksLoadError, setBookmarksLoadError] = useState<string | null>(
+    null,
+  );
   const [investigation, setInvestigation] =
     useState<ResolvedInvestigationDocumentDto | null>(null);
+  const [investigationLoadState, setInvestigationLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [investigationMode, setInvestigationMode] =
     useState<InvestigationRailMode>("chat");
   const [investigationBusy, setInvestigationBusy] = useState(false);
@@ -1003,6 +1030,11 @@ export function LogExplorer({ corpusId }: Props) {
   const laneSourceRequestRef = useRef(0);
   const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
+  const countRequestRef = useRef(0);
+  const summaryRequestRef = useRef(0);
+  const bookmarkRequestRef = useRef(0);
+  const bookmarkMetadataStartedRef = useRef(false);
+  const investigationMetadataStartedRef = useRef(false);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
   const activeFindRequestRef = useRef<string | null>(null);
@@ -1027,6 +1059,11 @@ export function LogExplorer({ corpusId }: Props) {
     }
     if (autoStatusLockRef.current === "bookmark-reveal") return;
     setStatus(nextStatus);
+  }, []);
+  const finishRowLoadStatus = useCallback((nextStatus: string) => {
+    setStatus((current) =>
+      current === "Loading first evidence rows…" ? nextStatus : current,
+    );
   }, []);
   const activeFilterCount =
     filters.levels.length +
@@ -1358,28 +1395,64 @@ export function LogExplorer({ corpusId }: Props) {
     document.body.style.userSelect = "none";
   };
 
-  const refreshMeta = useCallback(async () => {
-    const investigationRequest = ++investigationLoadRequestRef.current;
+  // Explorer launch/selection owns host activation before this component mounts.
+  // Keep summary refresh read-only so a stale response cannot reactivate an old corpus.
+  const refreshSummary = useCallback(async () => {
+    const requestId = ++summaryRequestRef.current;
+    setSummaryLoadState("loading");
+    setSummaryLoadError(null);
     try {
       const s = await hostGetLogCorpus(corpusId);
+      if (requestId !== summaryRequestRef.current) return;
       setSummary(s);
       if (s) setCorpusTotal(s.eventCount ?? 0);
-      await hostSetActiveLogCorpus(corpusId);
-      const bms = await hostLogListBookmarks(corpusId);
-      setBookmarks(bms ?? []);
-      try {
-        const activeInvestigation =
-          await hostLogLoadActiveInvestigation(corpusId);
-        if (investigationRequest !== investigationLoadRequestRef.current) {
-          return;
-        }
-        setInvestigation(activeInvestigation);
-        setInvestigationError(null);
-      } catch (investigationLoadError) {
-        setInvestigationError(String(investigationLoadError));
-      }
-    } catch (e) {
-      setError(String(e));
+      setSummaryLoadState("ready");
+    } catch (summaryError) {
+      if (requestId !== summaryRequestRef.current) return;
+      setSummaryLoadState("error");
+      setSummaryLoadError(String(summaryError));
+    }
+  }, [corpusId]);
+
+  const loadOptionalMetadata = useCallback(() => {
+    if (!bookmarkMetadataStartedRef.current) {
+      bookmarkMetadataStartedRef.current = true;
+      const bookmarkRequest = ++bookmarkRequestRef.current;
+      setBookmarksLoadState("loading");
+      setBookmarksLoadError(null);
+      void hostLogListBookmarks(corpusId)
+        .then((loadedBookmarks) => {
+          if (bookmarkRequest !== bookmarkRequestRef.current) return;
+          setBookmarks(loadedBookmarks ?? []);
+          setBookmarksLoadState("ready");
+        })
+        .catch((bookmarkError) => {
+          if (bookmarkRequest !== bookmarkRequestRef.current) return;
+          setBookmarksLoadState("error");
+          setBookmarksLoadError(String(bookmarkError));
+        });
+    }
+
+    if (!investigationMetadataStartedRef.current) {
+      investigationMetadataStartedRef.current = true;
+      const investigationRequest = ++investigationLoadRequestRef.current;
+      setInvestigationLoadState("loading");
+      setInvestigationError(null);
+      void hostLogLoadActiveInvestigation(corpusId)
+        .then((activeInvestigation) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigation(activeInvestigation);
+          setInvestigationLoadState("ready");
+        })
+        .catch((investigationLoadError) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigationLoadState("error");
+          setInvestigationError(String(investigationLoadError));
+        });
     }
   }, [corpusId]);
 
@@ -1459,7 +1532,14 @@ export function LogExplorer({ corpusId }: Props) {
 
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
+    const countRequestId = ++countRequestRef.current;
     let loadedCurrentView = false;
+    let shown = 0;
+    const countPlans: Array<{
+      laneId: string;
+      query: EventQueryDto | null;
+    }> = [];
+    const countUnavailableLaneIds = new Set<string>();
     if (facetAfterPaintFrameRef.current != null) {
       window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
       facetAfterPaintFrameRef.current = null;
@@ -1479,34 +1559,36 @@ export function LogExplorer({ corpusId }: Props) {
     );
     setBusy(true);
     setError(null);
+    setAutoStatus("Loading first evidence rows…");
     setLanePaging({});
     setLaneTimeStates(unloaded);
     setLaneMatched(
       Object.fromEntries(visibleLanes.map((lane) => [lane.id, null])),
     );
+    setLaneCountStates(
+      Object.fromEntries(visibleLanes.map((lane) => [lane.id, "pending"])),
+    );
+    setTotalMatched(0);
     setGaps([]);
     try {
       if (laneCount <= 1) {
         const sourceFilter = effectiveLaneSources(visibleLanes[0], filters);
+        const query = filtersToQuery(filters, { sources: sourceFilter });
         const page =
           sourceFilter?.length === 0
-            ? emptyEventPage()
-            : await hostLogQueryEvents(
-                corpusId,
-                filtersToQuery(filters, { sources: sourceFilter }),
-              );
+            ? emptyEventRowsPage()
+            : await hostLogQueryEventRows(corpusId, query);
         if (requestId !== eventsRequestRef.current) return;
         const laneState: LaneTimeState =
           page.events.length > 0
             ? { status: "loaded", quality: page.timeQuality }
             : { status: "empty", quality: page.timeQuality };
         const states = { "lane-0": laneState };
-        setTotalMatched(page.totalMatched);
-        setLaneMatched({ "lane-0": page.totalMatched });
         setNextCursor(page.nextCursor);
         setLaneTimeStates(states);
         setTimeQuality(aggregateViewTimeQuality(["lane-0"], states));
-        const seeded = seedFromPage(page);
+        const seeded = seedFromPage(rowsWithKnownCount(page, 0));
+        shown = seeded.events.length;
         setLaneEvents({ "lane-0": seeded.events });
         setLaneCursors({
           "lane-0": {
@@ -1518,8 +1600,12 @@ export function LogExplorer({ corpusId }: Props) {
             hasNewer: page.nextCursor != null,
           },
         });
-        setAutoStatus(
-          `${page.totalMatched} matched · ${seeded.events.length} resident (bounded)`,
+        countPlans.push({
+          laneId: "lane-0",
+          query: sourceFilter?.length === 0 ? null : query,
+        });
+        finishRowLoadStatus(
+          `${seeded.events.length} resident rows loaded (bounded)`,
         );
       } else {
         const byLane: Record<string, ExplorerEventDto[]> = {};
@@ -1536,20 +1622,22 @@ export function LogExplorer({ corpusId }: Props) {
         > = {};
         const states: Record<string, LaneTimeState> = {};
         const matchedByLane: Record<string, number | null> = {};
-        let maxLaneMatched = 0;
-        let shown = 0;
         const requests = visibleLanes.map(async (lane) => {
           const sourceFilter = effectiveLaneSources(lane, filters);
           if (sourceFilter?.length === 0) {
-            return { lane, page: emptyEventPage() };
+            return {
+              lane,
+              page: emptyEventRowsPage(),
+              countQuery: null,
+            };
           }
           const q = filtersToQuery(filters, {
             sources: sourceFilter,
             limit: 100,
             sortByTime: true,
           });
-          const page = await hostLogQueryEvents(corpusId, q);
-          return { lane, page };
+          const page = await hostLogQueryEventRows(corpusId, q);
+          return { lane, page, countQuery: q };
         });
         const results = await Promise.allSettled(requests);
         if (requestId !== eventsRequestRef.current) return;
@@ -1569,10 +1657,11 @@ export function LogExplorer({ corpusId }: Props) {
             };
             states[lane.id] = { status: "error", quality: null };
             matchedByLane[lane.id] = null;
+            countUnavailableLaneIds.add(lane.id);
             continue;
           }
-          const { page } = result.value;
-          const seeded = seedFromPage(page);
+          const { page, countQuery } = result.value;
+          const seeded = seedFromPage(rowsWithKnownCount(page, 0));
           byLane[lane.id] = seeded.events;
           cursors[lane.id] = {
             afterSeq: seeded.afterSeq,
@@ -1582,8 +1671,8 @@ export function LogExplorer({ corpusId }: Props) {
             hasOlder: page.prevCursor != null,
             hasNewer: page.nextCursor != null,
           };
-          matchedByLane[lane.id] = page.totalMatched;
-          maxLaneMatched = Math.max(maxLaneMatched, page.totalMatched);
+          matchedByLane[lane.id] = null;
+          countPlans.push({ laneId: lane.id, query: countQuery });
           shown += page.events.length;
           states[lane.id] =
             page.events.length > 0
@@ -1592,6 +1681,14 @@ export function LogExplorer({ corpusId }: Props) {
         }
         setLaneEvents(byLane);
         setLaneMatched(matchedByLane);
+        setLaneCountStates(
+          Object.fromEntries(
+            visibleLanes.map((lane) => [
+              lane.id,
+              countUnavailableLaneIds.has(lane.id) ? "error" : "pending",
+            ]),
+          ),
+        );
         setLaneCursors(cursors);
         setLaneTimeStates(states);
         // No global unique matched total is derivable from overlapping lanes.
@@ -1608,14 +1705,17 @@ export function LogExplorer({ corpusId }: Props) {
             `${failed} evidence lane${failed === 1 ? "" : "s"} failed to load; time linking remains off`,
           );
         }
-        setAutoStatus(
-          `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
+        finishRowLoadStatus(
+          `${laneCount} lanes · ${shown} resident rows loaded (bounded)`,
         );
       }
       loadedCurrentView = true;
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
+      setLaneCountStates(
+        Object.fromEntries(visibleLanes.map((lane) => [lane.id, "error"])),
+      );
     } finally {
       if (requestId === eventsRequestRef.current) {
         setBusy(false);
@@ -1630,7 +1730,48 @@ export function LogExplorer({ corpusId }: Props) {
             if (requestId !== eventsRequestRef.current) return;
             facetStartFrameRef.current = window.requestAnimationFrame(() => {
               facetStartFrameRef.current = null;
-              if (requestId === eventsRequestRef.current) void loadFacets();
+              if (requestId !== eventsRequestRef.current) return;
+              const applyCount = (laneId: string, total: number) => {
+                if (
+                  requestId !== eventsRequestRef.current ||
+                  countRequestId !== countRequestRef.current
+                ) {
+                  return;
+                }
+                setLaneMatched((previous) => ({
+                  ...previous,
+                  [laneId]: total,
+                }));
+                setLaneCountStates((previous) => ({
+                  ...previous,
+                  [laneId]: "ready",
+                }));
+                if (laneCount <= 1 && laneId === "lane-0") {
+                  setTotalMatched(total);
+                }
+              };
+              for (const plan of countPlans) {
+                if (plan.query == null) {
+                  applyCount(plan.laneId, 0);
+                  continue;
+                }
+                void hostLogCountEvents(corpusId, plan.query)
+                  .then((count) => applyCount(plan.laneId, count.totalMatched))
+                  .catch(() => {
+                    if (
+                      requestId !== eventsRequestRef.current ||
+                      countRequestId !== countRequestRef.current
+                    ) {
+                      return;
+                    }
+                    setLaneCountStates((previous) => ({
+                      ...previous,
+                      [plan.laneId]: "error",
+                    }));
+                  });
+              }
+              void loadFacets();
+              loadOptionalMetadata();
             });
           });
         } else {
@@ -1638,11 +1779,86 @@ export function LogExplorer({ corpusId }: Props) {
         }
       }
     }
-  }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
+  }, [
+    corpusId,
+    filters,
+    laneCount,
+    lanes,
+    finishRowLoadStatus,
+    loadFacets,
+    loadOptionalMetadata,
+    setAutoStatus,
+  ]);
+
+  useLayoutEffect(() => {
+    if (renderedCorpusRef.current === corpusId) return;
+    renderedCorpusRef.current = corpusId;
+    // A reused Explorer surface must never paint evidence or metadata from the
+    // previous corpus while the next corpus is loading. Invalidate every
+    // evidence-producing lifecycle and synchronously clear payload-bearing
+    // state before the browser paints the new corpus prop.
+    eventsRequestRef.current += 1;
+    countRequestRef.current += 1;
+    facetRequestRef.current += 1;
+    laneSourceRequestRef.current += 1;
+    setLaneEvents({});
+    setLaneCursors({});
+    setLanePaging({});
+    setLaneMatched({});
+    setLaneCountStates({});
+    setLaneTimeStates({});
+    setLaneScrollSeq({});
+    setNextCursor(null);
+    setSelected(new Set());
+    setHighlight(new Set());
+    setFocusLaneId(null);
+    setFacets(null);
+    setTimelineReady(false);
+    setTimeQuality("order_only");
+    setGaps([]);
+    setLaneSourceCatalog([]);
+    setLaneSourceCatalogNextCursor(null);
+    setLaneSourceCatalogTotal(null);
+    setLaneSourceCatalogUnavailable(false);
+    setLaneSourceQuery("");
+    clearDetail();
+
+    const savedLanes = loadLanes(corpusId);
+    setLanes(savedLanes && savedLanes.length > 0 ? savedLanes : defaultLanes(1));
+    setPreferredLaneCount(1);
+    setLaneCount(1);
+    setLinkMode(loadLinkMode(corpusId));
+  }, [clearDetail, corpusId]);
 
   useEffect(() => {
-    void refreshMeta();
-  }, [refreshMeta]);
+    bookmarkMetadataStartedRef.current = false;
+    investigationMetadataStartedRef.current = false;
+    summaryRequestRef.current += 1;
+    bookmarkRequestRef.current += 1;
+    investigationLoadRequestRef.current += 1;
+    setSummary(null);
+    setSummaryLoadState("loading");
+    setSummaryLoadError(null);
+    setCorpusTotal(0);
+    setBookmarks([]);
+    setBookmarksLoadState("idle");
+    setBookmarksLoadError(null);
+    setInvestigation(null);
+    setInvestigationLoadState("idle");
+    setInvestigationBusy(false);
+    setInvestigationError(null);
+    setEvidencePreview(null);
+    setFindingViewPreview(null);
+    return () => {
+      summaryRequestRef.current += 1;
+      bookmarkRequestRef.current += 1;
+      investigationLoadRequestRef.current += 1;
+    };
+  }, [corpusId]);
+
+  useEffect(() => {
+    void refreshSummary();
+  }, [refreshSummary]);
 
   useEffect(() => {
     if (!laneEditorOpen) {
@@ -1665,6 +1881,7 @@ export function LogExplorer({ corpusId }: Props) {
     void loadEvents();
     return () => {
       eventsRequestRef.current += 1;
+      countRequestRef.current += 1;
       facetRequestRef.current += 1;
       if (facetAfterPaintFrameRef.current != null) {
         window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
@@ -2618,6 +2835,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const priorEvidenceCount = investigation?.document.evidence.length ?? 0;
     // A slower metadata request must not replace the revision returned here.
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2629,6 +2847,7 @@ export function LogExplorer({ corpusId }: Props) {
         eventRefs: selection.eventRefs,
       });
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEvidencePreview(null);
       setSaveEvidenceOpen(false);
       setInvestigationMode("investigation");
@@ -2697,6 +2916,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const priorFindingCount = investigation?.document.findings?.length ?? 0;
     const priorNoteCount = investigation?.document.notes?.length ?? 0;
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2720,6 +2940,7 @@ export function LogExplorer({ corpusId }: Props) {
               body: draft.body,
             });
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEvidencePreview(null);
       setCreateInvestigationItem(null);
       setInvestigationMode("investigation");
@@ -2771,6 +2992,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const saveEditedInvestigationItem = async (draft: InvestigationItemDraft) => {
     if (!investigation || !editInvestigationItem) return;
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2801,6 +3023,7 @@ export function LogExplorer({ corpusId }: Props) {
         throw new Error("Investigation editor type changed unexpectedly");
       }
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEditInvestigationItem(null);
       setStatus(`Updated ${draft.type}`);
     } catch (saveError) {
@@ -3531,7 +3754,7 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     try {
-      const page = await hostLogQueryEvents(
+      const page = await hostLogQueryEventRows(
         corpusId,
         filtersToQuery(filters, {
           sources: sourceFilter,
@@ -3548,15 +3771,14 @@ export function LogExplorer({ corpusId }: Props) {
         afterTs: cur.afterTs,
         beforeSeq: cur.beforeSeq,
         beforeTs: cur.beforeTs,
-        totalMatched: totalMatched,
+        totalMatched: laneMatched[laneId] ?? 0,
       };
       const { window, droppedFromHead } = appendNewer(
         resident,
-        page,
+        rowsWithKnownCount(page, laneMatched[laneId] ?? 0),
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
-      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -3635,7 +3857,7 @@ export function LogExplorer({ corpusId }: Props) {
       },
     }));
     try {
-      const page = await hostLogQueryEvents(
+      const page = await hostLogQueryEventRows(
         corpusId,
         filtersToQuery(filters, {
           sources: sourceFilter,
@@ -3652,15 +3874,14 @@ export function LogExplorer({ corpusId }: Props) {
         afterTs: cur.afterTs,
         beforeSeq: cur.beforeSeq,
         beforeTs: cur.beforeTs,
-        totalMatched: totalMatched,
+        totalMatched: laneMatched[laneId] ?? 0,
       };
       const { window, droppedFromTail } = prependOlder(
         resident,
-        page,
+        rowsWithKnownCount(page, laneMatched[laneId] ?? 0),
         DEFAULT_MAX_RESIDENT,
       );
       setLaneEvents((prev) => ({ ...prev, [laneId]: window.events }));
-      setLaneMatched((prev) => ({ ...prev, [laneId]: page.totalMatched }));
       setLaneCursors((prev) => ({
         ...prev,
         [laneId]: {
@@ -4007,9 +4228,18 @@ export function LogExplorer({ corpusId }: Props) {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
     const matched = laneMatched[laneId];
-    if (busy && matched == null) return "Loading first evidence rows…";
+    const countState = laneCountStates[laneId];
+    if (busy && countState === "pending") {
+      return "Loading first evidence rows…";
+    }
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
-    return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
+    const countLabel =
+      countState === "error"
+        ? "matched unavailable"
+        : matched == null
+          ? "counting matches…"
+          : `${matched} matched`;
+    return `${countLabel} · ${n}${more} resident`;
   };
   const navigatorSourceScope = visibleLaneSourceScope(
     lanes,
@@ -4037,12 +4267,32 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationError(null);
   };
   const investigationModeControl = (
-    <InvestigationModeControl
-      mode={investigationMode}
-      investigationCount={investigationMaterialCount}
-      chatCount={chatSummary.chatCount}
-      onChange={chooseInvestigationMode}
-    />
+    <>
+      <InvestigationModeControl
+        mode={investigationMode}
+        investigationCount={investigationMaterialCount}
+        chatCount={chatSummary.chatCount}
+        onChange={chooseInvestigationMode}
+      />
+      {investigationLoadState === "loading" ? (
+        <span
+          className="log-explorer__loading-inline"
+          data-testid="log-explorer-investigation-loading"
+          aria-live="polite"
+        >
+          Loading investigation…
+        </span>
+      ) : investigationLoadState === "error" ? (
+        <span
+          className="log-explorer__loading-inline"
+          data-testid="log-explorer-investigation-load-error"
+          role="alert"
+          title={investigationError ?? undefined}
+        >
+          Investigation unavailable
+        </span>
+      ) : null}
+    </>
   );
 
   return (
@@ -4089,6 +4339,24 @@ export function LogExplorer({ corpusId }: Props) {
           className="log-explorer__meta"
           data-testid="log-explorer-global-counts"
         >
+          {summaryLoadState === "loading" ? (
+            <span
+              className="log-explorer__badge"
+              data-testid="log-explorer-summary-loading"
+              aria-live="polite"
+            >
+              Loading corpus details…
+            </span>
+          ) : summaryLoadState === "error" ? (
+            <span
+              className="log-explorer__badge log-explorer__badge--warn"
+              data-testid="log-explorer-summary-load-error"
+              role="alert"
+              title={summaryLoadError ?? undefined}
+            >
+              Corpus details unavailable
+            </span>
+          ) : null}
           <span
             className={
               timeQuality === "order_only"
@@ -4104,7 +4372,13 @@ export function LogExplorer({ corpusId }: Props) {
           </span>
           {laneCount === 1 && (
             <span className="log-explorer__badge">
-              {totalMatched.toLocaleString()} matched
+              {laneMatched["lane-0"] == null
+                ? busy
+                  ? "Evidence loading…"
+                  : laneCountStates["lane-0"] === "error"
+                    ? "Match count unavailable"
+                    : "Counting matches…"
+                : `${totalMatched.toLocaleString()} matched`}
             </span>
           )}
           {laneCount > 1 && (
@@ -5135,7 +5409,11 @@ export function LogExplorer({ corpusId }: Props) {
                 Corpus{" "}
                 {(corpusTotal || summary?.eventCount || 0).toLocaleString()} ·{" "}
                 {laneCount === 1
-                  ? `matched ${totalMatched.toLocaleString()} · `
+                  ? laneMatched["lane-0"] == null
+                    ? laneCountStates["lane-0"] === "error"
+                      ? "matched unavailable · "
+                      : "matched count pending · "
+                    : `matched ${totalMatched.toLocaleString()} · `
                   : "matched per lane below · "}
                 resident rows{" "}
                 {Object.values(laneEvents).reduce((n, e) => n + e.length, 0)}
@@ -5260,7 +5538,31 @@ export function LogExplorer({ corpusId }: Props) {
                     Bookmark target missing or unavailable
                   </div>
                 ) : null}
-                {bookmarks.length === 0 ? (
+                {bookmarksLoadState === "idle" ? (
+                  <div
+                    className="log-explorer__chat-preview"
+                    data-testid="log-explorer-bookmarks-deferred"
+                  >
+                    Bookmarks load after first evidence
+                  </div>
+                ) : bookmarksLoadState === "loading" ? (
+                  <div
+                    className="log-explorer__loading-inline"
+                    data-testid="log-explorer-bookmarks-loading"
+                    aria-live="polite"
+                  >
+                    Loading bookmarks…
+                  </div>
+                ) : bookmarksLoadState === "error" ? (
+                  <div
+                    className="log-explorer__chat-preview"
+                    data-testid="log-explorer-bookmarks-load-error"
+                    role="alert"
+                    title={bookmarksLoadError ?? undefined}
+                  >
+                    Bookmarks unavailable
+                  </div>
+                ) : bookmarks.length === 0 ? (
                   <div className="log-explorer__chat-preview">
                     None yet — select rows + B
                   </div>
@@ -5455,15 +5757,20 @@ export function LogExplorer({ corpusId }: Props) {
               const cursor = laneCursors[lane.id];
               const paging = lanePaging[lane.id];
               const matched = laneMatched[lane.id];
+              const countState = laneCountStates[lane.id];
               const boundaryLabel =
                 cursor == null || laneTime.status === "unloaded"
                   ? null
                   : laneTime.status === "error"
                     ? "Paging unavailable"
                     : !cursor.hasOlder && !cursor.hasNewer
-                      ? matched === 0
-                        ? "No matching logs"
-                        : "All matched logs loaded"
+                      ? matched == null
+                        ? countState === "error"
+                          ? "Exact match count unavailable"
+                          : "Exact match count pending"
+                        : matched === 0
+                          ? "No matching logs"
+                          : "All matched logs loaded"
                       : !cursor.hasOlder
                         ? "Start of matched logs"
                         : !cursor.hasNewer
@@ -5478,11 +5785,15 @@ export function LogExplorer({ corpusId }: Props) {
                       ? matched == null
                         ? "All matching events for this lane are in the resident window."
                         : `All ${matched} events matching this lane are in the resident window.`
-                      : boundaryLabel === "No matching logs"
-                        ? "No events match this lane's sources and active filters."
-                        : boundaryLabel === "Paging unavailable"
-                          ? "This lane did not load, so its paging boundaries are unknown."
-                          : undefined;
+                      : boundaryLabel === "Exact match count pending"
+                        ? "The bounded evidence rows are ready; the exact match count is still loading."
+                        : boundaryLabel === "Exact match count unavailable"
+                          ? "The bounded evidence rows are ready, but the exact match count could not be loaded."
+                          : boundaryLabel === "No matching logs"
+                            ? "No events match this lane's sources and active filters."
+                            : boundaryLabel === "Paging unavailable"
+                              ? "This lane did not load, so its paging boundaries are unknown."
+                              : undefined;
               return (
                 <section
                   key={lane.id}
@@ -6001,7 +6312,7 @@ export function LogExplorer({ corpusId }: Props) {
           bookmarks={bookmarkItems}
           preview={evidencePreview}
           viewPreview={findingViewPreview}
-          busy={investigationBusy}
+          busy={investigationBusy || investigationLoadState === "loading"}
           error={investigationError}
           compactLayout={breakpoint === "narrow"}
           collapsed={breakpoint !== "narrow" && chatCollapsed}

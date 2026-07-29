@@ -9,6 +9,11 @@ import {
   hostSetProviderToolsEnabled,
   normalizeProviderKind,
 } from "../../lib/host";
+import {
+  classifyModelRole,
+  preferredChatDefaultId,
+  sortIdsForChatPicker,
+} from "../../lib/modelRoleHints";
 import type { AppSetupState } from "../../lib/preflight";
 import {
   SecretField,
@@ -20,6 +25,7 @@ import {
   AiSetupWizard,
   type WizardApplyPayload,
 } from "./AiSetupWizard";
+import { ModelRoleHintLine } from "./ModelRoleHintLine";
 
 export type AiSectionProps = {
   baseId: string;
@@ -90,9 +96,10 @@ export function AiSection({
         chatModel: null,
       }).then((list) => {
         if (cancelled) return;
-        setDiscoveredModels(list);
+        const ordered = sortIdsForChatPicker(list);
+        setDiscoveredModels(ordered);
         setModelsLoading(false);
-        if (list.length === 0) {
+        if (ordered.length === 0) {
           setModelsNote(
             kind === "ollama"
               ? "No models listed — is Ollama running? Try `ollama pull mistral`."
@@ -101,11 +108,14 @@ export function AiSection({
                 : "No models listed yet — check URL/key, then Refresh models.",
           );
         } else {
-          setModelsNote(`Found ${list.length} model${list.length === 1 ? "" : "s"}.`);
-          // If empty model field, pick first discovered.
+          setModelsNote(`Found ${ordered.length} model${ordered.length === 1 ? "" : "s"}.`);
+          // Only fill an *empty* field; never silently replace an existing choice (#723).
+          // Never auto-write embedding/reranker as the chat default.
           setDraft((d) => {
             if (d.chatModel.trim()) return d;
-            return { ...d, chatModel: list[0] ?? d.chatModel };
+            const preferred = preferredChatDefaultId(ordered);
+            if (!preferred) return d; // specialty-only inventory: leave empty for user choice
+            return { ...d, chatModel: preferred };
           });
         }
       });
@@ -132,6 +142,30 @@ export function AiSection({
     : discoveredModels.length > 0
       ? "__other__"
       : "";
+  const modelSelectId = `${baseId}-model-select`;
+  const modelRoleHintId = `${baseId}-model-role-hint`;
+  const customModelId = `${baseId}-model`;
+  const customModelRoleHintId = `${baseId}-model-role-hint-custom`;
+  const customModelError = !draft.chatModel.trim()
+    ? "Model id is required."
+    : null;
+  const customModelOk = modelsLoading
+    ? "Looking up models…"
+    : discoveredModels.length === 0
+      ? modelsNote
+      : null;
+  const customModelPending =
+    modelsLoading && discoveredModels.length === 0
+      ? "Listing models…"
+      : null;
+  const customModelDescribedBy = [
+    customModelPending ? `${customModelId}-pending` : null,
+    customModelError ? `${customModelId}-error` : null,
+    customModelOk && !customModelError ? `${customModelId}-ok` : null,
+    draft.chatModel.trim() ? customModelRoleHintId : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   if (mode === "wizard") {
     return (
@@ -565,65 +599,92 @@ export function AiSection({
       </SelectField>
 
       {discoveredModels.length > 0 ? (
-        <SelectField
-          id={`${baseId}-model-select`}
-          label="Chat model"
-          hint={
-            modelsLoading
-              ? "Refreshing model list…"
-              : modelsNote ?? "Listed from the provider when reachable."
-          }
-          value={selectValue || discoveredModels[0]}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "__other__") {
-              // Keep current free-text if already custom; otherwise clear for typing.
-              if (modelInList) {
-                setDraft((d) => ({ ...d, chatModel: "" }));
-              }
-              return;
+        <>
+          <SelectField
+            id={modelSelectId}
+            label="Chat model"
+            hint={
+              modelsLoading
+                ? "Refreshing model list…"
+                : modelsNote ??
+                  "Listed from the provider when reachable. Role lines are name hints only."
             }
-            setDraft((d) => ({ ...d, chatModel: v }));
-          }}
-        >
-          {discoveredModels.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-          <option value="__other__">Other… (type below)</option>
-        </SelectField>
+            aria-describedby={modelInList ? modelRoleHintId : undefined}
+            value={selectValue || discoveredModels[0]}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__other__") {
+                // Keep current free-text if already custom; otherwise clear for typing.
+                if (modelInList) {
+                  setDraft((d) => ({ ...d, chatModel: "" }));
+                }
+                return;
+              }
+              setDraft((d) => ({ ...d, chatModel: v }));
+            }}
+          >
+            {discoveredModels.map((m) => {
+              const role = classifyModelRole(m).role;
+              const suffix =
+                role === "embedding"
+                  ? " · embedding"
+                  : role === "reranker"
+                    ? " · reranker"
+                    : role === "unknown"
+                      ? " · unqualified"
+                      : "";
+              return (
+                <option key={m} value={m}>
+                  {m}
+                  {suffix}
+                </option>
+              );
+            })}
+            <option value="__other__">Other… (type below)</option>
+          </SelectField>
+          {modelInList ? (
+            <ModelRoleHintLine
+              id={modelRoleHintId}
+              modelId={draft.chatModel}
+            />
+          ) : null}
+        </>
       ) : null}
       {discoveredModels.length === 0 || selectValue === "__other__" || !modelInList ? (
-        <TextField
-          id={`${baseId}-model`}
-          label={discoveredModels.length > 0 ? "Custom model id" : "Chat model"}
-          value={draft.chatModel}
-          error={!draft.chatModel.trim() ? "Model id is required." : null}
-          ok={
-            modelsLoading
-              ? "Looking up models…"
-              : discoveredModels.length === 0
-                ? modelsNote
-                : null
-          }
-          pending={modelsLoading && discoveredModels.length === 0 ? "Listing models…" : null}
-          onChange={(e) =>
-            setDraft((d) => ({ ...d, chatModel: e.target.value }))
-          }
-          placeholder={
-            draft.providerKind === "ollama"
-              ? "mistral"
-              : draft.providerKind === "xai_grok_build"
-                ? "grok-3"
-                : draft.providerKind === "anthropic"
-                  ? "claude-sonnet-4-20250514"
-                  : "provider/model"
-          }
-          list={
-            discoveredModels.length > 0 ? `${baseId}-model-suggestions` : undefined
-          }
-        />
+        <>
+          <TextField
+            id={customModelId}
+            label={discoveredModels.length > 0 ? "Custom model id" : "Chat model"}
+            value={draft.chatModel}
+            error={customModelError}
+            ok={customModelOk}
+            pending={customModelPending}
+            aria-describedby={customModelDescribedBy || undefined}
+            onChange={(e) =>
+              setDraft((d) => ({ ...d, chatModel: e.target.value }))
+            }
+            placeholder={
+              draft.providerKind === "ollama"
+                ? "mistral"
+                : draft.providerKind === "xai_grok_build"
+                  ? "grok-3"
+                  : draft.providerKind === "anthropic"
+                    ? "claude-sonnet-4-20250514"
+                    : "provider/model"
+            }
+            list={
+              discoveredModels.length > 0
+                ? `${baseId}-model-suggestions`
+                : undefined
+            }
+          />
+          {draft.chatModel.trim() ? (
+            <ModelRoleHintLine
+              id={customModelRoleHintId}
+              modelId={draft.chatModel}
+            />
+          ) : null}
+        </>
       ) : null}
       {discoveredModels.length > 0 ? (
         <datalist id={`${baseId}-model-suggestions`}>

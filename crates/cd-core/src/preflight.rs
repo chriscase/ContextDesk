@@ -300,11 +300,21 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
                     category: PreflightCategory::Launch,
                 });
             } else {
+                // Name-hint role line only (#723) — never claims measured capability.
+                let hint = crate::model_role_hints::classify_model_role(&p.chat_model);
+                let confidence = match hint.confidence {
+                    crate::model_role_hints::HintConfidence::High => "high",
+                    crate::model_role_hints::HintConfidence::Medium => "medium",
+                    crate::model_role_hints::HintConfidence::Low => "low",
+                };
                 items.push(PreflightItem {
                     id: "provider.model".into(),
                     title: "Chat model".into(),
                     level: PreflightLevel::Pass,
-                    detail: format!("Model: {}", p.chat_model),
+                    detail: format!(
+                        "Model: {} · {} · Basis: {} ({} confidence; not measured capability)",
+                        p.chat_model, hint.suggested_for, hint.basis_label, confidence
+                    ),
                     fix_action: Some("ai".into()),
                     category: PreflightCategory::Launch,
                 });
@@ -856,6 +866,70 @@ mod tests {
             .items
             .iter()
             .any(|i| i.id == "provider.grok_session" && i.level == PreflightLevel::Warn));
+        let model = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.model")
+            .expect("provider.model item");
+        assert!(
+            model.detail.contains("Suggested for:"),
+            "host preflight must surface Suggested-for: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("Basis: Name hint"),
+            "host preflight must surface Basis: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("(high confidence;"),
+            "host preflight must surface name-hint confidence: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("not measured capability"),
+            "host preflight must disclaim measurement: {}",
+            model.detail
+        );
+    }
+
+    #[test]
+    fn host_preflight_discloses_low_confidence_for_private_model_alias() {
+        let root = std::env::temp_dir();
+        let ws = Workspace::new("t", vec![PathBuf::from(&root)]);
+        let mut providers = ProviderConfig::with_local_ollama();
+        providers.profiles[0].chat_model = "corp-private-deployment".into();
+
+        let report = run_preflight(PreflightInput {
+            workspace: Some(&ws),
+            providers: &providers,
+            data_dir_writable: true,
+            ollama_reachable: Some(true),
+            provider_reachable: None,
+            provider_probe_detail: None,
+            active_key_present: None,
+            confluence: None,
+            confluence_pat_present: None,
+            grok_session_present: None,
+            connectors: &[],
+            durable_memory_active: None,
+        });
+        let model = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.model")
+            .expect("provider.model item");
+
+        assert!(
+            model.detail.contains("(low confidence;"),
+            "unknown private aliases must disclose low name-hint confidence: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("not measured capability"),
+            "low confidence must not be presented as measured capability: {}",
+            model.detail
+        );
     }
 
     #[test]

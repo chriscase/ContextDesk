@@ -39,6 +39,7 @@ synthesis only after required deterministic steps succeed.
 | Viewport snapshot is bounded and treated as data               | **Shipped** | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs)                                    | Snapshot is a hint, not authoritative event content                                                |
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
+| Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678; exact qualification remains #724            |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
 Issue status is descriptive, not proof by itself. The production paths and
@@ -104,6 +105,23 @@ or a broader read surface.
 This is not merely prompting. The host changes the offered tool set and checks
 the actual native tool result. Printed JSON, prose such as “I will search,” and
 tool-shaped Markdown are not evidence.
+
+### Model names are routing hints, not capability standards
+
+A provider inventory normally supplies deployment ids, not portable role or
+capability metadata. A versioned name catalog can improve picker ordering and
+explain why an id resembles an investigator, embedding model, or reranker, but
+that classification is only a `name_hint` with explicit confidence. Private and
+unknown ids remain selectable and unqualified. A familiar string never proves
+native tools, context length, output quality, embeddings, or reranking.
+
+Keep four evidence bases distinct in both data and presentation:
+`name_hint`, `provider_metadata`, `measured_locally`, and `user_override`.
+Presentation derives its basis label from that typed source rather than trusting
+preformatted copy. Name hints never silently replace an existing user choice.
+The current role-hint slice remains **Partial**: provider-scoped visibility
+preferences depend on #678, and exact user-triggered capability qualification
+belongs to #724.
 
 ## 4. Inputs, outputs, and portable contracts
 
@@ -448,6 +466,7 @@ assert the sentinel is absent from model-facing messages.
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
+| Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim; hidden-model integration remains #678 and measured qualification remains #724 |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 
@@ -484,6 +503,9 @@ Avoid these shortcuts:
   the deterministic core/component lifecycle and synthesis-only retry ship.
 - #646/#532: ranked proposals, review history, walkthroughs, and report
   assembly.
+- #678/#724: connect provider-scoped hidden-model state without expanding
+  inventories, then qualify exact deployed capabilities through explicit
+  user-triggered probes. Names remain hints and are never a gateway standard.
 - Provider acceptance: a real tools-enabled company profile must be selected
   and exercised; credentials and capability changes cannot be fabricated by an
   agent.

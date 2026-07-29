@@ -84,6 +84,18 @@ type CorpusAnalysis = {
   error: string | null;
 };
 
+function analysisFingerprint(corpus: LogCorpusSummaryDto): string {
+  const embedding = corpus.embedding;
+  return [
+    corpus.eventCount,
+    corpus.templateCount,
+    embedding?.state ?? "legacy",
+    embedding?.embeddedTemplates ?? corpus.stats?.embedded ?? 0,
+    embedding?.totalTemplates ?? corpus.templateCount,
+    embedding?.updatedAt ?? 0,
+  ].join(":");
+}
+
 const EMPTY_ANALYSIS: CorpusAnalysis = {
   status: "idle",
   clusters: [],
@@ -149,6 +161,13 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const analysisCacheRef = useRef(new Map<string, CorpusAnalysis>());
   const analysisInFlightRef = useRef(new Map<string, Promise<void>>());
   const analysisRequestTokenRef = useRef(new Map<string, symbol>());
+  /** Corpus-analysis fingerprint so re-analysis and growth invalidate stale cache. */
+  const analysisFingerprintRef = useRef(new Map<string, string>());
+  /** Selection generation and queue keep the trusted host's final corpus newest. */
+  const selectGenerationRef = useRef(0);
+  const hostSelectionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const activeIdRef = useRef<string | null>(null);
+  const refreshGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -177,14 +196,64 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     };
   }, []);
 
+  const clearAnalysisForCorpus = useCallback((id: string) => {
+    // Invalidate any in-flight token so late host replies cannot re-seed cache.
+    analysisRequestTokenRef.current.delete(id);
+    analysisInFlightRef.current.delete(id);
+    analysisCacheRef.current.delete(id);
+    analysisFingerprintRef.current.delete(id);
+    if (!mountedRef.current) return;
+    setAnalysisByCorpus((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
+    const generation = ++refreshGenerationRef.current;
     try {
-      const list = await hostListLogCorpora();
-      setCorpora(list ?? []);
+      const list = (await hostListLogCorpora()) ?? [];
+      if (
+        !mountedRef.current ||
+        generation !== refreshGenerationRef.current
+      ) {
+        return;
+      }
+      const liveIds = new Set(list.map((c) => c.id));
+      // Drop analysis for discarded corpora; invalidate when event/template or
+      // embedding metadata changes so local re-analysis cannot leave stale
+      // clusters under an unchanged event count.
+      for (const id of [...analysisCacheRef.current.keys()]) {
+        if (!liveIds.has(id)) {
+          clearAnalysisForCorpus(id);
+        }
+      }
+      for (const c of list) {
+        const prev = analysisFingerprintRef.current.get(c.id);
+        const next = analysisFingerprint(c);
+        if (prev !== undefined && prev !== next) {
+          clearAnalysisForCorpus(c.id);
+        }
+        analysisFingerprintRef.current.set(c.id, next);
+      }
+      for (const id of [...analysisFingerprintRef.current.keys()]) {
+        if (!liveIds.has(id)) {
+          analysisFingerprintRef.current.delete(id);
+        }
+      }
+      setCorpora(list);
     } catch (e) {
+      if (
+        !mountedRef.current ||
+        generation !== refreshGenerationRef.current
+      ) {
+        return;
+      }
       setError(String(e));
     }
-  }, []);
+  }, [clearAnalysisForCorpus]);
 
   useEffect(() => {
     void refresh();
@@ -316,15 +385,36 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   }, [corpora]);
 
   const selectCorpus = useCallback(async (id: string) => {
+    // Critical path: flip local selection immediately. Do not await cluster or
+    // template analysis — that is on-demand via loadAnalysis (#743).
+    const generation = ++selectGenerationRef.current;
+    activeIdRef.current = id;
     setActiveId(id);
     setTab("overview");
     setHits([]);
     setExemplar(null);
-    try {
-      await hostSetActiveLogCorpus(id);
-    } catch {
-      /* non-fatal */
-    }
+    setError(null);
+    const queued = hostSelectionQueueRef.current
+      .catch(() => {
+        /* A prior host activation is non-fatal; continue to the newest pick. */
+      })
+      .then(async () => {
+        // If another selection arrived before this request began, skip the
+        // obsolete host mutation. Once a request has begun, the next queued
+        // selection necessarily runs after it, so the host finishes newest.
+        if (selectGenerationRef.current !== generation) return;
+        try {
+          await hostSetActiveLogCorpus(id);
+        } catch (activationError) {
+          if (selectGenerationRef.current === generation) {
+            setError(
+              `Could not activate "${id}" for Explorer and chat: ${String(activationError)}`,
+            );
+          }
+        }
+      });
+    hostSelectionQueueRef.current = queued;
+    await queued;
   }, []);
 
   const writeAnalysis = useCallback((id: string, value: CorpusAnalysis) => {
@@ -356,26 +446,49 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
       const requestToken = Symbol(id);
       analysisRequestTokenRef.current.set(id, requestToken);
-      const request = Promise.all([
+      // Fingerprint at request start so a later re-ingest of the same id cannot
+      // accept results computed against the previous event count.
+      const fingerprintAtStart =
+        analysisFingerprintRef.current.get(id) ?? null;
+      const request = Promise.allSettled([
         hostLogClusterProblems(id, 12),
         hostListLogTemplates(id, 100),
       ])
-        .then(([clusters, templates]) => {
+        .then(([clusterResult, templateResult]) => {
           if (analysisRequestTokenRef.current.get(id) !== requestToken) return;
+          const fpNow = analysisFingerprintRef.current.get(id) ?? null;
+          if (fingerprintAtStart !== null && fpNow !== fingerprintAtStart) return;
+          if (
+            clusterResult.status === "rejected" ||
+            templateResult.status === "rejected"
+          ) {
+            const reasons = [clusterResult, templateResult]
+              .filter(
+                (
+                  result,
+                ): result is PromiseRejectedResult =>
+                  result.status === "rejected",
+              )
+              .map((result) => String(result.reason));
+            writeAnalysis(id, {
+              status: "error",
+              clusters:
+                clusterResult.status === "fulfilled"
+                  ? (clusterResult.value ?? [])
+                  : (cached?.clusters ?? []),
+              templates:
+                templateResult.status === "fulfilled"
+                  ? (templateResult.value ?? [])
+                  : (cached?.templates ?? []),
+              error: reasons.join(" · "),
+            });
+            return;
+          }
           writeAnalysis(id, {
             status: "ready",
-            clusters: clusters ?? [],
-            templates: templates ?? [],
+            clusters: clusterResult.value ?? [],
+            templates: templateResult.value ?? [],
             error: null,
-          });
-        })
-        .catch((analysisError: unknown) => {
-          if (analysisRequestTokenRef.current.get(id) !== requestToken) return;
-          writeAnalysis(id, {
-            status: "error",
-            clusters: cached?.clusters ?? [],
-            templates: cached?.templates ?? [],
-            error: String(analysisError),
           });
         })
         .finally(() => {
@@ -502,6 +615,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
 
   async function onReanalyze() {
     if (!activeId) return;
+    const corpusId = activeId;
     const ok = await dialogConfirm(
       "Re-analyze this corpus with the local ONNX model? Log content stays on this machine, events are not reparsed, and the current keyword corpus remains usable until the new index is complete.",
       { title: "Local template re-analysis" },
@@ -513,12 +627,20 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setNote(null);
     setProgress(null);
     try {
-      const status = await hostReanalyzeLogCorpus(activeId);
+      const status = await hostReanalyzeLogCorpus(corpusId);
       setNote(
         `Local re-analysis complete: ${status.embeddedTemplates.toLocaleString()}/${status.totalTemplates.toLocaleString()} templates embedded.`,
       );
+      // A successful re-analysis can change clusters/templates without changing
+      // the corpus row count or host summary timestamp. Never retain the prior
+      // optional-analysis snapshot in that case.
+      clearAnalysisForCorpus(corpusId);
       await refresh();
-      await selectCorpus(activeId);
+      // Corpus cards intentionally remain usable during local analysis. Do
+      // not let a late completion for A override a newer user selection B.
+      if (activeIdRef.current === corpusId) {
+        await selectCorpus(corpusId);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -571,15 +693,9 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setBusy(true);
     try {
       await hostDiscardLogCorpus(id);
-      analysisCacheRef.current.delete(id);
-      analysisInFlightRef.current.delete(id);
-      analysisRequestTokenRef.current.delete(id);
-      setAnalysisByCorpus((current) => {
-        const next = { ...current };
-        delete next[id];
-        return next;
-      });
-      if (activeId === id) {
+      clearAnalysisForCorpus(id);
+      if (activeIdRef.current === id) {
+        activeIdRef.current = null;
         setActiveId(null);
         setHits([]);
       }

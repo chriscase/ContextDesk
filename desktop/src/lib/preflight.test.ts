@@ -34,6 +34,39 @@ describe("runClientPreflight anthropic", () => {
     expect(active?.detail).toContain("Anthropic");
   });
 
+  it("provider.model detail includes Suggested-for and Basis name-hint honesty", () => {
+    const report = runClientPreflight(
+      baseSetup({
+        providerKind: "anthropic",
+        providerLabel: "Anthropic",
+        baseUrl: "https://api.anthropic.com",
+        chatModel: "claude-sonnet-4-20250514",
+        hasApiKey: true,
+      }),
+    );
+    const model = report.items.find((i) => i.id === "provider.model");
+    expect(model?.level).toBe("pass");
+    expect(model?.detail).toMatch(/Model: claude-sonnet-4-20250514/);
+    expect(model?.detail).toMatch(/Suggested for:/);
+    expect(model?.detail).toMatch(/Basis: Name hint/);
+    expect(model?.detail).toMatch(/not measured capability/i);
+  });
+
+  it("provider.model for embedding-shaped id still passes but labels specialty", () => {
+    const report = runClientPreflight(
+      baseSetup({
+        providerKind: "ollama",
+        providerLabel: "Ollama",
+        baseUrl: "http://127.0.0.1:11434",
+        chatModel: "bge-m3",
+        ollamaReachable: true,
+      }),
+    );
+    const model = report.items.find((i) => i.id === "provider.model");
+    expect(model?.detail).toMatch(/embedding/);
+    expect(model?.detail).toMatch(/Basis: Name hint/);
+  });
+
   it("fails provider.key when Anthropic has no key (not silently healthy)", () => {
     const report = runClientPreflight(
       baseSetup({

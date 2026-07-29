@@ -106,6 +106,8 @@ vi.mock("../../lib/host", () => ({
     totalMatched: 2,
     timeQuality: "wall",
   })),
+  hostLogQueryEventRows: vi.fn(),
+  hostLogCountEvents: vi.fn(),
   hostLogSharedTimelineSummary: vi.fn(async () => ({
     timeQuality: "wall",
     spanFrom: 1_700_000_000,
@@ -237,6 +239,11 @@ function defaultEventPage(): host.EventPageDto {
   };
 }
 
+function eventRows(page: host.EventPageDto): host.EventRowsPageDto {
+  const { totalMatched: _totalMatched, ...rows } = page;
+  return rows;
+}
+
 function nonresidentFindEvent(
   seq: number,
   message: string,
@@ -335,6 +342,24 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const exactCountByQuery = new Map<string, number>();
+
+function exactCountQueryKey(
+  corpusId: string,
+  query: host.EventQueryDto = {},
+): string {
+  const {
+    afterSeq: _afterSeq,
+    afterTs: _afterTs,
+    beforeSeq: _beforeSeq,
+    beforeTs: _beforeTs,
+    limit: _limit,
+    sortByTime: _sortByTime,
+    ...countQuery
+  } = query;
+  return JSON.stringify([corpusId, countQuery]);
+}
+
 function scrollLaneToEdge(edge: "older" | "newer", laneIndex = 0): HTMLElement {
   const list = screen.getAllByTestId("virtualized-event-list")[laneIndex]!;
   Object.defineProperties(list, {
@@ -412,6 +437,19 @@ function chooseTimeMode(
   chooseToolbarOption("time-link-picker", new RegExp(`^${mode}\\b`));
 }
 
+async function openInvestigationView(expectedItems: number) {
+  const trigger = await screen.findByRole("button", {
+    name: /Investigation workspace view: Chat/,
+  });
+  fireEvent.click(trigger);
+  const option = await waitFor(() =>
+    screen.getByRole("menuitemradio", {
+      name: new RegExp(`Investigation.*${expectedItems}`),
+    }),
+  );
+  fireEvent.click(option);
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -465,6 +503,25 @@ describe("LogExplorer shell", () => {
       totalMatched: 2,
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
+    exactCountByQuery.clear();
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (requestedCorpusId, query) => {
+        const page = await host.hostLogQueryEvents(requestedCorpusId, query);
+        exactCountByQuery.set(
+          exactCountQueryKey(requestedCorpusId, query),
+          page.totalMatched,
+        );
+        const { totalMatched: _totalMatched, ...rows } = page;
+        return rows;
+      },
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (requestedCorpusId, query) => ({
+        totalMatched:
+          exactCountByQuery.get(exactCountQueryKey(requestedCorpusId, query)) ??
+          defaultEventPage().totalMatched,
+      }),
+    );
     vi.mocked(host.hostLogQueryEventOriginal).mockResolvedValue({
       state: "unavailable",
       reason: "Original representation unavailable for this corpus",
@@ -592,6 +649,575 @@ describe("LogExplorer shell", () => {
         screen.queryByTestId("log-explorer-facets-loading"),
       ).toBeNull(),
     );
+  });
+
+  it("paints bounded rows and clears evidence busy before exact counting begins or finishes", async () => {
+    const rowPage = deferred<host.EventRowsPageDto>();
+    const countPage = deferred<host.EventCountDto>();
+    let evidenceVisibleWhenCountStarted = false;
+    vi.mocked(host.hostLogQueryEventRows).mockReturnValue(rowPage.promise);
+    vi.mocked(host.hostLogCountEvents).mockImplementation(() => {
+      evidenceVisibleWhenCountStarted =
+        screen.queryByText(/auth failure/) != null;
+      return countPage.promise;
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEventRows).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogCountEvents).not.toHaveBeenCalled();
+    expect(screen.getByText("Loading first evidence rows…")).toBeTruthy();
+
+    await act(async () => {
+      rowPage.resolve(eventRows(defaultEventPage()));
+      await rowPage.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    expect(screen.queryByText("Loading first evidence rows…")).toBeNull();
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "counting matches… · 2 resident",
+    );
+    await waitFor(() =>
+      expect(host.hostLogCountEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(evidenceVisibleWhenCountStarted).toBe(true);
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "counting matches… · 2 resident",
+    );
+
+    await act(async () => {
+      countPage.resolve({ totalMatched: 37 });
+      await countPage.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "37 matched · 2 resident",
+      ),
+    );
+  });
+
+  it("ignores an exact count from an obsolete corpus lifecycle", async () => {
+    const counts = {
+      c1: deferred<host.EventCountDto>(),
+      c2: deferred<host.EventCountDto>(),
+    };
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (requestedCorpusId) => {
+        const base = defaultEventPage();
+        const event = {
+          ...base.events[0]!,
+          seq: requestedCorpusId === "c1" ? 101 : 202,
+          source: `${requestedCorpusId}.log`,
+          message:
+            requestedCorpusId === "c1"
+              ? "obsolete corpus row"
+              : "current corpus row",
+        };
+        return eventRows({ ...base, events: [event], totalMatched: 1 });
+      },
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      (requestedCorpusId) =>
+        counts[requestedCorpusId as "c1" | "c2"].promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    expect(await screen.findByText("obsolete corpus row")).toBeTruthy();
+    await waitFor(() =>
+      expect(host.hostLogCountEvents).toHaveBeenCalledWith(
+        "c1",
+        expect.anything(),
+      ),
+    );
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(await screen.findByText("current corpus row")).toBeTruthy();
+    await waitFor(() =>
+      expect(host.hostLogCountEvents).toHaveBeenCalledWith(
+        "c2",
+        expect.anything(),
+      ),
+    );
+
+    await act(async () => {
+      counts.c2.resolve({ totalMatched: 22 });
+      await counts.c2.promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "22 matched",
+      ),
+    );
+
+    await act(async () => {
+      counts.c1.resolve({ totalMatched: 999 });
+      await counts.c1.promise;
+    });
+    expect(screen.getByText("current corpus row")).toBeTruthy();
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "22 matched",
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).not.toContain(
+      "999 matched",
+    );
+  });
+
+  it("clears prior-corpus evidence and inspector before the next corpus resolves", async () => {
+    const nextPage = deferred<host.EventRowsPageDto>();
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (requestedCorpusId) => {
+        if (requestedCorpusId === "c2") return nextPage.promise;
+        const base = defaultEventPage();
+        return eventRows({
+          ...base,
+          events: [
+            {
+              ...base.events[0]!,
+              seq: 101,
+              source: "c1.log",
+              message: "private evidence from prior corpus",
+            },
+          ],
+        });
+      },
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByText("private evidence from prior corpus"),
+    );
+    expect(await screen.findByTestId("log-explorer-detail")).toBeTruthy();
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(
+      screen.queryByText("private evidence from prior corpus"),
+    ).toBeNull();
+    expect(screen.queryByTestId("log-explorer-detail")).toBeNull();
+    expect(screen.getByText("Loading first evidence rows…")).toBeTruthy();
+
+    const base = defaultEventPage();
+    await act(async () => {
+      nextPage.resolve(
+        eventRows({
+          ...base,
+          events: [
+            {
+              ...base.events[0]!,
+              seq: 202,
+              source: "c2.log",
+              message: "current corpus evidence",
+            },
+          ],
+        }),
+      );
+      await nextPage.promise;
+    });
+    expect(await screen.findByText("current corpus evidence")).toBeTruthy();
+  });
+
+  it("resolves visible lane counts independently without inventing a global total", async () => {
+    const laneCounts = {
+      "a.log": deferred<host.EventCountDto>(),
+      "b.log": deferred<host.EventCountDto>(),
+      "c.log": deferred<host.EventCountDto>(),
+    };
+    let multiLaneView = false;
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (_requestedCorpusId, query) => {
+        const source = query?.sources?.[0] ?? "all.log";
+        const rows =
+          source === "c.log"
+            ? eventPage(source, "wall", 0, 1_700_000_200, 0)
+            : eventPage(source, "wall", 1);
+        return eventRows(rows);
+      },
+    );
+    vi.mocked(host.hostLogCountEvents).mockImplementation(
+      async (_requestedCorpusId, query) => {
+        const source = query?.sources?.[0] ?? "all.log";
+        if (!multiLaneView) return { totalMatched: 13 };
+        return laneCounts[source as keyof typeof laneCounts].promise;
+      },
+    );
+    localStorage.setItem(
+      "contextdesk.logExplorer.lanes.v1:c1",
+      JSON.stringify([
+        { id: "lane-0", label: "API", sources: ["a.log"] },
+        { id: "lane-1", label: "Worker", sources: ["b.log"] },
+        { id: "lane-2", label: "Empty", sources: ["c.log"] },
+      ]),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("a.log event 0");
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+        "13 matched",
+      ),
+    );
+
+    multiLaneView = true;
+    chooseLaneCount(3);
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-lane-id]")).toHaveLength(3),
+    );
+    await waitFor(() =>
+      expect(host.hostLogCountEvents).toHaveBeenCalledTimes(4),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "counting matches…",
+    );
+
+    await act(async () => {
+      laneCounts["b.log"].resolve({ totalMatched: 7 });
+      await laneCounts["b.log"].promise;
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("lane-count-lane-1").textContent).toContain(
+        "7 matched · 1 resident",
+      ),
+    );
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "counting matches…",
+    );
+
+    await act(async () => {
+      laneCounts["a.log"].resolve({ totalMatched: 13 });
+      laneCounts["c.log"].resolve({ totalMatched: 0 });
+      await Promise.all([
+        laneCounts["a.log"].promise,
+        laneCounts["c.log"].promise,
+      ]);
+    });
+    expect(screen.getByTestId("lane-count-lane-0").textContent).toContain(
+      "13 matched · 1 resident",
+    );
+    expect(screen.getByTestId("lane-count-lane-2").textContent).toContain(
+      "0 matched · 0 resident",
+    );
+    expect(screen.getByTestId("log-explorer-global-counts").textContent).toContain(
+      "3 lane queries",
+    );
+    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+      /matched per lane below · resident rows 2/,
+    );
+  });
+
+  it("uses row-only pagination in both directions without recounting", async () => {
+    const pageEvent = (
+      seq: number,
+      message: string,
+    ): host.ExplorerEventDto => ({
+      ...defaultEventPage().events[0]!,
+      seq,
+      ts: 1_700_000_000 + seq,
+      message,
+    });
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (_requestedCorpusId, query) => {
+        if (query?.beforeSeq === 101) {
+          return {
+            events: [pageEvent(99, "row-only older")],
+            prevCursor: null,
+            prevTs: null,
+            nextCursor: 100,
+            nextTs: 1_700_000_100,
+            timeQuality: "wall",
+          };
+        }
+        if (query?.afterSeq === 102) {
+          return {
+            events: [pageEvent(103, "row-only newer")],
+            prevCursor: 103,
+            prevTs: 1_700_000_103,
+            nextCursor: null,
+            nextTs: null,
+            timeQuality: "wall",
+          };
+        }
+        return {
+          events: [
+            pageEvent(101, "row-only middle 101"),
+            pageEvent(102, "row-only middle 102"),
+          ],
+          prevCursor: 101,
+          prevTs: 1_700_000_101,
+          nextCursor: 102,
+          nextTs: 1_700_000_102,
+          timeQuality: "wall",
+        };
+      },
+    );
+    vi.mocked(host.hostLogCountEvents).mockResolvedValue({ totalMatched: 6 });
+
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("row-only middle 101");
+    await waitFor(() =>
+      expect(host.hostLogCountEvents).toHaveBeenCalledTimes(1),
+    );
+
+    scrollLaneToEdge("older");
+    expect(await screen.findByText("row-only older")).toBeTruthy();
+    clock.mockReturnValue(1_300);
+    scrollLaneToEdge("newer");
+    expect(await screen.findByText("row-only newer")).toBeTruthy();
+
+    expect(host.hostLogQueryEventRows).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        beforeSeq: 101,
+        beforeTs: 1_700_000_101,
+      }),
+    );
+    expect(host.hostLogQueryEventRows).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({
+        afterSeq: 102,
+        afterTs: 1_700_000_102,
+      }),
+    );
+    expect(host.hostLogCountEvents).toHaveBeenCalledTimes(1);
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+    clock.mockRestore();
+  });
+
+  it("defers bookmark and Investigation metadata until first evidence rows paint", async () => {
+    const firstPage = deferred<host.EventPageDto>();
+    const bookmarkPage = deferred<host.LogBookmarkDto[]>();
+    const investigationPage =
+      deferred<host.ResolvedInvestigationDocumentDto | null>();
+    let evidenceVisibleWhenBookmarksStarted = false;
+    let evidenceVisibleWhenInvestigationStarted = false;
+    vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
+    vi.mocked(host.hostLogListBookmarks).mockImplementation(() => {
+      evidenceVisibleWhenBookmarksStarted =
+        screen.queryByText(/auth failure/) != null;
+      return bookmarkPage.promise;
+    });
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockImplementation(() => {
+      evidenceVisibleWhenInvestigationStarted =
+        screen.queryByText(/auth failure/) != null;
+      return investigationPage.promise;
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogListBookmarks).not.toHaveBeenCalled();
+    expect(host.hostLogLoadActiveInvestigation).not.toHaveBeenCalled();
+    expect(screen.getByTestId("log-explorer-bookmarks-deferred")).toBeTruthy();
+
+    await act(async () => {
+      firstPage.resolve(defaultEventPage());
+      await firstPage.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    await waitFor(() => {
+      expect(host.hostLogListBookmarks).toHaveBeenCalledTimes(1);
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledTimes(1);
+    });
+    expect(evidenceVisibleWhenBookmarksStarted).toBe(true);
+    expect(evidenceVisibleWhenInvestigationStarted).toBe(true);
+    expect(screen.getByTestId("log-explorer-bookmarks-loading")).toBeTruthy();
+    expect(
+      screen.getAllByTestId("log-explorer-investigation-loading").length,
+    ).toBeGreaterThan(0);
+
+    await act(async () => {
+      bookmarkPage.resolve([]);
+      investigationPage.resolve(null);
+      await Promise.all([bookmarkPage.promise, investigationPage.promise]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("log-explorer-bookmarks-loading")).toBeNull();
+      expect(
+        screen.queryAllByTestId("log-explorer-investigation-loading"),
+      ).toHaveLength(0);
+    });
+    expect(screen.getByText("None yet — select rows + B")).toBeTruthy();
+  });
+
+  it("keeps metadata scoped to the latest corpus without rewriting host activation", async () => {
+    const summaries = {
+      c1: deferred<host.LogCorpusSummaryDto | null>(),
+      c2: deferred<host.LogCorpusSummaryDto | null>(),
+    };
+    const bookmarkPages = {
+      c1: deferred<host.LogBookmarkDto[]>(),
+      c2: deferred<host.LogBookmarkDto[]>(),
+    };
+    const investigationPages = {
+      c1: deferred<host.ResolvedInvestigationDocumentDto | null>(),
+      c2: deferred<host.ResolvedInvestigationDocumentDto | null>(),
+    };
+    const c1Event = {
+      ...defaultEventPage().events[0]!,
+      message: "corpus one evidence",
+      source: "one.log",
+    };
+    const c2Event = {
+      ...defaultEventPage().events[0]!,
+      seq: 2,
+      message: "corpus two evidence",
+      source: "two.log",
+    };
+    const investigationFor = (
+      corpus: "c1" | "c2",
+      event: host.ExplorerEventDto,
+      title: string,
+    ): host.ResolvedInvestigationDocumentDto => {
+      const item: host.InvestigationEvidenceItemDto = {
+        id: `${corpus}-evidence`,
+        title,
+        provenance: "human",
+        corpusId: corpus,
+        eventRefs: [
+          {
+            corpusId: corpus,
+            seq: event.seq,
+            source: event.source,
+            timestampHint: event.ts,
+            timeQualityHint: event.timeQuality,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const resolved = resolvedInvestigation(item, event);
+      return {
+        ...resolved,
+        document: {
+          ...resolved.document,
+          id: `${corpus}-investigation`,
+          title: `Investigation · ${corpus}`,
+          corpusLinks: [{ corpusId: corpus }],
+        },
+      };
+    };
+
+    vi.mocked(host.hostGetLogCorpus).mockImplementation(
+      (corpus) => summaries[corpus as "c1" | "c2"].promise,
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(async (corpus) => ({
+      ...defaultEventPage(),
+      events: [corpus === "c1" ? c1Event : c2Event],
+      totalMatched: 1,
+    }));
+    vi.mocked(host.hostLogListBookmarks).mockImplementation(
+      (corpus) => bookmarkPages[corpus as "c1" | "c2"].promise,
+    );
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockImplementation(
+      (corpus) => investigationPages[corpus as "c1" | "c2"].promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    expect(await screen.findByText(c1Event.message)).toBeTruthy();
+    await waitFor(() =>
+      expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c1"),
+    );
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(await screen.findByText(c2Event.message)).toBeTruthy();
+    await waitFor(() => {
+      expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c2");
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith("c2");
+    });
+
+    await act(async () => {
+      summaries.c2.resolve({
+        id: "c2",
+        name: "new corpus",
+        eventCount: 20,
+        templateCount: 2,
+        engine: "duckdb",
+        createdAt: 2,
+        sourceLabel: null,
+        stats: null,
+        topTemplates: [],
+      });
+      bookmarkPages.c2.resolve([bookmark("bm-c2", "new bookmark", 2)]);
+      investigationPages.c2.resolve(
+        investigationFor("c2", c2Event, "new investigation evidence"),
+      );
+      await Promise.all([
+        summaries.c2.promise,
+        bookmarkPages.c2.promise,
+        investigationPages.c2.promise,
+      ]);
+    });
+
+    expect(
+      await screen.findByLabelText("Log Explorer for new corpus"),
+    ).toBeTruthy();
+    expect(await screen.findByTestId("bookmark-activate-bm-c2")).toBeTruthy();
+    await openInvestigationView(2);
+    expect(await screen.findByText("new investigation evidence")).toBeTruthy();
+
+    await act(async () => {
+      summaries.c1.resolve({
+        id: "c1",
+        name: "stale corpus",
+        eventCount: 10,
+        templateCount: 1,
+        engine: "duckdb",
+        createdAt: 1,
+        sourceLabel: null,
+        stats: null,
+        topTemplates: [],
+      });
+      bookmarkPages.c1.resolve([bookmark("bm-c1", "stale bookmark", 1)]);
+      investigationPages.c1.resolve(
+        investigationFor("c1", c1Event, "stale investigation evidence"),
+      );
+      await Promise.all([
+        summaries.c1.promise,
+        bookmarkPages.c1.promise,
+        investigationPages.c1.promise,
+      ]);
+    });
+
+    expect(screen.getByLabelText("Log Explorer for new corpus")).toBeTruthy();
+    expect(screen.getByTestId("bookmark-activate-bm-c2")).toBeTruthy();
+    expect(screen.getByText("new investigation evidence")).toBeTruthy();
+    expect(screen.queryByTestId("bookmark-activate-bm-c1")).toBeNull();
+    expect(screen.queryByText("stale investigation evidence")).toBeNull();
+    expect(host.hostSetActiveLogCorpus).not.toHaveBeenCalled();
+  });
+
+  it("keeps summary, bookmark, and Investigation load failures independent from evidence rows", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockRejectedValue(
+      new Error("summary unavailable"),
+    );
+    vi.mocked(host.hostLogListBookmarks).mockRejectedValue(
+      new Error("bookmark store unavailable"),
+    );
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockRejectedValue(
+      new Error("investigation store unavailable"),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    expect(
+      (await screen.findByTestId("log-explorer-summary-load-error"))
+        .textContent,
+    ).toContain("Corpus details unavailable");
+    expect(
+      (await screen.findByTestId("log-explorer-bookmarks-load-error"))
+        .textContent,
+    ).toContain("Bookmarks unavailable");
+    expect(
+      (await screen.findAllByTestId("log-explorer-investigation-load-error"))
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByTestId("virtualized-event-list")).toBeTruthy();
   });
 
   it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
@@ -1735,6 +2361,13 @@ describe("LogExplorer shell", () => {
 
       render(<LogExplorer corpusId="c1" />);
       await screen.findByText("job ok");
+      await waitFor(() =>
+        expect(
+          within(screen.getByTestId("log-explorer-filters")).getByText(
+            "error",
+          ),
+        ).toBeTruthy(),
+      );
       apply();
       await waitFor(() => expect(screen.queryByText("job ok")).toBeNull());
 
@@ -1863,7 +2496,9 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(screen.getByRole("checkbox", { name: /api\.log/i }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /api\.log/i }),
+    );
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenLastCalledWith(
         "c1",
@@ -2289,14 +2924,7 @@ describe("LogExplorer shell", () => {
     first.unmount();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(saved);
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     expect(await screen.findByText(item.title)).toBeTruthy();
   });
 
@@ -2467,14 +3095,7 @@ describe("LogExplorer shell", () => {
     view.unmount();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(savedEdit);
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*3/ }),
-    );
+    await openInvestigationView(3);
     expect(
       await screen.findByTestId(`finding-item-${finding.id}`),
     ).toBeTruthy();
@@ -2560,14 +3181,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
 
     const initialQueryCount = vi.mocked(host.hostLogQueryEvents).mock.calls
@@ -2708,14 +3322,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
     fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
 
@@ -2767,14 +3374,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(
       within(await screen.findByTestId(`evidence-item-${item.id}`)).getByRole(
         "button",
@@ -3713,8 +4313,10 @@ describe("LogExplorer shell", () => {
         }),
       ),
     );
-    expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
-      /matched 2/,
+    await waitFor(() =>
+      expect(screen.getByTestId("log-explorer-count-truth").textContent).toMatch(
+        /matched 2/,
+      ),
     );
 
     const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls
