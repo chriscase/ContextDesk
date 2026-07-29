@@ -7789,22 +7789,44 @@ mod startup_host_tests {
     #[test]
     fn linked_tools_disabled_guard_precedes_host_construction() {
         let src = include_str!("lib.rs");
+        let preflight_start = src
+            .find("fn linked_log_preflight_at(")
+            .expect("linked_log_preflight_at");
+        let preflight_end = src[preflight_start..]
+            .find("\nfn take_ready_linked_host<")
+            .map(|offset| preflight_start + offset)
+            .expect("linked preflight boundary");
+        let preflight_src = &src[preflight_start..preflight_end];
+        let corpus_validation = preflight_src
+            .find("validate_linked_log_corpus_at")
+            .expect("linked corpus validation");
+        let capability_guard = preflight_src
+            .find("linked_tools_unavailable_events")
+            .expect("linked tools-disabled guard");
+        assert!(
+            corpus_validation < capability_guard,
+            "stale linked corpora must fail before provider capability refusal"
+        );
+
         let turn_start = src.find("async fn agent_turn(").expect("agent_turn");
         let turn_end = src[turn_start..]
             .find("/// Signal cooperative cancel")
             .map(|offset| turn_start + offset)
             .expect("agent_turn boundary");
         let turn_src = &src[turn_start..turn_end];
-        let guard = turn_src
-            .find("linked_tools_unavailable_events")
-            .expect("linked tools-disabled guard");
-        let host = turn_src
+        let preflight = turn_src
+            .find("linked_log_preflight_at(")
+            .expect("linked preflight call");
+        let linked_host = turn_src
+            .find("take_ready_linked_host(")
+            .expect("linked fallback host construction");
+        let ordinary_host = turn_src
             .find("wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT")
             .expect("bounded host readiness wait");
 
         assert!(
-            guard < host,
-            "provider-free linked refusal must not wait for workspace host/index warmup"
+            preflight < linked_host && preflight < ordinary_host,
+            "provider-free linked refusal must precede linked and ordinary host construction"
         );
     }
 
