@@ -30,6 +30,20 @@ pub enum StreamEvent {
         /// Host-authored phase; never inferred from model prose.
         phase: AgentPhase,
     },
+    /// Host-confirmed availability of one exact synthesis-only retry.
+    ///
+    /// Evidence never crosses IPC; these identifiers let the renderer reject
+    /// stale events after a chat, corpus, or model switch.
+    LinkedSynthesisRetry {
+        /// Whether a valid host-only checkpoint currently exists.
+        available: bool,
+        /// Exact owning session.
+        session_id: String,
+        /// Exact owning corpus.
+        corpus_id: String,
+        /// Exact owning model, when known.
+        model: Option<String>,
+    },
     /// Incremental assistant markdown.
     TextDelta {
         /// UTF-8 chunk (may be partial markdown).

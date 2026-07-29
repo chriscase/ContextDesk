@@ -36,9 +36,26 @@ import {
   hostSetModelToolsEnabled,
   modelSelectionKey,
   parseModelSelectionKey,
+  type EventDto,
   type ModelOptionDto,
   type SessionMetaDto,
 } from "../../lib/host";
+
+export function hasHostLinkedSynthesisRetry(
+  events: EventDto[],
+  sessionId: string,
+  corpusId: string,
+  modelId: string,
+): boolean {
+  return events.some(
+    (event) =>
+      event.kind === "linked_synthesis_retry" &&
+      event.payload.available === true &&
+      event.payload.session_id === sessionId &&
+      event.payload.corpus_id === corpusId &&
+      event.payload.model === modelId,
+  );
+}
 import {
   applyEventsToMessage,
   newSession,
@@ -818,6 +835,17 @@ export function LinkedChatRail({
               }));
             }
           }
+          if (
+            ev.kind === "linked_synthesis_retry" &&
+            ev.payload.session_id === sessionId &&
+            ev.payload.corpus_id === corpusId &&
+            ev.payload.model === turnModel.id
+          ) {
+            setSynthesisRetryByChat((current) => ({
+              ...current,
+              [sessionId!]: ev.payload.available === true,
+            }));
+          }
           setMessages((msgs) => {
             const base =
               msgs.find((x) => x.id === assistantId) ??
@@ -898,18 +926,19 @@ export function LinkedChatRail({
       await refreshChats();
       const usedTools = (assistant.tools?.length ?? 0) > 0;
       const endedWithError = events.some((event) => event.kind === "error");
-      const synthesisTimedOut = events.some(
-        (event) =>
-          event.kind === "error" &&
-          event.payload.code === "linked_synthesis_timeout",
+      const retryAvailable = hasHostLinkedSynthesisRetry(
+        events,
+        sessionId,
+        corpusId,
+        turnModel.id,
       );
       setSynthesisRetryByChat((current) => ({
         ...current,
-        [sessionId!]: synthesisTimedOut,
+        [sessionId!]: retryAvailable,
       }));
       setStatusByChat((m) => ({
         ...m,
-        [sessionId!]: synthesisTimedOut
+        [sessionId!]: retryAvailable
           ? "Bounded evidence is preserved. Retry only the answer synthesis when ready."
           : endedWithError
             ? `Linked investigation stopped with ${turnModel.provider_label} · ${turnModel.label}. Retry, choose another tools-enabled model above, or configure one in Settings → AI.`

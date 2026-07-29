@@ -245,6 +245,10 @@ interrupts the active provider or tool wait. If retrieval succeeded but
 synthesis reached its bounded deadline, the evidence remains visible and
 **Retry synthesis** answers from that preserved evidence without another log
 search. The retry is accepted only for the same chat, corpus, and model.
+The control appears only after the host confirms a still-valid checkpoint; a
+timeout message alone cannot enable it. Checkpoints are memory-only,
+age/count/size bounded, and cleared when a chat is trashed, deleted, archived,
+relinked, or superseded by a new linked turn.
 
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.

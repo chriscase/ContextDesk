@@ -13,10 +13,60 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as host from "../../lib/host";
 import {
+  hasHostLinkedSynthesisRetry,
   LinkedChatRail,
   shouldApplyChatLoad,
   type AgentContextSummary,
 } from "./LinkedChatRail";
+
+it("requires an exact host-authored retry availability event", () => {
+  const timeoutOnly: host.EventDto[] = [
+    {
+      kind: "error",
+      payload: { code: "linked_synthesis_timeout", message: "timed out" },
+    },
+  ];
+  expect(
+    hasHostLinkedSynthesisRetry(timeoutOnly, "chat", "corpus", "model"),
+  ).toBe(false);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        ...timeoutOnly,
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "chat",
+            corpus_id: "corpus",
+            model: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "model",
+    ),
+  ).toBe(true);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "other-chat",
+            corpus_id: "corpus",
+            model: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "model",
+    ),
+  ).toBe(false);
+});
 
 vi.mock("../../lib/host", () => ({
   modelSelectionKey: (providerId: string, modelId: string) =>
@@ -1587,7 +1637,7 @@ describe("LinkedChatRail", () => {
       ],
     );
     vi.mocked(host.agentTurn)
-      .mockImplementationOnce(async (_id, _text, _fl, _m, _p, onEvent) => {
+      .mockImplementationOnce(async (id, _text, _fl, model, _p, onEvent) => {
         const events: host.EventDto[] = [
           {
             kind: "turn_phase",
@@ -1616,6 +1666,15 @@ describe("LinkedChatRail", () => {
               code: "linked_synthesis_timeout",
               message:
                 "Answer synthesis reached its bounded deadline. The successful log evidence above is preserved.",
+            },
+          },
+          {
+            kind: "linked_synthesis_retry",
+            payload: {
+              available: true,
+              session_id: id,
+              corpus_id: "c1",
+              model,
             },
           },
           {

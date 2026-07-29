@@ -287,6 +287,7 @@ universal recommendations:
 | Results per source          |               8 default, sanitized to 1–50 | [`router.rs`](../../../crates/cd-core/src/router.rs)                          | Retriever result cap                                       |
 | Whole-turn deadline         | Adaptive: 300,000 ms local/private, 120,000 ms managed; explicit 500–600,000 ms | [`router.rs`](../../../crates/cd-core/src/router.rs) | Phase timeout or visible whole-turn timeout |
 | Phase deadlines             | Choosing, retrieval, and synthesis are each capped inside the one monotonic turn ceiling | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `TurnClock` | A phase cap never resets or extends the whole turn |
+| Provider readiness          | Same absolute turn deadline starts before health/readiness/backend construction | [`research.rs`](../../../crates/cd-core/src/research.rs) | Stop and explicit short deadlines remain authoritative during cold local/private startup |
 | Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
 | View selection identities   |                                         64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate                                |
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
@@ -321,6 +322,15 @@ setting; new installs default to adaptive.
 | Cancellation                            | Per-turn cancel race around every provider/tool await | Cancelled terminal state                                           | Start another turn or retry preserved synthesis   | Cancellation is immediate and session-specific |
 | Malicious retrieved instructions        | Untrusted wrapper and system policy           | Usually not surfaced as instructions                                  | Continue with data-only interpretation            | No permission elevation                  |
 | Citation mismatch                       | Host validation against structured identities | Reject/downgrade answer                                               | Correct synthesis retry                           | Rendered text cannot forge identity      |
+
+Retry evidence comes only from a dedicated, bounded current-turn buffer
+populated by successful governed tool results. Historical tool messages,
+including stale or cross-corpus messages, are never swept into synthesis.
+Single-owner session admission prevents another window from replacing the
+active turn's cancellation or checkpoint ownership. The host keeps checkpoints
+memory-only, applies TTL, entry-count, and total-byte caps with deterministic
+oldest-first eviction, clears them on chat lifecycle/context changes, and is
+the sole authority that may expose retry availability to the renderer.
 
 ## 9. Observability
 

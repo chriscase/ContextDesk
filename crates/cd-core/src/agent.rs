@@ -81,6 +81,10 @@ pub struct AgentOptions {
     pub deadline_ms: u64,
     /// Provider-aware phase plan. `None` keeps the legacy uniform test plan.
     pub deadline_plan: Option<TurnDeadlinePlan>,
+    /// Absolute monotonic start shared with provider/host setup.
+    pub turn_started_at: Option<Instant>,
+    /// A host setup path already emitted the turn prelude to its live sink.
+    pub turn_started_emitted: bool,
     /// Cap for source-query tools (search_kb limit).
     pub max_results_per_source: usize,
     /// Session id for events.
@@ -130,6 +134,59 @@ impl LinkedSynthesisCheckpoint {
     /// Corpus that owns this checkpoint.
     pub fn corpus_id(&self) -> &str {
         &self.corpus_id
+    }
+
+    /// Conservative in-memory size used by the host's non-serialized bounds.
+    pub fn retained_bytes(&self) -> usize {
+        self.session_id.len()
+            + self.corpus_id.len()
+            + self.model.as_ref().map_or(0, String::len)
+            + self.user_text.len()
+            + self.evidence.len()
+            + self
+                .identities
+                .iter()
+                .map(|identity| identity.source.len() + std::mem::size_of_val(identity))
+                .sum::<usize>()
+    }
+}
+
+const CURRENT_TURN_EVIDENCE_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Default)]
+struct CurrentTurnEvidence {
+    blocks: Vec<String>,
+    bytes: usize,
+}
+
+impl CurrentTurnEvidence {
+    fn push(&mut self, block: &str) {
+        if block.is_empty() || self.bytes >= CURRENT_TURN_EVIDENCE_BYTES {
+            return;
+        }
+        let separator = usize::from(!self.blocks.is_empty()) * 2;
+        let available = CURRENT_TURN_EVIDENCE_BYTES
+            .saturating_sub(self.bytes)
+            .saturating_sub(separator);
+        if available == 0 {
+            return;
+        }
+        let mut end = block.len().min(available);
+        while !block.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            return;
+        }
+        let Some(bounded) = block.get(..end) else {
+            return;
+        };
+        self.blocks.push(bounded.to_string());
+        self.bytes += end + separator;
+    }
+
+    fn render(&self) -> String {
+        self.blocks.join("\n\n")
     }
 }
 
@@ -647,6 +704,8 @@ impl Default for AgentOptions {
             max_rounds: b.max_tool_rounds,
             deadline_ms: b.deadline_ms,
             deadline_plan: None,
+            turn_started_at: None,
+            turn_started_emitted: false,
             max_results_per_source: b.max_results_per_source,
             session_id: "session".into(),
             model: None,
@@ -672,6 +731,8 @@ impl AgentOptions {
             max_rounds: b.max_tool_rounds,
             deadline_ms: b.deadline_ms,
             deadline_plan: None,
+            turn_started_at: None,
+            turn_started_emitted: false,
             max_results_per_source: b.max_results_per_source,
             session_id: session_id.into(),
             model,
@@ -839,10 +900,10 @@ struct TurnClock {
 }
 
 impl TurnClock {
-    fn new(plan: TurnDeadlinePlan) -> Self {
+    fn new(plan: TurnDeadlinePlan, started: Option<Instant>) -> Self {
         let now = Instant::now();
         Self {
-            started: now,
+            started: started.unwrap_or(now),
             phase_started: now,
             phase: AgentPhase::ChoosingEvidence,
             plan,
@@ -1026,7 +1087,7 @@ async fn run_linked_synthesis_retry(
     }
 
     let plan = opts.effective_deadline_plan();
-    let mut clock = TurnClock::new(plan);
+    let mut clock = TurnClock::new(plan, opts.turn_started_at);
     let mut trail = vec![
         format!(
             "budget:deadline={}ms,deadline_policy={}",
@@ -1261,10 +1322,15 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         events: Vec::new(),
         live,
     };
-    out.push(StreamEvent::TurnStarted {
+    let started = StreamEvent::TurnStarted {
         session_id: opts.session_id.clone(),
         model: opts.model.clone(),
-    });
+    };
+    if opts.turn_started_emitted {
+        out.events.push(started);
+    } else {
+        out.push(started);
+    }
     // ToolHost owns the per-session web limiter and session-context view.
     host.set_active_session_id(Some(opts.session_id.clone()));
 
@@ -1424,12 +1490,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             trail.push("linked_requested_workspace_surface:search_kb".into());
         }
     }
-    let mut clock = TurnClock::new(deadline_plan);
+    let mut clock = TurnClock::new(deadline_plan, opts.turn_started_at);
     let mut pending_web_citations = Vec::new();
     // UI notice for hard-budget compaction — once per user turn only.
     let mut compact_notice_sent = false;
     let mut successful_log_tools = 0usize;
     let mut linked_log_evidence_identities = HashSet::new();
+    let mut current_turn_evidence = CurrentTurnEvidence::default();
     let mut successful_read_tools = HashSet::new();
     let mut nudged_required_tools = HashSet::new();
     let mut linked_invalid_synthesis_retry = false;
@@ -1539,12 +1606,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     // plus bounded host-returned evidence. Small models can
                     // otherwise anchor on old function-call syntax or overlook
                     // an earlier result among paired protocol messages.
-                    let evidence = model_ctx
-                        .iter()
-                        .filter(|message| message.role == Role::Tool)
-                        .map(|message| message.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
+                    let evidence = current_turn_evidence.render();
                     model_ctx = vec![
                         ChatMessage {
                             role: Role::System,
@@ -2249,6 +2311,9 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             }
             if result.ok {
                 successful_read_tools.insert(resolved_tool_name.clone());
+                if linked_turn {
+                    current_turn_evidence.push(&result.detail_for_model);
+                }
             }
             let awaiting_permission = result
                 .events
@@ -2301,12 +2366,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 && required_workspace_ready
                 && !linked_log_evidence_identities.is_empty()
             {
-                let evidence = history
-                    .iter()
-                    .filter(|message| message.role == Role::Tool)
-                    .map(|message| message.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+                let evidence = current_turn_evidence.render();
                 if let (Some(context), Some(slot)) = (
                     opts.log_explorer_context.as_ref(),
                     checkpoint_out.as_deref_mut(),
@@ -4507,7 +4567,12 @@ mod tests {
         let backend = ToolThenNeverBackend {
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let mut history = Vec::new();
+        let mut history = vec![ChatMessage {
+            role: Role::Tool,
+            content: "STALE_CROSS_CORPUS_EVIDENCE seq=999 source=other.log".into(),
+            tool_call_id: Some("old-turn".into()),
+            tool_calls: None,
+        }];
         let mut checkpoint = None;
         let plan = TurnDeadlinePlan {
             total_ms: 100,
@@ -4557,6 +4622,11 @@ mod tests {
             ]
         );
         let checkpoint = checkpoint.expect("bounded evidence checkpoint");
+        assert!(
+            !checkpoint.evidence.contains("STALE_CROSS_CORPUS_EVIDENCE"),
+            "history tool messages must never enter a current-turn checkpoint"
+        );
+        assert!(checkpoint.evidence.contains("worker.log"));
 
         let retry = ScriptedBackend::new(vec![ChatCompletion {
             content: "Observed pool exhaustion at seq=0 source=worker.log.".into(),
@@ -4599,6 +4669,17 @@ mod tests {
             |event| matches!(event, StreamEvent::TextDelta { text } if text.contains("seq=0 source=worker.log"))
         ));
         assert!(retry_checkpoint.is_none());
+    }
+
+    #[test]
+    fn current_turn_evidence_buffer_is_utf8_safe_and_hard_bounded() {
+        let mut evidence = CurrentTurnEvidence::default();
+        evidence.push(&"é".repeat(CURRENT_TURN_EVIDENCE_BYTES));
+        evidence.push("must-not-extend-the-cap");
+        let rendered = evidence.render();
+        assert!(rendered.len() <= CURRENT_TURN_EVIDENCE_BYTES);
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+        assert!(!rendered.contains("must-not-extend-the-cap"));
     }
 
     #[tokio::test]
@@ -4662,13 +4743,16 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 trigger.store(true, Ordering::SeqCst);
             });
-            let mut clock = TurnClock::new(TurnDeadlinePlan {
-                total_ms: 1_000,
-                choosing_ms: 900,
-                retrieving_ms: 900,
-                synthesizing_ms: 900,
-                explicit: true,
-            });
+            let mut clock = TurnClock::new(
+                TurnDeadlinePlan {
+                    total_ms: 1_000,
+                    choosing_ms: 900,
+                    retrieving_ms: 900,
+                    synthesizing_ms: 900,
+                    explicit: true,
+                },
+                None,
+            );
             clock.enter(phase);
             let result =
                 within_turn_deadline(&clock, Some(flag.as_ref()), std::future::pending::<()>())
@@ -4679,13 +4763,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn phase_caps_never_extend_the_monotonic_whole_turn_deadline() {
-        let mut clock = TurnClock::new(TurnDeadlinePlan {
-            total_ms: 100,
-            choosing_ms: 90,
-            retrieving_ms: 90,
-            synthesizing_ms: 90,
-            explicit: true,
-        });
+        let mut clock = TurnClock::new(
+            TurnDeadlinePlan {
+                total_ms: 100,
+                choosing_ms: 90,
+                retrieving_ms: 90,
+                synthesizing_ms: 90,
+                explicit: true,
+            },
+            None,
+        );
         tokio::time::advance(Duration::from_millis(90)).await;
         clock.enter(AgentPhase::SynthesizingAnswer);
         let result =

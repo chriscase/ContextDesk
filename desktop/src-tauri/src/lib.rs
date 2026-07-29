@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -48,6 +48,119 @@ const S3_ACCESS_KEY_REF: &str = "s3/default/access_key";
 const S3_SECRET_KEY_REF: &str = "s3/default/secret_key";
 const S3_SESSION_TOKEN_REF: &str = "s3/default/session_token";
 const AGENT_HOST_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const LINKED_CHECKPOINT_TTL: Duration = Duration::from_secs(30 * 60);
+const LINKED_CHECKPOINT_ENTRY_CAP: usize = 16;
+const LINKED_CHECKPOINT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+struct StoredLinkedCheckpoint<T> {
+    checkpoint: T,
+    inserted_at: StdInstant,
+    sequence: u64,
+    bytes: usize,
+}
+
+struct LinkedCheckpointStore<T = cd_core::agent::LinkedSynthesisCheckpoint> {
+    entries: HashMap<String, StoredLinkedCheckpoint<T>>,
+    next_sequence: u64,
+    total_bytes: usize,
+}
+
+impl<T> Default for LinkedCheckpointStore<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_sequence: 0,
+            total_bytes: 0,
+        }
+    }
+}
+
+impl<T: Clone> LinkedCheckpointStore<T> {
+    fn purge_expired_at(&mut self, now: StdInstant) {
+        let expired = self
+            .entries
+            .iter()
+            .filter_map(|(session_id, stored)| {
+                (now.saturating_duration_since(stored.inserted_at) >= LINKED_CHECKPOINT_TTL)
+                    .then_some(session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for session_id in expired {
+            self.remove(&session_id);
+        }
+    }
+
+    fn insert_value_at(
+        &mut self,
+        session_id: String,
+        checkpoint: T,
+        bytes: usize,
+        now: StdInstant,
+    ) -> bool {
+        self.purge_expired_at(now);
+        self.remove(&session_id);
+        if bytes > LINKED_CHECKPOINT_TOTAL_BYTES {
+            return false;
+        }
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        let inserted_session_id = session_id.clone();
+        self.entries.insert(
+            session_id,
+            StoredLinkedCheckpoint {
+                checkpoint,
+                inserted_at: now,
+                sequence: self.next_sequence,
+                bytes,
+            },
+        );
+        while self.entries.len() > LINKED_CHECKPOINT_ENTRY_CAP
+            || self.total_bytes > LINKED_CHECKPOINT_TOTAL_BYTES
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(session_id, stored)| (stored.sequence, *session_id))
+                .map(|(session_id, _)| session_id.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+        self.entries.contains_key(&inserted_session_id)
+    }
+
+    fn get_value(&mut self, session_id: &str, now: StdInstant) -> Option<T> {
+        self.purge_expired_at(now);
+        self.entries
+            .get(session_id)
+            .map(|stored| stored.checkpoint.clone())
+    }
+
+    fn remove(&mut self, session_id: &str) -> bool {
+        let Some(stored) = self.entries.remove(session_id) else {
+            return false;
+        };
+        self.total_bytes = self.total_bytes.saturating_sub(stored.bytes);
+        true
+    }
+}
+
+impl LinkedCheckpointStore {
+    fn insert(
+        &mut self,
+        session_id: String,
+        checkpoint: cd_core::agent::LinkedSynthesisCheckpoint,
+    ) -> bool {
+        let bytes = checkpoint.retained_bytes();
+        self.insert_value_at(session_id, checkpoint, bytes, StdInstant::now())
+    }
+
+    fn get(&mut self, session_id: &str) -> Option<cd_core::agent::LinkedSynthesisCheckpoint> {
+        self.get_value(session_id, StdInstant::now())
+    }
+}
 
 #[derive(Default)]
 struct HostInitFlightState {
@@ -154,9 +267,13 @@ struct AppState {
     investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Owner generation for each admitted chat turn. A second window cannot
+    /// replace cancellation/checkpoint ownership for the same session.
+    active_turn_owners: Mutex<HashMap<String, u64>>,
+    next_turn_owner: std::sync::atomic::AtomicU64,
     /// Host-only bounded evidence retained for an explicit synthesis-only retry.
     /// Never serialized to config, sessions, logs, or webview IPC.
-    linked_synthesis_checkpoints: Mutex<HashMap<String, cd_core::agent::LinkedSynthesisCheckpoint>>,
+    linked_synthesis_checkpoints: Mutex<LinkedCheckpointStore>,
     /// At most one trusted workspace backup is active.
     backup_cancel: Mutex<Option<cd_core::object_store::ObjectCancellation>>,
     /// Debounced FS watcher for incremental index refresh (#116).
@@ -277,6 +394,8 @@ fn ensure_host_inner(state: &AppState) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostReadinessFailure {
     Timeout,
+    TurnDeadline,
+    Cancelled,
     Initialization,
     Worker,
 }
@@ -285,6 +404,8 @@ impl HostReadinessFailure {
     fn code(&self) -> &'static str {
         match self {
             Self::Timeout => "host_readiness_timeout",
+            Self::TurnDeadline => "budget_time",
+            Self::Cancelled => "cancel",
             Self::Initialization => "host_initialization_failed",
             Self::Worker => "host_initialization_worker_failed",
         }
@@ -296,6 +417,14 @@ impl HostReadinessFailure {
                 "Workspace tools are still starting. This turn stopped before contacting the \
                  provider. Check that ContextDesk can access the configured workspace, then retry."
             }
+            Self::TurnDeadline => {
+                "The whole-turn deadline expired while workspace tools were starting. No provider \
+                 request was allowed to continue beyond that deadline."
+            }
+            Self::Cancelled => {
+                "The turn was cancelled while workspace tools were starting. No provider request \
+                 was started."
+            }
             Self::Initialization => {
                 "Workspace tools could not start. This turn stopped before contacting the \
                  provider. Check the configured workspace and its permissions, then retry."
@@ -303,6 +432,47 @@ impl HostReadinessFailure {
             Self::Worker => {
                 "Workspace tools stopped unexpectedly while starting. This turn did not contact \
                  the provider. Retry, and check the application logs if the problem continues."
+            }
+        }
+    }
+}
+
+async fn wait_for_atomic_cancel(cancel: &std::sync::atomic::AtomicBool) {
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_host_readiness_for_turn<F>(
+    timeout: Duration,
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    initialize: F,
+) -> Result<(), HostReadinessFailure>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let remaining = if plan.total_ms == 0 {
+        timeout
+    } else {
+        Duration::from_millis(plan.total_ms)
+            .checked_sub(started.elapsed())
+            .ok_or(HostReadinessFailure::TurnDeadline)?
+            .min(timeout)
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_atomic_cancel(cancel) => Err(HostReadinessFailure::Cancelled),
+        result = wait_for_host_readiness(remaining, initialize) => {
+            match result {
+                Err(HostReadinessFailure::Timeout)
+                    if plan.total_ms > 0
+                        && started.elapsed() >= Duration::from_millis(plan.total_ms) =>
+                {
+                    Err(HostReadinessFailure::TurnDeadline)
+                }
+                other => other,
             }
         }
     }
@@ -3289,6 +3459,77 @@ fn event_to_dto_with_linked_corpus(
     dto
 }
 
+struct AdmittedAgentTurn<'a> {
+    owners: &'a Mutex<HashMap<String, u64>>,
+    cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: String,
+    owner: u64,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for AdmittedAgentTurn<'_> {
+    fn drop(&mut self) {
+        finish_agent_turn(self.owners, self.cancels, &self.session_id, self.owner);
+    }
+}
+
+fn admit_agent_turn<'a>(
+    owners: &'a Mutex<HashMap<String, u64>>,
+    cancels: &'a Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    next_owner: &std::sync::atomic::AtomicU64,
+    session_id: &str,
+) -> Result<AdmittedAgentTurn<'a>, ()> {
+    let mut owner_map = owners.lock().expect("active turn owners");
+    if owner_map.contains_key(session_id) {
+        return Err(());
+    }
+    let owner = next_owner
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .saturating_add(1);
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    owner_map.insert(session_id.to_string(), owner);
+    cancels
+        .lock()
+        .expect("cancels")
+        .insert(session_id.to_string(), cancel.clone());
+    Ok(AdmittedAgentTurn {
+        owners,
+        cancels,
+        session_id: session_id.to_string(),
+        owner,
+        cancel,
+    })
+}
+
+fn finish_agent_turn(
+    owners: &Mutex<HashMap<String, u64>>,
+    cancels: &Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: &str,
+    owner: u64,
+) -> bool {
+    let mut owners = owners.lock().expect("active turn owners");
+    if owners.get(session_id).copied() != Some(owner) {
+        return false;
+    }
+    owners.remove(session_id);
+    cancels.lock().expect("cancels").remove(session_id);
+    true
+}
+
+fn linked_retry_event(
+    available: bool,
+    session_id: &str,
+    corpus_id: &str,
+    model: Option<String>,
+) -> cd_core::events::StreamEvent {
+    cd_core::events::StreamEvent::LinkedSynthesisRetry {
+        available,
+        session_id: session_id.to_string(),
+        corpus_id: corpus_id.to_string(),
+        model,
+    }
+}
+
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
@@ -3363,6 +3604,37 @@ async fn agent_turn(
         .api_key_ref
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
+    let admitted_turn = match admit_agent_turn(
+        &state.active_turn_owners,
+        &state.cancels,
+        &state.next_turn_owner,
+        &req.session_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(()) => {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "turn_in_progress".into(),
+                    message: "This chat already has an active turn in another window. Stop or \
+                              wait for that turn before sending again."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "turn_in_progress".into(),
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+    };
+    let cancel = admitted_turn.cancel.clone();
+    let turn_started_at = tokio::time::Instant::now();
+    let deadline_plan = cd_core::router::TurnDeadlinePlan::for_profile(&cfg.router, &profile);
 
     // Resolve the linked corpus only from the durable session. Explorer may
     // contribute a bounded viewport brief, but neither the model nor an
@@ -3380,7 +3652,6 @@ async fn agent_turn(
             .lock()
             .expect("linked synthesis checkpoints")
             .get(&req.session_id)
-            .cloned()
     } else {
         state
             .linked_synthesis_checkpoints
@@ -3459,6 +3730,7 @@ async fn agent_turn(
     // Linked log turns never join optional workspace/memory initialization.
     // They take an already-published full host when immediately available and
     // otherwise use an independent turn-local read-only log host.
+    let mut turn_prelude_emitted = false;
     let (mut host, using_fallback_host, borrowed_host_generation) =
         if let Some(context) = log_explorer_context.as_ref() {
             match take_ready_linked_host(&state.host, &state.host_generation, || {
@@ -3480,11 +3752,29 @@ async fn agent_turn(
                 }
             }
         } else {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::TurnPhase {
+                    phase: cd_core::router::AgentPhase::ChoosingEvidence,
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            turn_prelude_emitted = true;
             let app = window.app_handle().clone();
-            if let Err(failure) = wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT, move || {
-                let state = app.state::<AppState>();
-                ensure_host(&state)
-            })
+            if let Err(failure) = wait_for_host_readiness_for_turn(
+                AGENT_HOST_READY_TIMEOUT,
+                turn_started_at,
+                deadline_plan,
+                cancel.as_ref(),
+                move || {
+                    let state = app.state::<AppState>();
+                    ensure_host(&state)
+                },
+            )
             .await
             {
                 for event in host_readiness_terminal_events(&failure) {
@@ -3507,13 +3797,6 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.entry(req.session_id.clone()).or_default().clone()
     };
-
-    // Fresh cancel flag for this turn (#109).
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.insert(req.session_id.clone(), cancel.clone());
-    }
 
     let channel = on_event;
     let linked_citation_corpus = log_explorer_context
@@ -3572,21 +3855,32 @@ async fn agent_turn(
             log_explorer_context,
             linked_synthesis_retry,
             Some(&mut next_synthesis_checkpoint),
+            Some(turn_started_at),
+            turn_prelude_emitted,
             Some(&mut sink),
         )
         .await
         .map_err(|e| e.to_string())
     };
-    {
+    let retry_available = {
         let mut checkpoints = state
             .linked_synthesis_checkpoints
             .lock()
             .expect("linked synthesis checkpoints");
         if let Some(checkpoint) = next_synthesis_checkpoint {
-            checkpoints.insert(req.session_id.clone(), checkpoint);
+            checkpoints.insert(req.session_id.clone(), checkpoint)
         } else {
             checkpoints.remove(&req.session_id);
+            false
         }
+    };
+    if let Some(corpus_id) = linked_citation_corpus.as_deref() {
+        sink(linked_retry_event(
+            retry_available,
+            &req.session_id,
+            corpus_id,
+            Some(profile.chat_model.clone()),
+        ));
     }
     if !using_fallback_host {
         host.set_log_corpus_scope(previous_log_scope);
@@ -3660,10 +3954,6 @@ async fn agent_turn(
         }
     }
 
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.remove(&req.session_id);
-    }
     {
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(req.session_id.clone(), history);
@@ -3777,6 +4067,11 @@ fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session,
         .map_err(|e| e.to_string())?;
     let mut histories = state.histories.lock().expect("hist");
     histories.remove(&id);
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(session)
 }
 
@@ -3809,6 +4104,11 @@ fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), Str
         .map_err(|e| e.to_string())?;
     let mut histories = state.histories.lock().expect("hist");
     histories.remove(&id);
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(())
 }
 
@@ -3850,6 +4150,11 @@ fn archive_chat_session(
     }
     session.touch();
     store.save(&session).map_err(|e| e.to_string())?;
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&id);
     Ok(session)
 }
 
@@ -6641,14 +6946,20 @@ fn set_chat_linked_corpus(
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let cache = log_cache_dir(&state)?;
-    set_chat_linked_corpus_at(
+    let session = set_chat_linked_corpus_at(
         &store,
         &cache,
         &session_id,
         corpus_id,
         draft_session,
         expected_updated_at,
-    )
+    )?;
+    state
+        .linked_synthesis_checkpoints
+        .lock()
+        .expect("linked synthesis checkpoints")
+        .remove(&session_id);
+    Ok(session)
 }
 
 /// Build the SPA URL for a Log Explorer window.
@@ -7535,7 +7846,9 @@ pub fn run() {
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
-        linked_synthesis_checkpoints: Mutex::new(HashMap::new()),
+        active_turn_owners: Mutex::new(HashMap::new()),
+        next_turn_owner: std::sync::atomic::AtomicU64::new(0),
+        linked_synthesis_checkpoints: Mutex::new(LinkedCheckpointStore::default()),
         backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
         index_status: Arc::new(Mutex::new(cd_core::index::IndexStatus {
@@ -8281,13 +8594,15 @@ mod demo_log_host_tests {
 #[cfg(test)]
 mod startup_host_tests {
     use super::{
-        build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
-        event_to_dto_with_linked_corpus, host_readiness_terminal_events,
-        install_prepared_durable_memory, linked_log_fallback_notice,
-        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
-        normalize_log_corpus_id, restore_host_if_generation_matches, save_chat_session_at,
-        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
-        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
+        admit_agent_turn, build_and_install_background_index,
+        desktop_log_ingest_embed_plan_nonblocking, event_to_dto_with_linked_corpus,
+        finish_agent_turn, host_readiness_terminal_events, install_prepared_durable_memory,
+        linked_log_fallback_notice, linked_log_host_terminal_events, linked_log_preflight_at,
+        log_search_cancel_key, normalize_log_corpus_id, restore_host_if_generation_matches,
+        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
+        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
+        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, StdInstant,
+        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -8304,6 +8619,73 @@ mod startup_host_tests {
             .as_str()
             .expect("revision string")
             .to_string()
+    }
+
+    #[test]
+    fn two_windows_cannot_replace_same_session_turn_or_its_cancel_target() {
+        let owners = Mutex::new(std::collections::HashMap::new());
+        let cancels = Mutex::new(std::collections::HashMap::new());
+        let next_owner = AtomicU64::new(0);
+
+        let first_window =
+            admit_agent_turn(&owners, &cancels, &next_owner, "shared-chat").expect("first admit");
+        let first_cancel = first_window.cancel.clone();
+        assert!(
+            admit_agent_turn(&owners, &cancels, &next_owner, "shared-chat").is_err(),
+            "a second window must be rejected before replacing ownership"
+        );
+        cancels
+            .lock()
+            .unwrap()
+            .get("shared-chat")
+            .unwrap()
+            .store(true, Ordering::SeqCst);
+        assert!(first_cancel.load(Ordering::SeqCst));
+        assert!(
+            !finish_agent_turn(&owners, &cancels, "shared-chat", first_window.owner + 1),
+            "stale completion must not remove the admitted owner"
+        );
+        assert!(owners.lock().unwrap().contains_key("shared-chat"));
+        drop(first_window);
+        assert!(!owners.lock().unwrap().contains_key("shared-chat"));
+        assert!(!cancels.lock().unwrap().contains_key("shared-chat"));
+    }
+
+    #[test]
+    fn linked_checkpoint_store_expires_and_evicts_deterministically() {
+        let now = StdInstant::now();
+        let mut by_count = LinkedCheckpointStore::<String>::default();
+        for index in 0..=LINKED_CHECKPOINT_ENTRY_CAP {
+            assert!(by_count.insert_value_at(
+                format!("session-{index:02}"),
+                format!("checkpoint-{index}"),
+                1,
+                now,
+            ));
+        }
+        assert!(by_count.get_value("session-00", now).is_none());
+        assert_eq!(by_count.entries.len(), LINKED_CHECKPOINT_ENTRY_CAP);
+        assert_eq!(
+            by_count.get_value("session-16", now).as_deref(),
+            Some("checkpoint-16")
+        );
+
+        let mut by_bytes = LinkedCheckpointStore::<String>::default();
+        let majority = LINKED_CHECKPOINT_TOTAL_BYTES / 2 + 1;
+        assert!(by_bytes.insert_value_at("older".into(), "a".into(), majority, now));
+        assert!(by_bytes.insert_value_at("newer".into(), "b".into(), majority, now));
+        assert!(by_bytes.get_value("older", now).is_none());
+        assert_eq!(by_bytes.get_value("newer", now).as_deref(), Some("b"));
+        assert!(!by_bytes.insert_value_at(
+            "oversized".into(),
+            "c".into(),
+            LINKED_CHECKPOINT_TOTAL_BYTES + 1,
+            now,
+        ));
+
+        let expired_at = now + LINKED_CHECKPOINT_TTL;
+        assert!(by_bytes.get_value("newer", expired_at).is_none());
+        assert_eq!(by_bytes.total_bytes, 0);
     }
 
     #[test]
