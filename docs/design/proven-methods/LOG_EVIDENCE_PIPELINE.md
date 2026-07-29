@@ -318,7 +318,16 @@ WildFly, an explicit `Z` or numeric offset becomes a whole-second instant while
 an offsetless local timestamp remains order-only and is exposed transiently as
 unresolved source-local evidence for the future #670 policy.
 
-The last two points are limitations, not a complete timestamp system. A
+The #752 parser slice also recognizes the strict content shape
+`YYYY-MM-DDTHH:mm,SSS ZONE. LEVEL: message`. It extracts severity and payload
+but deliberately leaves the complete timestamp token unresolved and
+order-only. The producer grammar has not established whether the comma field
+means seconds, milliseconds, or another unit, and abbreviations such as `CET`
+are not resolved through the workstation locale. A future declarative source
+profile (#751) may define those semantics; #670 must then retain the selected
+rule/version and original evidence.
+
+The preceding parser slices are limitations, not a complete timestamp system. A
 reimplementation should design the richer #670 contract before writing data:
 original timestamp evidence, precision, explicit time basis, timezone rule
 identity, ambiguity state, and non-destructive skew overlays.
@@ -624,6 +633,7 @@ instant while ambiguous controls remain order-only.
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
 | JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
 | Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized | Persisted local-calendar provenance and per-source timezone rule (#670) |
+| Incomplete time + zone abbreviation | **Partial**              | Strict shape, level, payload, and unresolved source token are preserved | Comma-field semantics and abbreviation mapping require a versioned source profile (#751/#670) |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |

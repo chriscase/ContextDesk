@@ -54,6 +54,9 @@ pub fn detect_format(sample: &str, path: Option<&Path>) -> LogFormat {
     {
         return LogFormat::Json;
     }
+    if looks_like_zone_abbreviated_incomplete_time(t) {
+        return LogFormat::Syslog;
+    }
     if looks_like_elasticsearch(t) {
         return LogFormat::Syslog;
     }
@@ -122,6 +125,10 @@ fn looks_like_elasticsearch(t: &str) -> bool {
     parse_elasticsearch_parts(t).is_some()
 }
 
+fn looks_like_zone_abbreviated_incomplete_time(t: &str) -> bool {
+    parse_zone_abbreviated_incomplete_parts(t).is_some()
+}
+
 /// Parse one line with a known (or auto-detected) format.
 ///
 /// `ingest_seq` is used as synthetic timestamp when none is found.
@@ -129,6 +136,9 @@ pub fn parse_line(raw: &str, format: Option<LogFormat>, ingest_seq: u64) -> Pars
     // File-level detection is only a hint. A banner or continuation can precede
     // a structured application-server record, so recognize strict content
     // shapes regardless of the file's initial hint.
+    if let Some(parsed) = parse_zone_abbreviated_incomplete_time(raw, ingest_seq) {
+        return parsed;
+    }
     if let Some(parsed) = parse_elasticsearch(raw, ingest_seq) {
         return parsed;
     }
@@ -419,6 +429,85 @@ enum WildflyTimestamp {
     Wall(i64),
     /// A valid source-local calendar timestamp without a timezone.
     Local,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZoneAbbreviatedIncompleteParts<'a> {
+    source_timestamp: &'a str,
+    level: &'a str,
+    payload: &'a str,
+}
+
+/// Recognize an application record shaped like:
+///
+/// `YYYY-MM-DDTHH:mm,SSS ZONE. LEVEL: message`
+///
+/// This is deliberately structure-only parsing. The producer grammar has not
+/// established whether the comma field denotes seconds, milliseconds, or
+/// something else, and timezone abbreviations are not unique offsets. The
+/// complete timestamp token is therefore retained as unresolved provenance and
+/// never converted to a wall-clock instant.
+fn parse_zone_abbreviated_incomplete_parts(
+    raw: &str,
+) -> Option<ZoneAbbreviatedIncompleteParts<'_>> {
+    const LOCAL_PREFIX_BYTES: usize = 20;
+    let local = raw.get(..LOCAL_PREFIX_BYTES)?;
+    let bytes = local.as_bytes();
+    if bytes.len() != LOCAL_PREFIX_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b','
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    chrono::NaiveDate::parse_from_str(local.get(..10)?, "%Y-%m-%d").ok()?;
+    let hour = local.get(11..13)?.parse::<u8>().ok()?;
+    let minute = local.get(14..16)?.parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+
+    let rest = raw.get(LOCAL_PREFIX_BYTES..)?.strip_prefix(' ')?;
+    let zone_end = rest.find(". ")?;
+    let zone = rest.get(..zone_end)?;
+    if !(2..=8).contains(&zone.len()) || !zone.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let source_timestamp_end = LOCAL_PREFIX_BYTES + 1 + zone.len();
+    let source_timestamp = raw.get(..source_timestamp_end)?;
+    let body = rest.get(zone_end + 2..)?;
+    let (level, payload) = body.split_once(": ")?;
+    if !is_wildfly_level(level) || payload.is_empty() {
+        return None;
+    }
+
+    Some(ZoneAbbreviatedIncompleteParts {
+        source_timestamp,
+        level,
+        payload,
+    })
+}
+
+fn parse_zone_abbreviated_incomplete_time(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_zone_abbreviated_incomplete_parts(raw.trim())?;
+    Some(ParsedLine {
+        ts: Some(ingest_seq as i64),
+        unresolved_local_timestamp: Some(parts.source_timestamp.to_string()),
+        level: normalize_level(parts.level),
+        service: None,
+        host: None,
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -975,6 +1064,65 @@ mod tests {
         assert_eq!(detect_format(line, None), LogFormat::Syslog);
         let p = parse_line(line, Some(LogFormat::Syslog), 1);
         assert!(!p.message.is_empty());
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_auto_detects_but_stays_order_only() {
+        let line = "2026-07-29T14:05,321 CET. INFO: synthetic scheduler initialized";
+        assert_eq!(detect_format(line, None), LogFormat::Syslog);
+
+        let parsed = parse_line(line, Some(LogFormat::Plain), 61);
+        assert_eq!(parsed.format, LogFormat::Syslog);
+        assert_eq!(parsed.ts, Some(61));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29T14:05,321 CET")
+        );
+        assert_eq!(parsed.level, "info");
+        assert_eq!(parsed.message, "synthetic scheduler initialized");
+        assert_eq!(parsed.raw, line);
+        assert_eq!(parsed.service, None);
+        assert_eq!(parsed.host, None);
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_does_not_interpret_comma_or_zone() {
+        let line = "2026-07-29T23:59,059 CEST. ERROR: synthetic request rejected";
+        let parsed = parse_line(line, None, 62);
+
+        assert_eq!(parsed.ts, Some(62));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29T23:59,059 CEST")
+        );
+        assert_eq!(parsed.level, "error");
+        assert_eq!(parsed.message, "synthetic request rejected");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn zone_abbreviated_incomplete_time_near_matches_remain_whole() {
+        let lines = [
+            "2026-13-29T14:05,321 CET. INFO: impossible date",
+            "2026-07-29T24:05,321 CET. INFO: impossible hour",
+            "2026-07-29T14:60,321 CET. INFO: impossible minute",
+            "2026-07-29T14:05:06,321 CET. INFO: seconds unexpectedly present",
+            "2026-07-29T14:05,321 cet. INFO: lowercase zone is ambiguous",
+            "2026-07-29T14:05,321 CET INFO: missing record delimiter",
+            "2026-07-29T14:05,321 CET. NOTICE: unsupported severity",
+            "INFO: payload mentions 2026-07-29T14:05,321 CET.",
+            "\tat org.example.Worker.run(Worker.java:42)",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let ingest_seq = 970 + index as u64;
+            let parsed = parse_line(line, Some(LogFormat::Plain), ingest_seq);
+            assert_eq!(parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.message, line, "line={line}");
+            assert_eq!(parsed.raw, line, "line={line}");
+        }
     }
 
     #[test]
