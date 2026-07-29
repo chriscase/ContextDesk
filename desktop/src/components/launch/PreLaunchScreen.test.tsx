@@ -267,6 +267,42 @@ describe("optional first-run demo corpus (#732)", () => {
     expect(document.activeElement).toBe(retry);
   });
 
+  it("keeps cancellation failure visible while installation continues", async () => {
+    hostMocks.install.mockReturnValue(new Promise<DemoLogInstallDto>(() => {}));
+    hostMocks.cancel.mockResolvedValueOnce(false);
+    renderReady();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Install demo log corpus/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Install demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Cancellation could not be requested");
+    expect(alert.textContent).toContain("installation is still running");
+    expect(
+      (screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it("does not expose host cancellation errors in the launch UI", async () => {
+    hostMocks.install.mockReturnValue(new Promise<DemoLogInstallDto>(() => {}));
+    hostMocks.cancel.mockRejectedValueOnce(
+      new Error("private /Users/example path"),
+    );
+    renderReady();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Install demo log corpus/ }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Install demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Cancellation could not be requested");
+    expect(alert.textContent).not.toContain("/Users/example");
+  });
+
   it("handles the idempotent already-installed result and routes Enter to Logs", async () => {
     hostMocks.install.mockResolvedValue(installed("already_installed"));
     const { onEnterApp } = renderReady();

@@ -79,6 +79,7 @@ export function PreLaunchScreen({
   const [demoOptIn, setDemoOptIn] = useState(false);
   const [demoInstalling, setDemoInstalling] = useState(false);
   const [demoCancelling, setDemoCancelling] = useState(false);
+  const [demoCancelError, setDemoCancelError] = useState<string | null>(null);
   const [demoProgress, setDemoProgress] =
     useState<ProcessProgressDto | null>(null);
   const [demoResult, setDemoResult] = useState<DemoLogInstallDto | null>(null);
@@ -191,6 +192,7 @@ export function PreLaunchScreen({
   const installDemo = async () => {
     setDemoInstalling(true);
     setDemoCancelling(false);
+    setDemoCancelError(null);
     setDemoResult(null);
     setDemoProgress({
       kind: "log_ingest",
@@ -220,16 +222,26 @@ export function PreLaunchScreen({
     setDemoResult(result);
     setDemoInstalling(false);
     setDemoCancelling(false);
+    setDemoCancelError(null);
   };
 
   const cancelDemoInstall = async () => {
     if (!demoInstalling || demoCancelling) return;
     setDemoCancelling(true);
+    setDemoCancelError(null);
     try {
       const accepted = await hostCancelLogIngest();
-      if (!accepted) setDemoCancelling(false);
+      if (!accepted) {
+        setDemoCancelling(false);
+        setDemoCancelError(
+          "Cancellation could not be requested. The installation is still running; try again.",
+        );
+      }
     } catch {
       setDemoCancelling(false);
+      setDemoCancelError(
+        "Cancellation could not be requested. The installation is still running; try again.",
+      );
     }
   };
 
@@ -536,6 +548,14 @@ export function PreLaunchScreen({
                       >
                         {demoCancelling ? "Cancelling…" : "Cancel"}
                       </button>
+                      {demoCancelError ? (
+                        <span
+                          className="launch-demo__cancel-error"
+                          role="alert"
+                        >
+                          {demoCancelError}
+                        </span>
+                      ) : null}
                     </div>
                   ) : null}
                   {demoResult ? (

@@ -447,6 +447,13 @@
   justify-self: end;
 }
 
+.launch-demo__cancel-error {
+  grid-column: 1 / -1;
+  color: #ff9b9b;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .launch-demo__result {
   display: flex;
   align-items: center;
