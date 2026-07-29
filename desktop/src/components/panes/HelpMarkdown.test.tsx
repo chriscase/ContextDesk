@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   HelpMarkdown,
@@ -80,5 +80,51 @@ describe("HelpMarkdown trusted static renderer (#438)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "help://permission-tiers" }));
     expect(onOpenHelp).toHaveBeenCalledWith("permission-tiers", undefined);
+  });
+
+  it("keeps clipboard denial visible and lets the user retry a fenced block", async () => {
+    const writeText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("denied"))
+      .mockResolvedValueOnce(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <HelpMarkdown
+        body={"```sh\nprintf 'safe command'\n```"}
+        toc={[]}
+        assets={[]}
+        assetUrls={{}}
+        onOpenHelp={vi.fn()}
+        titleRef={createRef<HTMLHeadingElement>()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy sh block" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: "Copy sh block failed; retry",
+        }),
+      ).toBeTruthy(),
+    );
+    expect(screen.getByRole("status").textContent).toBe(
+      "Could not copy sh block",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Copy sh block failed; retry",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Copied sh block" }),
+      ).toBeTruthy(),
+    );
+    expect(writeText).toHaveBeenLastCalledWith("printf 'safe command'");
   });
 });

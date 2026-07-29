@@ -2,6 +2,7 @@ import {
   Fragment,
   type ReactNode,
   type RefObject,
+  useState,
 } from "react";
 import type {
   HelpAssetRefDto,
@@ -20,6 +21,67 @@ type Props = {
 
 const INLINE_TOKEN =
   /(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*|\[[^\]\n]+\]\(help:\/\/[^)\s]+\)|help:\/\/[a-z0-9-]+(?:#[a-z0-9-]+)?)/g;
+
+function HelpCodeBlock({
+  language,
+  source,
+}: {
+  language: string;
+  source: string;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
+    "idle",
+  );
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopyState("copied");
+      window.setTimeout(() => setCopyState("idle"), 1_400);
+    } catch {
+      setCopyState("error");
+    }
+  };
+
+  const languageLabel = language || "text";
+  const result =
+    copyState === "copied"
+      ? `${languageLabel} block copied to clipboard`
+      : copyState === "error"
+        ? `Could not copy ${languageLabel} block`
+        : "";
+
+  return (
+    <div className="help-code">
+      <div className="help-code__toolbar">
+        <span>{languageLabel}</span>
+        <button
+          type="button"
+          aria-label={
+            copyState === "copied"
+              ? `Copied ${languageLabel} block`
+              : copyState === "error"
+                ? `Copy ${languageLabel} block failed; retry`
+                : `Copy ${languageLabel} block`
+          }
+          onClick={() => void copy()}
+        >
+          {copyState === "copied"
+            ? "Copied"
+            : copyState === "error"
+              ? "Copy failed"
+              : "Copy"}
+        </button>
+      </div>
+      <span className="help-code__status" role="status" aria-live="polite">
+        {result}
+      </span>
+      <pre tabIndex={0}>
+        <code>{source}</code>
+      </pre>
+    </div>
+  );
+}
 
 function inlineNodes(
   text: string,
@@ -115,6 +177,30 @@ export function HelpMarkdown({
     const line = lines[lineIndex] ?? "";
     if (!line.trim()) {
       lineIndex += 1;
+      continue;
+    }
+
+    const codeFence = line.trim().match(/^```([A-Za-z0-9_+-]*)\s*$/);
+    if (codeFence) {
+      const language = codeFence[1] ?? "";
+      const code: string[] = [];
+      lineIndex += 1;
+      while (
+        lineIndex < lines.length &&
+        lines[lineIndex].trim() !== "```"
+      ) {
+        code.push(lines[lineIndex]);
+        lineIndex += 1;
+      }
+      if (lineIndex < lines.length) lineIndex += 1;
+      blocks.push(
+        <HelpCodeBlock
+          key={`code-${blockIndex}`}
+          language={language}
+          source={code.join("\n")}
+        />,
+      );
+      blockIndex += 1;
       continue;
     }
 
@@ -294,6 +380,7 @@ export function HelpMarkdown({
       !/^(#{1,3})\s+/.test(lines[lineIndex]) &&
       !/^!\[[^\]]+\]\([^)]+\)$/.test(lines[lineIndex].trim()) &&
       !/^>\s?/.test(lines[lineIndex]) &&
+      !/^```/.test(lines[lineIndex].trim()) &&
       !/^[-*+]\s+/.test(lines[lineIndex]) &&
       !/^\d+[.)]\s+/.test(lines[lineIndex]) &&
       !(
