@@ -26,7 +26,7 @@ use cd_core::providers::{
 use cd_core::research::{events_to_dto, grant_and_execute, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
-    SessionSearchHit, SessionStore,
+    SessionSearchHit, SessionStore, StoredMessage,
 };
 use cd_core::ssrf::{validate_provider_url, SsrfPolicy};
 use cd_core::tool_host::ToolHost;
@@ -2933,9 +2933,15 @@ struct AgentTurnReq {
     /// Reuse the exact host-retained evidence from this chat's prior synthesis timeout.
     #[serde(default)]
     retry_synthesis_only: bool,
+    /// Client-created transcript identities used by the trusted host when a
+    /// turn terminates before the ordinary agent persistence path starts.
+    #[serde(default)]
+    client_user_message_id: Option<String>,
+    #[serde(default)]
+    client_assistant_message_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct LogExplorerTurnContextReq {
     corpus_id: String,
     brief: String,
@@ -3581,6 +3587,12 @@ struct AdmittedAgentTurn<'a> {
     cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
+const CHAT_TURN_CANCEL_PREFIX: &str = "chat_turn:";
+
+fn chat_turn_cancel_key(session_id: &str) -> String {
+    format!("{CHAT_TURN_CANCEL_PREFIX}{session_id}")
+}
+
 impl Drop for AdmittedAgentTurn<'_> {
     fn drop(&mut self) {
         finish_agent_turn(self.owners, self.cancels, &self.session_id, self.owner);
@@ -3605,7 +3617,7 @@ fn admit_agent_turn<'a>(
     cancels
         .lock()
         .expect("cancels")
-        .insert(session_id.to_string(), cancel.clone());
+        .insert(chat_turn_cancel_key(session_id), cancel.clone());
     Ok(AdmittedAgentTurn {
         owners,
         cancels,
@@ -3626,7 +3638,22 @@ fn finish_agent_turn(
         return false;
     }
     owners.remove(session_id);
-    cancels.lock().expect("cancels").remove(session_id);
+    cancels
+        .lock()
+        .expect("cancels")
+        .remove(&chat_turn_cancel_key(session_id));
+    true
+}
+
+fn request_agent_turn_cancel(
+    cancels: &Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    session_id: &str,
+) -> bool {
+    let cancels = cancels.lock().expect("cancels");
+    let Some(flag) = cancels.get(&chat_turn_cancel_key(session_id)) else {
+        return false;
+    };
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
     true
 }
 
@@ -3644,6 +3671,195 @@ fn linked_retry_event(
         provider_profile_id,
         model_id,
     }
+}
+
+fn terminal_message_id(candidate: Option<&str>) -> String {
+    static NEXT_HOST_TERMINAL_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    candidate
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "host-terminal-{}-{}",
+                chrono_like(),
+                NEXT_HOST_TERMINAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        })
+}
+
+fn persist_host_terminal_turn_at(
+    store: &SessionStore,
+    session_id: &str,
+    user_text: &str,
+    client_user_message_id: Option<&str>,
+    client_assistant_message_id: Option<&str>,
+    events: &[cd_core::events::StreamEvent],
+    provider: (Option<&str>, Option<&str>, Option<&str>),
+) -> Result<Session, String> {
+    let (provider_profile_id, provider_label, model_id) = provider;
+    let mut session = store
+        .load(session_id)
+        .map_err(|error| format!("chat session is unavailable or corrupt: {error}"))?;
+    let assistant_id = terminal_message_id(client_assistant_message_id);
+    if session
+        .messages
+        .iter()
+        .any(|message| message.id == assistant_id)
+    {
+        return Ok(session);
+    }
+
+    let user_text = user_text.trim();
+    if !user_text.is_empty() {
+        let user_id = terminal_message_id(client_user_message_id);
+        if !session.messages.iter().any(|message| message.id == user_id) {
+            session.messages.push(StoredMessage {
+                id: user_id,
+                role: "user".into(),
+                content: user_text.to_string(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: Some(serde_json::json!({
+                    "host_persisted_terminal": true
+                })),
+            });
+        }
+    }
+
+    let errors = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::Error { code, message } => {
+                Some((code.as_str(), message.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let reason = events.iter().find_map(|event| match event {
+        cd_core::events::StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
+        _ => None,
+    });
+    let content = if errors.is_empty() {
+        format!(
+            "**Stopped:** This turn ended before provider work completed{}.",
+            reason
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        )
+    } else {
+        errors
+            .iter()
+            .map(|(_, message)| format!("**Error:** {message}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let trail = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::SearchTrail { steps } => Some(steps.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let error_codes = errors.iter().map(|(code, _)| *code).collect::<Vec<_>>();
+    session.messages.push(StoredMessage {
+        id: assistant_id.clone(),
+        role: "assistant".into(),
+        content,
+        tools: None,
+        citations: None,
+        trail: (!trail.is_empty()).then_some(trail),
+        meta: Some(serde_json::json!({
+            "model": model_id,
+            "provider_label": provider_label,
+            "provider_id": provider_profile_id,
+            "host_confirmed": true,
+            "host_persisted_terminal": true,
+            "terminal": {
+                "reason": reason,
+                "error_codes": error_codes
+            }
+        })),
+    });
+    session.last_read_message_id = Some(assistant_id);
+    session.maybe_auto_title_from_first_user();
+    session.touch();
+    store.save(&session).map_err(|error| error.to_string())?;
+    Ok(session)
+}
+
+fn persist_host_terminal_turn(
+    state: &AppState,
+    req: &AgentTurnReq,
+    events: &[cd_core::events::StreamEvent],
+    provider_profile_id: Option<&str>,
+    provider_label: Option<&str>,
+    model_id: Option<&str>,
+) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+    let store = session_store(state)?;
+    persist_host_terminal_turn_at(
+        &store,
+        &req.session_id,
+        &req.text,
+        req.client_user_message_id.as_deref(),
+        req.client_assistant_message_id.as_deref(),
+        events,
+        (provider_profile_id, provider_label, model_id),
+    )
+}
+
+fn persist_and_emit_host_terminal(
+    state: &AppState,
+    req: &AgentTurnReq,
+    events: &[cd_core::events::StreamEvent],
+    provider_profile_id: Option<&str>,
+    provider_label: Option<&str>,
+    model_id: Option<&str>,
+    on_event: &tauri::ipc::Channel<EventDto>,
+) -> Result<(), String> {
+    persist_host_terminal_turn(
+        state,
+        req,
+        events,
+        provider_profile_id,
+        provider_label,
+        model_id,
+    )?;
+    for event in events {
+        let _ = on_event.send(cd_core::research::event_to_dto(event));
+    }
+    Ok(())
+}
+
+fn provider_profile_for_turn(
+    config: &AppConfig,
+    explicit_profile_id: Option<&str>,
+) -> Result<ProviderProfile, String> {
+    let explicit_profile_id = explicit_profile_id
+        .map(str::trim)
+        .filter(|profile_id| !profile_id.is_empty());
+    if let Some(profile_id) = explicit_profile_id {
+        return config
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            .ok_or_else(|| profile_id.to_string());
+    }
+    Ok(config
+        .providers
+        .active()
+        .cloned()
+        .unwrap_or_else(ProviderProfile::ollama_local))
 }
 
 #[tauri::command]
@@ -3678,24 +3894,65 @@ async fn agent_turn(
             }
         }
     }
-    let mut profile = if let Some(pid) = req
-        .provider_profile_id
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        cfg.providers
-            .profiles
-            .iter()
-            .find(|p| p.id == pid)
-            .cloned()
-            .or_else(|| cfg.providers.active().cloned())
-            .unwrap_or_else(ProviderProfile::ollama_local)
-    } else {
-        cfg.providers
-            .active()
-            .cloned()
-            .unwrap_or_else(ProviderProfile::ollama_local)
+    let admitted_turn = match admit_agent_turn(
+        &state.active_turn_owners,
+        &state.cancels,
+        &state.next_turn_owner,
+        &req.session_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(()) => {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: req.chat_model.clone(),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "turn_in_progress".into(),
+                    message: "This chat already has an active turn in another window. Stop or \
+                              wait for that turn before sending again."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "turn_in_progress".into(),
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+    };
+    let explicit_profile_id = req.provider_profile_id.as_deref();
+    let mut profile = match provider_profile_for_turn(&cfg, explicit_profile_id) {
+        Ok(profile) => profile,
+        Err(profile_id) => {
+            let events = vec![
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: req.chat_model.clone(),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "provider_profile_unavailable".into(),
+                    message: "The provider profile selected for this chat no longer exists. \
+                              ContextDesk did not fall back to another provider. Choose an \
+                              available profile and retry."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "provider_profile_unavailable".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile_id),
+                None,
+                req.chat_model.as_deref(),
+                &on_event,
+            )?;
+            return Ok(());
+        }
     };
     // Per-chat model override (mid-chat switch), else app default, else profile model.
     if let Some(m) = req
@@ -3720,34 +3977,6 @@ async fn agent_turn(
         .api_key_ref
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
-    let admitted_turn = match admit_agent_turn(
-        &state.active_turn_owners,
-        &state.cancels,
-        &state.next_turn_owner,
-        &req.session_id,
-    ) {
-        Ok(admitted) => admitted,
-        Err(()) => {
-            for event in [
-                cd_core::events::StreamEvent::TurnStarted {
-                    session_id: req.session_id.clone(),
-                    model: Some(profile.chat_model.clone()),
-                },
-                cd_core::events::StreamEvent::Error {
-                    code: "turn_in_progress".into(),
-                    message: "This chat already has an active turn in another window. Stop or \
-                              wait for that turn before sending again."
-                        .into(),
-                },
-                cd_core::events::StreamEvent::TurnCompleted {
-                    reason: "turn_in_progress".into(),
-                },
-            ] {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
-            }
-            return Ok(());
-        }
-    };
     let cancel = admitted_turn.cancel.clone();
     let turn_started_at = tokio::time::Instant::now();
     let deadline_plan = cd_core::router::TurnDeadlinePlan::for_profile(&cfg.router, &profile);
@@ -3757,11 +3986,41 @@ async fn agent_turn(
     // ordinary main-chat turn request chooses or broadens corpus scope.
     let store = session_store(&state)?;
     let stored_session = load_session_for_turn(&store, &req.session_id)?;
-    let log_explorer_context = linked_log_turn_context(
+    let log_explorer_context = match linked_log_turn_context(
         stored_session.as_ref(),
         window.label(),
-        req.log_explorer_context,
-    )?;
+        req.log_explorer_context.clone(),
+    ) {
+        Ok(context) => context,
+        Err(error) if req.log_explorer_context.is_some() => {
+            let events = vec![
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "linked_context_rejected".into(),
+                    message: format!(
+                        "The linked corpus context was rejected before provider contact: {error}"
+                    ),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "linked_context_rejected".into(),
+                },
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile.id),
+                Some(&profile.label),
+                Some(&profile.chat_model),
+                &on_event,
+            )?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     let linked_synthesis_retry = if req.retry_synthesis_only {
         state
             .linked_synthesis_checkpoints
@@ -3777,7 +4036,7 @@ async fn agent_turn(
         None
     };
     if req.retry_synthesis_only && linked_synthesis_retry.is_none() {
-        for event in [
+        let events = vec![
             cd_core::events::StreamEvent::TurnStarted {
                 session_id: req.session_id.clone(),
                 model: Some(profile.chat_model.clone()),
@@ -3791,9 +4050,16 @@ async fn agent_turn(
             cd_core::events::StreamEvent::TurnCompleted {
                 reason: "linked_synthesis_retry_stale".into(),
             },
-        ] {
-            let _ = on_event.send(cd_core::research::event_to_dto(&event));
-        }
+        ];
+        persist_and_emit_host_terminal(
+            &state,
+            &req,
+            &events,
+            Some(&profile.id),
+            Some(&profile.label),
+            Some(&profile.chat_model),
+            &on_event,
+        )?;
         return Ok(());
     }
     if let (Some(context), Some(checkpoint)) = (
@@ -3811,7 +4077,7 @@ async fn agent_turn(
                 .lock()
                 .expect("linked synthesis checkpoints")
                 .remove(&req.session_id);
-            for event in [
+            let events = vec![
                 cd_core::events::StreamEvent::TurnStarted {
                     session_id: req.session_id.clone(),
                     model: Some(profile.chat_model.clone()),
@@ -3826,9 +4092,16 @@ async fn agent_turn(
                 cd_core::events::StreamEvent::TurnCompleted {
                     reason: "linked_synthesis_retry_stale".into(),
                 },
-            ] {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
-            }
+            ];
+            persist_and_emit_host_terminal(
+                &state,
+                &req,
+                &events,
+                Some(&profile.id),
+                Some(&profile.label),
+                Some(&profile.chat_model),
+                &on_event,
+            )?;
             return Ok(());
         }
     }
@@ -3839,7 +4112,23 @@ async fn agent_turn(
     let mut turn_prelude_emitted = false;
     let (mut host, using_fallback_host, borrowed_host_generation) =
         if let Some(context) = log_explorer_context.as_ref() {
-            let cache = log_cache_dir(&state)?;
+            let cache = match log_cache_dir(&state) {
+                Ok(cache) => cache,
+                Err(error) => {
+                    tracing::warn!(error = %error, "linked log cache is unavailable");
+                    let events = linked_log_host_terminal_events().to_vec();
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
+                    return Ok(());
+                }
+            };
             let corpus_id = context.corpus_id.clone();
             let capability_profile =
                 (!req.force_local && linked_synthesis_retry.is_none()).then_some(profile.clone());
@@ -3876,15 +4165,28 @@ async fn agent_turn(
                     (host, using_fallback, borrowed_generation)
                 }
                 Ok(LinkedTurnPreparation::Terminal(events)) => {
-                    for event in events {
-                        let _ = on_event.send(cd_core::research::event_to_dto(&event));
-                    }
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
                     return Ok(());
                 }
                 Err(failure) => {
-                    for event in linked_setup_failure_events(&failure) {
-                        let _ = on_event.send(cd_core::research::event_to_dto(&event));
-                    }
+                    let events = linked_setup_failure_events(&failure);
+                    persist_and_emit_host_terminal(
+                        &state,
+                        &req,
+                        &events,
+                        Some(&profile.id),
+                        Some(&profile.label),
+                        Some(&profile.chat_model),
+                        &on_event,
+                    )?;
                     return Ok(());
                 }
             }
@@ -4102,10 +4404,7 @@ async fn agent_turn(
 /// Signal cooperative cancel for an in-flight turn (#109).
 #[tauri::command]
 fn cancel_turn(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let cancels = state.cancels.lock().expect("cancels");
-    if let Some(flag) = cancels.get(&session_id) {
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+    request_agent_turn_cancel(&state.cancels, &session_id);
     Ok(())
 }
 
@@ -9665,15 +9964,17 @@ mod demo_log_host_tests {
 mod startup_host_tests {
     use super::{
         admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
-        desktop_log_ingest_embed_plan_nonblocking, event_to_dto_with_linked_corpus,
-        finish_agent_turn, host_readiness_terminal_events, install_prepared_durable_memory,
-        linked_log_fallback_notice, linked_log_host_terminal_events, linked_log_preflight_at,
-        log_search_cancel_key, normalize_log_corpus_id, prepare_linked_turn_with,
-        restore_host_if_generation_matches, save_chat_session_at, set_chat_linked_corpus_at,
-        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
-        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
-        LinkedTurnPreparation, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
-        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
+        chat_turn_cancel_key, desktop_log_ingest_embed_plan_nonblocking,
+        event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
+        install_prepared_durable_memory, linked_log_fallback_notice,
+        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
+        normalize_log_corpus_id, persist_host_terminal_turn_at, prepare_linked_turn_with,
+        provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
+        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
+        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
+        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, LinkedTurnPreparation,
+        StdInstant, LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES,
+        LINKED_CHECKPOINT_TTL, LOG_INGEST_CANCEL_KEY, LOG_REANALYZE_CANCEL_KEY,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -9708,7 +10009,7 @@ mod startup_host_tests {
         cancels
             .lock()
             .unwrap()
-            .get("shared-chat")
+            .get(&chat_turn_cancel_key("shared-chat"))
             .unwrap()
             .store(true, Ordering::SeqCst);
         assert!(first_cancel.load(Ordering::SeqCst));
@@ -9719,7 +10020,198 @@ mod startup_host_tests {
         assert!(owners.lock().unwrap().contains_key("shared-chat"));
         drop(first_window);
         assert!(!owners.lock().unwrap().contains_key("shared-chat"));
-        assert!(!cancels.lock().unwrap().contains_key("shared-chat"));
+        assert!(!cancels
+            .lock()
+            .unwrap()
+            .contains_key(&chat_turn_cancel_key("shared-chat")));
+    }
+
+    #[test]
+    fn chat_turn_cancellation_cannot_collide_with_log_operation_domains() {
+        let owners = Mutex::new(std::collections::HashMap::new());
+        let cancels = Mutex::new(std::collections::HashMap::new());
+        let next_owner = AtomicU64::new(0);
+        let log_ingest = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_reanalyze = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_search = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut registry = cancels.lock().unwrap();
+            registry.insert(LOG_INGEST_CANCEL_KEY.into(), log_ingest.clone());
+            registry.insert(LOG_REANALYZE_CANCEL_KEY.into(), log_reanalyze.clone());
+            registry.insert("log_search:find-123".into(), log_search.clone());
+        }
+
+        for session_id in [
+            LOG_INGEST_CANCEL_KEY,
+            LOG_REANALYZE_CANCEL_KEY,
+            "log_search:find-123",
+        ] {
+            let turn = admit_agent_turn(&owners, &cancels, &next_owner, session_id)
+                .expect("chat turn must use a separate cancellation namespace");
+            assert!(request_agent_turn_cancel(&cancels, session_id));
+            assert!(turn.cancel.load(Ordering::SeqCst));
+            assert!(!log_ingest.load(Ordering::SeqCst));
+            assert!(!log_reanalyze.load(Ordering::SeqCst));
+            assert!(!log_search.load(Ordering::SeqCst));
+            drop(turn);
+        }
+
+        let registry = cancels.lock().unwrap();
+        assert!(Arc::ptr_eq(
+            registry.get(LOG_INGEST_CANCEL_KEY).unwrap(),
+            &log_ingest
+        ));
+        assert!(Arc::ptr_eq(
+            registry.get(LOG_REANALYZE_CANCEL_KEY).unwrap(),
+            &log_reanalyze
+        ));
+        assert!(Arc::ptr_eq(
+            registry.get("log_search:find-123").unwrap(),
+            &log_search
+        ));
+    }
+
+    #[test]
+    fn preflight_and_readiness_terminal_turns_are_host_persisted_and_idempotent() {
+        for (suffix, code) in [
+            ("preflight", "linked_log_host_unavailable"),
+            ("readiness", "budget_time"),
+        ] {
+            let sessions_root = tempfile::tempdir().expect("sessions");
+            let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+            let mut session = cd_core::sessions::Session::new("Linked");
+            session.set_linked_corpus_id(Some("corpus-a".into()));
+            store.save(&session).expect("save session");
+            let events = vec![
+                StreamEvent::Error {
+                    code: code.into(),
+                    message: format!("{suffix} failed before provider contact"),
+                },
+                StreamEvent::SearchTrail {
+                    steps: vec![format!("terminal:{code}")],
+                },
+                StreamEvent::TurnCompleted {
+                    reason: code.into(),
+                },
+            ];
+            let saved = persist_host_terminal_turn_at(
+                &store,
+                &session.id,
+                "Which logs explain the incident?",
+                Some("user-terminal"),
+                Some("assistant-terminal"),
+                &events,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("trusted terminal persistence");
+            assert_eq!(saved.messages.len(), 2);
+            assert_eq!(saved.messages[0].id, "user-terminal");
+            assert_eq!(saved.messages[0].role, "user");
+            assert_eq!(
+                saved.messages[0].content,
+                "Which logs explain the incident?"
+            );
+            assert_eq!(saved.messages[1].id, "assistant-terminal");
+            assert_eq!(saved.messages[1].role, "assistant");
+            assert!(saved.messages[1]
+                .content
+                .contains("failed before provider contact"));
+            assert_eq!(
+                saved.messages[1]
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta["terminal"]["error_codes"][0].as_str()),
+                Some(code)
+            );
+            assert_eq!(
+                saved.messages[1].trail.as_deref(),
+                Some([format!("terminal:{code}")].as_slice())
+            );
+
+            persist_host_terminal_turn_at(
+                &store,
+                &session.id,
+                "Which logs explain the incident?",
+                Some("user-terminal"),
+                Some("assistant-terminal"),
+                &events,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("idempotent replay");
+            assert_eq!(
+                store
+                    .load(&session.id)
+                    .expect("switch back to chat")
+                    .messages
+                    .len(),
+                2,
+                "switching away and back must reveal one durable typed terminal turn"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_explicit_provider_never_falls_back_and_terminal_is_durable() {
+        let config = cd_core::config::AppConfig {
+            providers: cd_core::providers::ProviderConfig::with_local_ollama(),
+            ..Default::default()
+        };
+        assert!(
+            provider_profile_for_turn(&config, Some("removed-company-profile")).is_err(),
+            "an explicit missing profile must not borrow active Ollama"
+        );
+        assert_eq!(
+            provider_profile_for_turn(&config, None)
+                .expect("implicit active profile")
+                .id,
+            "ollama-local"
+        );
+
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let session = cd_core::sessions::Session::new("Removed profile");
+        store.save(&session).expect("save session");
+        let events = vec![
+            StreamEvent::Error {
+                code: "provider_profile_unavailable".into(),
+                message: "Selected provider profile no longer exists".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "provider_profile_unavailable".into(),
+            },
+        ];
+        let saved = persist_host_terminal_turn_at(
+            &store,
+            &session.id,
+            "Investigate these logs",
+            Some("removed-user"),
+            Some("removed-assistant"),
+            &events,
+            (Some("removed-company-profile"), None, Some("company-model")),
+        )
+        .expect("persist removed-profile failure");
+        assert_eq!(
+            saved.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["provider_id"].as_str()),
+            Some("removed-company-profile")
+        );
+        assert_eq!(
+            saved.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["terminal"]["reason"].as_str()),
+            Some("provider_profile_unavailable")
+        );
     }
 
     #[test]

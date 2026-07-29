@@ -325,6 +325,10 @@ export async function agentTurn(
   pinnedSkillId?: string | null,
   logExplorerContext?: LogExplorerTurnContextDto | null,
   retrySynthesisOnly = false,
+  transcriptIds?: {
+    userMessageId?: string | null;
+    assistantMessageId?: string | null;
+  },
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -335,6 +339,9 @@ export async function agentTurn(
     pinned_skill_id: pinnedSkillId?.trim() || null,
     log_explorer_context: logExplorerContext ?? null,
     retry_synthesis_only: retrySynthesisOnly,
+    client_user_message_id: transcriptIds?.userMessageId?.trim() || null,
+    client_assistant_message_id:
+      transcriptIds?.assistantMessageId?.trim() || null,
   };
 
   if (!isTauri()) {

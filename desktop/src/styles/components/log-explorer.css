@@ -454,6 +454,22 @@
   gap: 0.35rem;
 }
 
+.log-explorer__chat-scroll-region {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.log-explorer__chat--compact-layout .log-explorer__chat-scroll-region {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 .log-explorer__chat--mode-hidden {
   display: none !important;
 }
@@ -1547,6 +1563,19 @@
   max-height: 55vh;
   overflow: hidden;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.log-explorer--narrow.log-explorer--chat-open
+  .log-explorer__chat-scroll-region {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.log-explorer--narrow.log-explorer--chat-open
+  .log-explorer__chat-thread-wrap {
+  flex: 1 0 10rem;
 }
 
 .log-explorer--narrow .log-explorer__lanes {

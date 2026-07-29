@@ -463,6 +463,10 @@ describe("LinkedChatRail", () => {
       null,
       expect.objectContaining({ corpus_id: "c1" }),
       false,
+      expect.objectContaining({
+        userMessageId: expect.any(String),
+        assistantMessageId: expect.any(String),
+      }),
     );
 
     first.unmount();
@@ -650,6 +654,10 @@ describe("LinkedChatRail", () => {
       null,
       expect.objectContaining({ corpus_id: "c1" }),
       false,
+      expect.objectContaining({
+        userMessageId: expect.any(String),
+        assistantMessageId: expect.any(String),
+      }),
     );
     expect(
       vi.mocked(host.hostSaveChatSession).mock.calls[0]?.[0].linked_corpus_id,
