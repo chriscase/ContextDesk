@@ -301,13 +301,12 @@ describe("TimelineNavigator", () => {
       />,
     );
     const range = await screen.findByLabelText("Timeline position");
-    vi.useFakeTimers();
     fireEvent.change(range, { target: { value: "3" } });
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
-    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
-    act(() => vi.advanceTimersByTime(1_400));
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
-    vi.useRealTimers();
+    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+      "12 events",
+    );
     fireEvent.pointerUp(range, { target: { value: "3" } });
     await waitFor(() =>
       expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
@@ -494,6 +493,17 @@ describe("TimelineNavigator", () => {
     });
 
     expect(
+      screen
+        .getByTestId("timeline-navigator-bars")
+        .querySelector<HTMLElement>(".timeline-navigator__preview-marker")
+        ?.style.getPropertyValue("left"),
+    ).toBe("90%");
+    expect(
+      screen
+        .getByTestId("timeline-hover-reading")
+        .style.getPropertyValue("--timeline-detail-x"),
+    ).toBe("90%");
+    expect(
       screen.getByTestId("operational-metric-reading-cpu-percent").textContent,
     ).toContain("95 %");
     expect(
@@ -502,13 +512,61 @@ describe("TimelineNavigator", () => {
     expect(
       screen.getByTestId("operational-metric-reading-clients").textContent,
     ).toContain("120 clients");
-    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+      "12 events",
+    );
+    for (const id of ["cpu-percent", "heap-bytes", "clients"]) {
+      expect(
+        screen.getByTestId(`operational-metric-hover-reading-${id}`),
+      ).toBeTruthy();
+      expect(
+        screen
+          .getByTestId(`operational-metric-track-${id}`)
+          .querySelector<HTMLElement>(".operational-metric-track__plot")
+          ?.style.getPropertyValue("--metric-cursor-position"),
+      ).toBe("90%");
+    }
+    expect(
+      screen.getByTestId("timeline-hover-reading").getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
     expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
 
     act(() => {
       fireEvent.pointerLeave(chart);
     });
-    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    expect(screen.queryByTestId("timeline-hover-reading")).toBeNull();
+    expect(
+      screen.queryAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(0);
+
+    const cpuPlot = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    Object.defineProperty(cpuPlot, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    fireEvent.pointerEnter(cpuPlot);
+    fireEvent.pointerMove(cpuPlot, { clientX: 10, pointerId: 2 });
+    expect(screen.getByTestId("timeline-hover-reading").textContent).toContain(
+      "30 events",
+    );
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+    fireEvent.pointerLeave(cpuPlot);
+    expect(screen.queryByTestId("timeline-hover-reading")).toBeNull();
   });
 
   it("keeps detailed metric tracks inside a bounded scrollable timeline pane", async () => {
@@ -681,9 +739,19 @@ describe("TimelineNavigator", () => {
     expect(
       document.querySelectorAll(".timeline-navigator__axis span"),
     ).toHaveLength(2);
+    fireEvent.focus(scrubber);
+    fireEvent.keyDown(scrubber, { key: "F10", shiftKey: true });
+    expect(scrubber.getAttribute("aria-describedby")).toBe(
+      "timeline-bucket-detail",
+    );
+    fireEvent.keyDown(scrubber, { key: "Escape" });
+    expect(scrubber.getAttribute("aria-describedby")).toBeNull();
 
     const bucket = screen.getByTestId("timeline-bucket-0");
     fireEvent.focus(bucket);
+    expect(screen.getByTestId("timeline-hover-reading")).toBeTruthy();
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    fireEvent.contextMenu(bucket);
     const detail = await screen.findByTestId("timeline-bucket-detail");
     expect(bucket.getAttribute("aria-describedby")).toBe(
       "timeline-bucket-detail",
@@ -693,10 +761,10 @@ describe("TimelineNavigator", () => {
     expect(detail.textContent).toContain("Error 1");
     expect(detail.textContent).toContain("2023-");
 
-    fireEvent.pointerDown(document.body);
+    fireEvent.pointerDown(screen.getByTestId("timeline-navigator-bars"));
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
 
-    fireEvent.focus(bucket);
+    fireEvent.keyDown(bucket, { key: "F10", shiftKey: true });
     expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
     fireEvent.keyDown(bucket, { key: "Escape" });
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
@@ -783,7 +851,7 @@ describe("TimelineNavigator", () => {
     );
     expect(coverage.querySelectorAll("i")).toHaveLength(8);
     const bucket = screen.getByTestId("timeline-bucket-3");
-    fireEvent.pointerEnter(bucket);
+    fireEvent.contextMenu(bucket);
     const detail = screen.getByTestId("timeline-bucket-detail");
     const breakdown = within(detail).getByRole("list", {
       name: "Bucket lane breakdown",

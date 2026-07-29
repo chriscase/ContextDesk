@@ -76,7 +76,7 @@ describe("OperationalMetricTracks", () => {
     expect(screen.getAllByRole("slider")).toHaveLength(3);
   });
 
-  it("shows compact axis values and a non-sticky hover or focus reading", () => {
+  it("shows compact axes and synchronized non-sticky cursor readings", () => {
     render(
       <OperationalMetricTracks document={coherentFixture} density="compact" />,
     );
@@ -97,23 +97,46 @@ describe("OperationalMetricTracks", () => {
 
     fireEvent.pointerEnter(plot);
     fireEvent.pointerMove(plot, { clientX: 75, pointerId: 1 });
-    expect(
-      screen.getByTestId("operational-metric-hover-reading-cpu-percent")
-        .textContent,
-    ).toMatch(/% at .*UTC/);
+    for (const id of ["cpu-percent", "heap-used-bytes", "concurrent-clients"]) {
+      expect(
+        screen.getByTestId(`operational-metric-hover-reading-${id}`)
+          .textContent,
+      ).toMatch(/at .*UTC/);
+    }
+    expect(plot.style.getPropertyValue("--metric-reading-position")).toMatch(
+      /%$/,
+    );
     fireEvent.pointerLeave(plot);
-    expect(
-      screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
-    ).toBeNull();
+    for (const id of ["cpu-percent", "heap-used-bytes", "concurrent-clients"]) {
+      expect(
+        screen.queryByTestId(`operational-metric-hover-reading-${id}`),
+      ).toBeNull();
+    }
 
     fireEvent.focus(plot);
     expect(
-      screen.getByTestId("operational-metric-hover-reading-cpu-percent"),
-    ).toBeTruthy();
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+    fireEvent.pointerEnter(plot);
+    fireEvent.pointerLeave(plot);
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
     fireEvent.blur(plot);
     expect(
-      screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
-    ).toBeNull();
+      screen.queryAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(0);
+
+    fireEvent.pointerEnter(plot);
+    fireEvent.pointerDown(plot, { clientX: 50, pointerId: 2 });
+    fireEvent.pointerLeave(plot);
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+    fireEvent.pointerUp(plot, { clientX: 50, pointerId: 2 });
+    expect(
+      screen.queryAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(0);
   });
 
   it("uses one shared renderer and interaction model in compact side presentation", () => {

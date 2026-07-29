@@ -169,8 +169,19 @@
 }
 
 .operational-metric-track__hover-reading {
-  top: 0.18rem;
-  left: clamp(5.5rem, var(--metric-cursor-position), calc(100% - 5.5rem));
+  --metric-reading-half-width: min(8rem, calc(50% - 0.5rem));
+
+  top: clamp(
+    0.85rem,
+    var(--metric-reading-position, 50%),
+    calc(100% - 0.85rem)
+  );
+  left: clamp(
+    var(--metric-reading-half-width),
+    var(--metric-cursor-position),
+    calc(100% - var(--metric-reading-half-width))
+  );
+  width: max-content;
   max-width: min(16rem, calc(100% - 1rem));
   padding: 0.2rem 0.35rem;
   border: 1px solid
@@ -179,7 +190,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
 }
 
 .operational-metric-track__line {

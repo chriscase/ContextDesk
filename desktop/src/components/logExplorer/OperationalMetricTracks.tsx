@@ -44,6 +44,8 @@ export type OperationalMetricTracksProps = {
   selectedRange?: OperationalMetricRange | null;
   maxRenderedPointsPerTrack?: number;
   onCursorChange?: (timestamp: number) => void;
+  cursorReadingsVisible?: boolean;
+  onCursorReadingsVisibleChange?: (visible: boolean) => void;
   onRangeSelect?: (range: OperationalMetricRange | null) => void;
   /** Pointer release requests one bounded seek toward nearby log events. */
   onSeekTimestamp?: (timestamp: number) => void;
@@ -200,6 +202,8 @@ type MetricTrackProps = {
   cursor: number;
   selection: OperationalMetricRange | null;
   maxRenderedPoints: number;
+  showReading: boolean;
+  onReadingVisibilityChange: (visible: boolean) => void;
   onPointerTimestamp: (
     timestamp: number,
     phase: "start" | "move" | "end",
@@ -214,11 +218,12 @@ function MetricTrack({
   cursor,
   selection,
   maxRenderedPoints,
+  showReading,
+  onReadingVisibilityChange,
   onPointerTimestamp,
   onKeyboardTimestamp,
   onKeyboardCommit,
 }: MetricTrackProps) {
-  const [showReading, setShowReading] = useState(false);
   const visibleSourcePoints = useMemo(
     () => metricPointsForRange(series.points, bounds),
     [bounds, series.points],
@@ -247,7 +252,19 @@ function MetricTrack({
         currentPoint.timestamp,
       )}`;
   const cursorX = scaleTimestamp(cursor, bounds);
+  const cursorY = cursorInGap ? 50 : scaleValue(currentPoint.value, domain);
   const gaps = series.gaps ?? [];
+  const pointerInside = useRef(false);
+  const keyboardFocused = useRef(false);
+  const pointerDragging = useRef(false);
+
+  const publishReadingVisibility = () => {
+    onReadingVisibilityChange(
+      pointerInside.current ||
+        keyboardFocused.current ||
+        pointerDragging.current,
+    );
+  };
 
   const timestampFromPointer = (
     event: PointerEvent<HTMLDivElement>,
@@ -259,6 +276,8 @@ function MetricTrack({
   };
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pointerDragging.current = true;
+    publishReadingVisibility();
     event.currentTarget.setPointerCapture?.(event.pointerId);
     onPointerTimestamp(timestampFromPointer(event), "start");
   };
@@ -270,6 +289,13 @@ function MetricTrack({
   const onPointerUp = (event: PointerEvent<HTMLDivElement>) => {
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     onPointerTimestamp(timestampFromPointer(event), "end");
+    pointerDragging.current = false;
+    publishReadingVisibility();
+  };
+
+  const onPointerCancel = () => {
+    pointerDragging.current = false;
+    publishReadingVisibility();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -325,15 +351,29 @@ function MetricTrack({
         style={
           {
             "--metric-cursor-position": `${cursorX}%`,
+            "--metric-reading-position": `${cursorY}%`,
           } as CSSProperties
         }
-        onPointerEnter={() => setShowReading(true)}
-        onPointerLeave={() => setShowReading(false)}
+        onPointerEnter={() => {
+          pointerInside.current = true;
+          publishReadingVisibility();
+        }}
+        onPointerLeave={() => {
+          pointerInside.current = false;
+          publishReadingVisibility();
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onFocus={() => setShowReading(true)}
-        onBlur={() => setShowReading(false)}
+        onPointerCancel={onPointerCancel}
+        onFocus={() => {
+          keyboardFocused.current = true;
+          publishReadingVisibility();
+        }}
+        onBlur={() => {
+          keyboardFocused.current = false;
+          publishReadingVisibility();
+        }}
         onKeyDown={onKeyDown}
       >
         <svg
@@ -431,12 +471,13 @@ function MetricTrack({
           Min {formatValue(domain.min, series.unit)}
         </span>
         {showReading ? (
-          <output
+          <span
+            aria-hidden="true"
             className="operational-metric-track__hover-reading"
             data-testid={`operational-metric-hover-reading-${series.id}`}
           >
             {currentText}
-          </output>
+          </span>
         ) : null}
       </div>
       <footer className="operational-metric-track__details">
@@ -507,6 +548,8 @@ export function OperationalMetricTracks({
   selectedRange,
   maxRenderedPointsPerTrack = 240,
   onCursorChange,
+  cursorReadingsVisible,
+  onCursorReadingsVisibleChange,
   onRangeSelect,
   onSeekTimestamp,
 }: OperationalMetricTracksProps) {
@@ -514,16 +557,15 @@ export function OperationalMetricTracks({
     () => metricDocumentTimeRange(document),
     [document],
   );
-  const bounds = useMemo(
-    () => {
-      const fullBounds = resolveTimeBounds(documentBounds, sharedTimeBounds);
-      return visibleTimeBounds
-        ? clampMetricRange(visibleTimeBounds, fullBounds)
-        : fullBounds;
-    },
-    [documentBounds, sharedTimeBounds, visibleTimeBounds],
-  );
+  const bounds = useMemo(() => {
+    const fullBounds = resolveTimeBounds(documentBounds, sharedTimeBounds);
+    return visibleTimeBounds
+      ? clampMetricRange(visibleTimeBounds, fullBounds)
+      : fullBounds;
+  }, [documentBounds, sharedTimeBounds, visibleTimeBounds]);
   const [internalCursor, setInternalCursor] = useState(bounds.from);
+  const [internalCursorReadingsVisible, setInternalCursorReadingsVisible] =
+    useState(false);
   const [internalSelection, setInternalSelection] =
     useState<OperationalMetricRange | null>(null);
   const selectionStart = useRef<number | null>(null);
@@ -537,6 +579,13 @@ export function OperationalMetricTracks({
   const selection = requestedSelection
     ? clampMetricRange(requestedSelection, bounds)
     : null;
+  const showCursorReadings =
+    cursorReadingsVisible ?? internalCursorReadingsVisible;
+
+  const updateCursorReadingsVisible = (visible: boolean) => {
+    setInternalCursorReadingsVisible(visible);
+    onCursorReadingsVisibleChange?.(visible);
+  };
 
   const updateCursor = (timestamp: number) => {
     const bounded = clamp(timestamp, bounds.from, bounds.to);
@@ -624,6 +673,8 @@ export function OperationalMetricTracks({
             cursor={cursor}
             selection={selection}
             maxRenderedPoints={maxRenderedPointsPerTrack}
+            showReading={showCursorReadings}
+            onReadingVisibilityChange={updateCursorReadingsVisible}
             onPointerTimestamp={onPointerTimestamp}
             onKeyboardTimestamp={onKeyboardTimestamp}
             onKeyboardCommit={onKeyboardCommit}

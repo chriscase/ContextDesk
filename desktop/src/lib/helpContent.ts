@@ -86,7 +86,7 @@ export const HELP_TIMELINE_NAVIGATOR: HelpTipContent = {
   definition:
     "A fixed-size overview of the current filters. It summarizes event volume and canonical severity into at most 96 backend buckets, then seeks a bounded event neighborhood when you choose a position.",
   currentState:
-    "The timeline is visible by default on desktop and has a broad chart scrubber. Moving previews; releasing performs one seek. Bucket hover or keyboard focus opens exact detail. A validated wall-clock metric JSON document can be loaded for this Explorer session only; it is not persisted. Metric tracks show bounded spike-preserving summaries; brush a range and choose Zoom to selection for finer samples and a matching bounded log histogram, then Reset full range. Collapse stops subsequent timeline and metric work until it is reopened.",
+    "The timeline is visible by default on desktop and has a broad chart scrubber. Moving previews synchronized compact values on the log and metric tracks; releasing performs one seek. Right-click a log bucket, or focus it and press Shift+F10, for the richer exact breakdown. A validated wall-clock metric JSON document can be loaded for this Explorer session only; it is not persisted. Metric tracks show bounded spike-preserving summaries; brush a range and choose Zoom to selection for finer samples and a matching bounded log histogram. That control becomes Reset full range while zoomed. Collapse stops subsequent timeline and metric work until it is reopened.",
   useWhen:
     "you need to jump across a long corpus without loading or scrolling through every intervening event.",
   comparison: {
@@ -105,7 +105,7 @@ export const HELP_TIMELINE_NAVIGATOR: HelpTipContent = {
   consequence:
     "Empty buckets are honest gaps. Preview, committed seek, and resident range are distinct. Order-only data is labeled as order, not formatted as calendar time.",
   safety:
-    "The overview returns bounded counts only, never full event bodies. Severity has text and pattern equivalents in addition to color. Exact UTC bucket bounds remain available in details.",
+    "The overview returns bounded counts only, never full event bodies. Severity has text and pattern equivalents in addition to color. Hover and focus never seek. Exact UTC bucket bounds remain available through the explicit context detail.",
   helpLocator: "help://log-explorer#investigation-timeline",
 };
 

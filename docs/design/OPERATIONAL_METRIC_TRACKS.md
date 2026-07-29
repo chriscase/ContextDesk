@@ -77,11 +77,15 @@ nonessential visible metadata while retaining the complete accessible
 description. The right-edge scale marks are explicitly labeled **Max** and
 **Min**; the track header reports the nearest actual sample value and sample
 time at the shared cursor. Hovering or focusing any metric track—or hovering
-the aligned log histogram—moves that one preview cursor and updates every
-track's readout without seeking or filtering. A parent may provide shared time
-bounds; the renderer expands those bounds when necessary so no imported
-measurement is silently discarded. An explicit visible range is narrower by
-design and clips the chart to the shared zoom domain.
+the aligned log histogram—moves that one preview cursor and shows a concise
+value callout at the same horizontal position on every metric track and the
+log histogram. These synchronized callouts never seek or filter. The larger
+log-bucket breakdown is intentionally explicit through right-click or the
+keyboard context-menu shortcut, so routine scrubbing is not covered by a
+popover. A parent may provide shared time bounds; the renderer expands those
+bounds when necessary so no imported measurement is silently discarded. An
+explicit visible range is narrower by design and clips the chart to the shared
+zoom domain.
 
 ## Two explicit ingestion paths
 

@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
@@ -166,6 +167,7 @@ export function TimelineNavigator({
   const [sharedCursorTimestamp, setSharedCursorTimestamp] = useState<
     number | null
   >(null);
+  const [cursorReadingsVisible, setCursorReadingsVisible] = useState(false);
   const [metricDocument, setMetricDocument] =
     useState<OperationalMetricsDocumentV1 | null>(null);
   const [metricFileName, setMetricFileName] = useState<string | null>(null);
@@ -179,12 +181,10 @@ export function TimelineNavigator({
   const [metricViewRange, setMetricViewRange] =
     useState<OperationalMetricRange | null>(null);
   const canZoomMetricSelection =
-    metricSelection != null &&
-    metricSelection.to - metricSelection.from >= 1;
+    metricSelection != null && metricSelection.to - metricSelection.from >= 1;
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
-  const detailDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
   const effectiveFilter: EventQueryDto = metricViewRange
@@ -208,55 +208,20 @@ export function TimelineNavigator({
   );
 
   const clearDetail = useCallback(() => {
-    if (detailDismissTimer.current != null) {
-      clearTimeout(detailDismissTimer.current);
-      detailDismissTimer.current = null;
-    }
     setDetailIndex(null);
   }, []);
 
-  const showTransientDetail = useCallback((index: number) => {
-    if (detailDismissTimer.current != null) {
-      clearTimeout(detailDismissTimer.current);
-    }
-    setDetailIndex(index);
-    detailDismissTimer.current = setTimeout(() => {
-      detailDismissTimer.current = null;
-      setDetailIndex(null);
-    }, 1_400);
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (detailDismissTimer.current != null) {
-        clearTimeout(detailDismissTimer.current);
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
     if (detailIndex == null) return;
-    const dismissOnOutsidePointer = (event: globalThis.PointerEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest(".timeline-navigator__chart")
-      ) {
-        return;
-      }
-      clearDetail();
-    };
-    document.addEventListener("pointerdown", dismissOnOutsidePointer, true);
+    const dismissOnPointer = () => clearDetail();
+    document.addEventListener("pointerdown", dismissOnPointer, true);
     return () =>
-      document.removeEventListener(
-        "pointerdown",
-        dismissOnOutsidePointer,
-        true,
-      );
+      document.removeEventListener("pointerdown", dismissOnPointer, true);
   }, [clearDetail, detailIndex]);
 
   useEffect(() => {
+    setDetailIndex(null);
+    setCursorReadingsVisible(false);
     if (!open) {
       summaryRequest.current += 1;
       return;
@@ -340,6 +305,20 @@ export function TimelineNavigator({
         ...counts.map((_, index) => levelCounts(summary, index).error),
       )
     : 1;
+  const sharedCursorPosition =
+    summary?.spanFrom != null &&
+    summary.spanTo != null &&
+    summary.spanTo > summary.spanFrom
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            (((sharedCursorTimestamp ?? summary.spanFrom) - summary.spanFrom) /
+              (summary.spanTo - summary.spanFrom)) *
+              100,
+          ),
+        )
+      : 0;
 
   const residentIndexes = useMemo(() => {
     if (!summary || summary.spanFrom == null || summary.bucketCount === 0) {
@@ -408,7 +387,35 @@ export function TimelineNavigator({
       const index = previewTimestamp(
         summary.spanFrom + ratio * (summary.spanTo - summary.spanFrom),
       );
-      if (index != null) setDetailIndex(index);
+      if (index != null) setCursorReadingsVisible(true);
+    },
+    [previewTimestamp, summary],
+  );
+
+  const showTimelineContextDetail = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      if (
+        !summary ||
+        summary.spanFrom == null ||
+        summary.spanTo == null ||
+        summary.spanTo <= summary.spanFrom
+      ) {
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const ratio = Math.max(
+        0,
+        Math.min(1, (event.clientX - rect.left) / rect.width),
+      );
+      const index = previewTimestamp(
+        summary.spanFrom + ratio * (summary.spanTo - summary.spanFrom),
+      );
+      if (index != null) {
+        setCursorReadingsVisible(true);
+        setDetailIndex(index);
+      }
     },
     [previewTimestamp, summary],
   );
@@ -490,7 +497,7 @@ export function TimelineNavigator({
     const request = ++seekRequest.current;
     const { start, end } = bucketBounds(summary, index);
     setPreviewIndex(index);
-    setSharedCursorTimestamp(start);
+    setSharedCursorTimestamp((start + end) / 2);
     setError(null);
     setStatus(`Seeking ${compactBucketRange(summary, index)}…`);
     try {
@@ -673,7 +680,8 @@ export function TimelineNavigator({
                     gridTemplateColumns: `repeat(${summary.bucketCount}, minmax(2px, 1fr))`,
                   }}
                   onPointerMove={previewTimelinePointer}
-                  onPointerLeave={clearDetail}
+                  onPointerLeave={() => setCursorReadingsVisible(false)}
+                  onContextMenu={showTimelineContextDetail}
                 >
                   {residentRange ? (
                     <span
@@ -732,16 +740,43 @@ export function TimelineNavigator({
                           } as CSSProperties
                         }
                         onPointerEnter={() => {
-                          previewTimestamp(bucketBounds(summary, index).start);
-                          setDetailIndex(index);
+                          const bucket = bucketBounds(summary, index);
+                          previewTimestamp((bucket.start + bucket.end) / 2);
+                          setCursorReadingsVisible(true);
                         }}
-                        onPointerLeave={() => setDetailIndex(null)}
+                        onPointerLeave={() => setCursorReadingsVisible(false)}
                         onFocus={() => {
-                          previewTimestamp(bucketBounds(summary, index).start);
+                          const bucket = bucketBounds(summary, index);
+                          previewTimestamp((bucket.start + bucket.end) / 2);
+                          setCursorReadingsVisible(true);
+                        }}
+                        onBlur={() => {
+                          setCursorReadingsVisible(false);
+                          clearDetail();
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          const bucket = bucketBounds(summary, index);
+                          previewTimestamp((bucket.start + bucket.end) / 2);
+                          setCursorReadingsVisible(true);
                           setDetailIndex(index);
                         }}
-                        onBlur={clearDetail}
-                        onClick={() => void seekBucket(index)}
+                        onKeyDown={(event) => {
+                          if (
+                            event.key === "ContextMenu" ||
+                            (event.shiftKey && event.key === "F10")
+                          ) {
+                            event.preventDefault();
+                            const bucket = bucketBounds(summary, index);
+                            previewTimestamp((bucket.start + bucket.end) / 2);
+                            setCursorReadingsVisible(true);
+                            setDetailIndex(index);
+                          }
+                        }}
+                        onClick={() => {
+                          clearDetail();
+                          void seekBucket(index);
+                        }}
                       >
                         <span className="timeline-navigator__stack">
                           {LEVELS.map(({ key }) =>
@@ -762,7 +797,7 @@ export function TimelineNavigator({
                   <span
                     className="timeline-navigator__preview-marker"
                     style={{
-                      left: `${((previewIndex + 0.5) / summary.bucketCount) * 100}%`,
+                      left: `${sharedCursorPosition}%`,
                     }}
                     aria-hidden="true"
                   />
@@ -776,6 +811,37 @@ export function TimelineNavigator({
                       aria-hidden="true"
                     />
                   ) : null}
+                  {cursorReadingsVisible ? (
+                    <span
+                      aria-hidden="true"
+                      className="timeline-navigator__hover-reading"
+                      data-testid="timeline-hover-reading"
+                      style={
+                        {
+                          "--timeline-detail-x": `${sharedCursorPosition}%`,
+                          "--timeline-reading-y": `${
+                            100 -
+                            Math.max(
+                              0,
+                              Math.min(
+                                100,
+                                ((counts[previewIndex] ?? 0) / maxCount) * 100,
+                              ),
+                            )
+                          }%`,
+                        } as CSSProperties
+                      }
+                    >
+                      {compactTime(
+                        summary,
+                        bucketBounds(summary, previewIndex).start,
+                      )}{" "}
+                      · {counts[previewIndex] ?? 0} events
+                      {levelSummary(summary, previewIndex)
+                        ? ` · ${levelSummary(summary, previewIndex)}`
+                        : " · empty"}
+                    </span>
+                  ) : null}
                   <input
                     className="timeline-navigator__scrubber"
                     type="range"
@@ -783,14 +849,32 @@ export function TimelineNavigator({
                     max={Math.max(0, summary.bucketCount - 1)}
                     value={previewIndex}
                     aria-label="Timeline position"
+                    aria-keyshortcuts="Shift+F10"
+                    aria-describedby={
+                      detailIndex != null ? "timeline-bucket-detail" : undefined
+                    }
                     aria-valuetext={`${compactTime(summary, bucketBounds(summary, previewIndex).start)} · ${counts[previewIndex]} events · ${timeQualityLabel(summary.timeQuality)}`}
                     title={bucketLabel(summary, previewIndex)}
-                    onFocus={() => setDetailIndex(previewIndex)}
-                    onBlur={clearDetail}
+                    onFocus={() => setCursorReadingsVisible(true)}
+                    onBlur={() => {
+                      setCursorReadingsVisible(false);
+                      clearDetail();
+                    }}
                     onChange={(event) => {
                       const next = Number(event.target.value);
-                      previewTimestamp(bucketBounds(summary, next).start);
-                      showTransientDetail(next);
+                      const bucket = bucketBounds(summary, next);
+                      previewTimestamp((bucket.start + bucket.end) / 2);
+                      setCursorReadingsVisible(true);
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "ContextMenu" ||
+                        (event.shiftKey && event.key === "F10")
+                      ) {
+                        event.preventDefault();
+                        setCursorReadingsVisible(true);
+                        setDetailIndex(previewIndex);
+                      }
                     }}
                     onPointerUp={(event) =>
                       void seekBucket(Number(event.currentTarget.value))
@@ -941,6 +1025,8 @@ export function TimelineNavigator({
                     onCursorChange={(timestamp) => {
                       previewTimestamp(timestamp);
                     }}
+                    cursorReadingsVisible={cursorReadingsVisible}
+                    onCursorReadingsVisibleChange={setCursorReadingsVisible}
                     selectedRange={metricSelection}
                     onRangeSelect={setMetricSelection}
                     onSeekTimestamp={seekTimestamp}
