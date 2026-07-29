@@ -110,8 +110,13 @@ existing nearby-log load. Compact is the default session track size, with
 standard and detailed choices in the metric header. In the stacked
 presentation, metric tracks precede the log-volume histogram so the histogram
 acts as the bottom evidence track. Brushing and zooming preserve that shared
-domain; each zoom reissues the existing fixed-bucket backend summary rather than
-loading all matching log events. At every track size, the Timeline body is
+domain, and the outlined brush appears at the same horizontal range on every
+metric track and the log histogram before zoom is applied. The Explorer treats
+the reliable log span as the authoritative visible domain; metric samples
+outside that span are clipped with an explicit disclosure instead of expanding
+the metric tracks onto a different horizontal scale. Each zoom reissues the
+existing fixed-bucket backend summary rather than loading all matching log
+events. At every track size, the Timeline body is
 bounded to 44% of the viewport (and at most 30rem) and scrolls internally when
 its contents exceed that share, so a larger metric presentation never makes
 the log workspace unreachable. The bounded region is keyboard-focusable and

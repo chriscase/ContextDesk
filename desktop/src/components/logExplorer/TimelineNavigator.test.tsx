@@ -214,7 +214,15 @@ describe("TimelineNavigator", () => {
       />,
     );
     const scrubber = await screen.findByLabelText("Timeline position");
-    scrubber.focus();
+    fireEvent.focus(scrubber);
+    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    fireEvent.keyDown(scrubber, { key: "Escape" });
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+    expect(
+      screen
+        .getByTestId("timeline-navigator-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
     fireEvent.keyDown(scrubber, { key: "Escape" });
     expect(
       screen
@@ -639,6 +647,11 @@ describe("TimelineNavigator", () => {
     fireEvent.pointerDown(cpu, { clientX: 25.5, pointerId: 1 });
     fireEvent.pointerMove(cpu, { clientX: 74.5, pointerId: 1 });
     fireEvent.pointerUp(cpu, { clientX: 74.5, pointerId: 1 });
+    const histogramSelection = screen.getByTestId(
+      "timeline-selection-range",
+    ) as HTMLElement;
+    expect(Number.parseFloat(histogramSelection.style.left)).toBeCloseTo(25.5);
+    expect(Number.parseFloat(histogramSelection.style.width)).toBeCloseTo(49);
     const zoom = screen.getByRole("button", { name: "Zoom to selection" });
     expect(zoom.hasAttribute("disabled")).toBe(false);
     fireEvent.click(zoom);
@@ -661,6 +674,7 @@ describe("TimelineNavigator", () => {
     expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010.2");
     expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000029.8");
     expect(screen.getByText(/zoomed/)).toBeTruthy();
+    expect(screen.queryByTestId("timeline-selection-range")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Zoom to selection" }),
     ).toBeNull();
@@ -679,6 +693,35 @@ describe("TimelineNavigator", () => {
     });
     expect(restoredCpu.getAttribute("aria-valuemin")).toBe("1700000000");
     expect(restoredCpu.getAttribute("aria-valuemax")).toBe("1700000040");
+  });
+
+  it("keeps partially overlapping metrics on the exact log timeline domain", async () => {
+    const extended = structuredClone(sessionMetrics);
+    for (const series of extended.series) {
+      series.points = [
+        { ...series.points[0]!, timestamp: 1_699_999_980 },
+        { ...series.points[1]!, timestamp: 1_700_000_060 },
+      ];
+    }
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(extended)] },
+    });
+
+    const cpu = await screen.findByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    expect(cpu.getAttribute("aria-valuemin")).toBe("1700000000");
+    expect(cpu.getAttribute("aria-valuemax")).toBe("1700000040");
+    expect(screen.getByText(/clipped to the shared log timeline/)).toBeTruthy();
   });
 
   it("fails closed when session metric time cannot align honestly", async () => {
@@ -758,7 +801,7 @@ describe("TimelineNavigator", () => {
       "timeline-bucket-detail",
     );
     fireEvent.keyDown(scrubber, { key: "Escape" });
-    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
     fireEvent.blur(scrubber);
     expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
     expect(

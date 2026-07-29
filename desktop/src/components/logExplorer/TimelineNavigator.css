@@ -287,6 +287,17 @@
   pointer-events: none;
 }
 
+.timeline-navigator__selection-range {
+  position: absolute;
+  z-index: 3;
+  inset-block: 0.2rem;
+  border: 1px dashed
+    color-mix(in srgb, var(--accent, #5b9fd4) 78%, var(--fg, #e8eaed));
+  border-radius: 0.2rem;
+  background: transparent;
+  pointer-events: none;
+}
+
 .timeline-navigator__preview-marker,
 .timeline-navigator__committed-marker {
   position: absolute;

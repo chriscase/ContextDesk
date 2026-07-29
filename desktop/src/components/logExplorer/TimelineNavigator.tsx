@@ -183,6 +183,14 @@ export function TimelineNavigator({
     useState<OperationalMetricRange | null>(null);
   const canZoomMetricSelection =
     metricSelection != null && metricSelection.to - metricSelection.from >= 1;
+  const metricRange = metricDocument
+    ? metricDocumentTimeRange(metricDocument)
+    : null;
+  const metricExtendsBeyondLogTimeline =
+    metricRange != null &&
+    summary?.spanFrom != null &&
+    summary.spanTo != null &&
+    (metricRange.from < summary.spanFrom || metricRange.to > summary.spanTo);
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
@@ -329,6 +337,24 @@ export function TimelineNavigator({
           ),
         )
       : 0;
+  const timelineSelectionStyle = useMemo(() => {
+    if (
+      !metricSelection ||
+      summary?.spanFrom == null ||
+      summary.spanTo == null ||
+      summary.spanTo <= summary.spanFrom
+    ) {
+      return null;
+    }
+    const from = Math.max(summary.spanFrom, metricSelection.from);
+    const to = Math.min(summary.spanTo, metricSelection.to);
+    if (to <= from) return null;
+    const span = summary.spanTo - summary.spanFrom;
+    return {
+      left: `${((from - summary.spanFrom) / span) * 100}%`,
+      width: `${((to - from) / span) * 100}%`,
+    };
+  }, [metricSelection, summary]);
   const visibleDetailIndex =
     detailIndex ?? (cursorReadingsVisible ? previewIndex : null);
 
@@ -593,8 +619,10 @@ export function TimelineNavigator({
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.preventDefault();
-            if (detailIndex != null) {
+            if (detailIndex != null || cursorReadingsVisible) {
               clearDetail();
+              cursorVisibilitySources.current.clear();
+              setCursorReadingsVisible(false);
               return;
             }
             setOpen(false);
@@ -708,6 +736,14 @@ export function TimelineNavigator({
                       className="timeline-navigator__resident-range"
                       data-testid="timeline-resident-range"
                       style={residentRange}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  {timelineSelectionStyle ? (
+                    <span
+                      className="timeline-navigator__selection-range"
+                      data-testid="timeline-selection-range"
+                      style={timelineSelectionStyle}
                       aria-hidden="true"
                     />
                   ) : null}
@@ -958,6 +994,9 @@ export function TimelineNavigator({
                     </div>
                     <span title={metricFileName ?? undefined}>
                       {metricFileName} · session only · not persisted
+                      {metricExtendsBeyondLogTimeline
+                        ? " · clipped to the shared log timeline"
+                        : ""}
                       {metricViewRange
                         ? ` · zoomed ${compactTime(
                             summary,
@@ -974,7 +1013,12 @@ export function TimelineNavigator({
                         ? { from: summary.spanFrom, to: summary.spanTo }
                         : undefined
                     }
-                    visibleTimeBounds={metricViewRange ?? undefined}
+                    visibleTimeBounds={
+                      metricViewRange ??
+                      (summary.spanFrom != null && summary.spanTo != null
+                        ? { from: summary.spanFrom, to: summary.spanTo }
+                        : undefined)
+                    }
                     cursorTimestamp={
                       sharedCursorTimestamp ??
                       summary.spanFrom ??
