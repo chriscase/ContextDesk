@@ -3,5 +3,5 @@ fixtures/log-lab/** text eol=lf
 
 # Preserve deliberately non-text fixture bytes.
 fixtures/log-lab/**/*.zip -text -eol
-fixtures/log-lab/**/04-crlf.log -text -eol
+fixtures/log-lab/**/04-crlf.log -text -eol whitespace=-trailing-space
 fixtures/log-lab/**/binary.log -text -eol

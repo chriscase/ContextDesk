@@ -87,7 +87,7 @@ vi.mock("../../lib/host", () => ({
     totalMatched: 2,
     timeQuality: "wall",
   })),
-  hostLogTimelineSummary: vi.fn(async () => ({
+  hostLogSharedTimelineSummary: vi.fn(async () => ({
     timeQuality: "wall",
     spanFrom: 1_700_000_000,
     spanTo: 1_700_000_004,
@@ -95,21 +95,24 @@ vi.mock("../../lib/host", () => ({
     bucketCount: 4,
     totalMatched: 2,
     buckets: [
-      {
-        index: 0,
-        start: 1_700_000_000,
-        end: 1_700_000_001,
-        count: 1,
-        byLevel: { error: 1 },
-      },
-      {
-        index: 1,
-        start: 1_700_000_001,
-        end: 1_700_000_002,
-        count: 1,
-        byLevel: { info: 1 },
-      },
+      { index: 0, start: 1_700_000_000, end: 1_700_000_001 },
+      { index: 1, start: 1_700_000_001, end: 1_700_000_002 },
+      { index: 2, start: 1_700_000_002, end: 1_700_000_003 },
+      { index: 3, start: 1_700_000_003, end: 1_700_000_004 },
     ],
+    counts: [1, 1, 0, 0],
+    severitySeries: [
+      { severity: "error", counts: [1, 0, 0, 0] },
+      { severity: "warn", counts: [0, 0, 0, 0] },
+      { severity: "info", counts: [0, 1, 0, 0] },
+      { severity: "debug", counts: [0, 0, 0, 0] },
+      { severity: "other", counts: [0, 0, 0, 0] },
+    ],
+    lanes: [],
+  })),
+  hostLogQueryEventOriginal: vi.fn(async () => ({
+    state: "unavailable",
+    reason: "Original representation unavailable for this corpus",
   })),
   hostLogSearchEvents: vi.fn(async () => []),
   hostLogSearchEventsAdvanced: vi.fn(async () => ({
@@ -367,6 +370,10 @@ describe("LogExplorer shell", () => {
       timeQuality: "wall",
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
+    vi.mocked(host.hostLogQueryEventOriginal).mockResolvedValue({
+      state: "unavailable",
+      reason: "Original representation unavailable for this corpus",
+    });
     vi.mocked(host.hostLogListBookmarks).mockResolvedValue([]);
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(null);
     vi.mocked(host.hostListChatModels).mockResolvedValue([
@@ -399,6 +406,16 @@ describe("LogExplorer shell", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockResolvedValue(null);
+    vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
+      async (sessionId, corpusId, draftSession) => {
+        if (!draftSession) return null;
+        return host.hostSaveChatSession({
+          ...draftSession,
+          id: sessionId,
+          linked_corpus_id: corpusId,
+        });
+      },
+    );
     vi.mocked(host.agentTurn).mockResolvedValue([]);
   });
 
@@ -480,12 +497,82 @@ describe("LogExplorer shell", () => {
     await waitFor(() => expect(document.activeElement).toBe(columnsTrigger));
   });
 
+  it("starts new investigations with compact payload-first rows", async () => {
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    const root = screen.getByTestId("log-explorer");
+    expect(root.getAttribute("data-metadata-presentation")).toBe("compact");
+    expect(root.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain(
+      "Payload",
+    );
+    const firstList = screen.getAllByTestId("virtualized-event-list")[0]!;
+    expect(firstList.getAttribute("data-metadata-presentation")).toBe(
+      "compact",
+    );
+    expect(firstList.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(firstList.querySelector("[data-level-token]")).toBeTruthy();
+  });
+
+  it("keeps explicit metadata and field-emphasis choices inside Rows and persists them", async () => {
+    const first = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByLabelText("Row metadata presentation"), {
+      target: { value: "standard" },
+    });
+    fireEvent.change(screen.getByLabelText("Row field emphasis"), {
+      target: { value: "metadata" },
+    });
+
+    const root = screen.getByTestId("log-explorer");
+    expect(root.getAttribute("data-metadata-presentation")).toBe("standard");
+    expect(root.getAttribute("data-field-emphasis")).toBe("metadata");
+    expect(screen.getByTestId("row-mode-picker").textContent).toContain(
+      "Metadata",
+    );
+    const firstList = screen.getAllByTestId("virtualized-event-list")[0]!;
+    expect(firstList.getAttribute("data-metadata-presentation")).toBe(
+      "standard",
+    );
+    expect(firstList.getAttribute("data-field-emphasis")).toBe("metadata");
+    expect(firstList.querySelector("[data-level-token]")).toBeNull();
+    expect(
+      localStorage.getItem("contextdesk.logExplorer.metadataPresentation.v1"),
+    ).toBe("standard");
+    expect(
+      localStorage.getItem("contextdesk.logExplorer.fieldEmphasis.v1"),
+    ).toBe("metadata");
+
+    first.unmount();
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    expect(
+      screen
+        .getByTestId("log-explorer")
+        .getAttribute("data-metadata-presentation"),
+    ).toBe("standard");
+    expect(
+      screen
+        .getAllByTestId("virtualized-event-list")[0]!
+        .getAttribute("data-field-emphasis"),
+    ).toBe("metadata");
+  });
+
   it("collapses and reopens the normal-width chat rail without toolbar clutter", async () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
     const body = screen.getByTestId("log-explorer-body");
+    const modeControl = screen
+      .getByTestId("log-explorer-chat")
+      .querySelector<HTMLElement>(
+        ":scope > .log-explorer__investigation-mode-control",
+      );
 
     expect(root.getAttribute("data-chat-collapsed")).toBe("false");
+    expect(modeControl!.style.paddingLeft).toBe("1.65rem");
     expect(screen.getByTestId("splitter-chat")).toBeTruthy();
     fireEvent.click(screen.getByTestId("collapse-linked-chat"));
 
@@ -663,9 +750,16 @@ describe("LogExplorer shell", () => {
     render(<LogExplorer corpusId="c1" />);
     const root = await screen.findByTestId("log-explorer");
     const input = screen.getByTestId("log-explorer-find");
+    expect(input.getAttribute("placeholder")).toBe("Find logs…");
+    expect(input.getAttribute("aria-label")).toBe("Find in logs");
     expect(document.activeElement).not.toBe(input);
     fireEvent.keyDown(root, { key: "f", metaKey: true });
     expect(document.activeElement).toBe(input);
+
+    fireEvent.click(screen.getByRole("button", { name: "Help: Find vs Filter" }));
+    expect(
+      screen.getByText(/Find highlights matches and steps next\/previous/),
+    ).toBeTruthy();
   });
 
   it("resizes every event column by keyboard/pointer and supports auto-fit/reset", async () => {
@@ -681,7 +775,7 @@ describe("LogExplorer shell", () => {
     const headers = screen.getByRole("row", {
       name: "All sources column headings",
     });
-    expect(headers.style.gridTemplateColumns).toContain("12rem");
+    expect(headers.style.gridTemplateColumns).toContain("16rem");
     const messageResize = within(headers).getByRole("button", {
       name: "Resize Message column for All sources",
     });
@@ -690,7 +784,7 @@ describe("LogExplorer shell", () => {
     );
     fireEvent.keyDown(messageResize, { key: "ArrowRight" });
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("12.5rem"),
+      expect(headers.style.gridTemplateColumns).toContain("16.5rem"),
     );
 
     const timeResize = within(headers).getByRole("button", {
@@ -700,7 +794,7 @@ describe("LogExplorer shell", () => {
     fireEvent.mouseMove(window, { clientX: 132 });
     fireEvent.mouseUp(window);
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("9.5rem"),
+      expect(headers.style.gridTemplateColumns).toContain("9.25rem"),
     );
 
     fireEvent.click(screen.getByTestId("columns-menu"));
@@ -711,7 +805,7 @@ describe("LogExplorer shell", () => {
     fireEvent.click(screen.getByTestId("columns-menu"));
     fireEvent.click(screen.getByTestId("col-reset"));
     await waitFor(() =>
-      expect(headers.style.gridTemplateColumns).toContain("12rem"),
+      expect(headers.style.gridTemplateColumns).toContain("16rem"),
     );
 
     const eventTime = screen.getByTestId("event-time-1");
@@ -740,10 +834,203 @@ describe("LogExplorer shell", () => {
     const metadata = within(inspector).getByTestId("detail-metadata");
     expect(metadata.textContent).toContain("api.log");
     expect(metadata.textContent).toContain("seq 1");
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
     fireEvent.click(within(inspector).getByTestId("detail-close"));
     await waitFor(() =>
       expect(document.activeElement?.getAttribute("data-seq")).toBe("1"),
     );
+  });
+
+  it("lazily reveals and copies the authoritative redacted original with fidelity notices", async () => {
+    const load = deferred<host.EventOriginalRepresentationDto>();
+    vi.mocked(host.hostLogQueryEventOriginal).mockReturnValue(load.promise);
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    const representation = within(inspector).getByRole("group", {
+      name: "Event 1 representation",
+    });
+    const formatted = within(representation).getByRole("button", {
+      name: "Formatted",
+    });
+    const original = within(representation).getByRole("button", {
+      name: "Original (redacted)",
+    });
+    expect(formatted.getAttribute("aria-pressed")).toBe("true");
+    expect(original.getAttribute("aria-pressed")).toBe("false");
+    expect(host.hostLogQueryEventOriginal).not.toHaveBeenCalled();
+
+    fireEvent.click(original);
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledWith("c1", 1);
+    expect(
+      within(inspector).getByText("Loading Original (redacted)…"),
+    ).toBeTruthy();
+    expect(
+      (within(inspector).getByTestId("detail-copy") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    await act(async () => {
+      load.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: '{"message":"auth failure","unknown":"kept"}',
+        sourceByteCount: 75_000,
+        redactedCharCount: 70_000,
+        storedCharCount: 65_536,
+        truncated: true,
+        encodingNormalized: true,
+        redactionApplied: true,
+      });
+      await load.promise;
+    });
+
+    const notices = within(inspector).getByTestId("detail-original-notices");
+    expect(notices.textContent).toContain("after secret redaction");
+    expect(notices.textContent).toContain("65,536 stored characters");
+    expect(notices.textContent).toContain("suffix is unavailable");
+    expect(notices.textContent).toContain("Invalid UTF-8");
+    expect(notices.textContent).toContain("Sensitive value patterns");
+    expect(
+      within(inspector).getByLabelText(
+        "Stored Original (redacted) record for event 1",
+      ).textContent,
+    ).toBe('{"message":"auth failure","unknown":"kept"}');
+    expect(
+      within(inspector).getByTestId("detail-copy").getAttribute("aria-label"),
+    ).toBe("Copy stored Original (redacted) record 1");
+
+    fireEvent.click(within(inspector).getByTestId("detail-copy"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        '{"message":"auth failure","unknown":"kept"}',
+      ),
+    );
+
+    fireEvent.click(formatted);
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 1")
+        .textContent,
+    ).toBe("auth failure");
+    fireEvent.click(within(inspector).getByTestId("detail-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+    expect(writeText.mock.calls[1]?.[0]).toContain(
+      "\terror\tapi.log\tauth failure",
+    );
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows honest unavailable and retryable error states without inventing original text", async () => {
+    vi.mocked(host.hostLogQueryEventOriginal)
+      .mockRejectedValueOnce(new Error("event store unavailable"))
+      .mockResolvedValueOnce({
+        state: "unavailable",
+        reason: "Original representation unavailable for this corpus",
+      });
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    fireEvent.click(screen.getByText(/auth failure/));
+    const inspector = await screen.findByTestId("log-explorer-detail");
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+
+    expect(
+      await within(inspector).findByText(
+        /Could not load Original.*event store unavailable/,
+      ),
+    ).toBeTruthy();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Retry" }));
+    expect(
+      (await within(inspector).findByTestId("detail-original-unavailable"))
+        .textContent,
+    ).toBe("Original representation unavailable for this corpus");
+    expect(
+      (within(inspector).getByTestId("detail-copy") as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      within(inspector).queryByTestId("detail-original-message"),
+    ).toBeNull();
+    expect(host.hostLogQueryEventOriginal).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores stale original responses after switching events or closing the inspector", async () => {
+    const first = deferred<host.EventOriginalRepresentationDto>();
+    const second = deferred<host.EventOriginalRepresentationDto>();
+    vi.mocked(host.hostLogQueryEventOriginal).mockImplementation(
+      (_corpusId, seq) => (seq === 1 ? first.promise : second.promise),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+    fireEvent.click(screen.getByText(/auth failure/));
+    let inspector = await screen.findByTestId("log-explorer-detail");
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+
+    fireEvent.click(screen.getByText(/job ok/));
+    inspector = await screen.findByTestId("log-explorer-detail");
+    expect(inspector.getAttribute("aria-label")).toContain("sequence 2");
+    expect(
+      within(inspector).getByLabelText("Complete redacted message for event 2")
+        .textContent,
+    ).toBe("job ok");
+    await act(async () => {
+      first.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: "stale event one",
+        sourceByteCount: 15,
+        redactedCharCount: 15,
+        storedCharCount: 15,
+        truncated: false,
+        encodingNormalized: false,
+        redactionApplied: false,
+      });
+      await first.promise;
+    });
+    expect(screen.queryByText("stale event one")).toBeNull();
+
+    fireEvent.click(
+      within(inspector).getByRole("button", {
+        name: "Original (redacted)",
+      }),
+    );
+    fireEvent.click(within(inspector).getByTestId("detail-close"));
+    await act(async () => {
+      second.resolve({
+        state: "available",
+        label: "Original (redacted)",
+        text: "stale event two",
+        sourceByteCount: 15,
+        redactedCharCount: 15,
+        storedCharCount: 15,
+        truncated: false,
+        encodingNormalized: false,
+        redactionApplied: false,
+      });
+      await second.promise;
+    });
+    expect(screen.queryByTestId("log-explorer-detail")).toBeNull();
+    expect(screen.queryByText("stale event two")).toBeNull();
+    expect(host.hostLogQueryEventOriginal).toHaveBeenNthCalledWith(1, "c1", 1);
+    expect(host.hostLogQueryEventOriginal).toHaveBeenNthCalledWith(2, "c1", 2);
   });
 
   it("scopes synchronized resizable headings to every visible lane", async () => {
@@ -764,7 +1051,7 @@ describe("LogExplorer shell", () => {
 
     for (const heading of headings) {
       expect(within(heading).getAllByRole("columnheader")).toHaveLength(4);
-      expect(heading.style.gridTemplateColumns).toContain("12rem");
+      expect(heading.style.gridTemplateColumns).toContain("16rem");
     }
 
     const laneTwoHeading = screen.getByRole("row", {
@@ -778,7 +1065,7 @@ describe("LogExplorer shell", () => {
     );
     await waitFor(() => {
       for (const heading of headings) {
-        expect(heading.style.gridTemplateColumns).toContain("12.5rem");
+        expect(heading.style.gridTemplateColumns).toContain("16.5rem");
       }
     });
 
@@ -2911,7 +3198,7 @@ describe("LogExplorer shell", () => {
       host: null,
       templateId: 1,
       traceId: null,
-      message: `${source} seq ${seq}`,
+      message: `${source} seq ${seq} ${"detail ".repeat(40)}`,
       source,
     });
     vi.mocked(host.hostLogFacets).mockResolvedValue({
@@ -2964,6 +3251,20 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(root.getAttribute("data-link-mode")).toBe("align_time"),
     );
+    chooseRowMode("Deep");
+    for (const message of document.querySelectorAll<HTMLElement>(
+      "[data-row-message-seq]",
+    )) {
+      const seq = Number(message.dataset.rowMessageSeq);
+      Object.defineProperty(message, "scrollHeight", {
+        configurable: true,
+        value: seq === 11 ? 90 : seq === 21 ? 54 : 18,
+      });
+    }
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "12" },
+    });
 
     expect(root.getAttribute("data-aligned-slots")).toBe("3");
     expect(screen.getByTestId("aligned-time-axis").textContent).toMatch(
@@ -2973,6 +3274,31 @@ describe("LogExplorer shell", () => {
     expect(lists).toHaveLength(2);
     expect(lists[0]!.getAttribute("data-aligned-slots")).toBe("3");
     expect(lists[1]!.getAttribute("data-aligned-slots")).toBe("3");
+    await waitFor(() => {
+      expect(lists[0]!.getAttribute("data-total-height")).toBe("158");
+      expect(lists[1]!.getAttribute("data-total-height")).toBe("158");
+    });
+    chooseRowMode("Single line");
+    fireEvent.click(screen.getByTestId("expand-row-11"));
+    const expandedMessage = document.querySelector<HTMLElement>(
+      '[data-row-message-seq="11"]',
+    );
+    expect(expandedMessage).toBeTruthy();
+    expect(
+      document.querySelector('[data-row-message-seq="21"]'),
+    ).toBeNull();
+    Object.defineProperty(expandedMessage!, "scrollHeight", {
+      configurable: true,
+      value: 90,
+    });
+    openToolbarPicker("row-mode-picker");
+    fireEvent.change(screen.getByTestId("preview-lines"), {
+      target: { value: "8" },
+    });
+    await waitFor(() => {
+      expect(lists[0]!.getAttribute("data-total-height")).toBe("158");
+      expect(lists[1]!.getAttribute("data-total-height")).toBe("158");
+    });
     expect(screen.getAllByTestId("aligned-gap")).toHaveLength(2);
     expect(
       (document.querySelector('[data-seq="11"]') as HTMLElement).style.top,
@@ -4195,14 +4521,17 @@ describe("LogExplorer shell", () => {
       );
     });
 
-    fireEvent.click(screen.getByTestId("timeline-navigator-toggle"));
     fireEvent.click(await screen.findByTestId("timeline-bucket-0"));
 
-    expect(host.hostLogTimelineSummary).toHaveBeenCalledWith(
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledWith(
       "c1",
       expect.objectContaining({
         sources: ["api.log", "worker.log", "queue.log", "db.log"],
       }),
+      [
+        { sources: ["api.log", "worker.log"] },
+        { sources: ["queue.log", "db.log"] },
+      ],
       96,
     );
     expect(host.hostLogQueryEvents).toHaveBeenCalledWith(
@@ -4753,9 +5082,11 @@ describe("LogExplorer shell", () => {
     const root = await screen.findByTestId("log-explorer");
     expect(root.getAttribute("data-time-quality")).toBe("wall");
     expect(
-      (await screen.findAllByText("audit/deploy.jsonl")).length,
-    ).toBeGreaterThan(1);
-    expect(screen.getAllByText("worker/worker.log").length).toBeGreaterThan(1);
+      (await screen.findAllByLabelText(/^Source audit\/deploy\.jsonl;/)).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByLabelText(/^Source worker\/worker\.log;/).length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("/Users/")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Find in logs"), {

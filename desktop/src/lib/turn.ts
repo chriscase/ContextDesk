@@ -4,6 +4,14 @@ import type { PermissionPrompt } from "../components/PermissionModal";
 import type { ToolCallView } from "../components/ToolCallList";
 import type { EventDto, MessageMetaDto } from "./host";
 
+export type ChatCitation = {
+  id: string;
+  label: string;
+  title?: string;
+  /** Host-authored durable provenance for governed log evidence (#698). */
+  corpusId?: string;
+};
+
 /** In-UI chat message shape (subset persisted to sessions). */
 export type ChatMsg = {
   id: string;
@@ -11,7 +19,7 @@ export type ChatMsg = {
   content: string;
   tools?: ToolCallView[];
   /** id = url/path, label = short source, title = article/page title */
-  citations?: { id: string; label: string; title?: string }[];
+  citations?: ChatCitation[];
   trail?: string[];
   streaming?: boolean;
   meta?: MessageMetaDto;
@@ -55,9 +63,7 @@ export function applyEventsToMessage(
 ): { msg: ChatMsg; permission: PermissionPrompt | null } {
   let content = base.content;
   const tools: ToolCallView[] = [...(base.tools ?? [])];
-  const citations: { id: string; label: string; title?: string }[] = [
-    ...(base.citations ?? []),
-  ];
+  const citations: ChatCitation[] = [...(base.citations ?? [])];
   const trail: string[] = [...(base.trail ?? [])];
   let permission: PermissionPrompt | null = null;
   let meta: MessageMetaDto | undefined = base.meta
@@ -113,7 +119,13 @@ export function applyEventsToMessage(
             ? titleRaw
             : undefined;
         if (id && !citations.some((c) => c.id === id)) {
-          citations.push({ id, label, title });
+          const corpusId =
+            (id.startsWith("log_template:") || id.startsWith("log_event:")) &&
+            typeof p.corpus_id === "string" &&
+            p.corpus_id.trim()
+              ? p.corpus_id.trim()
+              : undefined;
+          citations.push({ id, label, title, corpusId });
         }
         break;
       }

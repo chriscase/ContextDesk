@@ -45,6 +45,7 @@ describe("columnWidths", () => {
 
   it("defaults when storage empty or corrupt", () => {
     expect(loadColWidths()).toEqual(DEFAULT_COL_WIDTHS);
+    expect(DEFAULT_COL_WIDTHS).toEqual([7.25, 2.5, 6, 16]);
     localStorage.setItem("contextdesk.logExplorer.colWidths.v1", "not-json");
     expect(loadColWidths()).toEqual(DEFAULT_COL_WIDTHS);
   });
@@ -56,10 +57,10 @@ describe("columnWidths", () => {
   });
 
   it("autoFit grows source column for long paths", () => {
-    const fit = autoFitColWidths([
-      "region-a/very-long-service-name/app.jsonl",
-      "api/app.jsonl",
-    ], ["short", "x".repeat(90)]);
+    const fit = autoFitColWidths(
+      ["region-a/very-long-service-name/app.jsonl", "api/app.jsonl"],
+      ["short", "x".repeat(90)],
+    );
     expect(fit[2]).toBeGreaterThan(DEFAULT_COL_WIDTHS[2]);
     expect(fit[3]).toBeGreaterThan(DEFAULT_COL_WIDTHS[3]);
   });

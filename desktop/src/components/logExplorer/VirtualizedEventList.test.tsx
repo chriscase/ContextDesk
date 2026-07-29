@@ -8,6 +8,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import {
   eventRowHeight,
+  measuredEventRowHeight,
   VirtualizedEventList,
 } from "./VirtualizedEventList";
 import type { ExplorerEventDto } from "../../lib/host";
@@ -81,6 +82,45 @@ describe("VirtualizedEventList", () => {
     expect(Number(list.getAttribute("data-rendered"))).toBeLessThan(120);
     expect(screen.getAllByTestId("aligned-gap").length).toBeLessThan(120);
     expect(screen.queryByText("No events match filters")).toBeNull();
+  });
+
+  it("keeps populated rows painted when a shared alignment axis becomes lane-local", () => {
+    const events = makeEvents(200);
+    const alignedRows = Array.from({ length: 10_000 }, (_, index) => ({
+      key: `slot-${index}`,
+      ts: 1_700_000_000 + index,
+      event: index % 50 === 0 ? events[index / 50] : null,
+      height: 28,
+    }));
+    const props = {
+      events,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList
+        {...props}
+        alignedRows={alignedRows}
+        linkedScrollTop={140_000}
+      />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, writable: true, value: 140_000 },
+    });
+    fireEvent.scroll(list);
+
+    act(() => {
+      rerender(<VirtualizedEventList {...props} />);
+    });
+
+    expect((list as HTMLDivElement).scrollTop).toBeLessThanOrEqual(5_200);
+    expect(Number(list.getAttribute("data-rendered"))).toBeGreaterThan(0);
+    expect(list.querySelector("[data-seq]")).toBeTruthy();
   });
 
   it("preserves a stable event pixel anchor across prepend and head eviction", () => {
@@ -266,6 +306,195 @@ describe("VirtualizedEventList", () => {
     expect(eventRowHeight(long!, "full", false, 28, 4)).toBe(156);
   });
 
+  it("remeasures wrapped payloads from painted content without clipping or blank maximum height", async () => {
+    const event = makeEvents(1)[0]!;
+    event.message = `STACK_TRACE_SENTINEL ${"frame detail ".repeat(40)}`;
+    const props = {
+      events: [event],
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      previewLines: 4,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(<VirtualizedEventList {...props} />);
+    const message = screen.getByText(/STACK_TRACE_SENTINEL/);
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 90,
+    });
+
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 5, 2]} />);
+
+    const row = document.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`);
+    await waitFor(() => expect(row?.style.height).toBe("102px"));
+    expect(message.style.maxHeight).toBe("144px");
+    expect(message.style.overflowWrap).toBe("anywhere");
+
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 18,
+    });
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 6, 2]} />);
+    await waitFor(() => expect(row?.style.height).toBe("28px"));
+  });
+
+  it("caps measured payload height at the selected preview depth", () => {
+    expect(measuredEventRowHeight(900, 28, 8)).toBe(156);
+    expect(measuredEventRowHeight(18, 28, 8)).toBe(28);
+  });
+
+  it("reports painted Align slot heights to the shared lane axis", async () => {
+    const event = makeEvents(1)[0]!;
+    event.message = "aligned stack trace ".repeat(30);
+    const onAlignedRowHeights = vi.fn();
+    const alignedRows = [
+      {
+        key: "1700000000:0",
+        ts: event.ts,
+        event,
+        height: 156,
+      },
+    ];
+    const props = {
+      events: [event],
+      alignedRows,
+      alignedLaneId: "lane-1",
+      onAlignedRowHeights,
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(<VirtualizedEventList {...props} />);
+    const message = screen.getByText(/aligned stack trace/);
+    Object.defineProperty(message, "scrollHeight", {
+      configurable: true,
+      value: 72,
+    });
+
+    rerender(<VirtualizedEventList {...props} colWidths={[7, 2, 5, 2]} />);
+
+    await waitFor(() =>
+      expect(onAlignedRowHeights).toHaveBeenCalledWith("lane-1", {
+        "1700000000:0": 84,
+      }),
+    );
+  });
+
+  it("attaches resize observation after an empty list becomes populated", () => {
+    const original = globalThis.ResizeObserver;
+    const observed: Element[] = [];
+    const disconnect = vi.fn();
+    globalThis.ResizeObserver = class {
+      observe(element: Element) {
+        observed.push(element);
+      }
+      unobserve() {}
+      disconnect() {
+        disconnect();
+      }
+    };
+    try {
+      const props = {
+        timeQuality: "wall" as const,
+        selected: new Set<number>(),
+        highlight: new Set<number>(),
+        density: "comfortable" as const,
+        onRowClick: vi.fn(),
+      };
+      const { rerender } = render(
+        <VirtualizedEventList {...props} events={[]} />,
+      );
+      expect(observed.at(-1)?.textContent).toContain("No events match filters");
+
+      rerender(<VirtualizedEventList {...props} events={makeEvents(1)} />);
+      expect(observed.at(-1)?.getAttribute("data-testid")).toBe(
+        "virtualized-event-list",
+      );
+      expect(observed).toHaveLength(1);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+
+  it("prunes measured heights when the resident event window changes", async () => {
+    const first = makeEvents(1)[0]!;
+    first.message = "first long payload ".repeat(20);
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={[first]} />,
+    );
+    const firstMessage = screen.getByText(/first long payload/);
+    Object.defineProperty(firstMessage, "scrollHeight", {
+      configurable: true,
+      value: 72,
+    });
+    rerender(
+      <VirtualizedEventList
+        {...props}
+        events={[first]}
+        colWidths={[7, 2, 5, 2]}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-measured-rows"),
+      ).toBe("1"),
+    );
+
+    const second = { ...makeEvents(1)[0]!, seq: 2, message: "short" };
+    rerender(<VirtualizedEventList {...props} events={[second]} />);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("virtualized-event-list")
+          .getAttribute("data-measured-rows"),
+      ).toBe("0"),
+    );
+  });
+
+  it("clamps the retained within-row anchor when a measured row shrinks", () => {
+    const expanded = makeEvents(4).map((event) => ({
+      ...event,
+      message: "x".repeat(1_000),
+    }));
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      lineMode: "full" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={expanded} />,
+    );
+    const list = screen.getByTestId("virtualized-event-list");
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 100,
+    });
+
+    rerender(<VirtualizedEventList {...props} events={makeEvents(4)} />);
+
+    expect((list as HTMLDivElement).scrollTop).toBe(27);
+  });
+
   it("uses the user preview depth and a backend hit-centered excerpt", () => {
     const event = makeEvents(1)[0]!;
     event.message = `prefix ${"noise ".repeat(40)}NEEDLE${" tail".repeat(40)}`;
@@ -388,5 +617,195 @@ describe("VirtualizedEventList", () => {
     await waitFor(() => expect(firstRequest).toHaveBeenCalledTimes(1));
     rerender(renderList(11, replacementRequest));
     expect(replacementRequest).not.toHaveBeenCalled();
+  });
+
+  it("uses a compact payload-first default without hiding complete provenance", () => {
+    const event = makeEvents(1)[0]!;
+    event.service = "checkout-api";
+    event.host = "worker-01";
+    const onRowClick = vi.fn();
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set([event.seq])}
+        highlight={new Set([event.seq])}
+        density="comfortable"
+        onRowClick={onRowClick}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    const row = list.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`)!;
+    expect(list.getAttribute("data-metadata-presentation")).toBe("compact");
+    expect(list.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(row.classList.contains("log-explorer__row--selected")).toBe(true);
+    expect(row.classList.contains("log-explorer__row--highlight")).toBe(true);
+    const provenance = list.querySelector<HTMLElement>("[data-source-token]")!;
+    expect(provenance.getAttribute("title")).toBe(
+      `Source: ${event.source}\nService: ${event.service}\nHost: ${event.host}`,
+    );
+    expect(provenance.getAttribute("tabindex")).toBe("0");
+
+    fireEvent.click(row);
+    expect(onRowClick).toHaveBeenLastCalledWith(event, false);
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(onRowClick).toHaveBeenLastCalledWith(event, false);
+  });
+
+  it("disambiguates colliding compact provenance labels deterministically", () => {
+    const events = makeEvents(2);
+    events[0]!.source = "/srv/region-a/api.log";
+    events[1]!.source = "/srv/region-b/api.log";
+    events[0]!.service = "checkout-A-production";
+    events[1]!.service = "checkout-B-production";
+    events[0]!.host = "worker-A-production";
+    events[1]!.host = "worker-B-production";
+    const props = {
+      timeQuality: "wall" as const,
+      selected: new Set<number>(),
+      highlight: new Set<number>(),
+      density: "comfortable" as const,
+      metadataPresentation: "compact" as const,
+      onRowClick: vi.fn(),
+    };
+    const { rerender } = render(
+      <VirtualizedEventList {...props} events={events} />,
+    );
+
+    const labelsBySource = () =>
+      new Map(
+        Array.from(
+          screen
+            .getByTestId("virtualized-event-list")
+            .querySelectorAll<HTMLElement>("[data-source-token]"),
+        ).map((element) => [
+          element.dataset.fullSource!,
+          {
+            source: element.dataset.sourceToken,
+            service: element.dataset.serviceToken,
+            host: element.dataset.hostToken,
+          },
+        ]),
+      );
+    const firstLabels = labelsBySource();
+    expect(firstLabels.get(events[0]!.source)?.source).not.toBe(
+      firstLabels.get(events[1]!.source)?.source,
+    );
+    expect(firstLabels.get(events[0]!.source)?.service).not.toBe(
+      firstLabels.get(events[1]!.source)?.service,
+    );
+    expect(firstLabels.get(events[0]!.source)?.host).not.toBe(
+      firstLabels.get(events[1]!.source)?.host,
+    );
+
+    rerender(
+      <VirtualizedEventList {...props} events={[...events].reverse()} />,
+    );
+    expect(labelsBySource()).toEqual(firstLabels);
+  });
+
+  it("keeps unknown compact levels textual, unique, and fully explained", () => {
+    const events = makeEvents(3);
+    events[0]!.level = "mystery";
+    events[1]!.level = "muted";
+    events[2]!.level = "error";
+    render(
+      <VirtualizedEventList
+        events={events}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const levelTokens = Array.from(
+      screen
+        .getByTestId("virtualized-event-list")
+        .querySelectorAll<HTMLElement>("[data-level-token]"),
+    );
+    const mystery = levelTokens.find(
+      (token) => token.dataset.fullLevel === "mystery",
+    )!;
+    const muted = levelTokens.find(
+      (token) => token.dataset.fullLevel === "muted",
+    )!;
+    const error = levelTokens.find(
+      (token) => token.dataset.fullLevel === "error",
+    )!;
+    expect(mystery.dataset.levelToken).not.toBe(muted.dataset.levelToken);
+    expect(mystery.dataset.levelToken).toMatch(/^M\?/);
+    expect(error.dataset.levelToken).toBe("E");
+    expect(mystery.classList.contains("log-explorer__level--other")).toBe(true);
+    expect(mystery.getAttribute("aria-label")).toContain("Level mystery");
+    expect(mystery.getAttribute("title")).toBe("Level: mystery");
+  });
+
+  it("exposes complete Unicode provenance to pointer and keyboard users", () => {
+    const event = makeEvents(1)[0]!;
+    event.source = "/var/log/服务/🚀-gateway-production.jsonl";
+    event.service = "结算-服务-production";
+    event.host = "主机-東京-production";
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        onRowClick={vi.fn()}
+      />,
+    );
+
+    const provenance = screen.getByLabelText(
+      `Source ${event.source}; Service ${event.service}; Host ${event.host}`,
+    );
+    expect(provenance.getAttribute("title")).toBe(
+      `Source: ${event.source}\nService: ${event.service}\nHost: ${event.host}`,
+    );
+    expect(provenance.getAttribute("tabindex")).toBe("0");
+    provenance.focus();
+    expect(document.activeElement).toBe(provenance);
+    expect(provenance.getAttribute("data-source-token")).toContain("🚀");
+  });
+
+  it("changes emphasis as presentation only and preserves authoritative interaction data", () => {
+    const event = makeEvents(1)[0]!;
+    event.source = "/logs/api/app.jsonl";
+    event.service = "checkout-api";
+    event.host = "node-17";
+    event.message = "payload=authoritative event text";
+    const original = structuredClone(event);
+    const onRowClick = vi.fn();
+    const onToggleExpand = vi.fn();
+    render(
+      <VirtualizedEventList
+        events={[event]}
+        timeQuality="wall"
+        selected={new Set()}
+        highlight={new Set()}
+        density="comfortable"
+        metadataPresentation="compact"
+        fieldEmphasis="payload"
+        onRowClick={onRowClick}
+        onToggleExpand={onToggleExpand}
+      />,
+    );
+
+    const list = screen.getByTestId("virtualized-event-list");
+    const row = list.querySelector<HTMLElement>(`[data-seq="${event.seq}"]`)!;
+    const message = screen.getByText(event.message);
+    expect(list.getAttribute("data-field-emphasis")).toBe("payload");
+    expect(message.getAttribute("title")).toBe(event.message);
+    expect(event).toEqual(original);
+
+    fireEvent.click(row, { ctrlKey: true });
+    expect(onRowClick).toHaveBeenLastCalledWith(event, true);
+    fireEvent.keyDown(row, { key: "x" });
+    expect(onToggleExpand).toHaveBeenCalledWith(event.seq);
   });
 });

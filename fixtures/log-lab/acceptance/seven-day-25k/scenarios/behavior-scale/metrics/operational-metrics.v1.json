@@ -1,0 +1,156 @@
+{
+  "schemaVersion": 1,
+  "id": "behavior-scale-performance-telemetry",
+  "name": "Checkout performance run telemetry",
+  "series": [
+    {
+      "id": "cpu-percent",
+      "name": "CPU",
+      "unit": "%",
+      "labels": {
+        "service": "checkout-api",
+        "environment": "synthetic-performance"
+      },
+      "thresholds": [
+        {
+          "id": "cpu-warning",
+          "label": "CPU warning",
+          "value": 80,
+          "severity": "warning"
+        }
+      ],
+      "provenance": {
+        "source": "synthetic/performance-agent.csv",
+        "collector": "ContextDesk Log Lab",
+        "query": "host CPU utilization at 15-minute resolution"
+      },
+      "timeQuality": "wall",
+      "points": [
+        { "timestamp": 1736078400, "value": 22 },
+        { "timestamp": 1736079300, "value": 24 },
+        { "timestamp": 1736080200, "value": 27 },
+        { "timestamp": 1736081100, "value": 30 },
+        { "timestamp": 1736082000, "value": 34 },
+        { "timestamp": 1736082900, "value": 39 },
+        { "timestamp": 1736083800, "value": 46 },
+        { "timestamp": 1736084700, "value": 55 },
+        { "timestamp": 1736085600, "value": 64 },
+        { "timestamp": 1736086500, "value": 73 },
+        { "timestamp": 1736087400, "value": 82 },
+        { "timestamp": 1736088300, "value": 89 },
+        { "timestamp": 1736089200, "value": 93 },
+        { "timestamp": 1736090100, "value": 96 },
+        { "timestamp": 1736091000, "value": 91 },
+        { "timestamp": 1736091900, "value": 86 },
+        { "timestamp": 1736092800, "value": 77 },
+        { "timestamp": 1736093700, "value": 68 },
+        { "timestamp": 1736094600, "value": 58 },
+        { "timestamp": 1736095500, "value": 49 },
+        { "timestamp": 1736096400, "value": 41 },
+        { "timestamp": 1736097300, "value": 35 },
+        { "timestamp": 1736098200, "value": 31 },
+        { "timestamp": 1736099100, "value": 27 },
+        { "timestamp": 1736100000, "value": 24 }
+      ]
+    },
+    {
+      "id": "heap-used-bytes",
+      "name": "Heap used",
+      "unit": "bytes",
+      "labels": {
+        "service": "checkout-api",
+        "pool": "application"
+      },
+      "thresholds": [
+        {
+          "id": "heap-warning",
+          "label": "Heap pressure warning",
+          "value": 750000000,
+          "severity": "warning"
+        }
+      ],
+      "gaps": [
+        {
+          "from": 1736082900,
+          "to": 1736083800,
+          "reason": "synthetic collector restart"
+        }
+      ],
+      "provenance": {
+        "source": "synthetic/jvm-telemetry.jsonl",
+        "collector": "ContextDesk Log Lab",
+        "query": "application heap used bytes at 15-minute resolution"
+      },
+      "timeQuality": "wall",
+      "points": [
+        { "timestamp": 1736078400, "value": 410000000 },
+        { "timestamp": 1736079300, "value": 425000000 },
+        { "timestamp": 1736080200, "value": 441000000 },
+        { "timestamp": 1736081100, "value": 459000000 },
+        { "timestamp": 1736082000, "value": 480000000 },
+        { "timestamp": 1736082900, "value": 505000000 },
+        { "timestamp": 1736083800, "value": 533000000 },
+        { "timestamp": 1736084700, "value": 566000000 },
+        { "timestamp": 1736085600, "value": 604000000 },
+        { "timestamp": 1736086500, "value": 648000000 },
+        { "timestamp": 1736087400, "value": 695000000 },
+        { "timestamp": 1736088300, "value": 742000000 },
+        { "timestamp": 1736089200, "value": 781000000 },
+        { "timestamp": 1736090100, "value": 812000000 },
+        { "timestamp": 1736091000, "value": 824000000 },
+        { "timestamp": 1736091900, "value": 806000000 },
+        { "timestamp": 1736092800, "value": 765000000 },
+        { "timestamp": 1736093700, "value": 714000000 },
+        { "timestamp": 1736094600, "value": 662000000 },
+        { "timestamp": 1736095500, "value": 610000000 },
+        { "timestamp": 1736096400, "value": 565000000 },
+        { "timestamp": 1736097300, "value": 527000000 },
+        { "timestamp": 1736098200, "value": 495000000 },
+        { "timestamp": 1736099100, "value": 468000000 },
+        { "timestamp": 1736100000, "value": 446000000 }
+      ]
+    },
+    {
+      "id": "concurrent-clients",
+      "name": "Concurrent clients",
+      "unit": "clients",
+      "labels": {
+        "workload": "checkout-ramp",
+        "environment": "synthetic-performance"
+      },
+      "provenance": {
+        "source": "synthetic/load-generator.csv",
+        "collector": "ContextDesk Log Lab",
+        "query": "connected virtual clients at 15-minute resolution"
+      },
+      "timeQuality": "wall",
+      "points": [
+        { "timestamp": 1736078400, "value": 10 },
+        { "timestamp": 1736079300, "value": 15 },
+        { "timestamp": 1736080200, "value": 20 },
+        { "timestamp": 1736081100, "value": 30 },
+        { "timestamp": 1736082000, "value": 40 },
+        { "timestamp": 1736082900, "value": 50 },
+        { "timestamp": 1736083800, "value": 60 },
+        { "timestamp": 1736084700, "value": 70 },
+        { "timestamp": 1736085600, "value": 80 },
+        { "timestamp": 1736086500, "value": 90 },
+        { "timestamp": 1736087400, "value": 100 },
+        { "timestamp": 1736088300, "value": 110 },
+        { "timestamp": 1736089200, "value": 120 },
+        { "timestamp": 1736090100, "value": 120 },
+        { "timestamp": 1736091000, "value": 120 },
+        { "timestamp": 1736091900, "value": 110 },
+        { "timestamp": 1736092800, "value": 100 },
+        { "timestamp": 1736093700, "value": 90 },
+        { "timestamp": 1736094600, "value": 80 },
+        { "timestamp": 1736095500, "value": 70 },
+        { "timestamp": 1736096400, "value": 60 },
+        { "timestamp": 1736097300, "value": 50 },
+        { "timestamp": 1736098200, "value": 35 },
+        { "timestamp": 1736099100, "value": 20 },
+        { "timestamp": 1736100000, "value": 10 }
+      ]
+    }
+  ]
+}

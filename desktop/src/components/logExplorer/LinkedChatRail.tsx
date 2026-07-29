@@ -25,12 +25,14 @@ import {
 import {
   agentTurn,
   hostArchiveChatSession,
+  hostCancelTurn,
   hostListChatModels,
   hostListChatSessionsForCorpus,
   hostLoadChatSession,
   hostPinChatSession,
   hostRenameChatSession,
   hostSaveChatSession,
+  hostSetChatLinkedCorpus,
   hostSetModelToolsEnabled,
   modelSelectionKey,
   parseModelSelectionKey,
@@ -271,6 +273,8 @@ export function LinkedChatRail({
    * chat A must not leak into chat B when the user switches mid-turn (#543).
    */
   const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
+  const [cancellationRequestedByChat, setCancellationRequestedByChat] =
+    useState<Record<string, boolean>>({});
   const [errorByChat, setErrorByChat] = useState<Record<string, string | null>>(
     {},
   );
@@ -312,7 +316,10 @@ export function LinkedChatRail({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const focusComposerAfterTurnRef = useRef<string | null>(null);
   const appliedExternalDraftRequestRef = useRef<number | null>(null);
+  const creatingTurnChatRef = useRef(false);
   const sendingChatsRef = useRef<Set<string>>(new Set());
+  const cancellationRequestsRef = useRef<Set<string>>(new Set());
+  const terminalChatsRef = useRef<Set<string>>(new Set());
   const detachedByChatRef = useRef(detachedByChat);
   detachedByChatRef.current = detachedByChat;
 
@@ -379,6 +386,9 @@ export function LinkedChatRail({
     ? (followByChat[activeChatId] ?? true)
     : true;
   const busy = activeChatId ? (busyByChat[activeChatId] ?? false) : false;
+  const cancellationRequested = activeChatId
+    ? (cancellationRequestedByChat[activeChatId] ?? false)
+    : false;
   const error = activeChatId
     ? (errorByChat[activeChatId] ?? railError)
     : railError;
@@ -610,7 +620,16 @@ export function LinkedChatRail({
         s.chatModel = preferred.id;
         s.providerProfileId = preferred.provider_id;
       }
-      const saved = await hostSaveChatSession(sessionToDto(s));
+      // A linked corpus is a host-governed grant, so the generic renderer save
+      // path intentionally cannot create it. Persist the empty first-turn
+      // draft and its validated corpus link atomically through the governed
+      // mutation instead.
+      const saved = await hostSetChatLinkedCorpus(
+        s.id,
+        corpusId,
+        sessionToDto(s),
+        s.updatedAt,
+      );
       if (saved) {
         if (preferred) {
           setSelectionByChat((current) => ({
@@ -705,12 +724,23 @@ export function LinkedChatRail({
     }
     let sessionId = activeChatId;
     if (!sessionId) {
-      sessionId = await createLinkedChat();
+      if (creatingTurnChatRef.current) return;
+      creatingTurnChatRef.current = true;
+      try {
+        sessionId = await createLinkedChat();
+      } finally {
+        creatingTurnChatRef.current = false;
+      }
       if (!sessionId) return;
     }
     if (busyByChat[sessionId] || sendingChatsRef.current.has(sessionId)) return;
     sendingChatsRef.current.add(sessionId);
+    terminalChatsRef.current.delete(sessionId);
     setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
+    setCancellationRequestedByChat((m) => ({
+      ...m,
+      [sessionId!]: false,
+    }));
     setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
     setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
     setDraft("");
@@ -776,6 +806,8 @@ export function LinkedChatRail({
           brief: agentContext.brief,
         },
       );
+      terminalChatsRef.current.add(sessionId);
+      setErrorByChat((current) => ({ ...current, [sessionId!]: null }));
 
       const full = await hostLoadChatSession(sessionId);
       if (!full) {
@@ -841,6 +873,7 @@ export function LinkedChatRail({
         void loadModels();
       }
     } catch (e) {
+      terminalChatsRef.current.add(sessionId);
       setErrorByChat((m) => ({ ...m, [sessionId!]: String(e) }));
       if (activeChatIdRef.current === sessionId) {
         setMessages((msgs) =>
@@ -857,10 +890,61 @@ export function LinkedChatRail({
       }
     } finally {
       sendingChatsRef.current.delete(sessionId);
+      cancellationRequestsRef.current.delete(sessionId);
       if (activeChatIdRef.current === sessionId) {
         focusComposerAfterTurnRef.current = sessionId;
       }
       setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
+      setCancellationRequestedByChat((m) => ({
+        ...m,
+        [sessionId!]: false,
+      }));
+    }
+  };
+
+  const requestCancellation = async () => {
+    const sessionId = activeChatId;
+    if (
+      !sessionId ||
+      !busyByChat[sessionId] ||
+      cancellationRequestedByChat[sessionId] ||
+      cancellationRequestsRef.current.has(sessionId)
+    ) {
+      return;
+    }
+
+    cancellationRequestsRef.current.add(sessionId);
+    setCancellationRequestedByChat((current) => ({
+      ...current,
+      [sessionId]: true,
+    }));
+    setErrorByChat((current) => ({ ...current, [sessionId]: null }));
+    setStatusByChat((current) => ({
+      ...current,
+      [sessionId]:
+        "Cancellation requested. Waiting for the current turn to stop…",
+    }));
+
+    try {
+      await hostCancelTurn(sessionId);
+    } catch (error) {
+      // A terminal turn event remains authoritative if it won this race.
+      if (
+        sendingChatsRef.current.has(sessionId) &&
+        !terminalChatsRef.current.has(sessionId)
+      ) {
+        setCancellationRequestedByChat((current) => ({
+          ...current,
+          [sessionId]: false,
+        }));
+        setStatusByChat((current) => ({ ...current, [sessionId]: null }));
+        setErrorByChat((current) => ({
+          ...current,
+          [sessionId]: `Could not request cancellation: ${String(error)}`,
+        }));
+      }
+    } finally {
+      cancellationRequestsRef.current.delete(sessionId);
     }
   };
 
@@ -1065,7 +1149,10 @@ export function LinkedChatRail({
       aria-label={compactLayout ? "Linked corpus chat drawer" : undefined}
     >
       {modeControl ? (
-        <div className="log-explorer__investigation-mode-control">
+        <div
+          className="log-explorer__investigation-mode-control"
+          style={compactLayout ? undefined : { paddingLeft: "1.65rem" }}
+        >
           {modeControl}
         </div>
       ) : null}
@@ -1272,7 +1359,11 @@ export function LinkedChatRail({
                       {c.title}
                     </div>
                     <div className="log-explorer__chat-preview">
-                      {busyByChat[c.id] ? "Investigating… · " : ""}
+                      {cancellationRequestedByChat[c.id]
+                        ? "Cancellation requested… · "
+                        : busyByChat[c.id]
+                          ? "Investigating… · "
+                          : ""}
                       {c.preview}
                     </div>
                   </button>
@@ -1457,10 +1548,11 @@ export function LinkedChatRail({
           type="button"
           className="log-explorer__btn log-explorer__btn--active"
           data-testid="send-linked-chat"
-          disabled={busy || !draft.trim()}
-          onClick={() => void sendChat()}
+          aria-disabled={busy && cancellationRequested}
+          disabled={!busy && !draft.trim()}
+          onClick={() => (busy ? void requestCancellation() : void sendChat())}
         >
-          {busy ? "Investigating…" : "Send"}
+          {busy ? (cancellationRequested ? "Stopping…" : "Stop") : "Send"}
         </button>
       </div>
 

@@ -44,6 +44,8 @@ export type MessageRowProps = {
   openCompositionFromMemoryId?: (sourceId: string) => void;
   /** Open a canonical bundled Help citation without treating it as a file. */
   onOpenHelpCitation?: (locator: string) => void;
+  /** Open the host-authored original corpus for governed log evidence. */
+  onOpenLogCitation?: (sourceId: string, corpusId?: string) => void;
   /** Optional measure hook for virtualization. */
   onHeightChange?: (id: string, height: number) => void;
 };
@@ -51,6 +53,18 @@ export type MessageRowProps = {
 function toolsSignature(tools: Msg["tools"]): string {
   if (!tools?.length) return "0";
   return `${tools.length}:${tools.map((t) => `${t.id}:${t.summary}:${t.ok}`).join("|")}`;
+}
+
+function citationsSignature(citations: Msg["citations"]): string {
+  if (!citations?.length) return "0";
+  return citations
+    .map(
+      (citation) =>
+        `${citation.id}:${citation.label}:${citation.title ?? ""}:${
+          citation.corpusId ?? ""
+        }`,
+    )
+    .join("|");
 }
 
 /** Equality for React.memo — settled rows equal when id/content/stream/tools stable. */
@@ -68,7 +82,10 @@ export function messageRowPropsEqual(
   if ((prev.msg.trail?.length ?? 0) !== (next.msg.trail?.length ?? 0)) {
     return false;
   }
-  if ((prev.msg.citations?.length ?? 0) !== (next.msg.citations?.length ?? 0)) {
+  if (
+    citationsSignature(prev.msg.citations) !==
+    citationsSignature(next.msg.citations)
+  ) {
     return false;
   }
   // Meta footer only on settled assistant rows
@@ -93,6 +110,7 @@ function MessageRowImpl({
   setMemoryPath,
   openCompositionFromMemoryId,
   onOpenHelpCitation,
+  onOpenLogCitation,
   onHeightChange,
 }: MessageRowProps) {
   const rootRef = useRef<HTMLElement | null>(null);
@@ -129,13 +147,18 @@ function MessageRowImpl({
       </div>
       {m.tools ? <ToolCallList tools={m.tools} /> : null}
       {m.trail?.length ? (
-        <div className="search-trail" aria-label="Search trail">
-          {m.trail.map((s) => (
-            <span key={s} className="search-trail__step">
-              {s}
-            </span>
-          ))}
-        </div>
+        <details className="message-activity">
+          <summary>
+            Activity · {m.trail.length} step{m.trail.length === 1 ? "" : "s"}
+          </summary>
+          <div className="search-trail" aria-label="Search trail">
+            {m.trail.map((s) => (
+              <span key={s} className="search-trail__step">
+                {s}
+              </span>
+            ))}
+          </div>
+        </details>
       ) : null}
       {m.citations?.length ? (
         <SourceCitations
@@ -147,6 +170,16 @@ function MessageRowImpl({
           onOpenFile={(path) => {
             if (path.startsWith("help://")) {
               onOpenHelpCitation?.(path);
+              return;
+            }
+            if (
+              path.startsWith("log_template:") ||
+              path.startsWith("log_event:")
+            ) {
+              onOpenLogCitation?.(
+                path,
+                m.citations?.find((citation) => citation.id === path)?.corpusId,
+              );
               return;
             }
             // Durable memory citations: `memory:{uuid}` → Compose (ADR 0007)
@@ -205,6 +238,17 @@ function MessageRowImpl({
                     onOpenHelpCitation?.(cite);
                     return;
                   }
+                  if (
+                    cite.startsWith("log_template:") ||
+                    cite.startsWith("log_event:")
+                  ) {
+                    onOpenLogCitation?.(
+                      cite,
+                      m.citations?.find((citation) => citation.id === cite)
+                        ?.corpusId,
+                    );
+                    return;
+                  }
                   if (isHttpUrl(cite)) {
                     openExternalUrl(cite);
                     return;
@@ -255,19 +299,10 @@ function MessageRowImpl({
       m.meta &&
       !m.streaming &&
       formatMsgMetaFooter(m.meta) ? (
-        <footer
-          className="msg__meta"
-          title={[
-            m.meta.model,
-            m.meta.provider_label,
-            m.meta.provider_id,
-            m.meta.base_url,
-          ]
-            .filter(Boolean)
-            .join("\n")}
-        >
-          {formatMsgMetaFooter(m.meta)}
-        </footer>
+        <details className="msg__meta-details">
+          <summary>Response details</summary>
+          <footer className="msg__meta">{formatMsgMetaFooter(m.meta)}</footer>
+        </details>
       ) : null}
     </article>
   );

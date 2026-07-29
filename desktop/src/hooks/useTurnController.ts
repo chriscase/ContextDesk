@@ -28,6 +28,51 @@ import {
   finalizeMessagesAfterStop,
   shouldProcessEventWhileStopped,
 } from "../lib/turn";
+import { parseHelpLocator } from "../lib/help";
+
+type CompletedCitationRoute =
+  | "help"
+  | "log"
+  | "file"
+  | "deferred"
+  | "invalid";
+
+const GOVERNED_LOG_CITATION =
+  /^(?:log_template|log_event):[a-z0-9][a-z0-9._-]*$/i;
+const URI_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const WINDOWS_ABSOLUTE_PATH = /^[a-z]:[\\/]/i;
+
+/**
+ * Classify a completed turn's first citation before any automatic I/O.
+ * Governed/in-app identities are click-routed elsewhere and must never be
+ * interpreted as workspace paths.
+ */
+export function classifyCompletedCitation(
+  citationId: string,
+): CompletedCitationRoute {
+  const id = citationId.trim();
+  if (!id || id.includes("\0")) return "invalid";
+  if (parseHelpLocator(id)) return "help";
+  if (GOVERNED_LOG_CITATION.test(id)) return "log";
+
+  if (
+    id.startsWith("help://") ||
+    id.startsWith("log_template:") ||
+    id.startsWith("log_event:")
+  ) {
+    return "invalid";
+  }
+
+  // These are handled only after an explicit citation click.
+  if (/^https?:\/\//i.test(id) || /^memory:[a-z0-9._-]+$/i.test(id)) {
+    return "deferred";
+  }
+
+  if (URI_SCHEME.test(id) && !WINDOWS_ABSOLUTE_PATH.test(id)) {
+    return "invalid";
+  }
+  return "file";
+}
 
 type Args = {
   sessionId: string;
@@ -213,15 +258,29 @@ export function useTurnController(args: Args) {
               };
               if (done) {
                 const cite = merged.citations?.[0];
-                if (cite && !cite.id.startsWith("help://")) {
-                  setSourcePath(cite.id);
-                  void hostReadFile(cite.id)
-                    .then((body) => setSourceContent(body))
-                    .catch((err) => {
-                      setSourceContent(
-                        `Could not read file:\n${err instanceof Error ? err.message : String(err)}`,
+                if (cite) {
+                  const citationId = cite.id.trim();
+                  switch (classifyCompletedCitation(citationId)) {
+                    case "file":
+                      setSourcePath(citationId);
+                      void hostReadFile(citationId)
+                        .then((body) => setSourceContent(body))
+                        .catch((err) => {
+                          setSourceContent(
+                            `Could not read file:\n${err instanceof Error ? err.message : String(err)}`,
+                          );
+                        });
+                      break;
+                    case "invalid":
+                      setAgentError(
+                        "The response included an unsupported or malformed citation. It was not opened.",
                       );
-                    });
+                      break;
+                    case "help":
+                    case "log":
+                    case "deferred":
+                      break;
+                  }
                 }
                 if (
                   merged.tools?.some(
@@ -256,7 +315,6 @@ export function useTurnController(args: Args) {
         );
       } catch (e) {
         const err = e instanceof Error ? e.message : String(e);
-        setAgentError(err);
         setSessions((all) => {
           const cur = all.find((s) => s.id === sid);
           if (!cur) return all;
@@ -391,9 +449,9 @@ export function useTurnController(args: Args) {
     }
     setBusy(false);
     setTurnStartedAt(null);
-    setAgentError(
-      "Stop requested — turn cancelled; partial answer kept when present.",
-    );
+    // Cancellation is an expected chat action, not an application-wide error.
+    // The partial assistant bubble remains in the originating conversation.
+    setAgentError(null);
   }, [sessionId, setSessions, persistSession]);
 
   return {

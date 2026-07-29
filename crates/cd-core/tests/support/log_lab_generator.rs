@@ -99,6 +99,30 @@ pub fn generate_compact(root: &Path) -> LabResult<GenerationSummary> {
     let redaction = redaction_files();
     write_scenario(root, "redaction", &redaction, redaction_truth(&redaction))?;
 
+    let company_timestamps = company_timestamp_diversity_files();
+    write_scenario(
+        root,
+        "company-timestamp-diversity",
+        &company_timestamps,
+        company_timestamp_diversity_truth(&company_timestamps),
+    )?;
+
+    let company_noise = company_known_noise_files();
+    write_scenario(
+        root,
+        "company-known-noise",
+        &company_noise,
+        company_known_noise_truth(&company_noise),
+    )?;
+
+    let company_fidelity = company_original_fidelity_files();
+    write_scenario(
+        root,
+        "company-original-fidelity",
+        &company_fidelity,
+        company_original_fidelity_truth(&company_fidelity),
+    )?;
+
     let archive_path = root.join("archives/checkout-cascade.zip");
     write_deterministic_zip(&checkout, &archive_path)?;
     let archive_hash = sha256_file(&archive_path)?;
@@ -841,6 +865,604 @@ fn redaction_truth(files: &[ImportFile]) -> Value {
             ],
             "safe_evidence": ["event_id=redaction-api-key", "event_id=redaction-bearer", "trace-redaction-1", "fictional-user"],
             "supported_conclusion": "A fictional credential was rejected and must be rotated; the raw synthetic value is not required to investigate."
+        }),
+    )
+}
+
+/// Shared wall-clock instant used by company-timestamp-diversity encodings.
+/// 2025-01-01T13:20:00Z (Unix seconds). String forms below must represent this
+/// instant when they carry a complete offset; epoch and fractional forms match it.
+// 2025-01-01T13:20:00Z — every shared-instant encoding below must resolve to this
+// exact UTC instant (including fractional form with .000 subseconds).
+const COMPANY_TS_SHARED_INSTANT_SECS: i64 = 1_735_737_600;
+const COMPANY_TS_SHARED_INSTANT_MS: i64 = 1_735_737_600_000;
+const COMPANY_TS_SHARED_RFC3339_UTC: &str = "2025-01-01T13:20:00Z";
+const COMPANY_TS_SHARED_OFFSET_PLUS: &str = "2025-01-01T14:20:00+01:00";
+const COMPANY_TS_SHARED_OFFSET_MINUS: &str = "2025-01-01T08:20:00-05:00";
+const COMPANY_TS_SHARED_FRACTIONAL: &str = "2025-01-01T13:20:00.000Z";
+const COMPANY_TS_SHARED_RFC5424: &str = "2025-01-01T13:20:00.000Z";
+
+fn company_timestamp_diversity_files() -> Vec<ImportFile> {
+    let shared = COMPANY_TS_SHARED_INSTANT_SECS;
+    // Same local clock face as shared UTC hour/minute but a different day — similar
+    // displayed local time only, not the same instant.
+    let similar_local_only = "2025-01-02T13:20:00";
+
+    let shared_encodings = vec![
+        json!({
+            "ts": COMPANY_TS_SHARED_RFC3339_UTC,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-01.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-rfc3339-utc shared-instant encoding=rfc3339-utc"
+        })
+        .to_string(),
+        json!({
+            "ts": COMPANY_TS_SHARED_OFFSET_PLUS,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-01.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-offset-plus shared-instant encoding=rfc3339-plus-one"
+        })
+        .to_string(),
+        json!({
+            "ts": COMPANY_TS_SHARED_OFFSET_MINUS,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-02.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-offset-minus shared-instant encoding=rfc3339-minus-five"
+        })
+        .to_string(),
+        json!({
+            "ts": shared,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-01.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-epoch-s shared-instant encoding=epoch-seconds"
+        })
+        .to_string(),
+        json!({
+            "ts": COMPANY_TS_SHARED_INSTANT_MS,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-01.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-epoch-ms shared-instant encoding=epoch-milliseconds"
+        })
+        .to_string(),
+        json!({
+            "ts": COMPANY_TS_SHARED_FRACTIONAL,
+            "level": "info",
+            "service": "billing-api",
+            "host": "api-01.example",
+            "trace_id": "trace-company-ts-shared",
+            "message": "event_id=ts-fractional shared-instant encoding=rfc3339-fractional"
+        })
+        .to_string(),
+        json!({
+            "ts": similar_local_only,
+            "level": "warn",
+            "service": "billing-api",
+            "host": "api-03.example",
+            "trace_id": "trace-company-ts-similar",
+            "message": "event_id=ts-similar-local-only similar-local-display-only not-shared-instant"
+        })
+        .to_string(),
+    ];
+
+    let logfmt_offset = format!(
+        "ts={COMPANY_TS_SHARED_OFFSET_PLUS} level=info service=billing-worker host=worker-01.example trace_id=trace-company-ts-shared msg=\"event_id=ts-logfmt-offset shared-instant encoding=logfmt-rfc3339-offset\""
+    );
+    let rfc5424 = format!(
+        "<34>1 {COMPANY_TS_SHARED_RFC5424} syslog-01.example billing-api - - - event_id=ts-rfc5424 shared-instant encoding=rfc5424-offset"
+    );
+    let yearless = "<34>Jan  1 13:20:00 syslog-01.example billing-api: event_id=ts-yearless-syslog yearless classic syslog must not assume year or timezone".to_string();
+    // US fall-back style local time without offset — ambiguous until zone rules are known.
+    let dst_ambiguous = json!({
+        "ts": "2025-11-02T01:30:00",
+        "level": "warn",
+        "service": "scheduler",
+        "host": "sched-01.example",
+        "trace_id": "trace-company-ts-dst",
+        "message": "event_id=ts-dst-ambiguous local fall-back hour without offset"
+    })
+    .to_string();
+    let malformed = json!({
+        "ts": "not-a-timestamp",
+        "level": "error",
+        "service": "billing-api",
+        "host": "api-01.example",
+        "trace_id": "trace-company-ts-bad",
+        "message": "event_id=ts-malformed unusable timestamp string"
+    })
+    .to_string();
+    let missing = json!({
+        "level": "error",
+        "service": "billing-api",
+        "host": "api-01.example",
+        "trace_id": "trace-company-ts-missing",
+        "message": "event_id=ts-missing no timestamp field"
+    })
+    .to_string();
+
+    let skew = logfmt(
+        shared - 180,
+        "warn",
+        "edge-proxy",
+        "edge-01.example",
+        "trace-company-ts-skew",
+        "event_id=ts-skew-behind known source clock skew_seconds=-180 no automatic correction claimed",
+    );
+    let late = logfmt(
+        shared + 30,
+        "info",
+        "edge-proxy",
+        "edge-01.example",
+        "trace-company-ts-late",
+        "event_id=ts-late late-arriving event wall time may disagree with ingest order",
+    );
+
+    let ambiguous = vec![yearless, dst_ambiguous, malformed, missing];
+    let skew_late = vec![skew, late];
+
+    vec![
+        ImportFile::text("01-shared-encodings.jsonl", &shared_encodings),
+        ImportFile::text("02-logfmt-offset.log", &[logfmt_offset]),
+        ImportFile::text("03-rfc5424.log", &[rfc5424]),
+        ImportFile::text("04-ambiguous-or-unusable.log", &ambiguous),
+        ImportFile::text("05-skew-and-late.log", &skew_late),
+    ]
+}
+
+fn company_timestamp_diversity_truth(files: &[ImportFile]) -> Value {
+    base_truth(
+        "company-timestamp-diversity",
+        "mixed",
+        files,
+        json!({
+            "shared_instant": {
+                "epoch_seconds": COMPANY_TS_SHARED_INSTANT_SECS,
+                "epoch_milliseconds": COMPANY_TS_SHARED_INSTANT_MS,
+                "rfc3339_utc": COMPANY_TS_SHARED_RFC3339_UTC,
+                "event_ids": [
+                    "ts-rfc3339-utc",
+                    "ts-offset-plus",
+                    "ts-offset-minus",
+                    "ts-epoch-s",
+                    "ts-epoch-ms",
+                    "ts-fractional",
+                    "ts-logfmt-offset",
+                    "ts-rfc5424"
+                ],
+                "note": "These encodings represent the same wall-clock instant when a complete offset or epoch is present. The fixture does not claim production already normalizes them."
+            },
+            "similar_local_display_only": [
+                {
+                    "event_id": "ts-similar-local-only",
+                    "local_face": "2025-01-02T13:20:00",
+                    "reason": "Same clock face as the shared UTC hour:minute on a different day and without an offset; not the shared instant."
+                }
+            ],
+            "unusable_timestamps": [
+                {"event_id": "ts-malformed", "reason": "non-parseable timestamp string"},
+                {"event_id": "ts-missing", "reason": "no timestamp field"}
+            ],
+            "order_only_or_incomplete": [
+                {
+                    "event_id": "ts-yearless-syslog",
+                    "reason": "Yearless classic syslog must not be assumed to have a year or timezone."
+                }
+            ],
+            "dst_ambiguous": {
+                "event_id": "ts-dst-ambiguous",
+                "local": "2025-11-02T01:30:00",
+                "note": "US-style fall-back hour without offset is ambiguous; do not claim a unique UTC conversion."
+            },
+            "known_skew": {
+                "event_id": "ts-skew-behind",
+                "skew_seconds": -180,
+                "note": "Known source clock skew relative to the shared instant. Fixture does not claim automatic correction."
+            },
+            "late_arrival": {
+                "event_id": "ts-late",
+                "source": "05-skew-and-late.log",
+                "note": "Late-arriving event: wall time may disagree with ingest or file order."
+            },
+            "product_gap_note": "Explicit-offset JSON, logfmt, and RFC5424 timestamps normalize to whole UTC seconds (#681). The fixture also evaluates unresolved local/yearless/DST time, source skew, and late arrival that remain #670; it does not claim inference or automatic correction.",
+            "canonical_queries": [
+                {"kind": "literal", "text": "shared-instant"},
+                {"kind": "literal", "text": "event_id=ts-yearless-syslog"},
+                {"kind": "literal", "text": "event_id=ts-dst-ambiguous"}
+            ]
+        }),
+    )
+}
+
+fn company_known_noise_files() -> Vec<ImportFile> {
+    let base = COMPANY_TS_SHARED_INSTANT_SECS + 3_600;
+    let mut health = Vec::new();
+    for i in 0..4 {
+        health.push(json_line(
+            base + i,
+            "info",
+            "health-monitor",
+            "health-01.example",
+            &format!("trace-noise-health-{i}"),
+            &format!(
+                "event_id=noise-health-{i} GET /health status=200 latency_ms={}",
+                3 + i
+            ),
+        ));
+    }
+
+    let retries = (0..3)
+        .map(|i| {
+            logfmt(
+                base + 10 + i,
+                "warn",
+                "queue-worker",
+                "worker-02.example",
+                &format!("trace-noise-retry-{i}"),
+                &format!(
+                    "event_id=noise-retry-{i} retrying delivery attempt={} reason=temporary-timeout job=job-noise-{}",
+                    i + 1,
+                    i
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // Known-benign error template (safe candidate for a narrow template rule).
+    let benign_errors = vec![
+        json_line(
+            base + 20,
+            "error",
+            "health-monitor",
+            "health-01.example",
+            "trace-noise-benign-0",
+            "event_id=noise-benign-reset-0 connection reset by peer during health probe target=192.0.2.10",
+        ),
+        json_line(
+            base + 21,
+            "error",
+            "health-monitor",
+            "health-01.example",
+            "trace-noise-benign-1",
+            "event_id=noise-benign-reset-1 connection reset by peer during health probe target=192.0.2.10",
+        ),
+    ];
+
+    // Superficially similar wording, genuinely important payment path — must not
+    // be hidden by an overbroad "connection reset" rule.
+    let important_similar = json_line(
+        base + 22,
+        "error",
+        "payments-api",
+        "pay-01.example",
+        "trace-noise-important",
+        "event_id=noise-important-reset connection reset by peer during payment settle request=req-noise-pay-7 amount_cents=4200",
+    );
+
+    // Same level (error) but different template, source, service, host, and trace.
+    let other_errors = vec![
+        json_line(
+            base + 30,
+            "error",
+            "catalog-api",
+            "cat-01.example",
+            "trace-noise-catalog",
+            "event_id=noise-catalog-error catalog lookup failed sku=SKU-NOISE-1",
+        ),
+        logfmt(
+            base + 31,
+            "error",
+            "edge-proxy",
+            "edge-02.example",
+            "trace-noise-edge",
+            "event_id=noise-edge-error upstream timeout path=/v1/checkout",
+        ),
+    ];
+
+    // Real incident: suppress-all-ERROR would hide the primary signal.
+    let incident = vec![
+        json_line(
+            base + 40,
+            "error",
+            "checkout-api",
+            "api-01.example",
+            "trace-noise-incident",
+            "event_id=noise-incident-error payment authorization failed code=AUTH_DECLINED request=req-noise-incident-9",
+        ),
+        json_line(
+            base + 41,
+            "info",
+            "checkout-api",
+            "api-01.example",
+            "trace-noise-incident",
+            "event_id=noise-incident-context recovery path selected request=req-noise-incident-9",
+        ),
+    ];
+
+    let mut errors_file = benign_errors;
+    errors_file.push(important_similar);
+    errors_file.extend(other_errors);
+    errors_file.extend(incident);
+
+    vec![
+        ImportFile::text("health/health.jsonl", &health),
+        ImportFile::text("worker/retries.log", &retries),
+        ImportFile::text("services/errors-and-incident.jsonl", &errors_file),
+    ]
+}
+
+fn company_known_noise_truth(files: &[ImportFile]) -> Value {
+    base_truth(
+        "company-known-noise",
+        "wall",
+        files,
+        json!({
+            "safe_suppression_candidates": [
+                {
+                    "predicate_id": "health_get_200",
+                    "description": "service=health-monitor AND message matches GET /health status=200",
+                    "event_ids": [
+                        "noise-health-0",
+                        "noise-health-1",
+                        "noise-health-2",
+                        "noise-health-3"
+                    ],
+                    "expected_count": 4
+                },
+                {
+                    "predicate_id": "health_probe_connection_reset",
+                    "description": "service=health-monitor AND message contains 'connection reset by peer during health probe'",
+                    "event_ids": [
+                        "noise-benign-reset-0",
+                        "noise-benign-reset-1"
+                    ],
+                    "expected_count": 2
+                },
+                {
+                    "predicate_id": "temporary_retry_timeout",
+                    "description": "service=queue-worker AND message contains 'retrying delivery' AND reason=temporary-timeout",
+                    "event_ids": [
+                        "noise-retry-0",
+                        "noise-retry-1",
+                        "noise-retry-2"
+                    ],
+                    "expected_count": 3
+                }
+            ],
+            "safe_candidate_total": 9,
+            "must_remain_visible": [
+                {
+                    "event_id": "noise-important-reset",
+                    "reason": "Payment settle connection reset is incident-relevant; overbroad 'connection reset' suppression would hide it."
+                },
+                {
+                    "event_id": "noise-incident-error",
+                    "reason": "Primary incident ERROR; suppress-all-ERROR damages investigation visibility."
+                },
+                {
+                    "event_id": "noise-catalog-error",
+                    "reason": "Shares level=error with noise but differs by template, service, host, and trace."
+                },
+                {
+                    "event_id": "noise-edge-error",
+                    "reason": "Shares level=error with noise but differs by template, service, host, and trace."
+                },
+                {
+                    "event_id": "noise-incident-context",
+                    "reason": "Incident context on the same trace as the primary failure."
+                }
+            ],
+            "unsafe_broad_predicates": [
+                {
+                    "predicate": "level=error",
+                    "would_hide_event_ids": [
+                        "noise-benign-reset-0",
+                        "noise-benign-reset-1",
+                        "noise-important-reset",
+                        "noise-catalog-error",
+                        "noise-edge-error",
+                        "noise-incident-error"
+                    ],
+                    "would_hide_count": 6,
+                    "reason": "Level-only suppression removes both safe noise and the real incident signal."
+                },
+                {
+                    "predicate": "message contains 'connection reset'",
+                    "would_hide_event_ids": [
+                        "noise-benign-reset-0",
+                        "noise-benign-reset-1",
+                        "noise-important-reset"
+                    ],
+                    "would_hide_count": 3,
+                    "reason": "Broad regex hides the payment settle failure that only looks similar to the health-probe template."
+                }
+            ],
+            "product_gap_note": "Supports evaluation of future known-noise suppression (#671). Does not claim suppression already ships.",
+            "canonical_queries": [
+                {"kind": "literal", "text": "event_id=noise-important-reset"},
+                {"kind": "literal", "text": "event_id=noise-incident-error"},
+                {"kind": "literal", "text": "GET /health"}
+            ]
+        }),
+    )
+}
+
+fn company_original_fidelity_files() -> Vec<ImportFile> {
+    let base = COMPANY_TS_SHARED_INSTANT_SECS + 7_200;
+    let token = "sk-LOG-LAB-INVALID-companyfidelity01";
+    let bearer = "LOG-LAB-INVALID-BEARER-companyfidelity01";
+
+    // Deliberate key order + unknown fields + nested object via raw string
+    // (serde_json::json! may reorder keys). Credential-shaped value uses safety marker.
+    let json_line_ordered = format!(
+        r#"{{"z_unknown":"tail-field","message":"event_id=fid-json-nested nested payload","nested":{{"cart":{{"items":2,"note":"keep punctuation: a,b; c=\"quoted\""}},"region":"lab"}},"level":"info","service":"orders-api","host":"ord-01.example","trace_id":"trace-fid-json","synthetic_key":"{token}","ts":{base}}}"#
+    );
+
+    let json_escape = json!({
+        "ts": base + 1,
+        "level": "warn",
+        "service": "orders-api",
+        "host": "ord-01.example",
+        "trace_id": "trace-fid-escape",
+        "message": "event_id=fid-json-escape path=C:\\\\lab\\\\orders note=\"quoted\" backslash\\and\"quote",
+        "extra_field": "unknown-top-level",
+        "unicode_note": "café λ synthetic"
+    })
+    .to_string();
+
+    let logfmt_line = format!(
+        "ts={} level=info service=format-service host=fmt-01.example trace_id=trace-fid-logfmt msg=\"event_id=fid-logfmt escaped=\\\"inner\\\" path=C:\\\\lab\\\\file\" unknown_kv=keep-me",
+        base + 2
+    );
+
+    let syslog_line = "<14>1 2025-01-01T15:20:00.000Z syslog-02.example orders-api - - - event_id=fid-syslog unicode=café status=ok".to_string();
+
+    let plain =
+        "INFO event_id=fid-plain plain text with punctuation: a,b; c=\"quoted\" and unicode café λ"
+            .to_string();
+
+    let crlf = format!(
+        "INFO event_id=fid-crlf-0 first windows line\r\nWARN event_id=fid-crlf-1 second windows line bearer={bearer}\r\n"
+    )
+    .into_bytes();
+
+    // Long but bounded line (~400 chars of payload, well under importer limits).
+    let long_payload = "X".repeat(400);
+    let long_line = format!(
+        "ts={} level=info service=orders-api host=ord-01.example trace_id=trace-fid-long msg=\"event_id=fid-long-line payload={long_payload}\"",
+        base + 3
+    );
+
+    vec![
+        ImportFile::text(
+            "formats/01-json-ordered.jsonl",
+            &[json_line_ordered, json_escape],
+        ),
+        ImportFile::text("formats/02-logfmt.log", &[logfmt_line]),
+        ImportFile::text("formats/03-syslog.log", &[syslog_line]),
+        // Basename 04-crlf.log matches root .gitattributes (-text -eol) so CRLF survives checkout.
+        ImportFile::bytes("formats/04-crlf.log", crlf, 2),
+        ImportFile::text("formats/05-plain.log", &[plain]),
+        ImportFile::text("formats/06-long.log", &[long_line]),
+    ]
+}
+
+fn company_original_fidelity_truth(files: &[ImportFile]) -> Value {
+    base_truth(
+        "company-original-fidelity",
+        "mixed",
+        files,
+        json!({
+            "formats": ["json", "logfmt", "syslog", "plain", "crlf", "long-line"],
+            "raw_values_for_test_only": [
+                "sk-LOG-LAB-INVALID-companyfidelity01",
+                "LOG-LAB-INVALID-BEARER-companyfidelity01"
+            ],
+            "original_redacted_must_preserve": [
+                {
+                    "event_id": "fid-json-nested",
+                    "properties": [
+                        "unknown field z_unknown",
+                        "deliberate JSON key order as stored in the import line",
+                        "nested cart items count",
+                        "nested cart note punctuation and escaped quotes",
+                        "nested region value",
+                        "trace_id",
+                        "service",
+                        "host"
+                    ]
+                },
+                {
+                    "event_id": "fid-json-escape",
+                    "properties": [
+                        "escaped backslashes and quotes in message",
+                        "extra_field unknown top-level key",
+                        "unicode_note cafe lambda synthetic"
+                    ]
+                },
+                {
+                    "event_id": "fid-logfmt",
+                    "properties": [
+                        "escaped quotes inside msg",
+                        "unknown_kv key",
+                        "backslash path shape without becoming a real host path claim"
+                    ]
+                },
+                {
+                    "event_id": "fid-syslog",
+                    "properties": ["RFC5424-style framing", "unicode cafe"]
+                },
+                {
+                    "event_id": "fid-plain",
+                    "properties": ["punctuation", "unicode cafe lambda"]
+                },
+                {
+                    "event_id": "fid-crlf-0",
+                    "properties": [
+                        "first record content imported from a CRLF source",
+                        "per-event Original does not claim record-separator bytes"
+                    ]
+                },
+                {
+                    "event_id": "fid-crlf-1",
+                    "properties": [
+                        "second record content imported from a CRLF source",
+                        "per-event Original does not claim record-separator bytes"
+                    ]
+                },
+                {
+                    "event_id": "fid-long-line",
+                    "properties": ["full bounded long payload without truncation in Original redacted view"]
+                }
+            ],
+            "original_redacted_must_redact": [
+                {
+                    "event_id": "fid-json-nested",
+                    "values": ["sk-LOG-LAB-INVALID-companyfidelity01"],
+                    "field_hints": ["synthetic_key"]
+                },
+                {
+                    "event_id": "fid-crlf-1",
+                    "values": ["LOG-LAB-INVALID-BEARER-companyfidelity01"],
+                    "field_hints": ["bearer"]
+                }
+            ],
+            "required_absence_surfaces": [
+                "persisted events",
+                "search results",
+                "Explorer rows and detail",
+                "Original (redacted) view",
+                "linked-chat context",
+                "errors",
+                "audit output",
+                "snapshots",
+                "exported packages"
+            ],
+            "safe_evidence": [
+                "event_id=fid-json-nested",
+                "event_id=fid-json-escape",
+                "event_id=fid-logfmt",
+                "event_id=fid-syslog",
+                "event_id=fid-plain",
+                "event_id=fid-crlf-0",
+                "event_id=fid-crlf-1",
+                "event_id=fid-long-line",
+                "trace-fid-json"
+            ],
+            "product_gap_note": "Original (redacted) storage and the explicit inspector view ship through #676/#673. The fixture evaluates bounded redacted fidelity and does not claim byte-identical raw source preservation, unredacted recovery, or line-separator preservation.",
+            "canonical_queries": [
+                {"kind": "literal", "text": "event_id=fid-json-nested"},
+                {"kind": "literal", "text": "event_id=fid-long-line"},
+                {"kind": "literal", "text": "café"}
+            ]
         }),
     )
 }

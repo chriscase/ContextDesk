@@ -1,0 +1,1 @@
+ts=2025-01-01T14:20:00+01:00 level=info service=billing-worker host=worker-01.example trace_id=trace-company-ts-shared msg="event_id=ts-logfmt-offset shared-instant encoding=logfmt-rfc3339-offset"

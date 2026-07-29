@@ -24,6 +24,7 @@ import { Workspace } from "./components/shell/Workspace";
 import { useChatScroll } from "./hooks/useChatScroll";
 import { useChatSessions } from "./hooks/useChatSessions";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useLinkedCorpusAttachment } from "./hooks/useLinkedCorpusAttachment";
 import { useShellState } from "./hooks/useShellState";
 import { useTurnController } from "./hooks/useTurnController";
 import {
@@ -42,7 +43,10 @@ import {
 } from "./lib/errorReport";
 import type { CompositionTarget } from "./components/panes/CompositionPane";
 import type { PaletteItem } from "./lib/commandPalette";
-import { foldPreview, nowIso } from "./lib/session";
+import {
+  foldPreview,
+  nowIso,
+} from "./lib/session";
 import {
   helpOpenRequest,
   parseHelpLocator,
@@ -100,6 +104,12 @@ export function App() {
     setShowFullHistory,
     syncSessionsFromHost,
   } = sessionsApi;
+  const { pendingSessionIds, setSessionLinkedCorpus } =
+    useLinkedCorpusAttachment({
+      ensureActiveSession,
+      setSessions,
+    });
+  const linkedCorpusPending = pendingSessionIds.has(resolvedSessionId);
 
   const [archiveRefreshKey, setArchiveRefreshKey] = useState(0);
   const [renameTarget, setRenameTarget] = useState<{
@@ -167,7 +177,8 @@ export function App() {
   const {
     chatScrollRef,
     stickToBottomRef,
-    unreadBelow,
+    showJumpToLatest,
+    hasNewResponseBelow,
     pinScrollToEnd,
     scrollChatToBottom,
     onChatScroll,
@@ -728,12 +739,18 @@ export function App() {
             onDismissError={() => turn.setAgentError(null)}
           />
           <div className="app-body">
-            <div className="main">
+            <div
+              className="main"
+              data-sidebar-collapsed={
+                shell.sidebarCollapsed ? "true" : undefined
+              }
+            >
               <SessionSidebar
                 sessionsReady={sessionsReady}
                 openChatSessions={openChatSessions}
                 activeSessionId={resolvedSessionId}
                 sidebarW={shell.sidebarW}
+                collapsed={shell.sidebarCollapsed}
                 onCreate={() => {
                   createSession();
                   shell.setPane("chat");
@@ -759,6 +776,9 @@ export function App() {
                   }
                 }}
                 onOpenArchive={() => shell.setPane("archive")}
+                onToggleCollapsed={() =>
+                  shell.setSidebarCollapsed((collapsed) => !collapsed)
+                }
                 archiveActive={shell.pane === "archive"}
               />
               <Workspace
@@ -788,7 +808,6 @@ export function App() {
                   hiddenPreview,
                   showFullHistory,
                   setShowFullHistory,
-                  setActiveSessionId,
                   openChatCtxMenu,
                   createSession: () => {
                     createSession();
@@ -806,7 +825,8 @@ export function App() {
                   setPane: (p) => shell.setPane(p),
                   chatScrollRef,
                   onChatScroll,
-                  unreadBelow,
+                  showJumpToLatest,
+                  hasNewResponseBelow,
                   scrollChatToBottom,
                   busy: turn.busy,
                   turnStartedAt: turn.turnStartedAt,
@@ -827,6 +847,9 @@ export function App() {
                   setSourcePath: shell.setSourcePath,
                   setSourceContent: shell.setSourceContent,
                   pinnedSkillId: activeSession?.pinnedSkillId ?? null,
+                  linkedCorpusId: activeSession?.linkedCorpusId ?? null,
+                  contextMutationPending: linkedCorpusPending,
+                  onLinkedCorpusChange: setSessionLinkedCorpus,
                   onPinnedSkillChange: (skillId) => {
                     if (!resolvedSessionId) return;
                     setSessions((all) => {
@@ -973,7 +996,6 @@ export function App() {
             setupIncomplete={shell.preflight.hasBlocking}
             scopeLabel={shell.scopeLabel}
             egressLabel={shell.egressLabel}
-            effectiveChatModel={effectiveChatModel}
             onOpenPreflight={() =>
               shell.openSettings("health", chatScrollRef.current)
             }

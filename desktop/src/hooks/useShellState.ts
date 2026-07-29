@@ -112,6 +112,10 @@ export function useShellState() {
     if (Number.isFinite(n) && n >= 140 && n <= 420) return n;
     return 200;
   });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem("cd-sidebar-collapsed");
+    return saved == null ? true : saved === "1";
+  });
   const sidebarDragging = useRef(false);
   const [setup, setSetup] = useState<AppSetupState>(loadSetup);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -282,6 +286,10 @@ export function useShellState() {
     document.documentElement.style.setProperty("--sidebar-w", `${sidebarW}px`);
     localStorage.setItem("cd-sidebar-w", String(sidebarW));
   }, [sidebarW]);
+
+  useEffect(() => {
+    localStorage.setItem("cd-sidebar-collapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
   useEffect(() => {
     localStorage.setItem("cd-pane", pane);
   }, [pane]);
@@ -533,6 +541,8 @@ export function useShellState() {
     setUiScale,
     sidebarW,
     setSidebarW,
+    sidebarCollapsed,
+    setSidebarCollapsed,
     sidebarDragging,
     setup,
     settingsOpen,

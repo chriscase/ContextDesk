@@ -1,0 +1,70 @@
+.virtualized-event-list--metadata-compact .virtualized-event-list__level-token {
+  align-self: center;
+  justify-self: start;
+  min-width: 1.45rem;
+  border: 1px solid
+    color-mix(in srgb, currentcolor 48%, var(--border-subtle, #2a2d33));
+  border-radius: 999px;
+  padding: 0.08rem 0.3rem;
+  background: color-mix(in srgb, currentcolor 10%, transparent);
+  line-height: 1.05;
+  text-align: center;
+}
+
+.virtualized-event-list__provenance {
+  display: flex;
+  align-items: center;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.virtualized-event-list__provenance-token {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.virtualized-event-list__provenance-token--secondary {
+  flex: 0 1 auto;
+  border-left: 1px solid var(--border-subtle, #2a2d33);
+  padding-left: 0.22rem;
+  color: color-mix(in srgb, var(--fg-muted, #9aa0a6) 82%, transparent);
+  font-size: 0.68rem;
+}
+
+.virtualized-event-list__level-token:focus,
+.virtualized-event-list__provenance:focus {
+  outline: none;
+}
+
+.virtualized-event-list__level-token:focus-visible,
+.virtualized-event-list__provenance:focus-visible {
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px var(--accent, #5b9fd4);
+  color: var(--fg-primary, #e8eaed);
+}
+
+.virtualized-event-list--emphasis-payload .log-explorer__ts,
+.virtualized-event-list--emphasis-payload .log-explorer__level,
+.virtualized-event-list--emphasis-payload .log-explorer__source {
+  color: color-mix(in srgb, var(--fg-muted, #9aa0a6) 78%, transparent);
+}
+
+.virtualized-event-list--emphasis-payload .log-explorer__msg {
+  color: var(--fg-primary, #e8eaed);
+  font-weight: 520;
+}
+
+.virtualized-event-list--emphasis-metadata .log-explorer__ts,
+.virtualized-event-list--emphasis-metadata .log-explorer__source {
+  color: var(--fg-primary, #e8eaed);
+}
+
+.virtualized-event-list--emphasis-metadata .log-explorer__msg {
+  color: color-mix(
+    in srgb,
+    var(--fg-primary, #e8eaed) 68%,
+    var(--fg-muted, #9aa0a6)
+  );
+}

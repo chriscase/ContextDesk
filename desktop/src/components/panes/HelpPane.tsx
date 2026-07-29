@@ -10,6 +10,7 @@ import {
   hostGetHelpAsset,
   hostGetHelpPage,
   hostListHelpSections,
+  hostOpenEngineeringHandbook,
   hostSearchHelpPages,
   type HelpPageDto,
   type HelpSearchHitDto,
@@ -50,6 +51,7 @@ export function HelpPane({ request }: Props) {
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [handbookError, setHandbookError] = useState<string | null>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const requestHandledRef = useRef<number | null>(null);
@@ -84,7 +86,9 @@ export function HelpPane({ request }: Props) {
         }
       });
     } catch {
-      setError("That Help page could not be opened. Try searching the bundled guide.");
+      setError(
+        "That Help page could not be opened. Try searching the bundled guide.",
+      );
     } finally {
       setLoading(false);
     }
@@ -103,7 +107,12 @@ export function HelpPane({ request }: Props) {
           listed[0]?.pages[0];
         // Skip auto-open when palette hands off Search Help (focusSearch) so
         // the search box keeps focus instead of the article title.
-        if (initial && !request?.pageId && !request?.query && !request?.focusSearch) {
+        if (
+          initial &&
+          !request?.pageId &&
+          !request?.query &&
+          !request?.focusSearch
+        ) {
           void openPage(initial.id);
         } else if (!initial && !request?.pageId && !request?.query) {
           setError("Bundled Help is unavailable in this installation.");
@@ -189,9 +198,7 @@ export function HelpPane({ request }: Props) {
       setActiveResult((index) => (index + 1) % results.length);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      setActiveResult(
-        (index) => (index - 1 + results.length) % results.length,
-      );
+      setActiveResult((index) => (index - 1 + results.length) % results.length);
     } else if (event.key === "Enter") {
       event.preventDefault();
       openSearchHit(results[activeResult] ?? results[0]);
@@ -273,12 +280,16 @@ export function HelpPane({ request }: Props) {
                   : `${results.length} result${results.length === 1 ? "" : "s"}`}
               </h3>
             </div>
-            <span className="help-results__hint">↑↓ move · Enter open · Esc clear</span>
+            <span className="help-results__hint">
+              ↑↓ move · Enter open · Esc clear
+            </span>
           </div>
           {!searching && results.length === 0 ? (
             <div className="help-empty">
               <strong>No bundled page matched that search.</strong>
-              <span>Try a feature name such as “logs”, “memory”, or “permissions”.</span>
+              <span>
+                Try a feature name such as “logs”, “memory”, or “permissions”.
+              </span>
             </div>
           ) : (
             <ol className="help-results__list">
@@ -296,17 +307,23 @@ export function HelpPane({ request }: Props) {
                       <span>{sectionTitle(sections, hit.section)}</span>
                     </span>
                     {hit.heading ? (
-                      <span className="help-result__heading">{hit.heading}</span>
+                      <span className="help-result__heading">
+                        {hit.heading}
+                      </span>
                     ) : null}
                     <span className="help-result__snippet">{hit.snippet}</span>
                     <span className="help-result__score">
-                      <span>{hit.mode === "hybrid" ? "Hybrid" : "Keyword"}</span>
+                      <span>
+                        {hit.mode === "hybrid" ? "Hybrid" : "Keyword"}
+                      </span>
                       <span
                         className="help-result__meter"
                         role="img"
                         aria-label={`Relevance score ${hit.score.toFixed(2)}`}
                       >
-                        <span style={{ width: `${Math.round(hit.score * 100)}%` }} />
+                        <span
+                          style={{ width: `${Math.round(hit.score * 100)}%` }}
+                        />
                       </span>
                     </span>
                   </button>
@@ -318,6 +335,34 @@ export function HelpPane({ request }: Props) {
       ) : (
         <div className="help-browser">
           <nav className="help-nav" aria-label="Help sections">
+            <section
+              className="help-handbook-entry"
+              aria-label="Engineering reference"
+            >
+              <span className="help-toolbar__eyebrow">For developers</span>
+              <strong>Engineering handbook</strong>
+              <p>
+                Proven implementation methods and design boundaries for teams
+                adapting or reimplementing ContextDesk.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setHandbookError(null);
+                  void hostOpenEngineeringHandbook().catch(() =>
+                    setHandbookError(
+                      "The bundled engineering handbook could not be opened.",
+                    ),
+                  );
+                }}
+              >
+                Open read-only handbook
+                <span aria-hidden>↗</span>
+              </button>
+              {handbookError ? (
+                <small role="alert">{handbookError}</small>
+              ) : null}
+            </section>
             <div className="help-nav__suggestions">
               <span>Try asking</span>
               {SUGGESTED_QUERIES.map((suggestion) => (
@@ -348,10 +393,16 @@ export function HelpPane({ request }: Props) {
             ))}
           </nav>
 
-          <main className="help-reader" aria-label="Help article" aria-busy={loading}>
+          <main
+            className="help-reader"
+            aria-label="Help article"
+            aria-busy={loading}
+          >
             {error ? (
               <div className="help-reader__state" role="alert">
-                <span className="help-reader__state-mark" aria-hidden>!</span>
+                <span className="help-reader__state-mark" aria-hidden>
+                  !
+                </span>
                 <h1>Page unavailable</h1>
                 <p>{error}</p>
                 <button type="button" onClick={() => setQuery("ContextDesk")}>

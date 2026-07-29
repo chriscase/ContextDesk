@@ -1518,7 +1518,7 @@ related: []
             "## Find vs Filter",
             "## Lanes",
             "## Time link",
-            "## Timeline navigator",
+            "## Investigation timeline",
             "## Long lines",
             "## Bookmarks",
             "## Agent context",

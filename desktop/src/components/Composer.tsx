@@ -110,7 +110,7 @@ export function Composer({
 
   return (
     <div
-      className="composer"
+      className="composer chat-input-surface"
       data-expanded={expanded ? "true" : "false"}
       data-busy={busy ? "true" : "false"}
       onMouseDown={(e) => {

@@ -243,10 +243,19 @@
   align-items: center;
   border-top: 1px solid var(--border-subtle, #2a2d33);
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   justify-content: space-between;
   margin-top: 0.15rem;
   padding: 0.5rem;
+}
+
+.log-explorer__picker-note {
+  color: var(--fg-muted, #9aa0a6);
+  flex: 1 0 100%;
+  font-size: 0.67rem;
+  line-height: 1.35;
+  margin: 0;
 }
 
 .log-explorer__picker-setting {
@@ -2255,6 +2264,8 @@
 }
 
 .log-explorer__msg--wrap {
+  line-height: 18px;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   overflow: auto;
   text-overflow: unset;
@@ -2447,6 +2458,43 @@
   margin-bottom: 0.35rem;
 }
 
+.log-explorer__detail-representations {
+  align-items: center;
+  background: var(--bg-app, #0b0c0e);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 6px;
+  display: inline-flex;
+  margin-left: auto;
+  padding: 0.12rem;
+}
+
+.log-explorer__detail-representation {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--fg-muted, #9aa0a6);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  line-height: 1.25;
+  padding: 0.26rem 0.48rem;
+}
+
+.log-explorer__detail-representation:hover {
+  color: var(--fg-primary, #e8eaed);
+}
+
+.log-explorer__detail-representation[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 18%, transparent);
+  color: var(--fg-primary, #e8eaed);
+}
+
+.log-explorer__detail-representation:focus-visible {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: 1px;
+}
+
 .log-explorer__detail-metadata {
   display: grid;
   gap: 0.25rem 0.75rem;
@@ -2473,6 +2521,72 @@
   margin: 0.55rem 0 0;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.log-explorer__detail-original {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.log-explorer__detail-notices,
+.log-explorer__detail-state {
+  background: color-mix(in srgb, var(--accent, #5b9fd4) 7%, transparent);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 6px;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.69rem;
+  line-height: 1.4;
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+}
+
+.log-explorer__detail-notices {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.log-explorer__detail-notices p {
+  margin: 0;
+}
+
+.log-explorer__detail-notices [role="note"] {
+  color: var(--fg-primary, #e8eaed);
+}
+
+.log-explorer__detail-state--error {
+  align-items: center;
+  background: color-mix(in srgb, var(--danger, #e06c75) 9%, transparent);
+  border-color: color-mix(
+    in srgb,
+    var(--danger, #e06c75) 38%,
+    var(--border-subtle, #2a2d33)
+  );
+  color: var(--danger, #e06c75);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: space-between;
+}
+
+.log-explorer__detail-message--original {
+  background: var(--bg-app, #0b0c0e);
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 6px;
+  margin-top: 0;
+  padding: 0.55rem;
+}
+
+@media (max-width: 620px) {
+  .log-explorer__detail-representations {
+    margin-left: 0;
+    order: 2;
+    width: 100%;
+  }
+
+  .log-explorer__detail-representation {
+    flex: 1 1 50%;
+  }
 }
 
 /* keep block open for any following rules that shared the brace */

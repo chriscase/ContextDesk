@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { EngineeringHandbook } from "./components/handbook";
 import { LogExplorer } from "./components/logExplorer/LogExplorer";
 import { parseExplorerBoot } from "./lib/logExplorer/boot";
 import "./assets/fonts/fonts.css";
@@ -59,6 +60,9 @@ function bootRoot() {
       );
     }
     return <LogExplorer corpusId={boot.corpusId} />;
+  }
+  if (boot.mode === "handbook") {
+    return <EngineeringHandbook />;
   }
   return <App />;
 }

@@ -56,13 +56,13 @@ function baseProps(overrides: Record<string, unknown> = {}) {
     hiddenPreview: "",
     showFullHistory: false,
     setShowFullHistory: vi.fn(),
-    setActiveSessionId: vi.fn(),
     openChatCtxMenu: vi.fn(),
     createSession: vi.fn(),
     setPane: vi.fn(),
     chatScrollRef: scrollRef,
     onChatScroll: vi.fn(),
-    unreadBelow: 0,
+    showJumpToLatest: false,
+    hasNewResponseBelow: false,
     scrollChatToBottom: vi.fn(),
     busy: false,
     turnStartedAt: null as number | null,
@@ -82,6 +82,33 @@ function baseProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ChatPane first-chat home", () => {
+  it("uses one chat navigator and a compact active-conversation header", () => {
+    const createSession = vi.fn();
+    const setPane = vi.fn();
+    const openChatCtxMenu = vi.fn();
+    render(
+      <ChatPane
+        {...baseProps({
+          createSession,
+          setPane,
+          openChatCtxMenu,
+          onOpenGuidedSetup: vi.fn(),
+        })}
+      />,
+    );
+
+    expect(screen.queryByRole("tablist", { name: "Open chats" })).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "New chat", level: 2 }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    expect(createSession).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    expect(setPane).toHaveBeenCalledWith("archive");
+    fireEvent.click(screen.getByRole("button", { name: "Options for New chat" }));
+    expect(openChatCtxMenu).toHaveBeenCalledWith(expect.any(Object), "s1");
+  });
+
   it("renders a context-safe home and starters fill composer without sending", async () => {
     const onSubmit = vi.fn(async () => true);
     render(
@@ -107,8 +134,20 @@ describe("ChatPane first-chat home", () => {
     );
     expect(onSubmit).not.toHaveBeenCalled();
     const context = screen.getByTestId("session-context-bar");
+    const composer = screen
+      .getByPlaceholderText("Message ContextDesk…")
+      .closest(".composer");
+    expect(composer).toBeTruthy();
+    expect(context.parentElement).toBe(composer!.parentElement);
+    expect(context.parentElement?.classList.contains("composer-dock")).toBe(
+      true,
+    );
+    expect(context.classList.contains("chat-input-surface")).toBe(true);
+    expect(composer!.classList.contains("chat-input-surface")).toBe(true);
     expect(context.hasAttribute("open")).toBe(false);
-    expect(within(context).getByText(/No files or skill/)).toBeTruthy();
+    expect(
+      within(context).getByText(/No files, skill, or log corpus/),
+    ).toBeTruthy();
   });
 
   it("shows workspace-aware starters only when workspace content is authorized", async () => {
@@ -178,5 +217,25 @@ describe("ChatPane first-chat home", () => {
     await waitFor(() =>
       expect(screen.getByTestId("session-context-bar")).toBeTruthy(),
     );
+  });
+
+  it("blocks send while a governed context mutation is pending", () => {
+    render(
+      <ChatPane
+        {...baseProps({
+          contextMutationPending: true,
+        })}
+      />,
+    );
+    expect(
+      (screen.getByPlaceholderText(
+        "Message ContextDesk…",
+      ) as HTMLTextAreaElement).disabled,
+    ).toBe(true);
+    expect(
+      screen
+        .getByTestId("session-context-bar")
+        .getAttribute("aria-busy"),
+    ).toBe("true");
   });
 });

@@ -50,7 +50,11 @@ pub fn memory_tool_specs() -> Vec<ToolSpec> {
                     "id": { "type": "string", "description": "Existing id for metadata update" },
                     "pinned": { "type": "boolean" }
                 },
-                "required": []
+                "anyOf": [
+                    { "required": ["content"] },
+                    { "required": ["body_markdown"] },
+                    { "required": ["id"] }
+                ]
             }),
         },
         ToolSpec {

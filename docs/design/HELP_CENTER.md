@@ -10,6 +10,11 @@ design documents elsewhere under `docs/` remain authoritative for internal
 implementation details; the Help Center curates only user-facing,
 shipped-product guidance.
 
+The Help navigation may open the separately bundled **Engineering handbook**.
+That reader is a developer reference, not a Help section: its Markdown is not
+added to `HelpIndex`, `search_help`, `read_help`, workspace indexing, memory, or
+chat context merely because the app can display it.
+
 ## 1. Goals and invariants
 
 The Help Center must:
@@ -470,6 +475,26 @@ have captions and controlled-error fallbacks. Reader landmarks are:
 On page navigation, focus moves to the article H1 unless the action is an
 in-page anchor. Browser-history semantics are local to the pane; no external
 window or network navigation occurs for `help://`.
+
+### 10.4 Engineering handbook boundary
+
+Help includes one clearly labeled developer entry that opens or focuses a
+single read-only Tauri window. The installed reader displays the exact
+repository Markdown rooted at `docs/design/PROVEN_METHODS.md`, its
+`docs/design/proven-methods/` chapters, and allowlisted canonical design
+targets. It never accepts an arbitrary filesystem path.
+
+Internal links are resolved by the host relative to the current bundled page.
+Traversal, non-Markdown targets, unavailable files, unsupported schemes, and
+paths outside the bundled documentation root fail closed. An HTTP(S) link
+opens in the system browser only after the user activates that exact link.
+Mermaid source is presented as a labeled, keyboard-readable diagram
+equivalent; raw HTML and script execution remain unsupported.
+
+The handbook window follows the registered app theme, supports close and
+reopen, and reuses one stable window label so repeated activation focuses the
+existing reader instead of creating duplicates. This display-only index stays
+separate from `HelpIndex` and is never attached to `ToolHost`.
 
 ## 11. Agent surface
 

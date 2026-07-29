@@ -77,12 +77,22 @@ export function ToolCallList({
       {visible.map((t) => {
         const expandable = hasExpandableDetail(t);
         const open = expandable && !!openIds[t.id];
+        // Older persisted sessions recorded "awaiting permission" as false.
+        // Pending is neutral until the user approves or denies (#691).
+        const effectiveOk =
+          t.summary.trim().toLowerCase() === "awaiting permission"
+            ? undefined
+            : t.ok;
         return (
           <div
             key={t.id}
             className="tool-row"
             data-ok={
-              t.ok === true ? "true" : t.ok === false ? "false" : "pending"
+              effectiveOk === true
+                ? "true"
+                : effectiveOk === false
+                  ? "false"
+                  : "pending"
             }
             data-open={open ? "true" : "false"}
             role="listitem"
@@ -102,11 +112,11 @@ export function ToolCallList({
               }
             >
               <span className="tool-row__status" aria-hidden>
-                <StatusIcon ok={t.ok} />
+                <StatusIcon ok={effectiveOk} />
               </span>
               <span className="tool-row__name">{t.name}</span>
               <span className="tool-row__summary" title={t.summary}>
-                {t.summary || (t.ok === false ? "failed" : "…")}
+                {t.summary || (effectiveOk === false ? "failed" : "…")}
               </span>
               {expandable ? (
                 <span className="tool-row__chev" aria-hidden>

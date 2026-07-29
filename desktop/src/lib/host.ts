@@ -156,6 +156,86 @@ export async function hostGetHelpAsset(
   return invoke<HelpAssetDto>("get_help_asset", { pageId, path });
 }
 
+/** Developer-facing handbook. Kept outside the user Help/search/tool index. */
+export type HandbookChapterDto = {
+  id: string;
+  title: string;
+};
+
+export type HandbookManifestDto = {
+  title: string;
+  audience: string;
+  chapters: HandbookChapterDto[];
+};
+
+export type HandbookPageDto = {
+  id: string;
+  title: string;
+  body: string;
+};
+
+export type HandbookLinkDto =
+  | { kind: "internal"; pageId: string; anchor?: string | null }
+  | { kind: "external"; url: string };
+
+export async function hostOpenEngineeringHandbook(): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<string>("open_engineering_handbook");
+}
+
+export async function hostGetHandbookManifest(): Promise<HandbookManifestDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookManifestDto>("get_handbook_manifest");
+}
+
+export async function hostGetHandbookPage(
+  id: string,
+): Promise<HandbookPageDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookPageDto>("get_handbook_page", { id });
+}
+
+export async function hostResolveHandbookLink(
+  fromPageId: string,
+  target: string,
+): Promise<HandbookLinkDto> {
+  if (!isTauri()) {
+    throw new Error("Engineering handbook requires the desktop app.");
+  }
+  return invoke<HandbookLinkDto>("resolve_handbook_link", {
+    fromPageId,
+    target,
+  });
+}
+
+export type HandbookExportScope = "current" | "complete";
+export type HandbookExportFormat = "markdown" | "html";
+
+export async function hostExportHandbookDocument(args: {
+  path: string;
+  scope: HandbookExportScope;
+  format: HandbookExportFormat;
+  pageId?: string | null;
+  renderedHtml?: string | null;
+}): Promise<number> {
+  if (!isTauri()) {
+    throw new Error("Handbook export requires the desktop app.");
+  }
+  return invoke<number>("export_handbook_document", {
+    path: args.path,
+    scope: args.scope,
+    format: args.format,
+    pageId: args.pageId ?? null,
+    renderedHtml: args.renderedHtml ?? null,
+  });
+}
+
 /** Session-scoped context pack entry (#341). */
 export type SessionContextEntryDto = {
   rel_path: string;
@@ -1820,6 +1900,23 @@ export type ExplorerEventDto = {
   source: string;
 };
 
+export type EventOriginalRepresentationDto =
+  | {
+      state: "available";
+      label: "Original (redacted)" | string;
+      text: string;
+      sourceByteCount: number;
+      redactedCharCount: number;
+      storedCharCount: number;
+      truncated: boolean;
+      encodingNormalized: boolean;
+      redactionApplied: boolean;
+    }
+  | {
+      state: "unavailable";
+      reason: string;
+    };
+
 export type EventQueryDto = {
   timeFrom?: number | null;
   timeTo?: number | null;
@@ -1871,6 +1968,44 @@ export type TimelineSummaryDto = {
   totalMatched: number;
   /** Non-empty buckets only; empty slots are represented by absent indexes. */
   buckets: TimelineSummaryBucketDto[];
+};
+
+export type SharedTimelineSeverity =
+  "error" | "warn" | "info" | "debug" | "other";
+
+export type SharedTimelineAxisBucketDto = {
+  index: number;
+  start: number;
+  end: number;
+};
+
+export type SharedTimelineSeveritySeriesDto = {
+  severity: SharedTimelineSeverity;
+  counts: number[];
+};
+
+export type SharedTimelineLaneSummaryDto = {
+  laneIndex: number;
+  sourceCount: number;
+  timeQuality: TimeQuality;
+  totalMatched: number;
+  counts: number[];
+};
+
+export type SharedTimelineSummaryDto = {
+  timeQuality: TimeQuality;
+  spanFrom: number | null;
+  spanTo: number | null;
+  bucketWidth: number;
+  bucketCount: number;
+  totalMatched: number;
+  /** Complete fixed-width axis, including empty slots. */
+  buckets: SharedTimelineAxisBucketDto[];
+  counts: number[];
+  /** Exactly Error, Warn, Info, Debug, and Other. */
+  severitySeries: SharedTimelineSeveritySeriesDto[];
+  /** Requested source lanes projected onto the same axis. */
+  lanes: SharedTimelineLaneSummaryDto[];
 };
 
 export type LogFacetsDto = {
@@ -2085,6 +2220,24 @@ export async function hostLogQueryEvents(
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
 }
 
+/**
+ * Fetch the separately stored authoritative redacted source for one event.
+ * This is intentionally not part of ordinary event pages and must be called
+ * only from an explicit inspector action.
+ */
+export async function hostLogQueryEventOriginal(
+  corpusId: string,
+  seq: number,
+): Promise<EventOriginalRepresentationDto> {
+  if (!isTauri()) {
+    throw new Error("Original event representation requires the desktop app");
+  }
+  return invoke<EventOriginalRepresentationDto>("log_query_event_original", {
+    corpusId,
+    seq,
+  });
+}
+
 /** Fixed-size, filter-aware overview used only when the Explorer navigator opens. */
 export async function hostLogTimelineSummary(
   corpusId: string,
@@ -2105,6 +2258,45 @@ export async function hostLogTimelineSummary(
   return invoke<TimelineSummaryDto>("log_timeline_summary", {
     corpusId,
     query: { filter, maxBuckets },
+  });
+}
+
+/** One bounded timeline response whose global, severity, and lane tracks share an axis. */
+export async function hostLogSharedTimelineSummary(
+  corpusId: string,
+  filter: EventQueryDto = {},
+  lanes: { sources: string[] }[] = [],
+  maxBuckets = 96,
+): Promise<SharedTimelineSummaryDto> {
+  if (!isTauri()) {
+    return {
+      timeQuality: "order_only",
+      spanFrom: null,
+      spanTo: null,
+      bucketWidth: 1,
+      bucketCount: 0,
+      totalMatched: 0,
+      buckets: [],
+      counts: [],
+      severitySeries: [
+        { severity: "error", counts: [] },
+        { severity: "warn", counts: [] },
+        { severity: "info", counts: [] },
+        { severity: "debug", counts: [] },
+        { severity: "other", counts: [] },
+      ],
+      lanes: lanes.map((lane, laneIndex) => ({
+        laneIndex,
+        sourceCount: new Set(lane.sources).size,
+        timeQuality: "order_only",
+        totalMatched: 0,
+        counts: [],
+      })),
+    };
+  }
+  return invoke<SharedTimelineSummaryDto>("log_shared_timeline_summary", {
+    corpusId,
+    query: { filter, lanes, maxBuckets },
   });
 }
 
@@ -2444,11 +2636,15 @@ export async function hostListChatSessionsForCorpus(
 export async function hostSetChatLinkedCorpus(
   sessionId: string,
   corpusId: string | null,
+  draftSession?: ChatSessionDto | null,
+  expectedUpdatedAt?: string | null,
 ): Promise<ChatSessionDto | null> {
   if (!isTauri()) return null;
   return invoke<ChatSessionDto>("set_chat_linked_corpus", {
     sessionId,
     corpusId,
+    draftSession: draftSession ?? null,
+    expectedUpdatedAt: expectedUpdatedAt ?? null,
   });
 }
 

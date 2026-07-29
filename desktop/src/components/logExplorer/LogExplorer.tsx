@@ -29,11 +29,13 @@ import {
   hostLogListBookmarks,
   hostLogPreviewInvestigationEvidence,
   hostLogPreviewInvestigationFindingView,
+  hostLogQueryEventOriginal,
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
   hostSetActiveLogCorpus,
   type EventPageDto,
+  type EventOriginalRepresentationDto,
   type SearchMatchMode,
   type EventQueryDto,
   type ExplorerEventDto,
@@ -98,7 +100,6 @@ import {
   HELP_FIND_VS_FILTER,
   HELP_LANE_COMPOSE,
   HELP_LONG_LINES,
-  HELP_TIMELINE_NAVIGATOR,
   HELP_TIME_LINK,
 } from "../../lib/helpContent";
 import { LinkedChatRail } from "./LinkedChatRail";
@@ -125,6 +126,8 @@ import {
   eventRowHeight,
   VirtualizedEventList,
   type LineMode,
+  type RowFieldEmphasis,
+  type RowMetadataPresentation,
 } from "./VirtualizedEventList";
 import {
   captureInvestigationView,
@@ -179,6 +182,7 @@ type ToolbarPickerOption<T extends string> = {
 function ToolbarPicker<T extends string>({
   label,
   value,
+  valueLabel,
   options,
   onChange,
   testId,
@@ -186,6 +190,7 @@ function ToolbarPicker<T extends string>({
 }: {
   label: string;
   value: T;
+  valueLabel?: string;
   options: ToolbarPickerOption<T>[];
   onChange: (value: T) => void;
   testId: string;
@@ -272,7 +277,7 @@ function ToolbarPicker<T extends string>({
       >
         <span className="log-explorer__picker-label">{label}</span>
         <span className="log-explorer__picker-value">
-          {selected?.label ?? value}
+          {valueLabel ?? selected?.label ?? value}
         </span>
         <IconChevronDown />
       </button>
@@ -726,6 +731,34 @@ export function LogExplorer({ corpusId }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [highlight, setHighlight] = useState<Set<number>>(new Set());
   const [detail, setDetail] = useState<ExplorerEventDto | null>(null);
+  const [detailRepresentation, setDetailRepresentation] = useState<
+    "formatted" | "original"
+  >("formatted");
+  const [detailOriginal, setDetailOriginal] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "loaded"; result: EventOriginalRepresentationDto }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+  const detailOriginalRequestRef = useRef(0);
+  const detailSeqRef = useRef<number | null>(null);
+  const detailRepresentationRef = useRef<"formatted" | "original">("formatted");
+  const showDetail = useCallback((event: ExplorerEventDto) => {
+    detailOriginalRequestRef.current += 1;
+    detailSeqRef.current = event.seq;
+    detailRepresentationRef.current = "formatted";
+    setDetailRepresentation("formatted");
+    setDetailOriginal({ status: "idle" });
+    setDetail(event);
+  }, []);
+  const clearDetail = useCallback(() => {
+    detailOriginalRequestRef.current += 1;
+    detailSeqRef.current = null;
+    detailRepresentationRef.current = "formatted";
+    setDetailRepresentation("formatted");
+    setDetailOriginal({ status: "idle" });
+    setDetail(null);
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [density, setDensity] = useState<Density>("comfortable");
@@ -763,6 +796,9 @@ export function LogExplorer({ corpusId }: Props) {
     seq: number;
   } | null>(null);
   const [alignedScrollTop, setAlignedScrollTop] = useState(0);
+  const [alignedMeasuredHeights, setAlignedMeasuredHeights] = useState<
+    Record<string, Record<string, number>>
+  >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
   const [investigation, setInvestigation] =
@@ -846,6 +882,31 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
     return "compact";
+  });
+  const [metadataPresentation, setMetadataPresentation] =
+    useState<RowMetadataPresentation>(() => {
+      try {
+        const value = localStorage.getItem(
+          "contextdesk.logExplorer.metadataPresentation.v1",
+        );
+        if (value === "standard" || value === "compact") return value;
+      } catch {
+        /* ignore */
+      }
+      return "compact";
+    });
+  const [fieldEmphasis, setFieldEmphasis] = useState<RowFieldEmphasis>(() => {
+    try {
+      const value = localStorage.getItem(
+        "contextdesk.logExplorer.fieldEmphasis.v1",
+      );
+      if (value === "balanced" || value === "payload" || value === "metadata") {
+        return value;
+      }
+    } catch {
+      /* ignore */
+    }
+    return "payload";
   });
   const [previewLines, setPreviewLines] = useState(() => {
     try {
@@ -1018,6 +1079,28 @@ export function LogExplorer({ corpusId }: Props) {
       /* ignore */
     }
   }, [lineMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.metadataPresentation.v1",
+        metadataPresentation,
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [metadataPresentation]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "contextdesk.logExplorer.fieldEmphasis.v1",
+        fieldEmphasis,
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [fieldEmphasis]);
 
   useEffect(() => {
     try {
@@ -1676,7 +1759,7 @@ export function LogExplorer({ corpusId }: Props) {
         setBookmarkFocusTarget({ laneId, seq });
       }
       if (nb.target && opts?.selectTarget !== false) {
-        setDetail(nb.target);
+        showDetail(nb.target);
         setSelected(new Set([seq]));
       }
     }
@@ -2070,7 +2153,7 @@ export function LogExplorer({ corpusId }: Props) {
   };
 
   const onRowClick = (e: ExplorerEventDto, multi: boolean) => {
-    setDetail(e);
+    showDetail(e);
     setSelected((prev) => {
       const next = new Set(multi ? prev : []);
       if (next.has(e.seq)) next.delete(e.seq);
@@ -2580,8 +2663,8 @@ export function LogExplorer({ corpusId }: Props) {
       }
       return next;
     });
-    setDetail((d) => (d && !resident.has(d.seq) ? null : d));
-  }, [laneEvents]);
+    if (detail && !resident.has(detail.seq)) clearDetail();
+  }, [clearDetail, detail, laneEvents]);
 
   /** #531: activate bookmark — direct neighborhood seek (no multi-page scan). */
   const activateBookmark = async (b: LogBookmarkDto) => {
@@ -2657,7 +2740,7 @@ export function LogExplorer({ corpusId }: Props) {
           setFocusLaneId(matchingLane.id);
           setLaneScrollSeq((m) => ({ ...m, [matchingLane.id]: seq }));
           setBookmarkFocusTarget({ laneId: matchingLane.id, seq });
-          setDetail(residentTarget);
+          showDetail(residentTarget);
           setSelected(new Set([seq]));
           setBookmarkRevealState("visible");
           setStatus(`Bookmark visible: ${b.label}`);
@@ -2792,7 +2875,7 @@ export function LogExplorer({ corpusId }: Props) {
     setFindPartial(false);
     setSelected(new Set());
     setHighlight(new Set());
-    setDetail(null);
+    clearDetail();
     setFilters(nextFilters);
     setFilterDraft(nextFilters.keyword ?? "");
     setLanes(
@@ -3400,14 +3483,47 @@ export function LogExplorer({ corpusId }: Props) {
     saveLinkMode(corpusId, mode);
   };
 
+  const recordAlignedRowHeights = useCallback(
+    (laneId: string, heights: Record<string, number>) => {
+      setAlignedMeasuredHeights((current) => {
+        const previousLane = current[laneId] ?? {};
+        let changed = false;
+        const merged = { ...previousLane };
+        for (const [key, height] of Object.entries(heights)) {
+          if (merged[key] !== height) {
+            merged[key] = height;
+            changed = true;
+          }
+        }
+        return changed ? { ...current, [laneId]: merged } : current;
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    setAlignedMeasuredHeights({});
+  }, [
+    colWidths,
+    density,
+    expandedSeqs,
+    filters.keyword,
+    findExcerpts,
+    laneCount,
+    laneEvents,
+    lineMode,
+    previewLines,
+  ]);
+
   const alignedRowsByLane = useMemo(() => {
     if (linkMode !== "align_time" || timeQuality !== "wall" || laneCount < 2) {
       return {};
     }
     const baseRowH = density === "compact" ? 22 : 28;
     const boundedPreview = Math.min(12, Math.max(2, previewLines));
-    return buildAlignedLaneRows(
-      lanes.slice(0, laneCount).map((lane) => ({
+    const visibleLanes = lanes.slice(0, laneCount);
+    const estimated = buildAlignedLaneRows(
+      visibleLanes.map((lane) => ({
         id: lane.id,
         events: laneEvents[lane.id] ?? [],
       })),
@@ -3422,10 +3538,46 @@ export function LogExplorer({ corpusId }: Props) {
             (filters.keyword
               ? centeredLiteralExcerpt(event.message, filters.keyword)
               : event.message),
-        ),
+      ),
       baseRowH,
     );
+    const firstLaneRows = estimated[visibleLanes[0]?.id ?? ""] ?? [];
+    const sharedMeasuredHeights = new Map<string, number>();
+    for (let index = 0; index < firstLaneRows.length; index += 1) {
+      const reference = firstLaneRows[index]!;
+      let complete = true;
+      let height = baseRowH;
+      for (const lane of visibleLanes) {
+        const row = estimated[lane.id]?.[index];
+        if (!row?.event) continue;
+        const wraps =
+          lineMode === "full" ||
+          lineMode === "wrap" ||
+          expandedSeqs.has(row.event.seq);
+        if (!wraps) {
+          height = Math.max(height, baseRowH);
+          continue;
+        }
+        const measured = alignedMeasuredHeights[lane.id]?.[reference.key];
+        if (measured == null) {
+          complete = false;
+          break;
+        }
+        height = Math.max(height, measured);
+      }
+      if (complete) sharedMeasuredHeights.set(reference.key, height);
+    }
+    return Object.fromEntries(
+      visibleLanes.map((lane) => [
+        lane.id,
+        (estimated[lane.id] ?? []).map((row) => ({
+          ...row,
+          height: sharedMeasuredHeights.get(row.key) ?? row.height,
+        })),
+      ]),
+    );
   }, [
+    alignedMeasuredHeights,
     density,
     expandedSeqs,
     filters.keyword,
@@ -3481,7 +3633,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const closeDetail = () => {
     const seq = detail?.seq;
-    setDetail(null);
+    clearDetail();
     if (seq != null) {
       queueMicrotask(() => {
         const row = rootRef.current?.querySelector<HTMLElement>(
@@ -3489,6 +3641,88 @@ export function LogExplorer({ corpusId }: Props) {
         );
         row?.focus();
       });
+    }
+  };
+
+  const selectDetailRepresentation = async (
+    representation: "formatted" | "original",
+  ) => {
+    if (!detail) return;
+    detailRepresentationRef.current = representation;
+    setDetailRepresentation(representation);
+    if (representation === "formatted") {
+      if (detailOriginal.status === "loading") {
+        detailOriginalRequestRef.current += 1;
+        setDetailOriginal({ status: "idle" });
+      }
+      return;
+    }
+    if (
+      detailOriginal.status === "loaded" ||
+      detailOriginal.status === "loading"
+    ) {
+      return;
+    }
+
+    const seq = detail.seq;
+    const request = detailOriginalRequestRef.current + 1;
+    detailOriginalRequestRef.current = request;
+    setDetailOriginal({ status: "loading" });
+    try {
+      const result = await hostLogQueryEventOriginal(corpusId, seq);
+      if (
+        detailOriginalRequestRef.current !== request ||
+        detailSeqRef.current !== seq ||
+        detailRepresentationRef.current !== "original"
+      ) {
+        return;
+      }
+      setDetailOriginal({ status: "loaded", result });
+    } catch (originalError) {
+      if (
+        detailOriginalRequestRef.current !== request ||
+        detailSeqRef.current !== seq ||
+        detailRepresentationRef.current !== "original"
+      ) {
+        return;
+      }
+      setDetailOriginal({
+        status: "error",
+        message:
+          originalError instanceof Error
+            ? originalError.message
+            : String(originalError),
+      });
+    }
+  };
+
+  const copyDetailRepresentation = async () => {
+    if (!detail || !navigator.clipboard?.writeText) {
+      setStatus("Clipboard unavailable");
+      return;
+    }
+    const original =
+      detailOriginal.status === "loaded" ? detailOriginal.result : null;
+    const text =
+      detailRepresentation === "original"
+        ? original?.state === "available"
+          ? original.text
+          : null
+        : `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`;
+    if (text == null) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus(
+        detailRepresentation === "original"
+          ? "Copied stored Original (redacted) record"
+          : "Copied complete formatted event",
+      );
+    } catch (copyError) {
+      setStatus(
+        `Could not copy event: ${
+          copyError instanceof Error ? copyError.message : String(copyError)
+        }`,
+      );
     }
   };
 
@@ -3544,6 +3778,8 @@ export function LogExplorer({ corpusId }: Props) {
       data-breakpoint={breakpoint}
       data-density={density}
       data-line-mode={lineMode}
+      data-metadata-presentation={metadataPresentation}
+      data-field-emphasis={fieldEmphasis}
       data-lane-count={laneCount}
       data-max-lane-count={maxLaneCount}
       data-usable-evidence-width={Math.floor(usableEvidenceWidth)}
@@ -3697,6 +3933,19 @@ export function LogExplorer({ corpusId }: Props) {
           <ToolbarPicker
             label="Rows"
             value={lineMode}
+            valueLabel={`${
+              lineMode === "compact"
+                ? "Single line"
+                : lineMode === "wrap"
+                  ? "Preview"
+                  : "Deep"
+            } · ${
+              fieldEmphasis === "payload"
+                ? "Payload"
+                : fieldEmphasis === "metadata"
+                  ? "Metadata"
+                  : "Balanced"
+            }`}
             testId="row-mode-picker"
             options={[
               {
@@ -3719,6 +3968,41 @@ export function LogExplorer({ corpusId }: Props) {
             onChange={setLineMode}
             footer={
               <>
+                <label className="log-explorer__picker-setting">
+                  Metadata
+                  <select
+                    value={metadataPresentation}
+                    aria-label="Row metadata presentation"
+                    data-testid="row-metadata-presentation"
+                    onChange={(event) =>
+                      setMetadataPresentation(
+                        event.target.value as RowMetadataPresentation,
+                      )
+                    }
+                  >
+                    <option value="standard">Full labels</option>
+                    <option value="compact">Compact tokens</option>
+                  </select>
+                </label>
+                <label className="log-explorer__picker-setting">
+                  Focus
+                  <select
+                    value={fieldEmphasis}
+                    aria-label="Row field emphasis"
+                    data-testid="row-field-emphasis"
+                    onChange={(event) =>
+                      setFieldEmphasis(event.target.value as RowFieldEmphasis)
+                    }
+                  >
+                    <option value="balanced">Balanced</option>
+                    <option value="payload">Payload</option>
+                    <option value="metadata">Metadata</option>
+                  </select>
+                </label>
+                <p className="log-explorer__picker-note">
+                  Tokens change presentation only. Focus a token for its
+                  complete level and provenance.
+                </p>
                 <label className="log-explorer__picker-setting">
                   Preview depth
                   <select
@@ -3785,7 +4069,7 @@ export function LogExplorer({ corpusId }: Props) {
               {
                 id: "reset",
                 label: "Reset columns",
-                description: "Restore the balanced default column widths.",
+                description: "Restore the payload-first default column widths.",
                 testId: "col-reset",
                 run: () => {
                   setColWidths([...DEFAULT_COL_WIDTHS]);
@@ -4044,8 +4328,8 @@ export function LogExplorer({ corpusId }: Props) {
                 className="log-explorer__search"
                 placeholder={
                   findMatchMode === "regex"
-                    ? "Regex (linear-time, bounded)…"
-                    : "Find in corpus (keeps surrounding rows)…"
+                    ? "Regex…"
+                    : "Find logs…"
                 }
                 value={findDraft}
                 onChange={(e) => {
@@ -4748,11 +5032,6 @@ export function LogExplorer({ corpusId }: Props) {
                 }
               }}
             />
-            <HelpTip
-              label="Timeline navigator help"
-              title="Timeline navigator"
-              content={HELP_TIMELINE_NAVIGATOR}
-            />
             {linkMode === "align_time" ? (
               <span
                 className="log-explorer__badge"
@@ -4919,6 +5198,14 @@ export function LogExplorer({ corpusId }: Props) {
                         ? setAlignedScrollTop
                         : undefined
                     }
+                    alignedLaneId={
+                      linkMode === "align_time" ? lane.id : undefined
+                    }
+                    onAlignedRowHeights={
+                      linkMode === "align_time"
+                        ? recordAlignedRowHeights
+                        : undefined
+                    }
                     onHorizontalScroll={(scrollLeft) =>
                       setLaneScrollLeft((current) =>
                         current[lane.id] === scrollLeft
@@ -4933,6 +5220,8 @@ export function LogExplorer({ corpusId }: Props) {
                     filterKeyword={filters.keyword}
                     density={density}
                     lineMode={lineMode}
+                    metadataPresentation={metadataPresentation}
+                    fieldEmphasis={fieldEmphasis}
                     previewLines={previewLines}
                     colWidths={colWidths}
                     expandedSeqs={expandedSeqs}
@@ -5052,17 +5341,45 @@ export function LogExplorer({ corpusId }: Props) {
               />
               <div className="log-explorer__detail-toolbar">
                 <strong>Event inspector · seq {detail.seq}</strong>
+                <div
+                  className="log-explorer__detail-representations"
+                  role="group"
+                  aria-label={`Event ${detail.seq} representation`}
+                >
+                  <button
+                    type="button"
+                    className="log-explorer__detail-representation"
+                    aria-pressed={detailRepresentation === "formatted"}
+                    onClick={() => void selectDetailRepresentation("formatted")}
+                  >
+                    Formatted
+                  </button>
+                  <button
+                    type="button"
+                    className="log-explorer__detail-representation"
+                    aria-pressed={detailRepresentation === "original"}
+                    onClick={() => void selectDetailRepresentation("original")}
+                  >
+                    Original (redacted)
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="log-explorer__btn"
                   data-testid="detail-copy"
-                  aria-label={`Copy complete redacted event ${detail.seq}`}
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(
-                      `${detail.seq}\t${formatCanonicalUtc(detail.ts)}\t${detail.level}\t${detail.source}\t${detail.message}`,
-                    );
-                    setStatus("Copied event to clipboard");
-                  }}
+                  aria-label={
+                    detailRepresentation === "original"
+                      ? `Copy stored Original (redacted) record ${detail.seq}`
+                      : `Copy complete formatted event ${detail.seq}`
+                  }
+                  disabled={
+                    detailRepresentation === "original" &&
+                    !(
+                      detailOriginal.status === "loaded" &&
+                      detailOriginal.result.state === "available"
+                    )
+                  }
+                  onClick={() => void copyDetailRepresentation()}
                 >
                   Copy
                 </button>
@@ -5075,54 +5392,147 @@ export function LogExplorer({ corpusId }: Props) {
                   Close inspector
                 </button>
               </div>
-              <dl
-                className="log-explorer__detail-metadata"
-                data-testid="detail-metadata"
-              >
-                <div>
-                  <dt>Event</dt>
-                  <dd>seq {detail.seq}</dd>
+              {detailRepresentation === "formatted" ? (
+                <>
+                  <dl
+                    className="log-explorer__detail-metadata"
+                    data-testid="detail-metadata"
+                  >
+                    <div>
+                      <dt>Event</dt>
+                      <dd>seq {detail.seq}</dd>
+                    </div>
+                    <div>
+                      <dt>Time</dt>
+                      <dd>
+                        {formatCanonicalUtc(detail.ts)} ·{" "}
+                        {timeQualityLabel(detail.timeQuality)} · UTC
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Source</dt>
+                      <dd>{detail.source}</dd>
+                    </div>
+                    <div>
+                      <dt>Level</dt>
+                      <dd className={levelClass(detail.level)}>
+                        {detail.level}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Service</dt>
+                      <dd>{detail.service ?? "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Host</dt>
+                      <dd>{detail.host ?? "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Template</dt>
+                      <dd>{detail.templateId}</dd>
+                    </div>
+                    <div>
+                      <dt>Trace</dt>
+                      <dd>{detail.traceId ?? "—"}</dd>
+                    </div>
+                  </dl>
+                  <pre
+                    className="log-explorer__detail-message"
+                    data-testid="detail-message"
+                    tabIndex={0}
+                    aria-label={`Complete redacted message for event ${detail.seq}`}
+                  >
+                    {detail.message}
+                  </pre>
+                </>
+              ) : (
+                <div
+                  className="log-explorer__detail-original"
+                  data-testid="detail-original"
+                  aria-live="polite"
+                >
+                  {detailOriginal.status === "loading" ? (
+                    <p className="log-explorer__detail-state" role="status">
+                      Loading Original (redacted)…
+                    </p>
+                  ) : detailOriginal.status === "error" ? (
+                    <div
+                      className="log-explorer__detail-state log-explorer__detail-state--error"
+                      role="alert"
+                    >
+                      <span>
+                        Could not load Original (redacted):{" "}
+                        {detailOriginal.message}
+                      </span>
+                      <button
+                        type="button"
+                        className="log-explorer__btn"
+                        onClick={() =>
+                          void selectDetailRepresentation("original")
+                        }
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : detailOriginal.status === "loaded" &&
+                    detailOriginal.result.state === "unavailable" ? (
+                    <p
+                      className="log-explorer__detail-state"
+                      data-testid="detail-original-unavailable"
+                    >
+                      {detailOriginal.result.reason}
+                    </p>
+                  ) : detailOriginal.status === "loaded" &&
+                    detailOriginal.result.state === "available" ? (
+                    <>
+                      <div
+                        className="log-explorer__detail-notices"
+                        data-testid="detail-original-notices"
+                      >
+                        <p>
+                          This is the stored source record after secret
+                          redaction and documented encoding or line-ending
+                          normalization. Unredacted source bytes are not shown.
+                        </p>
+                        <p>
+                          {detailOriginal.result.storedCharCount.toLocaleString()}{" "}
+                          stored characters from{" "}
+                          {detailOriginal.result.redactedCharCount.toLocaleString()}{" "}
+                          redacted characters ·{" "}
+                          {detailOriginal.result.sourceByteCount.toLocaleString()}{" "}
+                          source bytes.
+                        </p>
+                        {detailOriginal.result.redactionApplied ? (
+                          <p role="note">
+                            Sensitive value patterns were replaced during
+                            ingest.
+                          </p>
+                        ) : null}
+                        {detailOriginal.result.truncated ? (
+                          <p role="note">
+                            This record exceeded the storage bound; its suffix
+                            is unavailable.
+                          </p>
+                        ) : null}
+                        {detailOriginal.result.encodingNormalized ? (
+                          <p role="note">
+                            Invalid UTF-8 was normalized with replacement
+                            characters during ingest.
+                          </p>
+                        ) : null}
+                      </div>
+                      <pre
+                        className="log-explorer__detail-message log-explorer__detail-message--original"
+                        data-testid="detail-original-message"
+                        tabIndex={0}
+                        aria-label={`Stored Original (redacted) record for event ${detail.seq}`}
+                      >
+                        {detailOriginal.result.text}
+                      </pre>
+                    </>
+                  ) : null}
                 </div>
-                <div>
-                  <dt>Time</dt>
-                  <dd>
-                    {formatCanonicalUtc(detail.ts)} ·{" "}
-                    {timeQualityLabel(detail.timeQuality)} · UTC
-                  </dd>
-                </div>
-                <div>
-                  <dt>Source</dt>
-                  <dd>{detail.source}</dd>
-                </div>
-                <div>
-                  <dt>Level</dt>
-                  <dd className={levelClass(detail.level)}>{detail.level}</dd>
-                </div>
-                <div>
-                  <dt>Service</dt>
-                  <dd>{detail.service ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>Host</dt>
-                  <dd>{detail.host ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>Template</dt>
-                  <dd>{detail.templateId}</dd>
-                </div>
-                <div>
-                  <dt>Trace</dt>
-                  <dd>{detail.traceId ?? "—"}</dd>
-                </div>
-              </dl>
-              <pre
-                className="log-explorer__detail-message"
-                data-testid="detail-message"
-                tabIndex={0}
-                aria-label={`Complete redacted message for event ${detail.seq}`}
-              >
-                {detail.message}
-              </pre>
+              )}
               {(nextCursor != null ||
                 Object.values(laneCursors).some((c) => c.afterSeq != null)) && (
                 <button

@@ -29,11 +29,11 @@ main
 
 Examples:
 
-| Slug | Branch |
-|------|--------|
-| Confluence epic finish | `integrate/confluence-326` |
-| Launch surface | `integrate/launch-surface` |
-| Hotfix alone | skip integrate — direct `fix/…` → `main` |
+| Slug                   | Branch                                   |
+| ---------------------- | ---------------------------------------- |
+| Confluence epic finish | `integrate/confluence-326`               |
+| Launch surface         | `integrate/launch-surface`               |
+| Hotfix alone           | skip integrate — direct `fix/…` → `main` |
 
 **Do not** use one eternal shared `dev` for all goals — parallel goals collide.
 Use a **new slug per batch**.
@@ -58,15 +58,15 @@ Env defaults: `AGENT_KIND`, `AGENT_MODEL`.
 
 ## Agent kinds → labels
 
-| Kind | Label |
-|------|--------|
-| Grok Build | `agent:grok-build` |
-| Claude Code | `agent:claude-code` |
-| GitHub Copilot | `agent:copilot` |
-| Cursor | `agent:cursor` |
-| OpenAI Codex | `agent:codex` |
-| Human | `agent:human` |
-| Other automation | `agent:other` |
+| Kind             | Label               |
+| ---------------- | ------------------- |
+| Grok Build       | `agent:grok-build`  |
+| Claude Code      | `agent:claude-code` |
+| GitHub Copilot   | `agent:copilot`     |
+| Cursor           | `agent:cursor`      |
+| OpenAI Codex     | `agent:codex`       |
+| Human            | `agent:human`       |
+| Other automation | `agent:other`       |
 
 Model: `model:<slug>` (e.g. `model:grok-4.5`). Use `model:unknown` if slug not known.
 
@@ -83,6 +83,12 @@ Integration workflow does **not** relax honesty:
 1. Issue stays open until AC is true **on `main`** (after promote), not merely on `integrate/*`.
 2. Close comment includes SHA + pasted verification + issue-specific prose ([`CLOSE_PROOF.md`](./CLOSE_PROOF.md)).
 3. Close comment also includes **Agent** and **Model** lines; labels applied via `tag-issue-agent.sh`.
+4. Treat the proven-methods handbook as release documentation. Changes to
+   architecture, trust boundaries, evidence/context flow, log analysis,
+   permissions, investigation state, Help delivery, or provider lifecycle
+   update the relevant handbook chapter and status matrix in the same
+   integration batch. When no handbook edit is needed, record
+   `Handbook impact: none — <reason>` in the PR or close proof.
 
 ## Coordination
 
@@ -92,10 +98,10 @@ Integration workflow does **not** relax honesty:
 
 ## CI policy (intent)
 
-| Target | CI |
-|--------|-----|
-| PR → `main` | Full gate (required) |
-| Work on `integrate/*` | Local gate required; GitHub CI optional/light |
-| Direct hotfix PR → `main` | Full gate (same as today) |
+| Target                    | CI                                            |
+| ------------------------- | --------------------------------------------- |
+| PR → `main`               | Full gate (required)                          |
+| Work on `integrate/*`     | Local gate required; GitHub CI optional/light |
+| Direct hotfix PR → `main` | Full gate (same as today)                     |
 
 Workflow YAML may later skip heavy jobs for non-`main` bases; until then, **avoid opening PRs** to `main` until promote time.

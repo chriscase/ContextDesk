@@ -35,7 +35,7 @@ but it cannot widen an allowlist, invent a grant, or bypass a result limit.
 
 | Stage | Deterministic ContextDesk behavior | Model role | Visible result |
 | --- | --- | --- | --- |
-| 1. Bind the turn | Select the chat, provider profile, model, current user message, and any immutable linked-Explorer snapshot | None | The turn belongs to one chat and one captured view |
+| 1. Bind the turn | Select the chat, provider profile, model, current user message, and any durable linked corpus plus optional immutable Explorer snapshot | None | The turn belongs to one chat and one host-validated context scope |
 | 2. Prepare direct context | Add system policy, recent history, compacted older history, a pinned skill, session context, and bounded ambient memory when eligible | None | Context notices report compaction or a hard-fit failure |
 | 3. Offer governed tools | Filter tools by chat type, configured sources, capability flags, allowlists, side-effect tier, and prior first-use authorization | Choose an offered tool and arguments, or answer without one | Tool rows show calls, failures, and permission requests |
 | 4. Retrieve and cap | Validate the request, search or read the chosen source, rank matches, enforce source-specific limits, and wrap external content as evidence | Inspect returned evidence and optionally request another eligible read | Search trail and citations identify consulted sources |
@@ -48,27 +48,31 @@ but it cannot widen an allowlist, invent a grant, or bypass a result limit.
 > still chooses from the offered tools, formulates tool arguments, and reasons
 > over the bounded results.
 
-## Ordinary chat and linked Log Explorer chat
+## Ordinary chat, attached log context, and linked Explorer chat
 
-An ordinary chat and a corpus-linked chat share the same provider, context
-budget, permission system, and governed read tools. The difference is the log
-evidence contract.
+The main chat's **Add context** control can attach files, a folder, or one
+already-imported log corpus. A corpus attachment is durable for that chat and
+removable without deleting the corpus. It is not ambient: another chat receives
+no log access unless the user explicitly attaches a corpus there too.
 
 ![Parallel ordinary-chat and linked-log-chat context paths joining the same governed read surface and model boundary](../assets/ordinary-linked-context.svg)
 
-| Behavior | Ordinary chat | Linked Log Explorer chat |
-| --- | --- | --- |
-| Log corpus | No corpus is inherited; log-analysis tools are not eligible | Bound to the chat's corpus plus an immutable summary of the visible Explorer state |
-| First evidence step | The model may use the normal eligible read surface | A successful bounded log search is required before a log-grounded conclusion |
-| Explorer changes after send | Not applicable | Do not rewrite the already-running turn snapshot |
-| Workspace, memory, Help, databases, connectors | Available only when configured, eligible, and requested through governed reads | Same rules; linking adds no source configuration or permission |
-| Skills | A selected playbook can guide the turn | Can guide triage but is not observed log evidence |
-| Failure behavior | Missing or failed sources remain visible | Missing required log evidence is disclosed and the answer is not presented as log-grounded |
+| Behavior | Ordinary chat | Main chat with one attached corpus | Linked Log Explorer chat |
+| --- | --- | --- | --- |
+| Log corpus | No corpus is inherited; log-analysis tools are not eligible | Host resolves the one durable session link; no viewport is assumed | Host resolves the same durable link plus an immutable summary of the visible Explorer state |
+| First evidence step | The model may use the normal eligible read surface | A successful bounded log search is required before a log-grounded conclusion | Same required grounding |
+| Explorer changes after send | Not applicable | Not applicable until the user opens Explorer | Do not rewrite the already-running turn snapshot |
+| Workspace, memory, Help, databases, connectors | Available only when configured, eligible, and requested through governed reads | Same rules; attaching logs adds no source configuration or permission | Same rules |
+| Failure behavior | Missing or failed sources remain visible | A stale/corrupt corpus or tools-disabled model stops before provider contact | Missing required log evidence is disclosed and the answer is not presented as log-grounded |
 
-Linking a corpus is not a bulk upload. The snapshot contains orientation such
-as corpus identity, visible sources or lanes, filters, selection counts, time
-quality, and link mode. Event content still arrives through bounded log tools.
-See help://log-explorer#agent-context for the Explorer-specific contract.
+Attaching or linking a corpus is not a bulk upload. A main chat supplies only
+the host-validated corpus identity; an Explorer chat additionally supplies
+bounded orientation such as visible sources or lanes, filters, selection
+counts, time quality, and link mode. Event content still arrives through
+bounded redacted log tools. A profile without native tools is refused before a
+provider call. See help://log-explorer#agent-context for the
+Explorer-specific contract. Multiple corpora in one chat remain planned under
+#693.
 
 ## How each source can participate
 
@@ -83,7 +87,7 @@ rejects the requested target.
 | Workspace and Markdown | Configure narrow workspace roots; use `search_kb` or a validated file-slice read | Ranked chunks or a bounded slice with path provenance | The workspace, home directory, ignored files, or secret-shaped files |
 | Session context pack | Attach bounded files or a ZIP to one chat | Search hits and slices from that session overlay | Original files outside the copied pack or another chat's pack |
 | Skills | Pin a reviewed skill or invoke it for one turn | Playbook instructions | New permissions, credentials, or factual evidence merely because the skill says so |
-| Log corpus | Create and link a Log Explorer corpus | Bounded event, template, timeline, trace, correlation, or anomaly results | Raw corpus files, all events, evaluator truth, or a hidden answer key |
+| Log corpus | Import logs, then explicitly attach one corpus in main-chat Add context or link a Log Explorer chat | Bounded event, template, timeline, trace, correlation, or anomaly results | Raw corpus files, all events, evaluator truth, a hidden answer key, or an unselected corpus |
 | Durable memory | Save approved records; enable recall or call a memory read tool | A small ranked selection with memory identifiers | The complete memory database or unapproved review candidates |
 | Bundled Help | Ask a product question and use `search_help` or `read_help` | Bounded bundled guidance with `help://` citations | The complete Help corpus on every turn |
 | SQLite or Postgres | Enable a read-only connector and pass its SQL policy | Capped rows from one validated read-only statement | The database file, full tables, passwords, or an unrestricted SQL session |
@@ -125,7 +129,8 @@ The model can receive:
 - the current user message and host-owned system policy;
 - recent conversation plus a compacted model-facing view of older history;
 - selected skill text and relevant bounded session-context excerpts;
-- the immutable linked-Explorer orientation snapshot for a linked chat;
+- the host-validated identity of one explicitly attached log corpus and, only
+  for an Explorer-origin turn, its immutable bounded orientation snapshot;
 - bounded memory recall and successful tool results;
 - tool names, descriptions, and argument schemas that are eligible for the
   turn; and

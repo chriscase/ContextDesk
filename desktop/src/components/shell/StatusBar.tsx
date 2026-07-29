@@ -3,7 +3,6 @@ type Props = {
   setupIncomplete: boolean;
   scopeLabel: string;
   egressLabel: string;
-  effectiveChatModel: string | null | undefined;
   onOpenPreflight: () => void;
   onOpenWorkspace: () => void;
   onOpenAi: () => void;
@@ -15,7 +14,6 @@ export function StatusBar({
   setupIncomplete,
   scopeLabel,
   egressLabel,
-  effectiveChatModel,
   onOpenPreflight,
   onOpenWorkspace,
   onOpenAi,
@@ -50,14 +48,6 @@ export function StatusBar({
         <button type="button" onClick={onOpenAi}>
           {egressLabel}
         </button>
-        {effectiveChatModel ? (
-          <>
-            <span aria-hidden>·</span>
-            <span className="mono" title="Model for this chat">
-              {effectiveChatModel}
-            </span>
-          </>
-        ) : null}
       </span>
     </footer>
   );

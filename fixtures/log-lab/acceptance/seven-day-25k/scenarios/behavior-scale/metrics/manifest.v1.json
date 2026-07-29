@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "bundleId": "behavior-scale-performance-telemetry",
+  "name": "Behavior-scale performance telemetry",
+  "attachment": {
+    "mode": "explicit",
+    "suggestedCorpusScenarioId": "behavior-scale",
+    "timeAlignment": "normalized_unix_seconds"
+  },
+  "files": [
+    {
+      "path": "operational-metrics.v1.json",
+      "mediaType": "application/vnd.contextdesk.operational-metrics+json;version=1",
+      "role": "operational_metrics"
+    },
+    {
+      "path": "operational-metrics-patterns.v1.json",
+      "mediaType": "application/vnd.contextdesk.operational-metrics+json;version=1",
+      "role": "operational_metrics_test_patterns"
+    }
+  ],
+  "safety": "Entirely synthetic. This directory is not part of the log import root.",
+  "productStatus": "Fixture, bounded session import, and standalone renderer are shipped; durable attachment and persistence remain residual."
+}

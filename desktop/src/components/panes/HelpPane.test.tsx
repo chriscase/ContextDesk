@@ -4,6 +4,7 @@ import {
   hostGetHelpAsset,
   hostGetHelpPage,
   hostListHelpSections,
+  hostOpenEngineeringHandbook,
   hostSearchHelpPages,
 } from "../../lib/host";
 import { HelpPane } from "./HelpPane";
@@ -13,6 +14,7 @@ vi.mock("../../lib/host", () => ({
   hostGetHelpPage: vi.fn(),
   hostGetHelpAsset: vi.fn(),
   hostSearchHelpPages: vi.fn(),
+  hostOpenEngineeringHandbook: vi.fn(),
 }));
 
 const sections = [
@@ -111,19 +113,29 @@ describe("HelpPane product path (#438)", () => {
         citation: "help://log-analysis-pipeline#pipeline",
       },
     ]);
+    vi.mocked(hostOpenEngineeringHandbook).mockResolvedValue(
+      "engineering-handbook",
+    );
   });
 
   it("loads bundled navigation, article, table, and trusted SVG through host commands", async () => {
     render(<HelpPane />);
 
-    expect(await screen.findByRole("heading", { name: "What ContextDesk does" }))
-      .toBeTruthy();
-    expect(screen.getByRole("navigation", { name: "Help sections" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "What ContextDesk does" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Help sections" }),
+    ).toBeTruthy();
     expect(screen.getByRole("main", { name: "Help article" })).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: "On this page" })).toBeTruthy();
+    expect(
+      screen.getByRole("complementary", { name: "On this page" }),
+    ).toBeTruthy();
     expect(screen.getByRole("table")).toBeTruthy();
     expect(
-      screen.getByRole("img", { name: "Architecture flow" }).getAttribute("src"),
+      screen
+        .getByRole("img", { name: "Architecture flow" })
+        .getAttribute("src"),
     ).toBe("data:image/svg+xml;base64,PHN2Zy8+");
     expect(hostGetHelpAsset).toHaveBeenCalledWith(
       "product-overview",
@@ -183,5 +195,21 @@ describe("HelpPane product path (#438)", () => {
     );
     const search = screen.getByRole("searchbox", { name: "Search Help" });
     await waitFor(() => expect(document.activeElement).toBe(search));
+  });
+
+  it("labels the developer audience and opens the separate read-only handbook", async () => {
+    render(<HelpPane />);
+    await screen.findByRole("heading", { name: "What ContextDesk does" });
+
+    expect(screen.getByText("For developers")).toBeTruthy();
+    expect(
+      screen.getByText(/teams adapting or reimplementing ContextDesk/i),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: /Open read-only handbook/i }),
+    );
+    await waitFor(() =>
+      expect(hostOpenEngineeringHandbook).toHaveBeenCalledTimes(1),
+    );
   });
 });

@@ -34,6 +34,8 @@ vi.mock("../../lib/host", () => ({
   hostListChatSessionsForCorpus: vi.fn(async () => []),
   hostLoadChatSession: vi.fn(async () => null),
   hostSaveChatSession: vi.fn(),
+  hostSetChatLinkedCorpus: vi.fn(),
+  hostCancelTurn: vi.fn(async () => undefined),
   hostSetModelToolsEnabled: vi.fn(async () => true),
   hostRenameChatSession: vi.fn(),
   hostPinChatSession: vi.fn(),
@@ -119,6 +121,17 @@ describe("LinkedChatRail", () => {
     vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([]);
     vi.mocked(host.hostLoadChatSession).mockResolvedValue(null);
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostSetChatLinkedCorpus).mockImplementation(
+      async (sessionId, corpusId, draftSession) => {
+        if (!draftSession) return null;
+        return host.hostSaveChatSession({
+          ...draftSession,
+          id: sessionId,
+          linked_corpus_id: corpusId,
+        });
+      },
+    );
+    vi.mocked(host.hostCancelTurn).mockResolvedValue(undefined);
     vi.mocked(host.hostSetModelToolsEnabled).mockResolvedValue(true);
     vi.mocked(host.hostRenameChatSession).mockResolvedValue(null);
     vi.mocked(host.hostPinChatSession).mockResolvedValue(null);
@@ -476,9 +489,11 @@ describe("LinkedChatRail", () => {
     expect(await screen.findByText(/linked tools available/i)).toBeTruthy();
   });
 
-  it("sends with Return, preserves Shift+Return and IME composition, and blocks rapid duplicates", async () => {
+  it("auto-creates a linked chat for the first question and preserves keyboard composer behavior", async () => {
     let stored: host.ChatSessionDto | null = null;
+    let createdSessionId: string | null = null;
     vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      createdSessionId ??= session.id;
       stored = session;
       return session;
     });
@@ -520,7 +535,6 @@ describe("LinkedChatRail", () => {
         onApplyNav={() => undefined}
       />,
     );
-    fireEvent.click(screen.getByTestId("new-linked-chat"));
     const composer = (await screen.findByLabelText(
       "Chat message",
     )) as HTMLTextAreaElement;
@@ -534,9 +548,33 @@ describe("LinkedChatRail", () => {
     fireEvent.keyDown(composer, { key: "Enter" });
     fireEvent.keyDown(composer, { key: "Enter" });
     await waitFor(() => expect(host.agentTurn).toHaveBeenCalledTimes(1));
-    expect((screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled).toBe(
-      true,
+    expect(createdSessionId).not.toBeNull();
+    expect(host.hostSetChatLinkedCorpus).toHaveBeenCalledWith(
+      createdSessionId,
+      "c1",
+      expect.objectContaining({
+        id: createdSessionId,
+        linked_corpus_id: "c1",
+        messages: [],
+      }),
+      expect.any(String),
     );
+    expect(host.agentTurn).toHaveBeenCalledWith(
+      createdSessionId,
+      "line one",
+      false,
+      "triage-1",
+      "tools-provider",
+      expect.any(Function),
+      null,
+      expect.objectContaining({ corpus_id: "c1" }),
+    );
+    expect(
+      vi.mocked(host.hostSaveChatSession).mock.calls[0]?.[0].linked_corpus_id,
+    ).toBe("c1");
+    expect(
+      (screen.getByLabelText("Chat message") as HTMLTextAreaElement).disabled,
+    ).toBe(true);
 
     await act(async () => {
       resolveTurn?.([
@@ -546,8 +584,321 @@ describe("LinkedChatRail", () => {
     });
     expect(await screen.findByText("Grounded response.")).toBeTruthy();
     await waitFor(() =>
-      expect(document.activeElement).toBe(screen.getByLabelText("Chat message")),
+      expect(document.activeElement).toBe(
+        screen.getByLabelText("Chat message"),
+      ),
     );
+  });
+
+  it("stops before the first turn when governed linked-chat creation fails", async () => {
+    vi.mocked(host.hostSetChatLinkedCorpus).mockRejectedValueOnce(
+      new Error("linked corpus artifacts are unavailable"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const composer = await screen.findByLabelText("Chat message");
+    fireEvent.change(composer, {
+      target: { value: "Investigate this corpus" },
+    });
+    fireEvent.keyDown(composer, { key: "Enter" });
+
+    expect(
+      await screen.findByText(/linked corpus artifacts are unavailable/i),
+    ).toBeTruthy();
+    expect(host.agentTurn).not.toHaveBeenCalled();
+    expect(host.hostSaveChatSession).not.toHaveBeenCalled();
+    expect(screen.getByText("No chat selected")).toBeTruthy();
+  });
+
+  it("stops the exact active session once and waits for the host terminal event", async () => {
+    let stored = sessionDto("chat-stop", "Slow investigation");
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(
+      async () => [
+        {
+          id: stored.id,
+          title: stored.title,
+          archived: false,
+          pinned: false,
+          created_at: stored.created_at,
+          updated_at: stored.updated_at,
+          message_count: stored.messages.length,
+          preview: stored.messages.at(-1)?.content ?? "",
+          linked_corpus_id: "c1",
+        },
+      ],
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    let resolveCancellation: (() => void) | null = null;
+    vi.mocked(host.hostCancelTurn).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCancellation = resolve;
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Slow investigation",
+      ),
+    );
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Find the failure" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    const stop = await screen.findByRole("button", { name: "Stop" });
+    stop.focus();
+    fireEvent.click(stop);
+    fireEvent.click(stop);
+
+    expect(host.hostCancelTurn).toHaveBeenCalledTimes(1);
+    expect(host.hostCancelTurn).toHaveBeenCalledWith("chat-stop");
+    expect(
+      await screen.findByText(
+        "Cancellation requested. Waiting for the current turn to stop…",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBe(stop);
+    expect(document.activeElement).toBe(stop);
+
+    await act(async () => {
+      resolveCancellation?.();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeTruthy();
+
+    await act(async () => {
+      resolveTurn?.([
+        {
+          kind: "error",
+          payload: { code: "cancelled", message: "Turn cancelled by user." },
+        },
+        { kind: "turn_completed", payload: { reason: "cancelled" } },
+      ]);
+    });
+
+    expect(
+      await screen.findByText(
+        /Linked investigation stopped with Tools Provider · triage-1/,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "Cancellation requested. Waiting for the current turn to stop…",
+      ),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByLabelText("Chat message"),
+      ),
+    );
+  });
+
+  it("shows cancellation request failure and safely allows retry", async () => {
+    const stored = sessionDto("chat-retry-stop", "Retry cancellation");
+    vi.mocked(host.hostListChatSessionsForCorpus).mockResolvedValue([
+      {
+        id: stored.id,
+        title: stored.title,
+        archived: false,
+        pinned: false,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+        message_count: 0,
+        preview: "",
+        linked_corpus_id: "c1",
+      },
+    ]);
+    vi.mocked(host.hostLoadChatSession).mockResolvedValue(stored);
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostCancelTurn)
+      .mockRejectedValueOnce(new Error("cancellation channel unavailable"))
+      .mockResolvedValueOnce(undefined);
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+    fireEvent.click(
+      within(screen.getByTestId("linked-chat-switcher")).getByText(
+        "Retry cancellation",
+      ),
+    );
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Start a slow turn" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+
+    expect(
+      await screen.findByText(
+        /Could not request cancellation: Error: cancellation channel unavailable/,
+      ),
+    ).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Stop" });
+    expect(retry.getAttribute("aria-disabled")).toBe("false");
+
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(host.hostCancelTurn).toHaveBeenNthCalledWith(2, "chat-retry-stop"),
+    );
+    expect(screen.getByRole("button", { name: "Stopping…" })).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Cancellation requested. Waiting for the current turn to stop…",
+      ),
+    ).toBeTruthy();
+
+    await act(async () => {
+      resolveTurn?.([
+        {
+          kind: "error",
+          payload: { code: "cancelled", message: "Turn cancelled by user." },
+        },
+        { kind: "turn_completed", payload: { reason: "cancelled" } },
+      ]);
+    });
+    expect(
+      await screen.findByText(
+        /Linked investigation stopped with Tools Provider · triage-1/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/cancellation channel unavailable/)).toBeNull();
+  });
+
+  it("keeps Stop routing isolated when two chats are busy", async () => {
+    const sessions = new Map([
+      ["chat-a", sessionDto("chat-a", "Chat A")],
+      ["chat-b", sessionDto("chat-b", "Chat B")],
+    ]);
+    vi.mocked(host.hostListChatSessionsForCorpus).mockImplementation(async () =>
+      [...sessions.values()].map((session) => ({
+        id: session.id,
+        title: session.title,
+        archived: false,
+        pinned: false,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+        message_count: session.messages.length,
+        preview: session.messages.at(-1)?.content ?? "",
+        linked_corpus_id: "c1",
+      })),
+    );
+    vi.mocked(host.hostLoadChatSession).mockImplementation(
+      async (id) => sessions.get(id) ?? null,
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      sessions.set(session.id, session);
+      return session;
+    });
+
+    const turnResolvers = new Map<string, (events: host.EventDto[]) => void>();
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          turnResolvers.set(id, (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          });
+        }),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+
+    const openChat = async (name: string) => {
+      fireEvent.click(await screen.findByTestId("linked-chat-switcher-toggle"));
+      fireEvent.click(
+        within(screen.getByTestId("linked-chat-switcher")).getByText(name),
+      );
+      await screen.findByTitle(name);
+    };
+    const startTurn = async (prompt: string) => {
+      fireEvent.change(await screen.findByLabelText("Chat message"), {
+        target: { value: prompt },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await screen.findByRole("button", { name: "Stop" });
+    };
+
+    await openChat("Chat A");
+    await startTurn("Investigate A");
+    await openChat("Chat B");
+    await startTurn("Investigate B");
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(host.hostCancelTurn).toHaveBeenLastCalledWith("chat-b");
+
+    await openChat("Chat A");
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(host.hostCancelTurn).toHaveBeenNthCalledWith(2, "chat-a");
+    expect(host.hostCancelTurn).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      for (const resolve of turnResolvers.values()) {
+        resolve([
+          {
+            kind: "error",
+            payload: { code: "cancelled", message: "Turn cancelled by user." },
+          },
+          { kind: "turn_completed", payload: { reason: "cancelled" } },
+        ]);
+      }
+    });
   });
 
   it("collapses to an accessible reopen strip without losing the active draft", async () => {
@@ -1654,7 +2005,7 @@ describe("LinkedChatRail", () => {
     fireEvent.click(screen.getByTestId("send-linked-chat"));
     await waitFor(() =>
       expect(screen.getByTestId("send-linked-chat").textContent).toMatch(
-        /Investigating/,
+        /Stop/,
       ),
     );
 

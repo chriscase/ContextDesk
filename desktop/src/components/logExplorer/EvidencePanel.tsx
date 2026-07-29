@@ -425,7 +425,10 @@ export function EvidencePanel({
       role={compactLayout ? "dialog" : undefined}
       aria-label={compactLayout ? "Investigation drawer" : "Investigation"}
     >
-      <div className="log-explorer__investigation-mode-control">
+      <div
+        className="log-explorer__investigation-mode-control"
+        style={compactLayout ? undefined : { paddingLeft: "1.65rem" }}
+      >
         {modeControl}
       </div>
       <header className="log-explorer__evidence-header">

@@ -27,6 +27,7 @@ import {
   formatEventTimeTitle,
 } from "../../lib/logExplorer/types";
 import type { AlignedLaneRow } from "../../lib/logExplorer/alignment";
+import "./VirtualizedEventList.css";
 
 const DEFAULT_ROW = 28;
 const OVERSCAN = 12;
@@ -35,6 +36,15 @@ const PREVIEW_VERTICAL_CHROME = 12;
 const APPROX_PREVIEW_CHARS_PER_LINE = 80;
 
 export type LineMode = "compact" | "wrap" | "full";
+export type RowMetadataPresentation = "standard" | "compact";
+export type RowFieldEmphasis = "balanced" | "payload" | "metadata";
+
+type CompactMetadataLabels = {
+  levels: Map<string, string>;
+  sources: Map<string, string>;
+  services: Map<string, string>;
+  hosts: Map<string, string>;
+};
 
 type Props = {
   events: ExplorerEventDto[];
@@ -47,6 +57,10 @@ type Props = {
   filterKeyword?: string | null;
   density: "comfortable" | "compact";
   lineMode?: LineMode;
+  /** Presentation-only metadata density. Authoritative event values are unchanged. */
+  metadataPresentation?: RowMetadataPresentation;
+  /** Presentation-only emphasis. Search, copy, evidence, and inspector data are unchanged. */
+  fieldEmphasis?: RowFieldEmphasis;
   /** User-selected bounded preview depth; inspector always shows the complete event. */
   previewLines?: number;
   /** Column widths in rem: [ts, level, source, message]. */
@@ -60,6 +74,12 @@ type Props = {
   onViewportAnchor?: (event: ExplorerEventDto) => void;
   /** Keep the lane-local column heading aligned with horizontal row scroll. */
   onHorizontalScroll?: (scrollLeft: number) => void;
+  alignedLaneId?: string;
+  /** Report painted slot heights so Align can share one row axis. */
+  onAlignedRowHeights?: (
+    laneId: string,
+    heights: Record<string, number>,
+  ) => void;
   scrollToSeq?: number | null;
   /** One-shot keyboard focus target paired with an explicit seek. */
   focusToSeq?: number | null;
@@ -74,8 +94,155 @@ type Props = {
 };
 
 function levelClass(level: string): string {
-  const l = level.toLowerCase();
-  return `log-explorer__level log-explorer__level--${l}`;
+  const semantic = semanticLevel(level);
+  return `log-explorer__level log-explorer__level--${semantic.cssClass}`;
+}
+
+function semanticLevel(level: string): {
+  token: string;
+  cssClass: string;
+  collisionKey: string;
+} {
+  const normalized = level.trim().toLowerCase();
+  switch (normalized) {
+    case "trace":
+      return { token: "T", cssClass: "trace", collisionKey: "trace" };
+    case "debug":
+      return { token: "D", cssClass: "debug", collisionKey: "debug" };
+    case "info":
+    case "information":
+      return { token: "I", cssClass: "info", collisionKey: "info" };
+    case "notice":
+      return { token: "N", cssClass: "info", collisionKey: "notice" };
+    case "warn":
+    case "warning":
+      return { token: "W", cssClass: "warn", collisionKey: "warn" };
+    case "error":
+    case "err":
+      return { token: "E", cssClass: "error", collisionKey: "error" };
+    case "fatal":
+      return { token: "F", cssClass: "fatal", collisionKey: "fatal" };
+    case "critical":
+    case "crit":
+      return { token: "C", cssClass: "error", collisionKey: "critical" };
+    default: {
+      const first = Array.from(normalized)[0]?.toUpperCase() ?? "?";
+      return {
+        token: `${first}?`,
+        cssClass: "other",
+        collisionKey: `other:${normalized}`,
+      };
+    }
+  }
+}
+
+function middleEllipsis(value: string, maxCodePoints: number): string {
+  const codePoints = Array.from(value.normalize("NFC"));
+  if (codePoints.length <= maxCodePoints) return codePoints.join("");
+  const available = maxCodePoints - 1;
+  const head = Math.ceil(available / 2);
+  const tail = Math.floor(available / 2);
+  return `${codePoints.slice(0, head).join("")}…${codePoints
+    .slice(codePoints.length - tail)
+    .join("")}`;
+}
+
+function preferredMetadataLabel(
+  value: string,
+  kind: "source" | "service" | "host",
+): string {
+  if (kind === "source") {
+    const segments = value.replaceAll("\\", "/").split("/");
+    const basename = segments.filter(Boolean).at(-1) ?? value;
+    return middleEllipsis(basename, 18);
+  }
+  return middleEllipsis(value, 12);
+}
+
+/**
+ * Produce stable, resident-set-local labels. Values that shorten to the same
+ * visible text receive deterministic suffixes sorted by their authoritative
+ * value; generated suffixes are checked against every preferred label.
+ */
+function collisionSafeLabels(
+  values: Iterable<string>,
+  preferred: (value: string) => string,
+): Map<string, string> {
+  const distinct = Array.from(new Set(values)).sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  const groups = new Map<string, string[]>();
+  const preferredByValue = new Map<string, string>();
+  for (const value of distinct) {
+    const label = preferred(value);
+    preferredByValue.set(value, label);
+    const collisionKey = label.toLowerCase();
+    const group = groups.get(collisionKey);
+    if (group) group.push(value);
+    else groups.set(collisionKey, [value]);
+  }
+
+  const reserved = new Set(groups.keys());
+  const used = new Set<string>();
+  const labels = new Map<string, string>();
+  for (const [, group] of Array.from(groups.entries()).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  )) {
+    for (let index = 0; index < group.length; index += 1) {
+      const value = group[index]!;
+      const preferredLabel = preferredByValue.get(value)!;
+      let label = preferredLabel;
+      if (group.length > 1 || used.has(label.toLowerCase())) {
+        let suffix = index + 1;
+        do {
+          label = `${preferredLabel}·${suffix}`;
+          suffix += 1;
+        } while (
+          used.has(label.toLowerCase()) ||
+          reserved.has(label.toLowerCase())
+        );
+      }
+      labels.set(value, label);
+      used.add(label.toLowerCase());
+    }
+  }
+  return labels;
+}
+
+function compactMetadataLabels(
+  events: ExplorerEventDto[],
+): CompactMetadataLabels {
+  const levelSemantics = new Map(
+    events.map((event) => {
+      const semantic = semanticLevel(event.level);
+      return [semantic.collisionKey, semantic] as const;
+    }),
+  );
+  const levelTokensBySemantic = collisionSafeLabels(
+    levelSemantics.keys(),
+    (key) => levelSemantics.get(key)!.token,
+  );
+  const levels = new Map(
+    events.map((event) => {
+      const semantic = semanticLevel(event.level);
+      return [event.level, levelTokensBySemantic.get(semantic.collisionKey)!];
+    }),
+  );
+  return {
+    levels,
+    sources: collisionSafeLabels(
+      events.map((event) => event.source),
+      (value) => preferredMetadataLabel(value, "source"),
+    ),
+    services: collisionSafeLabels(
+      events.flatMap((event) => (event.service ? [event.service] : [])),
+      (value) => preferredMetadataLabel(value, "service"),
+    ),
+    hosts: collisionSafeLabels(
+      events.flatMap((event) => (event.host ? [event.host] : [])),
+      (value) => preferredMetadataLabel(value, "host"),
+    ),
+  };
 }
 
 export function eventRowHeight(
@@ -111,6 +278,22 @@ export function eventRowHeight(
   );
 }
 
+export function measuredEventRowHeight(
+  scrollHeight: number,
+  compactH: number,
+  maxLines: number,
+): number {
+  if (scrollHeight <= PREVIEW_LINE_HEIGHT + 1) return compactH;
+  const visibleContentHeight = Math.min(
+    scrollHeight,
+    maxLines * PREVIEW_LINE_HEIGHT,
+  );
+  return Math.max(
+    compactH,
+    visibleContentHeight + PREVIEW_VERTICAL_CHROME,
+  );
+}
+
 export function centeredLiteralExcerpt(
   message: string,
   keyword: string,
@@ -133,13 +316,17 @@ export function VirtualizedEventList({
   filterKeyword,
   density,
   lineMode = "compact",
+  metadataPresentation = "compact",
+  fieldEmphasis = "payload",
   previewLines = 4,
-  colWidths = [7.5, 3.5, 8, 1],
+  colWidths = [7.25, 2.5, 6, 1],
   alignedRows,
   linkedScrollTop,
   onLinkedScrollTop,
   onViewportAnchor,
   onHorizontalScroll,
+  alignedLaneId,
+  onAlignedRowHeights,
   scrollToSeq,
   focusToSeq,
   onFocusToSeq,
@@ -153,10 +340,15 @@ export function VirtualizedEventList({
   const baseRowH = density === "compact" ? 22 : DEFAULT_ROW;
   const compactH = baseRowH;
   const boundedPreviewLines = Math.min(12, Math.max(2, previewLines));
+  const compactLabels = useMemo(() => compactMetadataLabels(events), [events]);
   const maxPreviewLines =
     lineMode === "full"
       ? Math.min(24, boundedPreviewLines * 2)
       : boundedPreviewLines;
+  const [measurementRevision, setMeasurementRevision] = useState(0);
+  const [measuredRowHeights, setMeasuredRowHeights] = useState<
+    Map<number, number>
+  >(new Map());
   const edgeRowH =
     lineMode === "compact"
       ? baseRowH
@@ -168,6 +360,8 @@ export function VirtualizedEventList({
     () =>
       alignedRows ??
       events.map((event) => {
+        const expanded = expandedSeqs?.has(event.seq) ?? false;
+        const wraps = lineMode === "full" || lineMode === "wrap" || expanded;
         const matchExcerpt = matchExcerpts?.[event.seq];
         const filterExcerpt =
           !matchExcerpt && filterKeyword
@@ -177,14 +371,16 @@ export function VirtualizedEventList({
           key: String(event.seq),
           ts: event.ts,
           event,
-          height: eventRowHeight(
-            event,
-            lineMode,
-            expandedSeqs?.has(event.seq) ?? false,
-            compactH,
-            boundedPreviewLines,
-            matchExcerpt ?? filterExcerpt ?? event.message,
-          ),
+          height:
+            (wraps ? measuredRowHeights.get(event.seq) : undefined) ??
+            eventRowHeight(
+              event,
+              lineMode,
+              expanded,
+              compactH,
+              boundedPreviewLines,
+              matchExcerpt ?? filterExcerpt ?? event.message,
+            ),
         };
       }),
     [
@@ -196,6 +392,7 @@ export function VirtualizedEventList({
       filterKeyword,
       lineMode,
       matchExcerpts,
+      measuredRowHeights,
     ],
   );
 
@@ -210,6 +407,7 @@ export function VirtualizedEventList({
   }, [displayRows]);
   const gridCols = `${colWidths[0]}rem ${colWidths[1]}rem minmax(${colWidths[2]}rem, ${colWidths[2] + 2}rem) minmax(${colWidths[3]}rem, 1fr)`;
   const parentRef = useRef<HTMLDivElement>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const onHorizontalScrollRef = useRef(onHorizontalScroll);
   onHorizontalScrollRef.current = onHorizontalScroll;
   const onNearBottomRef = useRef(onNearBottom);
@@ -296,8 +494,18 @@ export function VirtualizedEventList({
   }, [displayRows.length, edgeRowH, viewportH]);
 
   const setRef = useCallback((el: HTMLDivElement | null) => {
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
     (parentRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
-    if (el) setViewportH(el.clientHeight || 400);
+    if (!el) return;
+    setViewportH(el.clientHeight || 400);
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => {
+        setMeasurementRevision((revision) => revision + 1);
+      });
+      observer.observe(el);
+      resizeObserverRef.current = observer;
+    }
   }, []);
 
   useLayoutEffect(() => {
@@ -313,6 +521,7 @@ export function VirtualizedEventList({
 
   const previousLayout = useRef<{
     keys: string[];
+    eventSeqs: Array<number | null>;
     offsets: number[];
     heights: number[];
   } | null>(null);
@@ -331,22 +540,56 @@ export function VirtualizedEventList({
         }
       }
       const anchorKey = prior.keys[anchorIndex];
-      const nextIndex = displayRows.findIndex((row) => row.key === anchorKey);
-      if (nextIndex >= 0) {
-        const withinRow = oldTop - (prior.offsets[anchorIndex] ?? 0);
-        const nextTop = Math.max(0, (offsets[nextIndex] ?? 0) + withinRow);
-        if (nextTop !== oldTop) {
-          el.scrollTop = nextTop;
-          setScrollTop(nextTop);
+      let nextIndex = displayRows.findIndex((row) => row.key === anchorKey);
+      if (nextIndex < 0) {
+        // Align mode uses shared slot keys while Independent mode uses event
+        // keys. Preserve the nearest logical event when crossing that layout
+        // boundary instead of retaining an invalid slot-sized pixel offset.
+        let anchorSeq = prior.eventSeqs[anchorIndex] ?? null;
+        for (
+          let distance = 1;
+          anchorSeq == null &&
+          (anchorIndex - distance >= 0 ||
+            anchorIndex + distance < prior.eventSeqs.length);
+          distance += 1
+        ) {
+          anchorSeq =
+            prior.eventSeqs[anchorIndex - distance] ??
+            prior.eventSeqs[anchorIndex + distance] ??
+            null;
+        }
+        if (anchorSeq != null) {
+          nextIndex = displayRows.findIndex(
+            (row) => row.event?.seq === anchorSeq,
+          );
         }
       }
+      let nextTop = oldTop;
+      if (nextIndex >= 0) {
+        const nextHeight = heights[nextIndex] ?? compactH;
+        const withinRow = Math.min(
+          Math.max(0, oldTop - (prior.offsets[anchorIndex] ?? 0)),
+          Math.max(0, nextHeight - 1),
+        );
+        nextTop = Math.max(0, (offsets[nextIndex] ?? 0) + withinRow);
+      }
+      const maxTop = Math.max(0, totalH - Math.max(0, el.clientHeight));
+      nextTop = Math.min(nextTop, maxTop);
+      if (nextTop !== el.scrollTop) {
+        el.scrollTop = nextTop;
+      }
+      // Browsers may clamp scrollTop when the virtual spacer shrinks without
+      // dispatching a scroll event. Keep React's windowing coordinate in sync
+      // with the actual element so a populated lane cannot paint blank.
+      setScrollTop(el.scrollTop);
     }
     previousLayout.current = {
       keys: displayRows.map((row) => row.key),
+      eventSeqs: displayRows.map((row) => row.event?.seq ?? null),
       offsets: [...offsets],
       heights: [...heights],
     };
-  }, [displayRows, offsets, heights, compactH]);
+  }, [displayRows, offsets, heights, compactH, totalH]);
 
   useLayoutEffect(() => {
     const el = parentRef.current;
@@ -399,11 +642,81 @@ export function VirtualizedEventList({
   );
 
   useLayoutEffect(() => {
-    if (focusToSeq == null) return;
+    setMeasuredRowHeights(new Map());
+  }, [
+    boundedPreviewLines,
+    compactH,
+    filterKeyword,
+    gridCols,
+    lineMode,
+    matchExcerpts,
+  ]);
+
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const next = new Map<number, number>();
+    const nextAligned: Record<string, number> = {};
+    for (const message of el.querySelectorAll<HTMLElement>(
+      "[data-row-message-seq]",
+    )) {
+      const seq = Number(message.dataset.rowMessageSeq);
+      if (!Number.isFinite(seq) || message.scrollHeight <= 0) continue;
+      const height = measuredEventRowHeight(
+        message.scrollHeight,
+        compactH,
+        maxPreviewLines,
+      );
+      const rowKey = message.dataset.rowKey;
+      if (alignedRows && rowKey) nextAligned[rowKey] = height;
+      else next.set(seq, height);
+    }
+    if (alignedRows) {
+      if (alignedLaneId) onAlignedRowHeights?.(alignedLaneId, nextAligned);
+      return;
+    }
+    const residentSeqs = new Set(events.map((event) => event.seq));
+    setMeasuredRowHeights((current) => {
+      let changed = false;
+      const merged = new Map<number, number>();
+      for (const [seq, height] of current) {
+        if (residentSeqs.has(seq)) merged.set(seq, height);
+        else changed = true;
+      }
+      for (const [seq, height] of next) {
+        if (merged.get(seq) !== height) {
+          merged.set(seq, height);
+          changed = true;
+        }
+      }
+      return changed ? merged : current;
+    });
+  }, [
+    alignedRows,
+    alignedLaneId,
+    compactH,
+    events,
+    gridCols,
+    lineMode,
+    matchExcerpts,
+    maxPreviewLines,
+    measurementRevision,
+    onAlignedRowHeights,
+    slice,
+  ]);
+
+  const lastFocusSeq = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (focusToSeq == null) {
+      lastFocusSeq.current = null;
+      return;
+    }
+    if (focusToSeq === lastFocusSeq.current) return;
     const row = parentRef.current?.querySelector<HTMLElement>(
       `[data-seq="${focusToSeq}"]`,
     );
     if (!row) return;
+    lastFocusSeq.current = focusToSeq;
     row.focus();
     onFocusToSeq?.(focusToSeq);
   }, [focusToSeq, onFocusToSeq, slice]);
@@ -411,6 +724,7 @@ export function VirtualizedEventList({
   if (displayRows.length === 0) {
     return (
       <div
+        ref={setRef}
         className="log-explorer__rows log-explorer__empty"
         role="list"
         aria-label={ariaLabel}
@@ -423,7 +737,12 @@ export function VirtualizedEventList({
   return (
     <div
       ref={setRef}
-      className="log-explorer__rows log-explorer__rows--virtual"
+      className={[
+        "log-explorer__rows",
+        "log-explorer__rows--virtual",
+        `virtualized-event-list--metadata-${metadataPresentation}`,
+        `virtualized-event-list--emphasis-${fieldEmphasis}`,
+      ].join(" ")}
       role="list"
       aria-label={ariaLabel}
       data-testid="virtualized-event-list"
@@ -432,7 +751,10 @@ export function VirtualizedEventList({
       data-aligned-slots={alignedRows?.length}
       data-rendered={slice.length}
       data-total-height={totalH}
+      data-measured-rows={measuredRowHeights.size}
       data-edge-trigger-rows={EDGE_TRIGGER_ROWS}
+      data-metadata-presentation={metadataPresentation}
+      data-field-emphasis={fieldEmphasis}
       onScroll={onScroll}
     >
       <div
@@ -479,6 +801,26 @@ export function VirtualizedEventList({
               : null;
           const visibleMessage = matchExcerpt ?? filterExcerpt ?? e.message;
           const excerpted = visibleMessage !== e.message;
+          const levelToken = compactLabels.levels.get(e.level) ?? "?";
+          const sourceToken = compactLabels.sources.get(e.source) ?? e.source;
+          const serviceToken = e.service
+            ? compactLabels.services.get(e.service)
+            : null;
+          const hostToken = e.host ? compactLabels.hosts.get(e.host) : null;
+          const provenanceLabel = [
+            `Source ${e.source}`,
+            e.service ? `Service ${e.service}` : null,
+            e.host ? `Host ${e.host}` : null,
+          ]
+            .filter(Boolean)
+            .join("; ");
+          const provenanceTitle = [
+            `Source: ${e.source}`,
+            e.service ? `Service: ${e.service}` : null,
+            e.host ? `Host: ${e.host}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n");
           const previewTruncated = !wrapText
             ? long
             : e.message.split(/\r?\n/).length > visiblePreviewLines ||
@@ -534,10 +876,61 @@ export function VirtualizedEventList({
               >
                 {formatEventTime(e.ts, tq, timeRange)}
               </span>
-              <span className={levelClass(e.level)}>{e.level}</span>
-              <span className="log-explorer__source" title={e.source}>
-                {e.source}
-              </span>
+              {metadataPresentation === "compact" ? (
+                <span
+                  className={`${levelClass(e.level)} virtualized-event-list__level-token`}
+                  title={`Level: ${e.level}`}
+                  aria-label={`Level ${e.level}; compact token ${levelToken}`}
+                  tabIndex={0}
+                  data-level-token={levelToken}
+                  data-full-level={e.level}
+                >
+                  {levelToken}
+                </span>
+              ) : (
+                <span className={levelClass(e.level)}>{e.level}</span>
+              )}
+              {metadataPresentation === "compact" ? (
+                <span
+                  className="log-explorer__source virtualized-event-list__provenance"
+                  title={provenanceTitle}
+                  aria-label={provenanceLabel}
+                  tabIndex={0}
+                  data-full-source={e.source}
+                  data-full-service={e.service ?? undefined}
+                  data-full-host={e.host ?? undefined}
+                  data-source-token={sourceToken}
+                  data-service-token={serviceToken ?? undefined}
+                  data-host-token={hostToken ?? undefined}
+                >
+                  <span
+                    className="virtualized-event-list__provenance-token"
+                    aria-hidden="true"
+                  >
+                    {sourceToken}
+                  </span>
+                  {serviceToken ? (
+                    <span
+                      className="virtualized-event-list__provenance-token virtualized-event-list__provenance-token--secondary"
+                      aria-hidden="true"
+                    >
+                      svc:{serviceToken}
+                    </span>
+                  ) : null}
+                  {hostToken ? (
+                    <span
+                      className="virtualized-event-list__provenance-token virtualized-event-list__provenance-token--secondary"
+                      aria-hidden="true"
+                    >
+                      host:{hostToken}
+                    </span>
+                  ) : null}
+                </span>
+              ) : (
+                <span className="log-explorer__source" title={e.source}>
+                  {e.source}
+                </span>
+              )}
               <span className="log-explorer__msg-cell">
                 <span
                   className={
@@ -545,6 +938,8 @@ export function VirtualizedEventList({
                       ? "log-explorer__msg log-explorer__msg--wrap"
                       : "log-explorer__msg"
                   }
+                  data-row-message-seq={wrapText ? e.seq : undefined}
+                  data-row-key={wrapText ? row.key : undefined}
                   title={e.message}
                   aria-label={
                     excerpted
@@ -553,7 +948,10 @@ export function VirtualizedEventList({
                   }
                   style={
                     wrapText
-                      ? { maxHeight: `${visiblePreviewLines * 1.35}em` }
+                      ? {
+                          maxHeight: `${visiblePreviewLines * PREVIEW_LINE_HEIGHT}px`,
+                          overflowWrap: "anywhere",
+                        }
                       : undefined
                   }
                 >

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "scenarioId": "behavior-scale",
+  "evaluatorOnly": true,
+  "mustNotEnterProductChatContext": true,
+  "metricBundle": "../metrics/manifest.v1.json",
+  "incidentWindow": {
+    "from": 1736087400,
+    "to": 1736092800,
+    "description": "Synthetic client ramp reaches peak load, followed by CPU and heap pressure and a locally concentrated warning/error sequence."
+  },
+  "expectedCorrelations": [
+    {
+      "id": "clients-lead-pressure",
+      "description": "Concurrent clients rise from 10 to 120 before CPU crosses 80 percent and heap crosses 750000000 bytes."
+    },
+    {
+      "id": "pressure-overlaps-log-signals",
+      "description": "Peak pressure overlaps the checked-in queue-worker warning, checkout-queue error, and database warning.",
+      "logEvents": [
+        {
+          "timestamp": 1736089501,
+          "level": "warn",
+          "source": "worker/worker.log",
+          "stableMessageToken": "event_id=behavior-14744"
+        },
+        {
+          "timestamp": 1736090130,
+          "level": "error",
+          "source": "queue/events.jsonl",
+          "stableMessageToken": "event_id=behavior-14770"
+        },
+        {
+          "timestamp": 1736091757,
+          "level": "warn",
+          "source": "db/database.log",
+          "stableMessageToken": "event_id=behavior-14841"
+        }
+      ]
+    },
+    {
+      "id": "recovery-after-ramp",
+      "description": "Clients, CPU, and heap all decline after the peak; the fixture asserts correlation only, not causation."
+    }
+  ],
+  "safety": "Expected answers live outside both import/ and metrics/. Product context may include imported measurements and their provenance, but never this evaluator truth."
+}

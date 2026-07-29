@@ -73,6 +73,26 @@ export function IconPin({ className, title }: IconProps) {
   );
 }
 
+/** Conversation list / chat workspace. */
+export function IconChat({ className, title }: IconProps) {
+  return (
+    <Svg className={className} title={title}>
+      <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+      <path d="M8 9h8M8 13h5" />
+    </Svg>
+  );
+}
+
+/** Archive tray. */
+export function IconArchive({ className, title }: IconProps) {
+  return (
+    <Svg className={className} title={title}>
+      <path d="M3 6h18M5 6v14h14V6M4 3h16l1 3H3z" />
+      <path d="M9 11h6" />
+    </Svg>
+  );
+}
+
 export function IconSend({ className }: IconProps) {
   return (
     <Svg className={className}>

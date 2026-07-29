@@ -127,7 +127,9 @@
   background-position:
     calc(100% - 11px) calc(50% - 1px),
     calc(100% - 7px) calc(50% - 1px);
-  background-size: 4px 4px, 4px 4px;
+  background-size:
+    4px 4px,
+    4px 4px;
   background-repeat: no-repeat;
   /* Primary text (not muted) — open dropdown options inherit this on WebKit. */
   color: var(--text);
@@ -241,7 +243,9 @@
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  transition: background var(--motion-fast), border-color var(--motion-fast);
+  transition:
+    background var(--motion-fast),
+    border-color var(--motion-fast);
 }
 
 .composer__stop svg {
@@ -352,7 +356,9 @@
 
 /* Session context pack (#341) */
 .session-context-bar {
-  margin: 0 0 var(--space-2);
+  /* Preserve the dock's auto inline margins so this shelf and composer share
+     exactly the same centered outer edges (#699). */
+  margin-block: 0 var(--space-2);
   padding: var(--space-2) var(--space-3);
   border: 1px dashed var(--border-soft);
   border-radius: 10px;
@@ -412,6 +418,115 @@
   cursor: pointer;
 }
 
+.session-context-corpus {
+  display: grid;
+  grid-template-columns: auto minmax(7rem, 1fr) auto auto auto;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-soft));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elevated));
+}
+
+.session-context-corpus--unavailable {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-soft));
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-elevated));
+}
+
+.session-context-corpus__kind {
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.session-context-corpus__name,
+.session-context-corpus__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-context-corpus__name {
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.session-context-corpus__meta {
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+}
+
+.session-context-add {
+  position: relative;
+}
+
+.session-context-add__panel {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 0.45rem);
+  left: 0;
+  display: grid;
+  gap: var(--space-3);
+  width: min(30rem, calc(100vw - 3rem));
+  max-height: min(26rem, 58vh);
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+}
+
+.session-context-add__section {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.session-context-add__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.session-context-add__corpora {
+  display: grid;
+  gap: var(--space-1);
+  max-height: 12rem;
+  margin-top: var(--space-1);
+  overflow: auto;
+}
+
+.session-context-add__corpus {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  color: var(--text);
+  text-align: left;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.session-context-add__corpus:hover,
+.session-context-add__corpus:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-panel));
+}
+
+.session-context-add__corpus span:last-child {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--text-2xs);
+}
+
 @media (max-width: 640px) {
   .session-context-bar__summary {
     align-items: flex-start;
@@ -423,5 +538,22 @@
   .session-context-bar__summary-state {
     margin-left: 1rem;
     max-width: calc(100% - 1rem);
+  }
+
+  .session-context-corpus {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .session-context-corpus__meta {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .session-context-add__panel {
+    position: fixed;
+    inset: auto var(--space-3) var(--space-3);
+    width: auto;
+    max-height: min(32rem, 68vh);
+    border-radius: var(--radius-lg);
   }
 }

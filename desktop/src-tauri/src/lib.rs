@@ -1,5 +1,7 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
+mod handbook;
+
 use cd_core::branding::Branding;
 use cd_core::chat::{ChatMessage, Role as ChatRole};
 use cd_core::config::{
@@ -30,6 +32,7 @@ use cd_core::workspace_backup::{
     BackupPlanSummary, BackupProgress, BackupProgressObserver, BackupProgressPhase,
     BackupRunStatus, BackupRunSummary,
 };
+use handbook::{HandbookIndex, HandbookLink, HandbookManifest, HandbookPage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -138,6 +141,9 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// Serializes chat-session writes across windows so governed fields cannot
+    /// race ordinary transcript saves (#695).
+    chat_session_mutation: Mutex<()>,
     /// Serializes one-process Investigation selection/create/mutation across windows.
     investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
@@ -150,6 +156,8 @@ struct AppState {
     index_status: Arc<Mutex<cd_core::index::IndexStatus>>,
     /// Validated, bundled product Help. This never points at a workspace root.
     help: Mutex<Option<Arc<HelpIndex>>>,
+    /// Read-only engineering docs. Deliberately separate from Help and ToolHost.
+    handbook: Mutex<Option<Arc<HandbookIndex>>>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -363,20 +371,25 @@ fn build_linked_log_fallback_host(
     Ok(host)
 }
 
-fn validate_linked_log_corpus(
-    state: &AppState,
-    context: &cd_core::agent::LogExplorerTurnContext,
-) -> Result<(), String> {
-    let cache = log_cache_dir(state)?;
-    validate_linked_log_corpus_at(&cache, &context.corpus_id)
-}
-
 fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
     // Opening validates metadata, engine artifacts, templates, and DuckDB
     // schema before any provider receives the turn.
     cd_core::log_analysis::LogCorpus::open(cache, corpus_id)
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+fn linked_log_preflight_at(
+    cache: &std::path::Path,
+    context: &cd_core::agent::LogExplorerTurnContext,
+    tools_profile: Option<&ProviderProfile>,
+    session_id: &str,
+) -> Option<Vec<cd_core::events::StreamEvent>> {
+    if validate_linked_log_corpus_at(cache, &context.corpus_id).is_err() {
+        return Some(linked_log_host_terminal_events().into());
+    }
+    tools_profile
+        .and_then(|profile| cd_core::research::linked_tools_unavailable_events(profile, session_id))
 }
 
 fn take_ready_linked_host<F>(
@@ -2620,6 +2633,43 @@ fn validate_log_explorer_turn_context(
         .map_err(|e| e.to_string())
 }
 
+fn linked_log_turn_context(
+    session: Option<&Session>,
+    window_id: &str,
+    explorer_request: Option<LogExplorerTurnContextReq>,
+) -> Result<Option<cd_core::agent::LogExplorerTurnContext>, String> {
+    if let Some(request) = explorer_request {
+        let session =
+            session.ok_or_else(|| "Log Explorer chat session is not available".to_string())?;
+        return validate_log_explorer_turn_context(session, window_id, request).map(Some);
+    }
+    session
+        .and_then(|session| session.linked_corpus_id.as_deref())
+        .map(cd_core::agent::LogExplorerTurnContext::for_main_chat)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+fn load_session_for_turn(
+    store: &cd_core::sessions::SessionStore,
+    session_id: &str,
+) -> Result<Option<Session>, String> {
+    match store.load(session_id) {
+        Ok(session) => Ok(Some(session)),
+        Err(error) => {
+            if store.exists(session_id).map_err(|e| e.to_string())? {
+                Err(format!(
+                    "Chat session is unavailable or corrupt; the turn stopped before provider contact: {error}"
+                ))
+            } else {
+                // A never-sent ordinary draft is intentionally ephemeral. It
+                // cannot carry a durable linked corpus.
+                Ok(None)
+            }
+        }
+    }
+}
+
 fn skill_dirs_for(state: &AppState, cfg: &AppConfig) -> Vec<std::path::PathBuf> {
     let config_dir = ensure_config_dir(&state.branding).ok();
     let roots: Vec<_> = cfg
@@ -3182,6 +3232,27 @@ async fn propose_save_skill_cmd(
     Ok(events_to_dto(&result.events))
 }
 
+fn event_to_dto_with_linked_corpus(
+    event: &cd_core::events::StreamEvent,
+    linked_corpus_id: Option<&str>,
+) -> EventDto {
+    let mut dto = cd_core::research::event_to_dto(event);
+    let is_log_citation = matches!(
+        event,
+        cd_core::events::StreamEvent::Citation { source_id, .. }
+            if source_id.starts_with("log_template:") || source_id.starts_with("log_event:")
+    );
+    if is_log_citation {
+        if let (Some(corpus_id), Some(payload)) = (linked_corpus_id, dto.payload.as_object_mut()) {
+            payload.insert(
+                "corpus_id".into(),
+                serde_json::Value::String(corpus_id.to_string()),
+            );
+        }
+    }
+    dto
+}
+
 #[tauri::command]
 async fn agent_turn(
     state: State<'_, AppState>,
@@ -3257,26 +3328,25 @@ async fn agent_turn(
         .as_ref()
         .and_then(|r| state.secrets.get(r).ok().flatten());
 
-    let log_explorer_context = match req.log_explorer_context {
-        Some(request) => {
-            let session = session_store(&state)?
-                .load(&req.session_id)
-                .map_err(|e| e.to_string())?;
-            Some(validate_log_explorer_turn_context(
-                &session,
-                window.label(),
-                request,
-            )?)
-        }
-        None => None,
-    };
+    // Resolve the linked corpus only from the durable session. Explorer may
+    // contribute a bounded viewport brief, but neither the model nor an
+    // ordinary main-chat turn request chooses or broadens corpus scope.
+    let store = session_store(&state)?;
+    let stored_session = load_session_for_turn(&store, &req.session_id)?;
+    let log_explorer_context = linked_log_turn_context(
+        stored_session.as_ref(),
+        window.label(),
+        req.log_explorer_context,
+    )?;
 
-    // A linked turn on a chat-only profile has a deterministic, provider-free
-    // answer. Emit it before host construction so workspace background indexing
-    // cannot strand the UI in streaming state (#596).
-    if !req.force_local && log_explorer_context.is_some() {
+    // Validate the durable corpus before capability checks or provider/host
+    // construction. A stale link must never be masked by a tools-disabled
+    // profile or silently broadened into an ordinary turn.
+    if let Some(context) = log_explorer_context.as_ref() {
+        let cache = log_cache_dir(&state)?;
+        let tools_profile = (!req.force_local).then_some(&profile);
         if let Some(events) =
-            cd_core::research::linked_tools_unavailable_events(&profile, &req.session_id)
+            linked_log_preflight_at(&cache, context, tools_profile, &req.session_id)
         {
             for event in events {
                 let _ = on_event.send(cd_core::research::event_to_dto(&event));
@@ -3290,13 +3360,6 @@ async fn agent_turn(
     // otherwise use an independent turn-local read-only log host.
     let (mut host, using_fallback_host, borrowed_host_generation) =
         if let Some(context) = log_explorer_context.as_ref() {
-            if let Err(error) = validate_linked_log_corpus(&state, context) {
-                tracing::warn!(error = %error, "linked log corpus preflight failed");
-                for event in linked_log_host_terminal_events() {
-                    let _ = on_event.send(cd_core::research::event_to_dto(&event));
-                }
-                return Ok(());
-            }
             match take_ready_linked_host(&state.host, &state.host_generation, || {
                 build_linked_log_fallback_host(&state, context)
             }) {
@@ -3352,8 +3415,11 @@ async fn agent_turn(
     }
 
     let channel = on_event;
+    let linked_citation_corpus = log_explorer_context
+        .as_ref()
+        .map(|context| context.corpus_id.clone());
     let mut sink = |ev: cd_core::events::StreamEvent| {
-        let dto = cd_core::research::event_to_dto(&ev);
+        let dto = event_to_dto_with_linked_corpus(&ev, linked_citation_corpus.as_deref());
         let _ = channel.send(dto);
     };
 
@@ -3525,16 +3591,37 @@ fn should_persist_chat_session(session: &Session) -> bool {
     !session.messages.is_empty() || session.linked_corpus_id.is_some()
 }
 
-#[tauri::command]
-fn save_chat_session(state: State<'_, AppState>, mut session: Session) -> Result<Session, String> {
+fn save_chat_session_at(
+    store: &cd_core::sessions::SessionStore,
+    mut session: Session,
+) -> Result<Session, String> {
+    // The renderer owns transcript/view fields, but never the governed corpus
+    // grant. Preserve the durable host value for an existing chat and strip an
+    // attempted grant from a new chat; only set_chat_linked_corpus may change it.
+    if store.exists(&session.id).map_err(|e| e.to_string())? {
+        let durable = store
+            .load(&session.id)
+            .map_err(|e| format!("chat session is unavailable or corrupt: {e}"))?;
+        session.linked_corpus_id = durable.linked_corpus_id;
+    } else {
+        session.linked_corpus_id = None;
+    }
     session.maybe_auto_title_from_first_user();
     session.touch();
-    // Do not persist empty never-messaged drafts under placeholder titles.
-    if !should_persist_chat_session(&session) {
-        return Ok(session);
+    if should_persist_chat_session(&session) {
+        store.save(&session).map_err(|e| e.to_string())?;
     }
+    Ok(session)
+}
+
+#[tauri::command]
+fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
-    store.save(&session).map_err(|e| e.to_string())?;
+    let session = save_chat_session_at(&store, session)?;
     seed_history_from_session(&state, &session);
     Ok(session)
 }
@@ -3546,6 +3633,10 @@ fn rename_chat_session(
     id: String,
     title: String,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     let title = title.trim().to_string();
@@ -3562,6 +3653,10 @@ fn rename_chat_session(
 /// Soft-delete: move session to trash (recoverable).
 #[tauri::command]
 fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let session = session_store(&state)?
         .trash(&id)
         .map_err(|e| e.to_string())?;
@@ -3573,6 +3668,10 @@ fn trash_chat_session(state: State<'_, AppState>, id: String) -> Result<Session,
 /// Restore a session from trash.
 #[tauri::command]
 fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     session_store(&state)?
         .restore_from_trash(&id)
         .map_err(|e| e.to_string())
@@ -3582,6 +3681,10 @@ fn restore_chat_session(state: State<'_, AppState>, id: String) -> Result<Sessio
 /// Also purges session-scoped context pack files (#341).
 #[tauri::command]
 fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     // Best-effort purge of session context pack before removing session metadata (#341).
     if let Ok(base) = session_context_base(&state) {
         let _ = cd_core::session_context::purge_session_at(&base, &id);
@@ -3601,6 +3704,10 @@ fn pin_chat_session(
     id: String,
     pinned: bool,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     session.pinned = pinned;
@@ -3616,6 +3723,10 @@ fn archive_chat_session(
     id: String,
     archived: bool,
 ) -> Result<Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
     let mut session = store.load(&id).map_err(|e| e.to_string())?;
     session.archived = archived;
@@ -5176,6 +5287,83 @@ fn log_query_events(
     cd_core::log_analysis::query_events(&c, &query).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum LogEventOriginalDto {
+    Available {
+        label: String,
+        text: String,
+        #[serde(rename = "sourceByteCount")]
+        source_byte_count: u64,
+        #[serde(rename = "redactedCharCount")]
+        redacted_char_count: u64,
+        #[serde(rename = "storedCharCount")]
+        stored_char_count: u64,
+        truncated: bool,
+        #[serde(rename = "encodingNormalized")]
+        encoding_normalized: bool,
+        #[serde(rename = "redactionApplied")]
+        redaction_applied: bool,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl From<cd_core::log_analysis::query::EventOriginalRepresentation> for LogEventOriginalDto {
+    fn from(value: cd_core::log_analysis::query::EventOriginalRepresentation) -> Self {
+        use cd_core::log_analysis::query::EventOriginalRepresentation;
+        match value {
+            EventOriginalRepresentation::Available {
+                label,
+                text,
+                source_byte_count,
+                redacted_char_count,
+                stored_char_count,
+                truncated,
+                encoding_normalized,
+                redaction_applied,
+            } => Self::Available {
+                label,
+                text,
+                source_byte_count,
+                redacted_char_count,
+                stored_char_count,
+                truncated,
+                encoding_normalized,
+                redaction_applied,
+            },
+            EventOriginalRepresentation::Unavailable { reason } => Self::Unavailable { reason },
+        }
+    }
+}
+
+fn query_log_event_original_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    seq: u64,
+) -> Result<LogEventOriginalDto, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query::query_event_original(&corpus, seq)
+        .map(LogEventOriginalDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Explicit, read-only fetch for the inspector's Original (redacted) view.
+///
+/// This remains separate from ordinary Explorer pages, search, evidence, and
+/// linked-chat DTOs so source records never enter those paths automatically.
+#[tauri::command]
+fn log_query_event_original(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    seq: u64,
+) -> Result<LogEventOriginalDto, String> {
+    let cache = log_cache_dir(&state)?;
+    query_log_event_original_at(&cache, &corpus_id, seq)
+}
+
 /// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
 #[tauri::command]
 fn log_timeline_summary(
@@ -5187,6 +5375,19 @@ fn log_timeline_summary(
     let c =
         cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
     cd_core::log_analysis::query_timeline_summary(&c, &query).map_err(|e| e.to_string())
+}
+
+/// One bounded global timeline axis with canonical severity and lane tracks.
+#[tauri::command]
+fn log_shared_timeline_summary(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::SharedTimelineSummaryQuery,
+) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
+    let cache = log_cache_dir(&state)?;
+    let c =
+        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_shared_timeline_summary(&c, &query).map_err(|e| e.to_string())
 }
 
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
@@ -5713,17 +5914,88 @@ fn list_chat_sessions_for_corpus(
 }
 
 /// Set or clear `linked_corpus_id` on a chat session.
+fn set_chat_linked_corpus_at(
+    store: &cd_core::sessions::SessionStore,
+    cache: &std::path::Path,
+    session_id: &str,
+    corpus_id: Option<String>,
+    draft_session: Option<Session>,
+    expected_updated_at: Option<String>,
+) -> Result<Session, String> {
+    let mut session = match store.load(session_id) {
+        Ok(session) => {
+            let durable_revision = serde_json::to_value(session.updated_at)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string));
+            if expected_updated_at != durable_revision {
+                return Err(
+                    "Chat changed in another window; reload it before changing log context".into(),
+                );
+            }
+            session
+        }
+        Err(error) => {
+            if store.exists(session_id).map_err(|e| e.to_string())? {
+                return Err(format!("chat session is unavailable or corrupt: {error}"));
+            }
+            let draft = draft_session.ok_or_else(|| "chat session does not exist".to_string())?;
+            if draft.id != session_id
+                || draft.trashed
+                || draft.archived
+                || !draft.messages.is_empty()
+                || expected_updated_at
+                    != serde_json::to_value(draft.updated_at)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+            {
+                return Err("draft chat identity is invalid".into());
+            }
+            // Construct a minimal host-owned draft. Do not trust renderer
+            // messages, lifecycle flags, linked corpus, or timestamps wholesale.
+            let mut safe = Session::new(draft.title);
+            safe.id = session_id.to_string();
+            safe.compact_keep_last = draft.compact_keep_last;
+            safe.show_full_history = draft.show_full_history;
+            safe.title_locked = draft.title_locked;
+            safe.chat_model = draft.chat_model;
+            safe.provider_profile_id = draft.provider_profile_id;
+            safe.pinned_skill_id = draft.pinned_skill_id;
+            safe
+        }
+    };
+    let corpus_id = normalize_log_corpus_id(corpus_id);
+    if let Some(corpus_id) = corpus_id.as_deref() {
+        // Validate before mutating or saving. A failed attach leaves both an
+        // existing durable chat and a new empty draft unchanged.
+        validate_linked_log_corpus_at(cache, corpus_id)?;
+    }
+    session.set_linked_corpus_id(corpus_id);
+    store.save(&session).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
 #[tauri::command]
 fn set_chat_linked_corpus(
     state: State<'_, AppState>,
     session_id: String,
     corpus_id: Option<String>,
+    draft_session: Option<Session>,
+    expected_updated_at: Option<String>,
 ) -> Result<cd_core::sessions::Session, String> {
+    let _mutation = state
+        .chat_session_mutation
+        .lock()
+        .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
-    let mut session = store.load(&session_id).map_err(|e| e.to_string())?;
-    session.set_linked_corpus_id(corpus_id);
-    store.save(&session).map_err(|e| e.to_string())?;
-    Ok(session)
+    let cache = log_cache_dir(&state)?;
+    set_chat_linked_corpus_at(
+        &store,
+        &cache,
+        &session_id,
+        corpus_id,
+        draft_session,
+        expected_updated_at,
+    )
 }
 
 /// Build the SPA URL for a Log Explorer window.
@@ -5817,6 +6089,50 @@ async fn open_log_explorer(
         .build()
         .map_err(|e| format!("open log explorer window: {e}"))?;
     Ok(label)
+}
+
+fn handbook_webview_url(app: &tauri::AppHandle) -> Result<tauri::WebviewUrl, String> {
+    let query = "window=engineering-handbook";
+    if tauri::is_dev() {
+        if let Some(dev) = app.config().build.dev_url.as_ref() {
+            let base = dev.as_str().trim_end_matches('/');
+            return format!("{base}/?{query}")
+                .parse()
+                .map(tauri::WebviewUrl::External)
+                .map_err(|error| format!("engineering handbook dev url: {error}"));
+        }
+    }
+    Ok(tauri::WebviewUrl::App(format!("index.html?{query}").into()))
+}
+
+/// Open or focus the single read-only engineering handbook window.
+#[tauri::command]
+async fn open_engineering_handbook(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // Refuse to create a blank shell when packaging omitted the handbook.
+    handbook_index(&state)?;
+    const LABEL: &str = "engineering-handbook";
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(LABEL.into());
+    }
+    let url = handbook_webview_url(&app)?;
+    tauri::WebviewWindowBuilder::new(&app, LABEL, url)
+        .title("ContextDesk · Engineering handbook")
+        .inner_size(1180.0, 820.0)
+        .min_inner_size(760.0, 560.0)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
+        .decorations(true)
+        .background_color(tauri::window::Color(0x0b, 0x0c, 0x0e, 0xff))
+        .build()
+        .map_err(|error| format!("open engineering handbook window: {error}"))?;
+    Ok(LABEL.into())
 }
 
 /// Harvest row DTO for Harvest Browser (#326 PR6 / PR8).
@@ -6403,6 +6719,22 @@ fn load_bundled_help(app: &tauri::App) -> Option<Arc<HelpIndex>> {
         .find_map(|root| HelpIndex::load(root).ok().map(Arc::new))
 }
 
+fn load_bundled_handbook(app: &tauri::App) -> Option<Arc<HandbookIndex>> {
+    use tauri::Manager;
+
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("handbook"));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    }
+    candidates
+        .into_iter()
+        .find_map(|root| HandbookIndex::load(root).ok().map(Arc::new))
+}
+
 fn help_index(state: &AppState) -> Result<Arc<HelpIndex>, String> {
     state
         .help
@@ -6410,6 +6742,15 @@ fn help_index(state: &AppState) -> Result<Arc<HelpIndex>, String> {
         .map_err(|_| "Bundled Help is temporarily unavailable.".to_string())?
         .clone()
         .ok_or_else(|| "Bundled Help is unavailable in this installation.".to_string())
+}
+
+fn handbook_index(state: &AppState) -> Result<Arc<HandbookIndex>, String> {
+    state
+        .handbook
+        .lock()
+        .map_err(|_| "Engineering handbook is temporarily unavailable.".to_string())?
+        .clone()
+        .ok_or_else(|| "Engineering handbook is unavailable in this installation.".to_string())
 }
 
 #[tauri::command]
@@ -6448,6 +6789,43 @@ fn get_help_asset(
         data_url: format!("data:{mime};base64,{encoded}"),
         mime,
     })
+}
+
+#[tauri::command]
+fn get_handbook_manifest(state: State<'_, AppState>) -> Result<HandbookManifest, String> {
+    Ok(handbook_index(&state)?.manifest())
+}
+
+#[tauri::command]
+fn get_handbook_page(state: State<'_, AppState>, id: String) -> Result<HandbookPage, String> {
+    handbook_index(&state)?.page(&id)
+}
+
+#[tauri::command]
+fn export_handbook_document(
+    state: State<'_, AppState>,
+    path: String,
+    scope: String,
+    format: String,
+    page_id: Option<String>,
+    rendered_html: Option<String>,
+) -> Result<usize, String> {
+    handbook_index(&state)?.export_document(
+        std::path::Path::new(&path),
+        &scope,
+        &format,
+        page_id.as_deref(),
+        rendered_html.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn resolve_handbook_link(
+    state: State<'_, AppState>,
+    from_page_id: String,
+    target: String,
+) -> Result<HandbookLink, String> {
+    handbook_index(&state)?.resolve_link(&from_page_id, &target)
 }
 
 fn base64_standard(input: &[u8]) -> String {
@@ -6498,6 +6876,7 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
@@ -6508,6 +6887,7 @@ pub fn run() {
             ..Default::default()
         })),
         help: Mutex::new(None),
+        handbook: Mutex::new(None),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -6525,7 +6905,12 @@ pub fn run() {
             if help.is_none() {
                 tracing::warn!("bundled Help corpus unavailable");
             }
+            let handbook = load_bundled_handbook(app);
+            if handbook.is_none() {
+                tracing::warn!("bundled engineering handbook unavailable");
+            }
             *app.state::<AppState>().help.lock().expect("help") = help.clone();
+            *app.state::<AppState>().handbook.lock().expect("handbook") = handbook;
             if let Ok(mut host) = app.state::<AppState>().host.lock() {
                 if let Some(host) = host.as_mut() {
                     host.set_help_index(help);
@@ -6540,6 +6925,11 @@ pub fn run() {
             get_help_page,
             search_help_pages,
             get_help_asset,
+            get_handbook_manifest,
+            get_handbook_page,
+            export_handbook_document,
+            resolve_handbook_link,
+            open_engineering_handbook,
             session_context_list,
             session_context_import_path,
             session_context_import_bytes,
@@ -6636,7 +7026,9 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_query_event_original,
             log_timeline_summary,
+            log_shared_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
             log_search_events,
@@ -6689,6 +7081,105 @@ pub fn run() {
 mod s3_backup_host_tests;
 
 #[cfg(test)]
+mod log_original_host_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_original_query_maps_fidelity_metadata_and_missing_events() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("logs");
+        std::fs::write(
+            logs.join("event.jsonl"),
+            br#"{"timestamp":"2026-07-28T12:00:00Z","level":"ERROR","message":"failure","unknown":"kept","token":"ghp_example_invalid_secret_marker_1234567890"}
+"#,
+        )
+        .expect("fixture");
+        let cache = root.path().join("cache");
+        let report = cd_core::log_analysis::ingest_path(&cache, &logs, "original", None, "none")
+            .expect("ingest");
+
+        let original = query_log_event_original_at(&cache, &report.corpus_id, 0).expect("original");
+        let LogEventOriginalDto::Available {
+            label,
+            text,
+            source_byte_count,
+            redacted_char_count,
+            stored_char_count,
+            truncated,
+            encoding_normalized,
+            redaction_applied,
+        } = original
+        else {
+            panic!("newly ingested event should have an original representation");
+        };
+        assert_eq!(label, "Original (redacted)");
+        assert!(text.contains(r#""unknown":"kept""#));
+        assert!(!text.contains("ghp_example_invalid_secret_marker_1234567890"));
+        assert!(source_byte_count > 0);
+        assert_eq!(stored_char_count, text.chars().count() as u64);
+        assert!(redacted_char_count >= stored_char_count);
+        assert!(!truncated);
+        assert!(!encoding_normalized);
+        assert!(redaction_applied);
+
+        let error =
+            query_log_event_original_at(&cache, &report.corpus_id, 99).expect_err("missing event");
+        assert!(error.contains("event seq 99 not found"), "{error}");
+    }
+
+    #[test]
+    fn original_ipc_is_registered_and_ordinary_pages_remain_separate() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("log_query_event_original,"),
+            "explicit command must be registered"
+        );
+        let page_start = src
+            .find("fn log_query_events(")
+            .expect("ordinary page command");
+        let original_start = src
+            .find("enum LogEventOriginalDto")
+            .expect("separate original DTO");
+        let page_src = &src[page_start..original_start];
+        assert!(
+            !page_src.contains("query_event_original"),
+            "ordinary event pages must never fetch original records"
+        );
+        let original_command_start = src
+            .find("fn log_query_event_original(")
+            .expect("original command");
+        let timeline_start = src[original_command_start..]
+            .find("fn log_timeline_summary(")
+            .map(|offset| original_command_start + offset)
+            .expect("original command boundary");
+        let original_command = &src[original_command_start..timeline_start];
+        assert!(original_command.contains("query_log_event_original_at"));
+        assert!(
+            !original_command.contains("ensure_host("),
+            "local read-only record lookup must not construct the agent host"
+        );
+        assert!(
+            src.contains("log_shared_timeline_summary,"),
+            "shared-axis timeline command must be registered"
+        );
+        let shared_start = src
+            .find("fn log_shared_timeline_summary(")
+            .expect("shared timeline command");
+        let neighborhood_start = src[shared_start..]
+            .find("fn log_query_event_neighborhood(")
+            .map(|offset| shared_start + offset)
+            .expect("shared timeline command boundary");
+        let shared_command = &src[shared_start..neighborhood_start];
+        assert!(shared_command.contains("query_shared_timeline_summary"));
+        assert!(
+            !shared_command.contains("ensure_host("),
+            "local bounded summary must not construct the agent host"
+        );
+    }
+}
+
+#[cfg(test)]
 mod help_host_tests {
     use super::*;
 
@@ -6722,6 +7213,47 @@ mod help_host_tests {
                 .map(|hit| hit.page_id.as_str()),
             Some("log-analysis-pipeline")
         );
+        assert!(
+            index.page("PROVEN_METHODS").is_err(),
+            "bundling the engineering handbook must not widen user Help retrieval"
+        );
+    }
+
+    #[test]
+    fn handbook_packaging_and_window_lifecycle_are_explicit_and_isolated() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config");
+        assert_eq!(
+            config["bundle"]["resources"]["../../docs/design"],
+            serde_json::json!("handbook/docs/design")
+        );
+        assert_eq!(
+            config["bundle"]["resources"]["../../AGENTS.md"],
+            serde_json::json!("handbook/AGENTS.md")
+        );
+
+        let source = include_str!("lib.rs");
+        let open_start = source
+            .find("async fn open_engineering_handbook(")
+            .expect("open command");
+        let open_end = source[open_start..]
+            .find("/// Harvest row DTO")
+            .map(|offset| open_start + offset)
+            .expect("open command boundary");
+        let command = &source[open_start..open_end];
+        assert!(command.contains("get_webview_window(LABEL)"));
+        assert!(command.contains("window.set_focus()"));
+        assert!(command.contains("handbook_index(&state)?"));
+        assert!(!command.contains("ensure_host("));
+        for registration in [
+            "get_handbook_manifest,",
+            "get_handbook_page,",
+            "export_handbook_document,",
+            "resolve_handbook_link,",
+            "open_engineering_handbook,",
+        ] {
+            assert!(source.contains(registration), "{registration}");
+        }
     }
 }
 
@@ -6729,19 +7261,62 @@ mod help_host_tests {
 mod startup_host_tests {
     use super::{
         build_and_install_background_index, desktop_log_ingest_embed_plan_nonblocking,
-        host_readiness_terminal_events, install_prepared_durable_memory,
-        linked_log_fallback_notice, linked_log_host_terminal_events, log_search_cancel_key,
-        normalize_log_corpus_id, restore_host_if_generation_matches, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure,
+        event_to_dto_with_linked_corpus, host_readiness_terminal_events,
+        install_prepared_durable_memory, linked_log_fallback_notice,
+        linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
+        normalize_log_corpus_id, restore_host_if_generation_matches, save_chat_session_at,
+        set_chat_linked_corpus_at, take_ready_linked_host, validate_linked_log_corpus_at,
+        wait_for_host_readiness, BackgroundIndexBuild, HostInitFlight, HostReadinessFailure,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
+    use cd_core::providers::ProviderProfile;
     use cd_core::tool_host::ToolHost;
     use cd_core::workspace::Workspace;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::time::Duration;
+
+    fn wire_session_revision(session: &cd_core::sessions::Session) -> String {
+        serde_json::to_value(session.updated_at)
+            .expect("serialize revision")
+            .as_str()
+            .expect("revision string")
+            .to_string()
+    }
+
+    #[test]
+    fn linked_log_citation_dto_stamps_only_host_resolved_corpus_identity() {
+        let log = cd_core::events::StreamEvent::Citation {
+            source_id: "log_template:7".into(),
+            label: "template 7".into(),
+            locator: None,
+        };
+        let stamped = event_to_dto_with_linked_corpus(&log, Some("trusted-corpus"));
+        assert_eq!(
+            stamped
+                .payload
+                .get("corpus_id")
+                .and_then(|value| value.as_str()),
+            Some("trusted-corpus")
+        );
+
+        let file = cd_core::events::StreamEvent::Citation {
+            source_id: "runbook.md".into(),
+            label: "runbook".into(),
+            locator: None,
+        };
+        assert!(
+            event_to_dto_with_linked_corpus(&file, Some("trusted-corpus"))
+                .payload
+                .get("corpus_id")
+                .is_none()
+        );
+        assert!(event_to_dto_with_linked_corpus(&log, None)
+            .payload
+            .get("corpus_id")
+            .is_none());
+    }
 
     #[test]
     fn log_ingest_embed_plan_does_not_wait_for_the_workspace_host_lock() {
@@ -7001,6 +7576,228 @@ mod startup_host_tests {
             StreamEvent::TurnCompleted { reason }
                 if reason == "linked_log_host_unavailable"
         ));
+    }
+
+    #[test]
+    fn stale_link_precedes_tools_capability_for_every_profile() {
+        let cache = tempfile::tempdir().expect("cache");
+        let context = cd_core::agent::LogExplorerTurnContext::for_main_chat("discarded").unwrap();
+        let mut tools_disabled = ProviderProfile::ollama_local();
+        tools_disabled.capabilities.tools = false;
+        let tools_enabled = ProviderProfile::ollama_local();
+
+        for profile in [&tools_disabled, &tools_enabled] {
+            let events =
+                linked_log_preflight_at(cache.path(), &context, Some(profile), "session-a")
+                    .expect("terminal stale-corpus events");
+            assert!(matches!(
+                events.first(),
+                Some(StreamEvent::Error { code, message })
+                    if code == "linked_log_host_unavailable"
+                        && message.contains("before contacting the provider")
+            ));
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    StreamEvent::Error { code, .. } if code == "linked_tools_unavailable"
+                )),
+                "stale corpus must win before tool capability: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_attach_leaves_existing_and_empty_draft_sessions_unchanged() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+
+        let existing = cd_core::sessions::Session::new("Existing");
+        store.save(&existing).expect("save existing");
+        assert!(set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &existing.id,
+            Some("missing-corpus".into()),
+            None,
+            Some(wire_session_revision(&existing)),
+        )
+        .is_err());
+        assert!(store
+            .load(&existing.id)
+            .expect("existing unchanged")
+            .linked_corpus_id
+            .is_none());
+
+        let draft = cd_core::sessions::Session::new("Draft");
+        assert!(set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft.id,
+            Some("missing-corpus".into()),
+            Some(draft.clone()),
+            Some(wire_session_revision(&draft)),
+        )
+        .is_err());
+        assert!(
+            !store.exists(&draft.id).expect("draft existence"),
+            "failed attach must not create a durable draft"
+        );
+    }
+
+    #[test]
+    fn validated_attach_atomically_creates_an_empty_linked_chat() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+        let draft = cd_core::sessions::Session::new("Incident");
+
+        let saved = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft.id,
+            Some(report.corpus_id.clone()),
+            Some(draft.clone()),
+            Some(wire_session_revision(&draft)),
+        )
+        .expect("validated attach");
+        assert!(saved.messages.is_empty());
+        assert_eq!(
+            saved.linked_corpus_id.as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+        assert_eq!(
+            store
+                .load(&draft.id)
+                .expect("reopen")
+                .linked_corpus_id
+                .as_deref(),
+            Some(report.corpus_id.as_str())
+        );
+    }
+
+    #[test]
+    fn generic_save_cannot_attach_detach_or_switch_governed_log_context() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut durable = cd_core::sessions::Session::new("Governed");
+        durable.set_linked_corpus_id(Some("trusted-corpus".into()));
+        store.save(&durable).expect("save governed session");
+
+        for attempted in [None, Some("other-corpus".to_string())] {
+            let mut renderer = durable.clone();
+            renderer.linked_corpus_id = attempted;
+            let saved = save_chat_session_at(&store, renderer).expect("generic save");
+            assert_eq!(saved.linked_corpus_id.as_deref(), Some("trusted-corpus"));
+            assert_eq!(
+                store
+                    .load(&durable.id)
+                    .expect("reopen governed session")
+                    .linked_corpus_id
+                    .as_deref(),
+                Some("trusted-corpus")
+            );
+        }
+
+        let mut new_renderer = cd_core::sessions::Session::new("New");
+        new_renderer.linked_corpus_id = Some("smuggled-corpus".into());
+        new_renderer
+            .messages
+            .push(cd_core::sessions::StoredMessage {
+                id: "user-1".into(),
+                role: "user".into(),
+                content: "hello".into(),
+                tools: None,
+                citations: None,
+                trail: None,
+                meta: None,
+            });
+        let saved = save_chat_session_at(&store, new_renderer).expect("save new session");
+        assert!(saved.linked_corpus_id.is_none());
+        assert!(store
+            .load(&saved.id)
+            .expect("reopen new session")
+            .linked_corpus_id
+            .is_none());
+    }
+
+    #[test]
+    fn linked_corpus_change_rejects_a_stale_session_revision() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let logs = tempfile::tempdir().expect("logs");
+        std::fs::write(
+            logs.path().join("app.log"),
+            b"2026-07-28T12:00:00Z ERROR checkout failed\n",
+        )
+        .expect("fixture");
+        let report =
+            cd_core::log_analysis::ingest_path(cache.path(), logs.path(), "incident", None, "none")
+                .expect("ingest");
+
+        let session = cd_core::sessions::Session::new("Concurrent");
+        let stale_revision = wire_session_revision(&session);
+        store.save(&session).expect("save session");
+        let mut newer = session.clone();
+        newer.title = "Changed elsewhere".into();
+        std::thread::sleep(Duration::from_millis(2));
+        newer.touch();
+        store.save(&newer).expect("save newer revision");
+
+        let error = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &session.id,
+            Some(report.corpus_id),
+            None,
+            Some(stale_revision),
+        )
+        .expect_err("stale mutation must fail");
+        assert!(error.contains("changed in another window"));
+        let reopened = store.load(&session.id).expect("reopen");
+        assert_eq!(reopened.title, "Changed elsewhere");
+        assert!(reopened.linked_corpus_id.is_none());
+    }
+
+    #[test]
+    fn linked_corpus_attach_rejects_renderer_supplied_nonempty_draft() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let cache = tempfile::tempdir().expect("cache");
+        let mut draft = cd_core::sessions::Session::new("Unsafe draft");
+        draft.messages.push(cd_core::sessions::StoredMessage {
+            id: "user-1".into(),
+            role: "user".into(),
+            content: "renderer supplied".into(),
+            tools: None,
+            citations: None,
+            trail: None,
+            meta: None,
+        });
+        let draft_id = draft.id.clone();
+        let updated_at = wire_session_revision(&draft);
+
+        let error = set_chat_linked_corpus_at(
+            &store,
+            cache.path(),
+            &draft_id,
+            None,
+            Some(draft),
+            Some(updated_at),
+        )
+        .expect_err("nonempty draft must fail");
+        assert!(error.contains("draft chat identity is invalid"));
+        assert!(!store.exists(&draft_id).expect("draft existence"));
     }
 
     #[test]
@@ -7417,8 +8214,12 @@ mod chat_session_host_tests {
             },
         )
         .expect("matching linked context");
-        assert_eq!(context.window_id, "log-explorer-a");
         assert_eq!(context.corpus_id, "corpus-a");
+        assert!(matches!(
+            context.origin,
+            cd_core::agent::LinkedLogTurnOrigin::Explorer { ref window_id, .. }
+                if window_id == "log-explorer-a"
+        ));
 
         let mismatch = validate_log_explorer_turn_context(
             &linked,
@@ -7441,6 +8242,67 @@ mod chat_session_host_tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn ordinary_unlinked_session_resolves_no_log_context() {
+        let ordinary = Session::new("Ordinary");
+        assert!(linked_log_turn_context(Some(&ordinary), "main", None)
+            .expect("ordinary context")
+            .is_none());
+        assert!(linked_log_turn_context(None, "main", None)
+            .expect("ephemeral ordinary chat")
+            .is_none());
+    }
+
+    #[test]
+    fn main_chat_linked_context_comes_only_from_the_durable_session() {
+        let mut linked = Session::new("Incident");
+        linked.set_linked_corpus_id(Some("corpus-a".into()));
+
+        let context = linked_log_turn_context(Some(&linked), "main", None)
+            .expect("valid context")
+            .expect("linked context");
+        assert_eq!(context.corpus_id, "corpus-a");
+        assert_eq!(
+            context.origin,
+            cd_core::agent::LinkedLogTurnOrigin::MainChat
+        );
+    }
+
+    #[test]
+    fn stale_main_chat_link_fails_corpus_preflight_before_provider_host_path() {
+        let cache = tempfile::tempdir().expect("cache");
+        let mut linked = Session::new("Incident");
+        linked.set_linked_corpus_id(Some("discarded-corpus".into()));
+        let context = linked_log_turn_context(Some(&linked), "main", None)
+            .expect("valid durable link")
+            .expect("linked context");
+
+        let error = validate_linked_log_corpus_at(cache.path(), &context.corpus_id)
+            .expect_err("stale corpus must fail closed");
+        assert!(!error.trim().is_empty());
+    }
+
+    #[test]
+    fn corrupt_durable_session_cannot_degrade_into_an_ordinary_turn() {
+        let root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(root.path());
+        let session = Session::new("Incident");
+        store.save(&session).expect("save");
+        std::fs::write(
+            root.path().join(format!("{}.json", session.id)),
+            b"{not-json",
+        )
+        .expect("corrupt session");
+
+        let error = load_session_for_turn(&store, &session.id)
+            .expect_err("corrupt durable session must fail closed");
+        assert!(error.contains("before provider contact"), "{error}");
+
+        assert!(load_session_for_turn(&store, "new-ephemeral")
+            .expect("ephemeral draft")
+            .is_none());
     }
 }
 

@@ -450,8 +450,288 @@ pub fn generate_behavior(
         }),
     )?;
 
+    if controls == &BehaviorControls::for_profile(SEVEN_DAY_PROFILE, None)? {
+        write_seven_day_metric_fixture(root, actual_from, actual_to)?;
+    }
+
     verify_safety(root)?;
     summarize_generation(root, &controls.profile, actual_events)
+}
+
+fn metric_points(start: i64, step: i64, values: &[i64]) -> Vec<Value> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            json!({
+                "timestamp": start + step * index as i64,
+                "value": value
+            })
+        })
+        .collect()
+}
+
+fn write_seven_day_metric_fixture(root: &Path, from: i64, to: i64) -> LabResult<()> {
+    if to - from != 7 * DAY_SECS {
+        return Err("seven-day metric fixture requires an exact seven-day wall-clock span".into());
+    }
+    let scenario_root = root.join("scenarios").join(BEHAVIOR_SCENARIO_ID);
+    let metrics_root = scenario_root.join("metrics");
+    let truth_root = scenario_root.join("truth");
+    let main_start = from + 4 * DAY_SECS;
+    let main_step = 15 * 60;
+    let pattern_step = (to - from) / 16;
+    let pattern_ts = |index: i64| from + pattern_step * index;
+    let gap = |after_index: i64, reason: &str| {
+        json!({
+            "from": pattern_ts(after_index) + pattern_step / 4,
+            "to": pattern_ts(after_index) + pattern_step * 3 / 4,
+            "reason": reason
+        })
+    };
+
+    write_json(
+        &metrics_root.join("manifest.v1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "bundleId": "behavior-scale-performance-telemetry",
+            "name": "Behavior-scale performance telemetry",
+            "attachment": {
+                "mode": "explicit",
+                "suggestedCorpusScenarioId": BEHAVIOR_SCENARIO_ID,
+                "timeAlignment": "normalized_unix_seconds"
+            },
+            "files": [
+                {
+                    "path": "operational-metrics.v1.json",
+                    "mediaType": "application/vnd.contextdesk.operational-metrics+json;version=1",
+                    "role": "operational_metrics"
+                },
+                {
+                    "path": "operational-metrics-patterns.v1.json",
+                    "mediaType": "application/vnd.contextdesk.operational-metrics+json;version=1",
+                    "role": "operational_metrics_test_patterns"
+                }
+            ],
+            "safety": "Entirely synthetic. This directory is not part of the log import root.",
+            "productStatus": "Fixture, bounded session import, and standalone renderer are shipped; durable attachment and persistence remain residual."
+        }),
+    )?;
+
+    let cpu = [
+        22, 24, 27, 30, 34, 39, 46, 55, 64, 73, 82, 89, 93, 96, 91, 86, 77, 68, 58, 49, 41, 35, 31,
+        27, 24,
+    ];
+    let heap = [
+        410_000_000,
+        425_000_000,
+        441_000_000,
+        459_000_000,
+        480_000_000,
+        505_000_000,
+        533_000_000,
+        566_000_000,
+        604_000_000,
+        648_000_000,
+        695_000_000,
+        742_000_000,
+        781_000_000,
+        812_000_000,
+        824_000_000,
+        806_000_000,
+        765_000_000,
+        714_000_000,
+        662_000_000,
+        610_000_000,
+        565_000_000,
+        527_000_000,
+        495_000_000,
+        468_000_000,
+        446_000_000,
+    ];
+    let clients = [
+        10, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 120, 120, 110, 100, 90, 80, 70, 60,
+        50, 35, 20, 10,
+    ];
+    write_json(
+        &metrics_root.join("operational-metrics.v1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "id": "behavior-scale-performance-telemetry",
+            "name": "Checkout performance run telemetry",
+            "series": [
+                {
+                    "id": "cpu-percent",
+                    "name": "CPU",
+                    "unit": "%",
+                    "labels": {"service": "checkout-api", "environment": "synthetic-performance"},
+                    "thresholds": [{"id": "cpu-warning", "label": "CPU warning", "value": 80, "severity": "warning"}],
+                    "provenance": {
+                        "source": "synthetic/performance-agent.csv",
+                        "collector": "ContextDesk Log Lab",
+                        "query": "host CPU utilization at 15-minute resolution"
+                    },
+                    "timeQuality": "wall",
+                    "points": metric_points(main_start, main_step, &cpu)
+                },
+                {
+                    "id": "heap-used-bytes",
+                    "name": "Heap used",
+                    "unit": "bytes",
+                    "labels": {"service": "checkout-api", "pool": "application"},
+                    "thresholds": [{"id": "heap-warning", "label": "Heap pressure warning", "value": 750000000, "severity": "warning"}],
+                    "gaps": [{"from": main_start + 5 * main_step, "to": main_start + 6 * main_step, "reason": "synthetic collector restart"}],
+                    "provenance": {
+                        "source": "synthetic/jvm-telemetry.jsonl",
+                        "collector": "ContextDesk Log Lab",
+                        "query": "application heap used bytes at 15-minute resolution"
+                    },
+                    "timeQuality": "wall",
+                    "points": metric_points(main_start, main_step, &heap)
+                },
+                {
+                    "id": "concurrent-clients",
+                    "name": "Concurrent clients",
+                    "unit": "clients",
+                    "labels": {"workload": "checkout-ramp", "environment": "synthetic-performance"},
+                    "provenance": {
+                        "source": "synthetic/load-generator.csv",
+                        "collector": "ContextDesk Log Lab",
+                        "query": "connected virtual clients at 15-minute resolution"
+                    },
+                    "timeQuality": "wall",
+                    "points": metric_points(main_start, main_step, &clients)
+                }
+            ]
+        }),
+    )?;
+
+    let pattern_cpu = [
+        18, 19, 21, 91, 23, 20, 19, 18, 18, 22, 24, 21, 20, 96, 29, 22, 19,
+    ];
+    let pattern_heap = [
+        410_000_000,
+        418_000_000,
+        425_000_000,
+        430_000_000,
+        422_000_000,
+        419_000_000,
+        426_000_000,
+        880_000_000,
+        438_000_000,
+        431_000_000,
+        428_000_000,
+        424_000_000,
+        429_000_000,
+        910_000_000,
+        455_000_000,
+        439_000_000,
+        432_000_000,
+    ];
+    let pattern_clients = [
+        12, 12, 13, 14, 12, 12, 12, 13, 12, 14, 115, 15, 13, 140, 18, 14, 12,
+    ];
+    let pattern_labels = json!({"scenario": "isolated-and-overlapping-spikes"});
+    write_json(
+        &metrics_root.join("operational-metrics-patterns.v1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "id": "behavior-scale-performance-patterns",
+            "name": "Operational metric pattern gallery",
+            "series": [
+                {
+                    "id": "cpu-percent",
+                    "name": "CPU",
+                    "unit": "%",
+                    "labels": pattern_labels,
+                    "provenance": {"source": "synthetic/patterns/cpu.csv", "collector": "ContextDesk Log Lab"},
+                    "timeQuality": "wall",
+                    "gaps": [gap(7, "synthetic CPU collector outage")],
+                    "points": metric_points(from, pattern_step, &pattern_cpu)
+                },
+                {
+                    "id": "heap-used-bytes",
+                    "name": "Heap used",
+                    "unit": "bytes",
+                    "labels": pattern_labels,
+                    "provenance": {"source": "synthetic/patterns/heap.jsonl", "collector": "ContextDesk Log Lab"},
+                    "timeQuality": "wall",
+                    "gaps": [gap(15, "synthetic heap collector outage")],
+                    "points": metric_points(from, pattern_step, &pattern_heap)
+                },
+                {
+                    "id": "concurrent-clients",
+                    "name": "Concurrent clients",
+                    "unit": "clients",
+                    "labels": pattern_labels,
+                    "provenance": {"source": "synthetic/patterns/clients.csv", "collector": "ContextDesk Log Lab"},
+                    "timeQuality": "wall",
+                    "gaps": [gap(5, "synthetic client-count collector outage")],
+                    "points": metric_points(from, pattern_step, &pattern_clients)
+                }
+            ]
+        }),
+    )?;
+
+    write_json(
+        &truth_root.join("metric-correlations.v1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "scenarioId": BEHAVIOR_SCENARIO_ID,
+            "evaluatorOnly": true,
+            "mustNotEnterProductChatContext": true,
+            "metricBundle": "../metrics/manifest.v1.json",
+            "incidentWindow": {
+                "from": main_start + 10 * main_step,
+                "to": main_start + 16 * main_step,
+                "description": "Synthetic client ramp reaches peak load, followed by CPU and heap pressure and a locally concentrated warning/error sequence."
+            },
+            "expectedCorrelations": [
+                {
+                    "id": "clients-lead-pressure",
+                    "description": "Concurrent clients rise from 10 to 120 before CPU crosses 80 percent and heap crosses 750000000 bytes."
+                },
+                {
+                    "id": "pressure-overlaps-log-signals",
+                    "description": "Peak pressure overlaps the checked-in queue-worker warning, checkout-queue error, and database warning.",
+                    "logEvents": [
+                        {"timestamp": from + 356701, "level": "warn", "source": "worker/worker.log", "stableMessageToken": "event_id=behavior-14744"},
+                        {"timestamp": from + 357330, "level": "error", "source": "queue/events.jsonl", "stableMessageToken": "event_id=behavior-14770"},
+                        {"timestamp": from + 358957, "level": "warn", "source": "db/database.log", "stableMessageToken": "event_id=behavior-14841"}
+                    ]
+                },
+                {
+                    "id": "recovery-after-ramp",
+                    "description": "Clients, CPU, and heap all decline after the peak; the fixture asserts correlation only, not causation."
+                }
+            ],
+            "safety": "Expected answers live outside both import/ and metrics/. Product context may include imported measurements and their provenance, but never this evaluator truth."
+        }),
+    )?;
+
+    write_json(
+        &truth_root.join("metric-patterns.v1.json"),
+        &json!({
+            "schemaVersion": 1,
+            "scenarioId": "behavior-scale-performance-patterns",
+            "evaluatorOnly": true,
+            "mustNotEnterProductChatContext": true,
+            "metricData": "../metrics/operational-metrics-patterns.v1.json",
+            "expectedPatterns": [
+                {"timestamp": pattern_ts(3), "kind": "isolated_cpu_spike", "description": "CPU rises while heap and clients remain near their own baselines."},
+                {"timestamp": pattern_ts(7), "kind": "isolated_heap_spike", "description": "Heap rises while CPU and clients remain near their own baselines."},
+                {"timestamp": pattern_ts(10), "kind": "isolated_client_spike", "description": "Client count rises while CPU and heap remain near their own baselines."},
+                {"timestamp": pattern_ts(13), "kind": "overlapping_spike", "description": "CPU, heap, and clients rise together while retaining separate native-unit scales."}
+            ],
+            "quietWindows": [
+                {"from": from + 5 * DAY_SECS, "to": from + 5 * DAY_SECS + 30 * 60},
+                {"from": from + 5 * DAY_SECS + 3 * 60 * 60 + 30 * 60, "to": from + 5 * DAY_SECS + 4 * 60 * 60}
+            ],
+            "expectedMissingIntervals": 3,
+            "safety": "Expected pattern labels are evaluator truth and must never be added to product chat context."
+        }),
+    )?;
+    Ok(())
 }
 
 fn plan_timestamps(

@@ -1,6 +1,7 @@
 #[path = "support/log_lab_generator.rs"]
 mod log_lab_generator;
 
+use chrono::{DateTime, NaiveDateTime};
 use log_lab_generator::{
     generate_behavior, generate_compact, generate_scale, load_behavior_manifest, tree_hashes,
     verify_safety, write_performance_template, BehaviorControls, LARGE_PROFILE,
@@ -10,6 +11,116 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Expected shared wall-clock instant for company-timestamp-diversity encodings
+/// (2025-01-01T13:20:00Z). Must match generator COMPANY_TS_SHARED_INSTANT_SECS.
+const COMPANY_TS_SHARED_INSTANT_SECS: i64 = 1_735_737_600;
+
+fn parse_rfc3339_to_unix_secs(text: &str) -> i64 {
+    DateTime::parse_from_rfc3339(text)
+        .unwrap_or_else(|err| panic!("invalid RFC3339 `{text}`: {err}"))
+        .timestamp()
+}
+
+fn parse_timestamp_token_to_unix_secs(token: &str) -> Option<i64> {
+    if let Ok(number) = token.parse::<i64>() {
+        // Heuristic used by the fixtures: values past year ~2001 in ms are epoch ms.
+        if number.abs() >= 1_000_000_000_000 {
+            return Some(number / 1_000);
+        }
+        return Some(number);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(token) {
+        return Some(dt.timestamp());
+    }
+    // Offset-less local face: interpret as UTC for fixture comparison only.
+    if let Ok(naive) = NaiveDateTime::parse_from_str(token, "%Y-%m-%dT%H:%M:%S") {
+        return Some(naive.and_utc().timestamp());
+    }
+    None
+}
+
+fn event_id_from_line(line: &str) -> Option<String> {
+    // Prefer JSON message field when present; otherwise scan the whole line so
+    // logfmt `msg="event_id=..."` still resolves.
+    let haystack = if let Ok(value) = serde_json::from_str::<Value>(line) {
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or(line)
+            .to_owned()
+    } else {
+        line.to_owned()
+    };
+    let marker = "event_id=";
+    let start = haystack.find(marker)? + marker.len();
+    let end = haystack[start..]
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | ',' | ';' | '}'))
+        .map(|offset| start + offset)
+        .unwrap_or(haystack.len());
+    let id = haystack[start..end].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_owned())
+    }
+}
+
+fn company_timestamp_import_instants() -> BTreeMap<String, i64> {
+    let import_root = fixture_root().join("scenarios/company-timestamp-diversity/import");
+    let mut instants = BTreeMap::new();
+    for path in walkdir_files(&import_root) {
+        let text = fs::read_to_string(&path).unwrap();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let Some(event_id) = event_id_from_line(line) else {
+                continue;
+            };
+
+            let instant = if let Ok(value) = serde_json::from_str::<Value>(line) {
+                match &value["ts"] {
+                    Value::Number(number) => {
+                        let n = number
+                            .as_i64()
+                            .or_else(|| number.as_u64().map(|v| v as i64))
+                            .expect("numeric ts");
+                        if n.abs() >= 1_000_000_000_000 {
+                            n / 1_000
+                        } else {
+                            n
+                        }
+                    }
+                    Value::String(text) => match parse_timestamp_token_to_unix_secs(text) {
+                        Some(value) => value,
+                        None => continue, // malformed / unusable
+                    },
+                    Value::Null => continue, // missing timestamp field
+                    other => panic!("unsupported JSON ts for {event_id}: {other}"),
+                }
+            } else if let Some(ts) = line
+                .split_whitespace()
+                .find_map(|token| token.strip_prefix("ts="))
+            {
+                match parse_timestamp_token_to_unix_secs(ts.trim_matches('"')) {
+                    Some(value) => value,
+                    None => continue,
+                }
+            } else if line.starts_with('<') && line.contains(" - - - ") {
+                // RFC5424 with explicit offset: <pri>VERSION TIMESTAMP HOST APP ...
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                assert!(
+                    fields.len() >= 3,
+                    "RFC5424 line too short for {event_id}: {line}"
+                );
+                parse_rfc3339_to_unix_secs(fields[1])
+            } else {
+                // Yearless classic syslog and other incomplete forms have no unique UTC.
+                continue;
+            };
+            instants.insert(event_id, instant);
+        }
+    }
+    instants
+}
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -40,6 +151,22 @@ fn generated_subset_hashes(root: &Path) -> BTreeMap<String, String> {
 
 fn pinned_seven_day_root() -> PathBuf {
     fixture_root().join("acceptance/seven-day-25k")
+}
+
+const SEVEN_DAY_METRIC_JSON: [&str; 5] = [
+    "scenarios/behavior-scale/metrics/manifest.v1.json",
+    "scenarios/behavior-scale/metrics/operational-metrics-patterns.v1.json",
+    "scenarios/behavior-scale/metrics/operational-metrics.v1.json",
+    "scenarios/behavior-scale/truth/metric-correlations.v1.json",
+    "scenarios/behavior-scale/truth/metric-patterns.v1.json",
+];
+
+fn generated_seven_day_byte_hashes(root: &Path) -> BTreeMap<String, String> {
+    let mut hashes = tree_hashes(root).unwrap();
+    for path in SEVEN_DAY_METRIC_JSON {
+        hashes.remove(path);
+    }
+    hashes
 }
 
 #[derive(Debug)]
@@ -105,7 +232,7 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
 
     assert_eq!(first_summary, second_summary);
     assert_eq!(first_summary.profile, "small");
-    assert_eq!(first_summary.events, 63);
+    assert_eq!(first_summary.events, 100);
     assert_eq!(
         generated_subset_hashes(&first_root),
         generated_subset_hashes(&second_root)
@@ -123,6 +250,9 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
         "source-provenance",
         "importer-edge-cases",
         "redaction",
+        "company-timestamp-diversity",
+        "company-known-noise",
+        "company-original-fidelity",
     ] {
         let manifest = truth(scenario);
         assert_eq!(manifest["schema_version"], 1);
@@ -170,6 +300,165 @@ fn log_lab_compact_generation_is_frozen_deterministic_and_safe() {
         checkout["investigation"]["rubric"]["exact_prose_required"],
         false
     );
+
+    let company_ts = truth("company-timestamp-diversity");
+    assert_eq!(company_ts["expected"]["events"], 15);
+    assert_eq!(company_ts["expected"]["files"], 5);
+    assert_eq!(company_ts["expected"]["time_quality"], "mixed");
+    let shared = company_ts["investigation"]["shared_instant"]["event_ids"]
+        .as_array()
+        .unwrap();
+    assert_eq!(shared.len(), 8);
+    assert!(shared.iter().any(|id| id == "ts-rfc3339-utc"));
+    assert!(shared.iter().any(|id| id == "ts-epoch-ms"));
+    assert!(shared.iter().any(|id| id == "ts-rfc5424"));
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["epoch_seconds"],
+        COMPANY_TS_SHARED_INSTANT_SECS
+    );
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["epoch_milliseconds"],
+        COMPANY_TS_SHARED_INSTANT_SECS * 1_000
+    );
+    assert_eq!(
+        company_ts["investigation"]["shared_instant"]["rfc3339_utc"],
+        "2025-01-01T13:20:00Z"
+    );
+    // Honest proof: parse each shared_instant import encoding to one UTC instant.
+    let import_instants = company_timestamp_import_instants();
+    for event_id in shared {
+        let id = event_id.as_str().unwrap();
+        let instant = import_instants
+            .get(id)
+            .unwrap_or_else(|| panic!("shared_instant event_id missing from import: {id}"));
+        assert_eq!(
+            *instant, COMPANY_TS_SHARED_INSTANT_SECS,
+            "shared_instant {id} resolved to {instant}, expected {COMPANY_TS_SHARED_INSTANT_SECS}"
+        );
+    }
+    // Control: similar-local-only and skew must NOT collapse to the shared instant.
+    assert_ne!(
+        *import_instants.get("ts-similar-local-only").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS
+    );
+    assert_eq!(
+        *import_instants.get("ts-skew-behind").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS - 180
+    );
+    assert_eq!(
+        *import_instants.get("ts-late").unwrap(),
+        COMPANY_TS_SHARED_INSTANT_SECS + 30
+    );
+    assert_eq!(
+        company_ts["investigation"]["known_skew"]["skew_seconds"],
+        -180
+    );
+    assert_eq!(
+        company_ts["investigation"]["late_arrival"]["event_id"],
+        "ts-late"
+    );
+    assert!(company_ts["investigation"]["unusable_timestamps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["event_id"] == "ts-malformed"));
+    assert!(company_ts["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#670"));
+
+    let company_noise = truth("company-known-noise");
+    assert_eq!(company_noise["expected"]["events"], 14);
+    assert_eq!(company_noise["expected"]["files"], 3);
+    assert_eq!(company_noise["investigation"]["safe_candidate_total"], 9);
+    let safe = company_noise["investigation"]["safe_suppression_candidates"]
+        .as_array()
+        .unwrap();
+    let safe_sum: u64 = safe
+        .iter()
+        .map(|row| row["expected_count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(safe_sum, 9);
+    for row in safe {
+        assert_eq!(
+            row["event_ids"].as_array().unwrap().len() as u64,
+            row["expected_count"].as_u64().unwrap()
+        );
+    }
+    let must_remain = company_noise["investigation"]["must_remain_visible"]
+        .as_array()
+        .unwrap();
+    assert!(must_remain
+        .iter()
+        .any(|row| row["event_id"] == "noise-important-reset"));
+    assert!(must_remain
+        .iter()
+        .any(|row| row["event_id"] == "noise-incident-error"));
+    let unsafe_preds = company_noise["investigation"]["unsafe_broad_predicates"]
+        .as_array()
+        .unwrap();
+    assert!(unsafe_preds
+        .iter()
+        .any(|row| { row["predicate"] == "level=error" && row["would_hide_count"] == 6 }));
+    assert!(company_noise["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#671"));
+
+    let company_fid = truth("company-original-fidelity");
+    assert_eq!(company_fid["expected"]["events"], 8);
+    assert_eq!(company_fid["expected"]["files"], 6);
+    let raw = company_fid["investigation"]["raw_values_for_test_only"]
+        .as_array()
+        .unwrap();
+    assert!(raw.iter().all(|value| {
+        value
+            .as_str()
+            .is_some_and(|text| text.contains("LOG-LAB-INVALID"))
+    }));
+    assert!(
+        company_fid["investigation"]["original_redacted_must_preserve"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 6
+    );
+    assert!(
+        company_fid["investigation"]["original_redacted_must_redact"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
+    );
+    assert!(company_fid["investigation"]["product_gap_note"]
+        .as_str()
+        .unwrap()
+        .contains("#673"));
+
+    // Import roots must never ship truth manifests (chat-context isolation).
+    for scenario in [
+        "company-timestamp-diversity",
+        "company-known-noise",
+        "company-original-fidelity",
+    ] {
+        let import_root = fixture_root()
+            .join("scenarios")
+            .join(scenario)
+            .join("import");
+        assert!(import_root.is_dir());
+        for path in walkdir_files(&import_root) {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            assert_ne!(name, "manifest.json");
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("product_gap_note"),
+                "truth-only fields leaked into import for {scenario}"
+            );
+        }
+    }
 
     eprintln!(
         "PASS compact files={} events={} bytes={} tree_sha256={}",
@@ -481,17 +770,27 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
     let summary = generate_behavior(&generated_root, &controls).unwrap();
 
     assert_eq!(summary.events, 25_000);
-    assert_eq!(summary.files, 11);
-    assert_eq!(summary.bytes, 4_209_626);
+    assert_eq!(summary.files, 16);
+    assert_eq!(summary.bytes, 4_227_271);
     assert_eq!(
         summary.tree_sha256,
-        "d5908dbe2b41d925d49066e397d3bfdecaa0168c1340ea6de8d5c79603ddaea1"
+        "2b6173f31036bc2a70fd365effa0c5a02db8644fd8e71642de49fe11e64c2bc4"
     );
     assert_eq!(
-        tree_hashes(&generated_root).unwrap(),
-        tree_hashes(&pinned_root).unwrap(),
-        "checked-in seven-day acceptance corpus drifted from the deterministic generator"
+        generated_seven_day_byte_hashes(&generated_root),
+        generated_seven_day_byte_hashes(&pinned_root),
+        "checked-in seven-day logs or primary truth drifted from the deterministic generator"
     );
+    for path in SEVEN_DAY_METRIC_JSON {
+        let generated_json: Value =
+            serde_json::from_slice(&fs::read(generated_root.join(path)).unwrap()).unwrap();
+        let pinned_json: Value =
+            serde_json::from_slice(&fs::read(pinned_root.join(path)).unwrap()).unwrap();
+        assert_eq!(
+            generated_json, pinned_json,
+            "checked-in seven-day metric fixture drifted semantically: {path}"
+        );
+    }
 
     let manifest = load_behavior_manifest(&pinned_root).unwrap();
     assert_eq!(manifest["scenario_version"], 2);
