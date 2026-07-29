@@ -25,9 +25,9 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Hybrid embed scoring (core API) | Shipped | crates/cd-core/src/index.rs:search_hybrid | #119 |
 | search_kb hybrid opt-in product path | Shipped | crates/cd-core/src/tool_host.rs:set_hybrid_retrieval | #119 |
 | Team server roles + shared memory | Roadmap | crates/cd-server/src/main.rs:AppState | #167 |
-| Skin / theme registry beyond dark/light/slate | Roadmap | desktop/src/styles/themes/ | #99 |
+| Five-theme appearance registry (Dark/Light/Slate/Sand/Forest) | Shipped | desktop/src/lib/skins.ts:SKINS | #99 |
 | External module sandbox | Roadmap | docs/ | #94 |
-| README product screenshot in docs/assets | Roadmap | docs/examples/host-adapter.md | #176 residual |
+| Privacy-reviewed README product gallery | Shipped | docs/media/public-assets.json:assets | #653 |
 | Proven multi-OS release installers (tag run) | Roadmap | .github/workflows/release.yml | #172 residual — workflow present; no public tag artifacts yet |
 | Release packaging docs + dispatch dry path | Shipped | docs/PACKAGING.md:Packaging | #55 #99 path documented |
 | Provider tools capability detect + persist | Shipped | crates/cd-core/src/providers.rs:set_profile_tools_enabled | #327 |
@@ -60,7 +60,6 @@ Machine-checked by `scripts/check_claims.sh`. **Shipped** rows must name a real 
 | Atomic trusted log re-analysis | Shipped | crates/cd-core/src/log_analysis/reanalyze.rs:reanalyze_corpus_embeddings | #518 |
 | Log explorer time-sort composite keyset only | Shipped | crates/cd-core/src/log_analysis/query.rs:query_events | #504 #494 |
 | Log Explorer in-app escape hatch | Shipped | desktop/src/components/panes/LogPane.tsx:LogPane | #503 |
-| Bookmarks not in package v1 | Shipped | docs/help/log-analysis/log-explorer.md | #509 |
 | Log template embed (local ONNX default) | Shipped | crates/cd-core/src/embed.rs:default_log_embed_backend | #359 |
 | Process progress (log ingest + session import) | Shipped | crates/cd-core/src/process_progress.rs:ProcessProgress | #445 #442 |
 | Session process wizard shell | Shipped | desktop/src/components/wizards/SessionWizardShell.tsx:SessionWizardShell | #444 #442 |

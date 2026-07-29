@@ -3,8 +3,8 @@
   "assets": [
     {
       "path": "docs/media/gallery/help-appearance.png",
-      "gitBlob": "c9a7192a985da03ce0efe5bece23a66f4fae431d",
-      "sourceSha": "2be6f56c3ddab6e0b1d481d6ca42a4720dc78040",
+      "gitBlob": "d94fb0e6b1864371e10bd6a5533571f8da477ebd",
+      "sourceSha": "4cbdf664a794af3f424cd5bba8a4c621c3df3bae",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
       "fixture": "Bundled offline Help content and synthetic demo-dataset documentation",
@@ -14,19 +14,19 @@
     },
     {
       "path": "docs/media/gallery/log-explorer-investigation.png",
-      "gitBlob": "c92ec53c0c0042bf23d3ec2b1307a8a9dba7d03e",
-      "sourceSha": "2be6f56c3ddab6e0b1d481d6ca42a4720dc78040",
+      "gitBlob": "ef9caf4acb15303d1f4c6c0ff3ef7062c8b2ff8a",
+      "sourceSha": "4cbdf664a794af3f424cd5bba8a4c621c3df3bae",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
       "fixture": "Synthetic seven-day 25,000-event Log Lab behavior-scale corpus",
       "theme": "Slate",
-      "claim": "Two exact-time evidence lanes with timeline, source provenance, payload-focused rows, and the linked-chat rail collapsed",
+      "claim": "Two exact-time evidence lanes with aligned CPU, heap, and client tracks, source provenance, payload-focused rows, and the linked-chat rail collapsed",
       "reviewedBy": "Agent: Codex · Model: gpt-5.6-sol"
     },
     {
       "path": "docs/media/gallery/logs-library-demo.png",
-      "gitBlob": "d911235e42a36e8d965e448dbf6d9f0ff806aeb7",
-      "sourceSha": "2be6f56c3ddab6e0b1d481d6ca42a4720dc78040",
+      "gitBlob": "f688df2a742386541694a958cffce78c7899434b",
+      "sourceSha": "4cbdf664a794af3f424cd5bba8a4c621c3df3bae",
       "privacyReview": "publishable",
       "modelInventoryVisible": false,
       "fixture": "Bundled synthetic 25,000-event Log Lab demonstration corpus",

@@ -45,8 +45,10 @@ Explorer.
 ![ContextDesk Log Explorer investigating synthetic logs with aligned lanes and timeline](docs/media/gallery/log-explorer-investigation.png)
 
 **Investigate without losing provenance.** Navigate time, compose source lanes,
-inspect payloads, filter events, and retain evidence while the linked-chat area
-remains optional.
+inspect payloads, filter events, and retain evidence. When a compatible
+operational-metrics bundle is supplied, optional CPU, heap, client, or other
+time-series tracks share the same UTC cursor; the linked-chat area remains
+optional.
 
 ![ContextDesk Help Center explaining demonstration datasets with the appearance picker open](docs/media/gallery/help-appearance.png)
 
@@ -159,10 +161,12 @@ machine-checked against production symbols. Partial work is listed separately.
 ### Log Explorer at scale
 
 Deterministic Log Lab corpora exercise 100,000-event multi-lane investigation
-and a separate 25,000-event seven-day time span. These fixture counts support
-repeatable acceptance checks; they are not production ceilings or universal
-performance claims. Public screenshots are governed by the exact-build
-publication gate tracked by
+and a separate 25,000-event seven-day time span. A generated 250,000-event
+triage-stress corpus exercises progressive Logs-library selection and bounded
+Explorer startup without checking a quarter-million source lines into Git.
+These fixture counts support repeatable acceptance checks; they are not
+production ceilings or universal performance claims. Public screenshots are
+governed by the exact-build publication gate tracked by
 [#653](https://github.com/chriscase/ContextDesk/issues/653).
 
 **Roadmap / partial (do not treat as done):**
@@ -316,7 +320,7 @@ crates/
   cd-server/           # optional headless server (early; SSE research shipped)
 desktop/               # Tauri 2 + React host (thin)
 docs/                  # product, architecture, claims, ADRs (agent-friendly)
-fixtures/              # offline sample knowledge base for demos/tests
+fixtures/              # offline knowledge, Log Lab corpora, archives, and optional metrics
 ```
 
 Core logic lives in **`cd-core`** so the desktop app, server, and future host adapters stay thin.
@@ -332,13 +336,13 @@ Prerequisites: Rust (stable), Node 20+, platform deps for Tauri 2.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-( cd desktop && npm install && npm run build )
+( cd desktop && npm ci && npm run build )
 
 # Doc honesty gate (claim ↔ code)
 sh scripts/check_claims.sh
 
 # Desktop interactive (free-port aware)
-cd desktop && npm install && npm run tauri:dev
+cd desktop && npm ci && npm run tauri:dev
 ```
 
 See [`docs/DEV.md`](docs/DEV.md) (including **Dev ports**), [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and [`AGENTS.md`](AGENTS.md).
