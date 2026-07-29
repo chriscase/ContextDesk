@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { SKINS, type SkinId } from "../../lib/skins";
+import type { SkinId } from "../../lib/skins";
 import { AppearanceSection } from "./AppearanceSection";
 
 function renderAppearance(
@@ -24,30 +24,16 @@ function renderAppearance(
   };
 }
 
-describe("Appearance theme selector (#630)", () => {
-  it("uses a labeled native select containing every registered theme", () => {
+describe("Appearance theme selector (#638)", () => {
+  it("uses the compact shared theme gallery without crowding UI scale", () => {
     const { onUiScaleChange } = renderAppearance();
-    const select = screen.getByRole("combobox", {
-      name: "Theme",
-    }) as HTMLSelectElement;
-    const options = within(select).getAllByRole(
-      "option",
-    ) as HTMLOptionElement[];
-
-    expect(select.tagName).toBe("SELECT");
-    expect(select.value).toBe("slate");
-    expect(options.map((option) => [option.value, option.textContent])).toEqual(
-      SKINS.map((skin) => [skin.id, skin.label]),
-    );
-    expect(screen.queryByRole("radiogroup")).toBeNull();
-
-    const preview = screen.getByRole("status", {
-      name: "Selected theme preview",
-    });
-    expect(preview.textContent).toContain("Slate");
-    expect(preview.textContent).toContain(
-      "GitHub-adjacent dark blue-gray",
-    );
+    const trigger = screen.getByRole("button", { name: /Theme Slate/ });
+    expect(trigger.textContent).toContain("GitHub-adjacent dark blue-gray");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.click(trigger);
+    expect(
+      screen.getByRole("listbox", { name: "Choose appearance theme" }),
+    ).toBeTruthy();
 
     const scale = screen.getByRole("combobox", {
       name: "UI scale",
@@ -75,21 +61,15 @@ describe("Appearance theme selector (#630)", () => {
     }
 
     render(<ControlledAppearance />);
-    const select = screen.getByRole("combobox", {
-      name: "Theme",
-    }) as HTMLSelectElement;
-
-    fireEvent.change(select, { target: { value: "sand" } });
+    fireEvent.click(screen.getByRole("button", { name: /Theme Dark/ }));
+    fireEvent.click(screen.getByRole("option", { name: /Sand/ }));
 
     expect(onThemeChange).toHaveBeenCalledTimes(1);
     expect(onThemeChange).toHaveBeenCalledWith("sand");
-    expect(select.value).toBe("sand");
-    const preview = screen.getByRole("status", {
-      name: "Selected theme preview",
-    });
-    expect(preview.textContent).toContain("Sand");
-    expect(preview.textContent).toContain(
+    const trigger = screen.getByRole("button", { name: /Theme Sand/ });
+    expect(trigger.textContent).toContain(
       "Warm paper light for long reading",
     );
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });

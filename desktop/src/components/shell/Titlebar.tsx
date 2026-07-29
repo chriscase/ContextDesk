@@ -1,6 +1,7 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { IconMoon, IconSettings, IconSpark, IconSun } from "../icons";
-import { nextSkinId, skinMeta, type SkinId } from "../../lib/skins";
+import { IconSettings, IconSpark } from "../icons";
+import type { SkinId } from "../../lib/skins";
+import { ThemePicker } from "../ThemePicker";
 
 type Props = {
   productName: string;
@@ -12,7 +13,7 @@ type Props = {
   onOpenWorkspace: () => void;
   onOpenAi: () => void;
   onOpenSettings: () => void;
-  onToggleTheme: () => void;
+  onThemeChange: (theme: SkinId) => void;
 };
 
 /**
@@ -46,7 +47,7 @@ export function Titlebar({
   onOpenWorkspace,
   onOpenAi,
   onOpenSettings,
-  onToggleTheme,
+  onThemeChange,
 }: Props) {
   return (
     <header
@@ -104,16 +105,11 @@ export function Titlebar({
         >
           <IconSettings />
         </button>
-        <button
-          type="button"
-          className="icon-btn titlebar__no-drag"
-          data-no-drag
-          title={`Skin: ${skinMeta(theme).label} → ${skinMeta(nextSkinId(theme)).label}`}
-          aria-label={`Cycle skin (current ${skinMeta(theme).label})`}
-          onClick={onToggleTheme}
-        >
-          {skinMeta(theme).colorScheme === "dark" ? <IconSun /> : <IconMoon />}
-        </button>
+        <ThemePicker
+          variant="toolbar"
+          theme={theme}
+          onThemeChange={onThemeChange}
+        />
       </div>
     </header>
   );

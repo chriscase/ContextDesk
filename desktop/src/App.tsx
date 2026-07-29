@@ -53,7 +53,6 @@ import {
   subscribeHelpAcrossWindows,
   type HelpLocation,
 } from "./lib/help";
-import { nextSkinId } from "./lib/skins";
 import { SplashScreen } from "./components/launch/SplashScreen";
 import { ContextDeskMark } from "./components/launch/ContextDeskMark";
 import { IdentityPhase } from "./components/launch/IdentityPhase";
@@ -721,7 +720,7 @@ export function App() {
             onOpenSettings={() =>
               shell.openSettings("health", chatScrollRef.current)
             }
-            onToggleTheme={() => shell.setTheme((t) => nextSkinId(t))}
+            onThemeChange={shell.setTheme}
           />
           <UpdateBanner branding={shell.branding} />
           <Banners
