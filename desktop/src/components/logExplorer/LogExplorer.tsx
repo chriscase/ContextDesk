@@ -35,7 +35,6 @@ import {
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
   hostLogSourceCatalog,
-  hostSetActiveLogCorpus,
   type EventPageDto,
   type EventOriginalRepresentationDto,
   type SearchMatchMode,
@@ -705,6 +704,10 @@ function investigationBookmarkViews(
 
 export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
+  const [summaryLoadState, setSummaryLoadState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const [summaryLoadError, setSummaryLoadError] = useState<string | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [facetsLoading, setFacetsLoading] = useState(true);
@@ -824,8 +827,17 @@ export function LogExplorer({ corpusId }: Props) {
   >({});
   const [gaps, setGaps] = useState<GapRegion[]>([]);
   const [bookmarks, setBookmarks] = useState<LogBookmarkDto[]>([]);
+  const [bookmarksLoadState, setBookmarksLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [bookmarksLoadError, setBookmarksLoadError] = useState<string | null>(
+    null,
+  );
   const [investigation, setInvestigation] =
     useState<ResolvedInvestigationDocumentDto | null>(null);
+  const [investigationLoadState, setInvestigationLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [investigationMode, setInvestigationMode] =
     useState<InvestigationRailMode>("chat");
   const [investigationBusy, setInvestigationBusy] = useState(false);
@@ -1003,6 +1015,10 @@ export function LogExplorer({ corpusId }: Props) {
   const laneSourceRequestRef = useRef(0);
   const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
+  const summaryRequestRef = useRef(0);
+  const bookmarkRequestRef = useRef(0);
+  const bookmarkMetadataStartedRef = useRef(false);
+  const investigationMetadataStartedRef = useRef(false);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
   const activeFindRequestRef = useRef<string | null>(null);
@@ -1358,28 +1374,64 @@ export function LogExplorer({ corpusId }: Props) {
     document.body.style.userSelect = "none";
   };
 
-  const refreshMeta = useCallback(async () => {
-    const investigationRequest = ++investigationLoadRequestRef.current;
+  // Explorer launch/selection owns host activation before this component mounts.
+  // Keep summary refresh read-only so a stale response cannot reactivate an old corpus.
+  const refreshSummary = useCallback(async () => {
+    const requestId = ++summaryRequestRef.current;
+    setSummaryLoadState("loading");
+    setSummaryLoadError(null);
     try {
       const s = await hostGetLogCorpus(corpusId);
+      if (requestId !== summaryRequestRef.current) return;
       setSummary(s);
       if (s) setCorpusTotal(s.eventCount ?? 0);
-      await hostSetActiveLogCorpus(corpusId);
-      const bms = await hostLogListBookmarks(corpusId);
-      setBookmarks(bms ?? []);
-      try {
-        const activeInvestigation =
-          await hostLogLoadActiveInvestigation(corpusId);
-        if (investigationRequest !== investigationLoadRequestRef.current) {
-          return;
-        }
-        setInvestigation(activeInvestigation);
-        setInvestigationError(null);
-      } catch (investigationLoadError) {
-        setInvestigationError(String(investigationLoadError));
-      }
-    } catch (e) {
-      setError(String(e));
+      setSummaryLoadState("ready");
+    } catch (summaryError) {
+      if (requestId !== summaryRequestRef.current) return;
+      setSummaryLoadState("error");
+      setSummaryLoadError(String(summaryError));
+    }
+  }, [corpusId]);
+
+  const loadOptionalMetadata = useCallback(() => {
+    if (!bookmarkMetadataStartedRef.current) {
+      bookmarkMetadataStartedRef.current = true;
+      const bookmarkRequest = ++bookmarkRequestRef.current;
+      setBookmarksLoadState("loading");
+      setBookmarksLoadError(null);
+      void hostLogListBookmarks(corpusId)
+        .then((loadedBookmarks) => {
+          if (bookmarkRequest !== bookmarkRequestRef.current) return;
+          setBookmarks(loadedBookmarks ?? []);
+          setBookmarksLoadState("ready");
+        })
+        .catch((bookmarkError) => {
+          if (bookmarkRequest !== bookmarkRequestRef.current) return;
+          setBookmarksLoadState("error");
+          setBookmarksLoadError(String(bookmarkError));
+        });
+    }
+
+    if (!investigationMetadataStartedRef.current) {
+      investigationMetadataStartedRef.current = true;
+      const investigationRequest = ++investigationLoadRequestRef.current;
+      setInvestigationLoadState("loading");
+      setInvestigationError(null);
+      void hostLogLoadActiveInvestigation(corpusId)
+        .then((activeInvestigation) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigation(activeInvestigation);
+          setInvestigationLoadState("ready");
+        })
+        .catch((investigationLoadError) => {
+          if (investigationRequest !== investigationLoadRequestRef.current) {
+            return;
+          }
+          setInvestigationLoadState("error");
+          setInvestigationError(String(investigationLoadError));
+        });
     }
   }, [corpusId]);
 
@@ -1630,7 +1682,9 @@ export function LogExplorer({ corpusId }: Props) {
             if (requestId !== eventsRequestRef.current) return;
             facetStartFrameRef.current = window.requestAnimationFrame(() => {
               facetStartFrameRef.current = null;
-              if (requestId === eventsRequestRef.current) void loadFacets();
+              if (requestId !== eventsRequestRef.current) return;
+              void loadFacets();
+              loadOptionalMetadata();
             });
           });
         } else {
@@ -1638,11 +1692,45 @@ export function LogExplorer({ corpusId }: Props) {
         }
       }
     }
-  }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
+  }, [
+    corpusId,
+    filters,
+    laneCount,
+    lanes,
+    loadFacets,
+    loadOptionalMetadata,
+    setAutoStatus,
+  ]);
 
   useEffect(() => {
-    void refreshMeta();
-  }, [refreshMeta]);
+    bookmarkMetadataStartedRef.current = false;
+    investigationMetadataStartedRef.current = false;
+    summaryRequestRef.current += 1;
+    bookmarkRequestRef.current += 1;
+    investigationLoadRequestRef.current += 1;
+    setSummary(null);
+    setSummaryLoadState("loading");
+    setSummaryLoadError(null);
+    setCorpusTotal(0);
+    setBookmarks([]);
+    setBookmarksLoadState("idle");
+    setBookmarksLoadError(null);
+    setInvestigation(null);
+    setInvestigationLoadState("idle");
+    setInvestigationBusy(false);
+    setInvestigationError(null);
+    setEvidencePreview(null);
+    setFindingViewPreview(null);
+    return () => {
+      summaryRequestRef.current += 1;
+      bookmarkRequestRef.current += 1;
+      investigationLoadRequestRef.current += 1;
+    };
+  }, [corpusId]);
+
+  useEffect(() => {
+    void refreshSummary();
+  }, [refreshSummary]);
 
   useEffect(() => {
     if (!laneEditorOpen) {
@@ -2618,6 +2706,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const priorEvidenceCount = investigation?.document.evidence.length ?? 0;
     // A slower metadata request must not replace the revision returned here.
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2629,6 +2718,7 @@ export function LogExplorer({ corpusId }: Props) {
         eventRefs: selection.eventRefs,
       });
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEvidencePreview(null);
       setSaveEvidenceOpen(false);
       setInvestigationMode("investigation");
@@ -2697,6 +2787,7 @@ export function LogExplorer({ corpusId }: Props) {
     }
     const priorFindingCount = investigation?.document.findings?.length ?? 0;
     const priorNoteCount = investigation?.document.notes?.length ?? 0;
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2720,6 +2811,7 @@ export function LogExplorer({ corpusId }: Props) {
               body: draft.body,
             });
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEvidencePreview(null);
       setCreateInvestigationItem(null);
       setInvestigationMode("investigation");
@@ -2771,6 +2863,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const saveEditedInvestigationItem = async (draft: InvestigationItemDraft) => {
     if (!investigation || !editInvestigationItem) return;
+    investigationMetadataStartedRef.current = true;
     investigationLoadRequestRef.current += 1;
     setInvestigationBusy(true);
     setInvestigationError(null);
@@ -2801,6 +2894,7 @@ export function LogExplorer({ corpusId }: Props) {
         throw new Error("Investigation editor type changed unexpectedly");
       }
       setInvestigation(updated);
+      setInvestigationLoadState("ready");
       setEditInvestigationItem(null);
       setStatus(`Updated ${draft.type}`);
     } catch (saveError) {
@@ -4037,12 +4131,32 @@ export function LogExplorer({ corpusId }: Props) {
     setInvestigationError(null);
   };
   const investigationModeControl = (
-    <InvestigationModeControl
-      mode={investigationMode}
-      investigationCount={investigationMaterialCount}
-      chatCount={chatSummary.chatCount}
-      onChange={chooseInvestigationMode}
-    />
+    <>
+      <InvestigationModeControl
+        mode={investigationMode}
+        investigationCount={investigationMaterialCount}
+        chatCount={chatSummary.chatCount}
+        onChange={chooseInvestigationMode}
+      />
+      {investigationLoadState === "loading" ? (
+        <span
+          className="log-explorer__loading-inline"
+          data-testid="log-explorer-investigation-loading"
+          aria-live="polite"
+        >
+          Loading investigation…
+        </span>
+      ) : investigationLoadState === "error" ? (
+        <span
+          className="log-explorer__loading-inline"
+          data-testid="log-explorer-investigation-load-error"
+          role="alert"
+          title={investigationError ?? undefined}
+        >
+          Investigation unavailable
+        </span>
+      ) : null}
+    </>
   );
 
   return (
@@ -4089,6 +4203,24 @@ export function LogExplorer({ corpusId }: Props) {
           className="log-explorer__meta"
           data-testid="log-explorer-global-counts"
         >
+          {summaryLoadState === "loading" ? (
+            <span
+              className="log-explorer__badge"
+              data-testid="log-explorer-summary-loading"
+              aria-live="polite"
+            >
+              Loading corpus details…
+            </span>
+          ) : summaryLoadState === "error" ? (
+            <span
+              className="log-explorer__badge log-explorer__badge--warn"
+              data-testid="log-explorer-summary-load-error"
+              role="alert"
+              title={summaryLoadError ?? undefined}
+            >
+              Corpus details unavailable
+            </span>
+          ) : null}
           <span
             className={
               timeQuality === "order_only"
@@ -5260,7 +5392,31 @@ export function LogExplorer({ corpusId }: Props) {
                     Bookmark target missing or unavailable
                   </div>
                 ) : null}
-                {bookmarks.length === 0 ? (
+                {bookmarksLoadState === "idle" ? (
+                  <div
+                    className="log-explorer__chat-preview"
+                    data-testid="log-explorer-bookmarks-deferred"
+                  >
+                    Bookmarks load after first evidence
+                  </div>
+                ) : bookmarksLoadState === "loading" ? (
+                  <div
+                    className="log-explorer__loading-inline"
+                    data-testid="log-explorer-bookmarks-loading"
+                    aria-live="polite"
+                  >
+                    Loading bookmarks…
+                  </div>
+                ) : bookmarksLoadState === "error" ? (
+                  <div
+                    className="log-explorer__chat-preview"
+                    data-testid="log-explorer-bookmarks-load-error"
+                    role="alert"
+                    title={bookmarksLoadError ?? undefined}
+                  >
+                    Bookmarks unavailable
+                  </div>
+                ) : bookmarks.length === 0 ? (
                   <div className="log-explorer__chat-preview">
                     None yet — select rows + B
                   </div>
@@ -6001,7 +6157,7 @@ export function LogExplorer({ corpusId }: Props) {
           bookmarks={bookmarkItems}
           preview={evidencePreview}
           viewPreview={findingViewPreview}
-          busy={investigationBusy}
+          busy={investigationBusy || investigationLoadState === "loading"}
           error={investigationError}
           compactLayout={breakpoint === "narrow"}
           collapsed={breakpoint !== "narrow" && chatCollapsed}

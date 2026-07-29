@@ -412,6 +412,19 @@ function chooseTimeMode(
   chooseToolbarOption("time-link-picker", new RegExp(`^${mode}\\b`));
 }
 
+async function openInvestigationView(expectedItems: number) {
+  const trigger = await screen.findByRole("button", {
+    name: /Investigation workspace view: Chat/,
+  });
+  fireEvent.click(trigger);
+  const option = await waitFor(() =>
+    screen.getByRole("menuitemradio", {
+      name: new RegExp(`Investigation.*${expectedItems}`),
+    }),
+  );
+  fireEvent.click(option);
+}
+
 describe("LogExplorer shell", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -592,6 +605,241 @@ describe("LogExplorer shell", () => {
         screen.queryByTestId("log-explorer-facets-loading"),
       ).toBeNull(),
     );
+  });
+
+  it("defers bookmark and Investigation metadata until first evidence rows paint", async () => {
+    const firstPage = deferred<host.EventPageDto>();
+    const bookmarkPage = deferred<host.LogBookmarkDto[]>();
+    const investigationPage =
+      deferred<host.ResolvedInvestigationDocumentDto | null>();
+    let evidenceVisibleWhenBookmarksStarted = false;
+    let evidenceVisibleWhenInvestigationStarted = false;
+    vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
+    vi.mocked(host.hostLogListBookmarks).mockImplementation(() => {
+      evidenceVisibleWhenBookmarksStarted =
+        screen.queryByText(/auth failure/) != null;
+      return bookmarkPage.promise;
+    });
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockImplementation(() => {
+      evidenceVisibleWhenInvestigationStarted =
+        screen.queryByText(/auth failure/) != null;
+      return investigationPage.promise;
+    });
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogListBookmarks).not.toHaveBeenCalled();
+    expect(host.hostLogLoadActiveInvestigation).not.toHaveBeenCalled();
+    expect(screen.getByTestId("log-explorer-bookmarks-deferred")).toBeTruthy();
+
+    await act(async () => {
+      firstPage.resolve(defaultEventPage());
+      await firstPage.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    await waitFor(() => {
+      expect(host.hostLogListBookmarks).toHaveBeenCalledTimes(1);
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledTimes(1);
+    });
+    expect(evidenceVisibleWhenBookmarksStarted).toBe(true);
+    expect(evidenceVisibleWhenInvestigationStarted).toBe(true);
+    expect(screen.getByTestId("log-explorer-bookmarks-loading")).toBeTruthy();
+    expect(
+      screen.getAllByTestId("log-explorer-investigation-loading").length,
+    ).toBeGreaterThan(0);
+
+    await act(async () => {
+      bookmarkPage.resolve([]);
+      investigationPage.resolve(null);
+      await Promise.all([bookmarkPage.promise, investigationPage.promise]);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("log-explorer-bookmarks-loading")).toBeNull();
+      expect(
+        screen.queryAllByTestId("log-explorer-investigation-loading"),
+      ).toHaveLength(0);
+    });
+    expect(screen.getByText("None yet — select rows + B")).toBeTruthy();
+  });
+
+  it("keeps metadata scoped to the latest corpus without rewriting host activation", async () => {
+    const summaries = {
+      c1: deferred<host.LogCorpusSummaryDto | null>(),
+      c2: deferred<host.LogCorpusSummaryDto | null>(),
+    };
+    const bookmarkPages = {
+      c1: deferred<host.LogBookmarkDto[]>(),
+      c2: deferred<host.LogBookmarkDto[]>(),
+    };
+    const investigationPages = {
+      c1: deferred<host.ResolvedInvestigationDocumentDto | null>(),
+      c2: deferred<host.ResolvedInvestigationDocumentDto | null>(),
+    };
+    const c1Event = {
+      ...defaultEventPage().events[0]!,
+      message: "corpus one evidence",
+      source: "one.log",
+    };
+    const c2Event = {
+      ...defaultEventPage().events[0]!,
+      seq: 2,
+      message: "corpus two evidence",
+      source: "two.log",
+    };
+    const investigationFor = (
+      corpus: "c1" | "c2",
+      event: host.ExplorerEventDto,
+      title: string,
+    ): host.ResolvedInvestigationDocumentDto => {
+      const item: host.InvestigationEvidenceItemDto = {
+        id: `${corpus}-evidence`,
+        title,
+        provenance: "human",
+        corpusId: corpus,
+        eventRefs: [
+          {
+            corpusId: corpus,
+            seq: event.seq,
+            source: event.source,
+            timestampHint: event.ts,
+            timeQualityHint: event.timeQuality,
+          },
+        ],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const resolved = resolvedInvestigation(item, event);
+      return {
+        ...resolved,
+        document: {
+          ...resolved.document,
+          id: `${corpus}-investigation`,
+          title: `Investigation · ${corpus}`,
+          corpusLinks: [{ corpusId: corpus }],
+        },
+      };
+    };
+
+    vi.mocked(host.hostGetLogCorpus).mockImplementation(
+      (corpus) => summaries[corpus as "c1" | "c2"].promise,
+    );
+    vi.mocked(host.hostLogQueryEvents).mockImplementation(async (corpus) => ({
+      ...defaultEventPage(),
+      events: [corpus === "c1" ? c1Event : c2Event],
+      totalMatched: 1,
+    }));
+    vi.mocked(host.hostLogListBookmarks).mockImplementation(
+      (corpus) => bookmarkPages[corpus as "c1" | "c2"].promise,
+    );
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockImplementation(
+      (corpus) => investigationPages[corpus as "c1" | "c2"].promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    expect(await screen.findByText(c1Event.message)).toBeTruthy();
+    await waitFor(() =>
+      expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c1"),
+    );
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(await screen.findByText(c2Event.message)).toBeTruthy();
+    await waitFor(() => {
+      expect(host.hostLogListBookmarks).toHaveBeenCalledWith("c2");
+      expect(host.hostLogLoadActiveInvestigation).toHaveBeenCalledWith("c2");
+    });
+
+    await act(async () => {
+      summaries.c2.resolve({
+        id: "c2",
+        name: "new corpus",
+        eventCount: 20,
+        templateCount: 2,
+        engine: "duckdb",
+        createdAt: 2,
+        sourceLabel: null,
+        stats: null,
+        topTemplates: [],
+      });
+      bookmarkPages.c2.resolve([bookmark("bm-c2", "new bookmark", 2)]);
+      investigationPages.c2.resolve(
+        investigationFor("c2", c2Event, "new investigation evidence"),
+      );
+      await Promise.all([
+        summaries.c2.promise,
+        bookmarkPages.c2.promise,
+        investigationPages.c2.promise,
+      ]);
+    });
+
+    expect(
+      await screen.findByLabelText("Log Explorer for new corpus"),
+    ).toBeTruthy();
+    expect(await screen.findByTestId("bookmark-activate-bm-c2")).toBeTruthy();
+    await openInvestigationView(2);
+    expect(await screen.findByText("new investigation evidence")).toBeTruthy();
+
+    await act(async () => {
+      summaries.c1.resolve({
+        id: "c1",
+        name: "stale corpus",
+        eventCount: 10,
+        templateCount: 1,
+        engine: "duckdb",
+        createdAt: 1,
+        sourceLabel: null,
+        stats: null,
+        topTemplates: [],
+      });
+      bookmarkPages.c1.resolve([bookmark("bm-c1", "stale bookmark", 1)]);
+      investigationPages.c1.resolve(
+        investigationFor("c1", c1Event, "stale investigation evidence"),
+      );
+      await Promise.all([
+        summaries.c1.promise,
+        bookmarkPages.c1.promise,
+        investigationPages.c1.promise,
+      ]);
+    });
+
+    expect(screen.getByLabelText("Log Explorer for new corpus")).toBeTruthy();
+    expect(screen.getByTestId("bookmark-activate-bm-c2")).toBeTruthy();
+    expect(screen.getByText("new investigation evidence")).toBeTruthy();
+    expect(screen.queryByTestId("bookmark-activate-bm-c1")).toBeNull();
+    expect(screen.queryByText("stale investigation evidence")).toBeNull();
+    expect(host.hostSetActiveLogCorpus).not.toHaveBeenCalled();
+  });
+
+  it("keeps summary, bookmark, and Investigation load failures independent from evidence rows", async () => {
+    vi.mocked(host.hostGetLogCorpus).mockRejectedValue(
+      new Error("summary unavailable"),
+    );
+    vi.mocked(host.hostLogListBookmarks).mockRejectedValue(
+      new Error("bookmark store unavailable"),
+    );
+    vi.mocked(host.hostLogLoadActiveInvestigation).mockRejectedValue(
+      new Error("investigation store unavailable"),
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    expect(
+      (await screen.findByTestId("log-explorer-summary-load-error"))
+        .textContent,
+    ).toContain("Corpus details unavailable");
+    expect(
+      (await screen.findByTestId("log-explorer-bookmarks-load-error"))
+        .textContent,
+    ).toContain("Bookmarks unavailable");
+    expect(
+      (await screen.findAllByTestId("log-explorer-investigation-load-error"))
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByTestId("virtualized-event-list")).toBeTruthy();
   });
 
   it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
@@ -2289,14 +2537,7 @@ describe("LogExplorer shell", () => {
     first.unmount();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(saved);
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     expect(await screen.findByText(item.title)).toBeTruthy();
   });
 
@@ -2467,14 +2708,7 @@ describe("LogExplorer shell", () => {
     view.unmount();
     vi.mocked(host.hostLogLoadActiveInvestigation).mockResolvedValue(savedEdit);
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*3/ }),
-    );
+    await openInvestigationView(3);
     expect(
       await screen.findByTestId(`finding-item-${finding.id}`),
     ).toBeTruthy();
@@ -2560,14 +2794,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
 
     const initialQueryCount = vi.mocked(host.hostLogQueryEvents).mock.calls
@@ -2708,14 +2935,7 @@ describe("LogExplorer shell", () => {
 
     render(<LogExplorer corpusId="c1" />);
     await screen.findByText("auth failure");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(await screen.findByTestId(`finding-item-${finding.id}`));
     fireEvent.click(screen.getByRole("button", { name: "Preview saved view" }));
 
@@ -2767,14 +2987,7 @@ describe("LogExplorer shell", () => {
     });
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: /Investigation workspace view: Chat/,
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("menuitemradio", { name: /Investigation.*1/ }),
-    );
+    await openInvestigationView(1);
     fireEvent.click(
       within(await screen.findByTestId(`evidence-item-${item.id}`)).getByRole(
         "button",
