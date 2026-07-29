@@ -54,6 +54,9 @@ pub fn detect_format(sample: &str, path: Option<&Path>) -> LogFormat {
     {
         return LogFormat::Json;
     }
+    if looks_like_elasticsearch(t) {
+        return LogFormat::Syslog;
+    }
     if looks_like_wildfly(t) {
         return LogFormat::Syslog;
     }
@@ -115,13 +118,20 @@ fn looks_like_wildfly(t: &str) -> bool {
     parse_wildfly_parts(t).is_some()
 }
 
+fn looks_like_elasticsearch(t: &str) -> bool {
+    parse_elasticsearch_parts(t).is_some()
+}
+
 /// Parse one line with a known (or auto-detected) format.
 ///
 /// `ingest_seq` is used as synthetic timestamp when none is found.
 pub fn parse_line(raw: &str, format: Option<LogFormat>, ingest_seq: u64) -> ParsedLine {
     // File-level detection is only a hint. A banner or continuation can precede
-    // a structured WildFly record, so recognize the strict prefix regardless
-    // of the file's initial hint.
+    // a structured application-server record, so recognize strict content
+    // shapes regardless of the file's initial hint.
+    if let Some(parsed) = parse_elasticsearch(raw, ingest_seq) {
+        return parsed;
+    }
     if let Some(parsed) = parse_wildfly(raw, ingest_seq) {
         return parsed;
     }
@@ -409,6 +419,122 @@ enum WildflyTimestamp {
     Wall(i64),
     /// A valid source-local calendar timestamp without a timezone.
     Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElasticsearchTimestamp {
+    /// A timestamp with an explicit `Z` or numeric UTC offset.
+    Wall(i64),
+    /// A valid source-local calendar timestamp without a timezone.
+    Local,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElasticsearchParts<'a> {
+    timestamp: ElasticsearchTimestamp,
+    source_timestamp: &'a str,
+    level: &'a str,
+    component: &'a str,
+    node: &'a str,
+    payload: &'a str,
+}
+
+/// Parse the classic Elasticsearch prefix:
+///
+/// `[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message`
+///
+/// The shape is intentionally strict: four leading bracket groups, a valid
+/// calendar timestamp, a known severity, and non-empty component/node fields.
+/// This lets per-line recognition work despite a file-level `Plain` hint
+/// without mistaking arbitrary bracketed payloads for Elasticsearch records.
+fn parse_elasticsearch_parts(raw: &str) -> Option<ElasticsearchParts<'_>> {
+    let (source_timestamp, rest) = take_bracketed_field(raw)?;
+    let source_timestamp = source_timestamp.trim();
+    let timestamp = parse_elasticsearch_timestamp(source_timestamp)?;
+    let (level, rest) = take_bracketed_field(rest)?;
+    let level = level.trim();
+    if !is_wildfly_level(level) {
+        return None;
+    }
+    let (component, rest) = take_bracketed_field(rest)?;
+    let component = component.trim();
+    if component.is_empty() {
+        return None;
+    }
+    let (node, rest) = take_bracketed_field(rest)?;
+    let node = node.trim();
+    if node.is_empty() {
+        return None;
+    }
+
+    Some(ElasticsearchParts {
+        timestamp,
+        source_timestamp,
+        level,
+        component,
+        node,
+        payload: rest.trim_start(),
+    })
+}
+
+fn take_bracketed_field(value: &str) -> Option<(&str, &str)> {
+    let value = value.strip_prefix('[')?;
+    let end = value.find(']')?;
+    Some((value.get(..end)?, value.get(end + 1..)?))
+}
+
+fn parse_elasticsearch_timestamp(value: &str) -> Option<ElasticsearchTimestamp> {
+    const LOCAL_TIMESTAMP_BYTES: usize = 23;
+    let local = value.get(..LOCAL_TIMESTAMP_BYTES)?;
+    let bytes = local.as_bytes();
+    if bytes.len() != LOCAL_TIMESTAMP_BYTES
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b' ' | b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !matches!(bytes[19], b',' | b'.')
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+    {
+        return None;
+    }
+
+    let mut canonical_local = local.to_string();
+    canonical_local.replace_range(10..11, " ");
+    canonical_local.replace_range(19..20, ".");
+    chrono::NaiveDateTime::parse_from_str(&canonical_local, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+
+    let suffix = value.get(LOCAL_TIMESTAMP_BYTES..)?;
+    if suffix.is_empty() {
+        return Some(ElasticsearchTimestamp::Local);
+    }
+    let offset = canonical_wildfly_offset(suffix)?;
+    canonical_local.replace_range(10..11, "T");
+    canonical_local.push_str(&offset);
+    parse_explicit_timestamp(&canonical_local).map(ElasticsearchTimestamp::Wall)
+}
+
+fn parse_elasticsearch(raw: &str, ingest_seq: u64) -> Option<ParsedLine> {
+    let parts = parse_elasticsearch_parts(raw.trim())?;
+    let (ts, unresolved_local_timestamp) = match parts.timestamp {
+        ElasticsearchTimestamp::Wall(ts) => (ts, None),
+        ElasticsearchTimestamp::Local => {
+            (ingest_seq as i64, Some(parts.source_timestamp.to_string()))
+        }
+    };
+    Some(ParsedLine {
+        ts: Some(ts),
+        unresolved_local_timestamp,
+        level: normalize_level(parts.level),
+        service: Some(parts.component.to_string()),
+        host: Some(parts.node.to_string()),
+        trace_id: None,
+        message: parts.payload.to_string(),
+        raw: raw.to_string(),
+        format: LogFormat::Syslog,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -849,6 +975,89 @@ mod tests {
         assert_eq!(detect_format(line, None), LogFormat::Syslog);
         let p = parse_line(line, Some(LogFormat::Syslog), 1);
         assert!(!p.message.is_empty());
+    }
+
+    #[test]
+    fn elasticsearch_classic_record_auto_detects_and_preserves_normalized_fields() {
+        let line = "[2026-07-29 14:05:06,324][INFO][transport   ][fixture-node.example] synthetic node initialized";
+        assert_eq!(detect_format(line, None), LogFormat::Syslog);
+
+        let parsed = parse_line(line, Some(LogFormat::Plain), 37);
+        assert_eq!(parsed.format, LogFormat::Syslog);
+        assert_eq!(parsed.ts, Some(37));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29 14:05:06,324")
+        );
+        assert_eq!(parsed.level, "info");
+        assert_eq!(parsed.service.as_deref(), Some("transport"));
+        assert_eq!(parsed.host.as_deref(), Some("fixture-node.example"));
+        assert_eq!(parsed.message, "synthetic node initialized");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn elasticsearch_dot_fraction_and_padded_fields_are_trimmed() {
+        let line =
+            "[2026-07-29 14:05:07.004][WARN ][cluster.service ][node-b.example  ] synthetic queue pressure";
+        let parsed = parse_line(line, None, 38);
+
+        assert_eq!(parsed.ts, Some(38));
+        assert_eq!(
+            parsed.unresolved_local_timestamp.as_deref(),
+            Some("2026-07-29 14:05:07.004")
+        );
+        assert_eq!(parsed.level, "warn");
+        assert_eq!(parsed.service.as_deref(), Some("cluster.service"));
+        assert_eq!(parsed.host.as_deref(), Some("node-b.example"));
+        assert_eq!(parsed.message, "synthetic queue pressure");
+        assert_eq!(parsed.raw, line);
+    }
+
+    #[test]
+    fn elasticsearch_explicit_offsets_normalize_to_the_same_unix_second() {
+        let lines = [
+            "[2025-01-01 13:20:00,999Z][INFO][node][fixture-a.example] shared-z",
+            "[2025-01-01T14:20:00.250+01:00][WARN][node][fixture-b.example] shared-plus",
+            "[2025-01-01 08:20:00,001-0500][ERROR][node][fixture-c.example] shared-minus",
+        ];
+
+        for line in lines {
+            let parsed = parse_line(line, Some(LogFormat::Plain), 9999);
+            assert_eq!(parsed.format, LogFormat::Syslog, "line={line}");
+            assert_eq!(parsed.ts, Some(SHARED_INSTANT_SECS), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.service.as_deref(), Some("node"));
+            assert!(parsed
+                .host
+                .as_deref()
+                .is_some_and(|host| host.ends_with(".example")));
+            assert!(parsed.message.starts_with("shared-"));
+            assert_eq!(parsed.raw, line);
+        }
+    }
+
+    #[test]
+    fn elasticsearch_malformed_brackets_and_continuations_remain_whole() {
+        let lines = [
+            "[2026-13-29 14:05:06,324][INFO][node][fixture.example] impossible month",
+            "[2026-07-29 14:05:06,32][INFO][node][fixture.example] short fraction",
+            "[2026-07-29 14:05:06,324][NOTICE][node][fixture.example] unsupported level",
+            "[2026-07-29 14:05:06,324][INFO][][fixture.example] empty component",
+            "[2026-07-29 14:05:06,324][INFO][node] missing node field",
+            "[node][INFO] ordinary bracketed payload",
+            "\tat org.example.Worker.run(Worker.java:42)",
+        ];
+
+        for (index, line) in lines.into_iter().enumerate() {
+            let ingest_seq = 900 + index as u64;
+            let parsed = parse_line(line, Some(LogFormat::Plain), ingest_seq);
+            assert_eq!(parsed.format, LogFormat::Plain, "line={line}");
+            assert_eq!(parsed.ts, Some(ingest_seq as i64), "line={line}");
+            assert_eq!(parsed.unresolved_local_timestamp, None, "line={line}");
+            assert_eq!(parsed.message, line, "line={line}");
+            assert_eq!(parsed.raw, line, "line={line}");
+        }
     }
 
     #[test]

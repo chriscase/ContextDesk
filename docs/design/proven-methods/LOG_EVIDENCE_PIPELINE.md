@@ -309,6 +309,15 @@ timezone provenance, or DST ambiguity. A future #670 per-source timezone rule
 must preserve that source text, preview the chosen interpretation, and record
 the rule before the event becomes wall-time alignable.
 
+The #749 parser slice recognizes the classic Elasticsearch bracketed shape
+`[YYYY-MM-DD HH:mm:ss,SSS][LEVEL][component][node] message` by content, even
+when a file-level sample was classified as plain text. It trims padded
+severity, component, and node fields; maps component and node into the existing
+service and host fields; and keeps the complete original line. As with
+WildFly, an explicit `Z` or numeric offset becomes a whole-second instant while
+an offsetless local timestamp remains order-only and is exposed transiently as
+unresolved source-local evidence for the future #670 policy.
+
 The last two points are limitations, not a complete timestamp system. A
 reimplementation should design the richer #670 contract before writing data:
 original timestamp evidence, precision, explicit time basis, timezone rule
@@ -614,6 +623,7 @@ instant while ambiguous controls remain order-only.
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
 | JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
+| Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized | Persisted local-calendar provenance and per-source timezone rule (#670) |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |
