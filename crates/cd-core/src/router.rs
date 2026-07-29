@@ -1,6 +1,10 @@
 //! Multi-source routing budgets — enforced on the live agent path, not cosmetic.
 
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+use url::Url;
+
+use crate::providers::{ProviderDeadlinePreference, ProviderKind, ProviderProfile};
 
 /// Source kinds ordered by cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +37,13 @@ pub struct RouterBudget {
     /// Wall-clock deadline for the agent loop (milliseconds).
     #[serde(default = "default_deadline_ms")]
     pub deadline_ms: u64,
+    /// Whether `deadline_ms` is a user-authored whole-turn ceiling.
+    ///
+    /// Existing serialized router settings predate this field and therefore
+    /// migrate as explicit so an upgrade never silently lengthens a user's
+    /// configured stop. A brand-new default remains adaptive.
+    #[serde(default = "migrated_deadline_is_explicit")]
+    pub deadline_is_explicit: bool,
     /// Preferred order.
     #[serde(default = "default_order")]
     pub order: Vec<SourceKind>,
@@ -50,11 +61,13 @@ fn default_max_results_per_source() -> usize {
     8
 }
 fn default_deadline_ms() -> u64 {
-    // One bounded turn can include provider cold start, tool selection,
-    // retrieval, and final synthesis. Two minutes is patient enough for local
-    // and private-network profiles while cancellation and the hard ceiling
-    // remain authoritative.
+    // Stored fallback and managed-provider adaptive ceiling. Local/private
+    // profiles receive the patient adaptive plan in TurnDeadlinePlan, while
+    // cancellation and one monotonic hard ceiling remain authoritative.
     120_000
+}
+fn migrated_deadline_is_explicit() -> bool {
+    true
 }
 fn default_order() -> Vec<SourceKind> {
     vec![
@@ -73,6 +86,7 @@ impl Default for RouterBudget {
             max_tool_rounds: default_max_tool_rounds(),
             max_results_per_source: default_max_results_per_source(),
             deadline_ms: default_deadline_ms(),
+            deadline_is_explicit: false,
             order: default_order(),
         }
     }
@@ -94,10 +108,135 @@ impl RouterBudget {
     /// Honest trail step describing what will be enforced.
     pub fn trail_step(&self) -> String {
         format!(
-            "budget:sources={},rounds={},per_source={},deadline={}ms",
-            self.max_sources, self.max_tool_rounds, self.max_results_per_source, self.deadline_ms
+            "budget:sources={},rounds={},per_source={},deadline={}ms,deadline_policy={}",
+            self.max_sources,
+            self.max_tool_rounds,
+            self.max_results_per_source,
+            self.deadline_ms,
+            if self.deadline_is_explicit {
+                "explicit"
+            } else {
+                "adaptive"
+            }
         )
     }
+}
+
+/// Bounded lifecycle phases for one provider/tool turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    /// The provider is choosing which bounded evidence to request.
+    ChoosingEvidence,
+    /// The trusted host is running one bounded read.
+    RetrievingEvidence,
+    /// The provider is answering from a tool-closed evidence package.
+    SynthesizingAnswer,
+}
+
+impl AgentPhase {
+    /// Stable user-facing phase label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ChoosingEvidence => "Choosing evidence",
+            Self::RetrievingEvidence => "Retrieving evidence",
+            Self::SynthesizingAnswer => "Synthesizing answer",
+        }
+    }
+}
+
+/// Effective bounded deadline plan for one turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnDeadlinePlan {
+    /// Whole-turn hard ceiling.
+    pub total_ms: u64,
+    /// Maximum uninterrupted provider evidence-selection wait.
+    pub choosing_ms: u64,
+    /// Maximum uninterrupted trusted retrieval wait.
+    pub retrieving_ms: u64,
+    /// Maximum uninterrupted tool-closed synthesis wait.
+    pub synthesizing_ms: u64,
+    /// True when the total came from an explicit user setting.
+    pub explicit: bool,
+}
+
+impl TurnDeadlinePlan {
+    /// Resolve the cap for one lifecycle phase.
+    pub const fn for_phase(self, phase: AgentPhase) -> u64 {
+        match phase {
+            AgentPhase::ChoosingEvidence => self.choosing_ms,
+            AgentPhase::RetrievingEvidence => self.retrieving_ms,
+            AgentPhase::SynthesizingAnswer => self.synthesizing_ms,
+        }
+    }
+
+    /// Build a provider-aware plan while preserving an explicit user ceiling.
+    pub fn for_profile(budget: &RouterBudget, profile: &ProviderProfile) -> Self {
+        let budget = budget.clone().sanitized();
+        let slow_private = provider_prefers_patient_deadlines(profile);
+        let total_ms = if budget.deadline_is_explicit {
+            budget.deadline_ms
+        } else if slow_private {
+            300_000
+        } else {
+            120_000
+        };
+        let phase = |numerator: u64, denominator: u64| {
+            total_ms
+                .saturating_mul(numerator)
+                .checked_div(denominator)
+                .unwrap_or(total_ms)
+                .clamp(500, total_ms)
+        };
+        if slow_private {
+            Self {
+                total_ms,
+                choosing_ms: phase(2, 5),
+                retrieving_ms: phase(1, 3),
+                synthesizing_ms: phase(3, 5),
+                explicit: budget.deadline_is_explicit,
+            }
+        } else {
+            Self {
+                total_ms,
+                choosing_ms: phase(3, 8),
+                retrieving_ms: phase(1, 4),
+                synthesizing_ms: phase(5, 8),
+                explicit: budget.deadline_is_explicit,
+            }
+        }
+    }
+}
+
+fn provider_prefers_patient_deadlines(profile: &ProviderProfile) -> bool {
+    match profile.deadline_preference {
+        ProviderDeadlinePreference::Patient => return true,
+        ProviderDeadlinePreference::Standard => return false,
+        ProviderDeadlinePreference::Auto => {}
+    }
+    if profile.kind == ProviderKind::Ollama || profile.local_only {
+        return true;
+    }
+    let Ok(url) = Url::parse(&profile.base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".lan")
+        || host.ends_with(".internal")
+        || host.ends_with(".corp")
+        || host.ends_with(".intranet")
+        || host.ends_with(".private")
+    {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| match ip {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+    })
 }
 
 /// Rank available sources for a query (simple heuristics).
@@ -178,6 +317,7 @@ mod tests {
         assert!(t.contains("rounds=12"));
         assert!(t.contains("per_source=8"));
         assert!(t.contains("deadline="));
+        assert!(t.contains("deadline_policy=adaptive"));
     }
 
     #[test]
@@ -187,6 +327,7 @@ mod tests {
             max_tool_rounds: 999,
             max_results_per_source: 0,
             deadline_ms: 1,
+            deadline_is_explicit: true,
             order: vec![],
         }
         .sanitized();
@@ -195,5 +336,101 @@ mod tests {
         assert_eq!(b.max_results_per_source, 1);
         assert_eq!(b.deadline_ms, 500);
         assert!(!b.order.is_empty());
+    }
+
+    #[test]
+    fn adaptive_deadlines_are_patient_for_local_and_private_profiles() {
+        let budget = RouterBudget::default();
+        let ollama = ProviderProfile::ollama_local();
+        let local = TurnDeadlinePlan::for_profile(&budget, &ollama);
+        assert_eq!(local.total_ms, 300_000);
+        assert!(!local.explicit);
+
+        let mut private = ollama.clone();
+        private.kind = ProviderKind::OpenAiCompatible;
+        private.local_only = false;
+        private.base_url = "https://10.20.30.40/v1".into();
+        let private = TurnDeadlinePlan::for_profile(&budget, &private);
+        assert_eq!(private.total_ms, 300_000);
+
+        let mut managed = ollama;
+        managed.kind = ProviderKind::OpenAiCompatible;
+        managed.local_only = false;
+        managed.base_url = "https://models.example.com/v1".into();
+        let managed = TurnDeadlinePlan::for_profile(&budget, &managed);
+        assert_eq!(managed.total_ms, 120_000);
+
+        for host in [
+            "gateway.internal",
+            "gateway.local",
+            "gateway.lan",
+            "gateway.corp",
+            "gateway.intranet",
+            "gateway.private",
+        ] {
+            let mut profile = ProviderProfile::ollama_local();
+            profile.kind = ProviderKind::OpenAiCompatible;
+            profile.local_only = false;
+            profile.base_url = format!("https://{host}/v1");
+            profile.deadline_preference = ProviderDeadlinePreference::Auto;
+            assert_eq!(
+                TurnDeadlinePlan::for_profile(&budget, &profile).total_ms,
+                300_000,
+                "host={host}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_profile_deadline_preference_overrides_url_inference() {
+        let mut profile = ProviderProfile::ollama_local();
+        profile.kind = ProviderKind::OpenAiCompatible;
+        profile.local_only = false;
+        profile.base_url = "https://models.example.com/v1".into();
+        profile.deadline_preference = ProviderDeadlinePreference::Patient;
+        assert_eq!(
+            TurnDeadlinePlan::for_profile(&RouterBudget::default(), &profile).total_ms,
+            300_000
+        );
+
+        profile.base_url = "https://models.example.corp/v1".into();
+        profile.deadline_preference = ProviderDeadlinePreference::Standard;
+        assert_eq!(
+            TurnDeadlinePlan::for_profile(&RouterBudget::default(), &profile).total_ms,
+            120_000
+        );
+    }
+
+    #[test]
+    fn explicit_deadline_precedes_provider_defaults_and_bounds_every_phase() {
+        let budget = RouterBudget {
+            deadline_ms: 42_000,
+            deadline_is_explicit: true,
+            ..RouterBudget::default()
+        };
+        let plan = TurnDeadlinePlan::for_profile(&budget, &ProviderProfile::ollama_local());
+        assert_eq!(plan.total_ms, 42_000);
+        assert!(plan.explicit);
+        for phase in [
+            AgentPhase::ChoosingEvidence,
+            AgentPhase::RetrievingEvidence,
+            AgentPhase::SynthesizingAnswer,
+        ] {
+            assert!((500..=42_000).contains(&plan.for_phase(phase)));
+        }
+    }
+
+    #[test]
+    fn serialized_legacy_budget_migrates_deadline_as_explicit() {
+        let budget: RouterBudget = serde_json::from_value(serde_json::json!({
+            "max_sources": 3,
+            "max_tool_rounds": 12,
+            "max_results_per_source": 8,
+            "deadline_ms": 90_000,
+            "order": ["memory", "files"]
+        }))
+        .expect("legacy budget");
+        assert!(budget.deadline_is_explicit);
+        assert_eq!(budget.deadline_ms, 90_000);
     }
 }

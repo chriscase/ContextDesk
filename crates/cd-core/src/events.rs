@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::router::AgentPhase;
+
 /// Phase of a tool invocation in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +24,11 @@ pub enum StreamEvent {
         session_id: String,
         /// Model id if known.
         model: Option<String>,
+    },
+    /// Truthful current lifecycle phase for a bounded agent turn.
+    TurnPhase {
+        /// Host-authored phase; never inferred from model prose.
+        phase: AgentPhase,
     },
     /// Incremental assistant markdown.
     TextDelta {
@@ -109,5 +116,20 @@ mod tests {
             StreamEvent::TextDelta { text } => assert_eq!(text, "hello"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn turn_phase_uses_stable_snake_case_protocol_values() {
+        let value = serde_json::to_value(StreamEvent::TurnPhase {
+            phase: AgentPhase::SynthesizingAnswer,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "turn_phase",
+                "phase": "synthesizing_answer"
+            })
+        );
     }
 }

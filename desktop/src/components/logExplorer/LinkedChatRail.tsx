@@ -281,6 +281,9 @@ export function LinkedChatRail({
   const [statusByChat, setStatusByChat] = useState<
     Record<string, string | null>
   >({});
+  const [synthesisRetryByChat, setSynthesisRetryByChat] = useState<
+    Record<string, boolean>
+  >({});
   const [navChipsByChat, setNavChipsByChat] = useState<
     Record<string, LogNavAction[]>
   >({});
@@ -687,9 +690,10 @@ export function LinkedChatRail({
     }
   };
 
-  const sendChat = async () => {
-    const text = draft.trim();
-    if (!text || busy) return;
+  const sendChat = async (options?: { retrySynthesisOnly?: boolean }) => {
+    const retrySynthesisOnly = options?.retrySynthesisOnly ?? false;
+    const text = retrySynthesisOnly ? "" : draft.trim();
+    if ((!text && !retrySynthesisOnly) || busy) return;
     let turnModel = selectedModel;
     if (!turnModel) {
       const options = await loadModels();
@@ -707,7 +711,7 @@ export function LinkedChatRail({
       );
       return;
     }
-    if (!turnModel.tools_enabled) {
+    if (!retrySynthesisOnly && !turnModel.tools_enabled) {
       const message =
         turnModel.tools_disabled_reason === "model"
           ? `${turnModel.provider_label} · ${turnModel.label} previously rejected native tools. Retry tools for this model or choose another tools-enabled model.`
@@ -723,6 +727,7 @@ export function LinkedChatRail({
       return;
     }
     let sessionId = activeChatId;
+    if (retrySynthesisOnly && !sessionId) return;
     if (!sessionId) {
       if (creatingTurnChatRef.current) return;
       creatingTurnChatRef.current = true;
@@ -743,8 +748,14 @@ export function LinkedChatRail({
     }));
     setErrorByChat((m) => ({ ...m, [sessionId!]: null }));
     setStatusByChat((m) => ({ ...m, [sessionId!]: null }));
-    setDraft("");
-    draftsRef.current[sessionId] = "";
+    setSynthesisRetryByChat((current) => ({
+      ...current,
+      [sessionId!]: false,
+    }));
+    if (!retrySynthesisOnly) {
+      setDraft("");
+      draftsRef.current[sessionId] = "";
+    }
     // Sending always re-engages follow for this chat (#529).
     setFollowByChat((m) => ({ ...m, [sessionId!]: true }));
     setDetachedByChat((m) => ({ ...m, [sessionId!]: false }));
@@ -753,15 +764,17 @@ export function LinkedChatRail({
       [sessionId!]: false,
     }));
 
-    const userMsg: ChatMsg = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: text,
-    };
+    const userMsg: ChatMsg | null = retrySynthesisOnly
+      ? null
+      : {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: text,
+        };
     const assistantId = crypto.randomUUID();
     setMessages((m) => [
       ...m,
-      userMsg,
+      ...(userMsg ? [userMsg] : []),
       { id: assistantId, role: "assistant", content: "", streaming: true },
     ]);
     // Snap to the new user message immediately.
@@ -786,6 +799,25 @@ export function LinkedChatRail({
               [sessionId!]: true,
             }));
           }
+          if (ev.kind === "turn_phase") {
+            const phase = String(ev.payload.phase ?? "");
+            const label =
+              phase === "choosing_evidence"
+                ? "Choosing bounded evidence…"
+                : phase === "retrieving_evidence"
+                  ? "Retrieving bounded evidence…"
+                  : phase === "synthesizing_answer"
+                    ? retrySynthesisOnly
+                      ? "Retrying answer synthesis from preserved evidence…"
+                      : "Synthesizing an evidence-cited answer…"
+                    : null;
+            if (label) {
+              setStatusByChat((current) => ({
+                ...current,
+                [sessionId!]: label,
+              }));
+            }
+          }
           setMessages((msgs) => {
             const base =
               msgs.find((x) => x.id === assistantId) ??
@@ -805,6 +837,7 @@ export function LinkedChatRail({
           corpus_id: corpusId,
           brief: agentContext.brief,
         },
+        retrySynthesisOnly,
       );
       terminalChatsRef.current.add(sessionId);
       setErrorByChat((current) => ({ ...current, [sessionId!]: null }));
@@ -825,7 +858,11 @@ export function LinkedChatRail({
       };
       const updated = {
         ...session,
-        messages: [...session.messages, userMsg, assistant],
+        messages: [
+          ...session.messages,
+          ...(userMsg ? [userMsg] : []),
+          assistant,
+        ],
         chatModel: turnModel.id,
         providerProfileId: turnModel.provider_id,
         lastReadMessageId: assistantId,
@@ -861,13 +898,24 @@ export function LinkedChatRail({
       await refreshChats();
       const usedTools = (assistant.tools?.length ?? 0) > 0;
       const endedWithError = events.some((event) => event.kind === "error");
+      const synthesisTimedOut = events.some(
+        (event) =>
+          event.kind === "error" &&
+          event.payload.code === "linked_synthesis_timeout",
+      );
+      setSynthesisRetryByChat((current) => ({
+        ...current,
+        [sessionId!]: synthesisTimedOut,
+      }));
       setStatusByChat((m) => ({
         ...m,
-        [sessionId!]: endedWithError
-          ? `Linked investigation stopped with ${turnModel.provider_label} · ${turnModel.label}. Retry, choose another tools-enabled model above, or configure one in Settings → AI.`
-          : usedTools
-            ? "Linked investigation completed with governed evidence tools"
-            : "Linked chat response saved",
+        [sessionId!]: synthesisTimedOut
+          ? "Bounded evidence is preserved. Retry only the answer synthesis when ready."
+          : endedWithError
+            ? `Linked investigation stopped with ${turnModel.provider_label} · ${turnModel.label}. Retry, choose another tools-enabled model above, or configure one in Settings → AI.`
+            : usedTools
+              ? "Linked investigation completed with governed evidence tools"
+              : "Linked chat response saved",
       }));
       if (endedWithError) {
         void loadModels();
@@ -1696,9 +1744,22 @@ export function LinkedChatRail({
         </details>
       )}
 
-      {(error || status) && (
+      {(error ||
+        status ||
+        (activeChatId && synthesisRetryByChat[activeChatId])) && (
         <div className="log-explorer__chat-status" role="status">
           {error ? `Error: ${error}` : status}
+          {activeChatId && synthesisRetryByChat[activeChatId] ? (
+            <button
+              type="button"
+              className="log-explorer__btn"
+              data-testid="retry-linked-synthesis"
+              disabled={busy}
+              onClick={() => void sendChat({ retrySynthesisOnly: true })}
+            >
+              Retry synthesis
+            </button>
+          ) : null}
         </div>
       )}
     </aside>

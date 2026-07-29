@@ -812,7 +812,9 @@ complete.
 
 - Demo fixtures remain source-checkout assets rather than installed-app content;
   the quick Help guide says so and provides a portable path command.
-- #649 retains phase-aware provider deadline and evidence-preserving retry work.
+- #649 retains native cold/slow tools-enabled provider acceptance; deterministic
+  phase deadlines, cancellation, evidence preservation, and synthesis-only
+  retry ship.
 - #656 retains the complete native investigation acceptance matrix.
 - #646 retains typed model/detector finding proposals, review history, ranking,
   and walkthrough.

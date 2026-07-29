@@ -102,6 +102,7 @@ export function useSettingsController({
     max_tool_rounds: 12,
     max_results_per_source: 8,
     deadline_ms: 120_000,
+    deadline_is_explicit: false,
   });
   /** Workspace connector registry (#127). */
   const [connectors, setConnectors] = useState<ConnectorDto[]>([]);
@@ -200,6 +201,7 @@ export function useSettingsController({
             hasApiKey: active.has_key,
             toolsEnabled: active.tools_enabled ?? true,
             localOnly: kind === "ollama",
+            deadlinePreference: active.deadline_preference ?? "auto",
           }));
         }
       } else if (setup.providerKind !== "none") {
@@ -478,6 +480,7 @@ export function useSettingsController({
             ? false
             : (source.localOnly ?? source.providerKind === "ollama"),
         toolsEnabled: source.toolsEnabled,
+        deadlinePreference: source.deadlinePreference ?? "auto",
       });
       if (!saved) return source;
       return {
@@ -487,6 +490,8 @@ export function useSettingsController({
         chatModel: saved.chat_model,
         providerLabel: saved.label,
         toolsEnabled: saved.tools_enabled ?? source.toolsEnabled ?? true,
+        deadlinePreference:
+          saved.deadline_preference ?? source.deadlinePreference ?? "auto",
         providerKind: source.providerKind,
         localOnly:
           saved.kind === "xai_grok_build" ? false : source.localOnly,

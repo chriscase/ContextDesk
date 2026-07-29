@@ -19,7 +19,9 @@ use cd_core::memory_fs::{list_memory_files, read_workspace_file, write_memory_fi
 use cd_core::permissions::PermissionDecision;
 use cd_core::preflight::{run_preflight, PreflightInput, PreflightReport};
 use cd_core::probe::{expand_base_candidates, normalize_gateway_input};
-use cd_core::providers::{ProviderConfig, ProviderKind, ProviderProfile};
+use cd_core::providers::{
+    ProviderConfig, ProviderDeadlinePreference, ProviderKind, ProviderProfile,
+};
 use cd_core::research::{events_to_dto, grant_and_execute, EventDto};
 use cd_core::sessions::{
     sanitize_generated_title, session_title_llm_prompt, title_from_prompt, Session, SessionMeta,
@@ -152,6 +154,9 @@ struct AppState {
     investigation_mutation: Mutex<()>,
     /// Per-session cooperative cancel flags for in-flight turns (#109).
     cancels: Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// Host-only bounded evidence retained for an explicit synthesis-only retry.
+    /// Never serialized to config, sessions, logs, or webview IPC.
+    linked_synthesis_checkpoints: Mutex<HashMap<String, cd_core::agent::LinkedSynthesisCheckpoint>>,
     /// At most one trusted workspace backup is active.
     backup_cancel: Mutex<Option<cd_core::object_store::ObjectCancellation>>,
     /// Debounced FS watcher for incremental index refresh (#116).
@@ -1757,6 +1762,9 @@ struct SaveProviderReq {
     /// Optional override for native tool calling (#327). `None` preserves existing.
     #[serde(default)]
     tools_enabled: Option<bool>,
+    /// Optional explicit latency class. `None` preserves the saved profile value.
+    #[serde(default)]
+    deadline_preference: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1771,6 +1779,8 @@ struct ProviderDto {
     has_key: bool,
     /// Native tool calling enabled for this profile (#327).
     tools_enabled: bool,
+    /// `auto` | `patient` | `standard`; contains no endpoint or secret.
+    deadline_preference: String,
 }
 
 fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
@@ -1788,6 +1798,12 @@ fn provider_to_dto(p: &ProviderProfile, has_key: bool) -> ProviderDto {
         api_key_ref: p.api_key_ref.clone(),
         has_key,
         tools_enabled: p.capabilities.tools,
+        deadline_preference: match p.deadline_preference {
+            ProviderDeadlinePreference::Auto => "auto",
+            ProviderDeadlinePreference::Patient => "patient",
+            ProviderDeadlinePreference::Standard => "standard",
+        }
+        .into(),
     }
 }
 
@@ -1868,9 +1884,11 @@ fn save_active_provider(
 
     // #125: seed per-kind defaults; preserve discovered capabilities.tools (#327).
     let mut capabilities = desc.default_capabilities;
+    let mut deadline_preference = Default::default();
     if let Some(existing) = cfg.providers.profiles.iter().find(|p| p.id == id) {
         capabilities.tools = existing.capabilities.tools;
         capabilities.stream = existing.capabilities.stream;
+        deadline_preference = existing.deadline_preference;
         // embeddings from descriptor when kind changes still uses default above
         if existing.kind == kind {
             capabilities.embeddings = existing.capabilities.embeddings;
@@ -1878,6 +1896,14 @@ fn save_active_provider(
     }
     if let Some(te) = req.tools_enabled {
         capabilities.tools = te;
+    }
+    if let Some(preference) = req.deadline_preference.as_deref() {
+        deadline_preference = match preference {
+            "auto" => ProviderDeadlinePreference::Auto,
+            "patient" => ProviderDeadlinePreference::Patient,
+            "standard" => ProviderDeadlinePreference::Standard,
+            other => return Err(format!("unsupported deadline preference: {other}")),
+        };
     }
     let profile = ProviderProfile {
         id: id.clone(),
@@ -1895,6 +1921,7 @@ fn save_active_provider(
         embedding_base_url: None,
         capabilities,
         local_only,
+        deadline_preference,
     };
 
     if let Some(slot) = cfg.providers.profiles.iter_mut().find(|p| p.id == id) {
@@ -2107,6 +2134,7 @@ struct SetRouterBudgetReq {
     max_tool_rounds: usize,
     max_results_per_source: usize,
     deadline_ms: u64,
+    deadline_is_explicit: bool,
 }
 
 #[tauri::command]
@@ -2119,6 +2147,7 @@ fn set_router_budget(
         max_tool_rounds: req.max_tool_rounds,
         max_results_per_source: req.max_results_per_source,
         deadline_ms: req.deadline_ms,
+        deadline_is_explicit: req.deadline_is_explicit,
         order: cd_core::router::RouterBudget::default().order,
     }
     .sanitized();
@@ -2617,6 +2646,9 @@ struct AgentTurnReq {
     /// Present only for a turn started from a Log Explorer linked chat.
     #[serde(default)]
     log_explorer_context: Option<LogExplorerTurnContextReq>,
+    /// Reuse the exact host-retained evidence from this chat's prior synthesis timeout.
+    #[serde(default)]
+    retry_synthesis_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3342,13 +3374,78 @@ async fn agent_turn(
         window.label(),
         req.log_explorer_context,
     )?;
+    let linked_synthesis_retry = if req.retry_synthesis_only {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .get(&req.session_id)
+            .cloned()
+    } else {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .remove(&req.session_id);
+        None
+    };
+    if req.retry_synthesis_only && linked_synthesis_retry.is_none() {
+        for event in [
+            cd_core::events::StreamEvent::TurnStarted {
+                session_id: req.session_id.clone(),
+                model: Some(profile.chat_model.clone()),
+            },
+            cd_core::events::StreamEvent::Error {
+                code: "linked_synthesis_retry_stale".into(),
+                message: "No preserved evidence is available for this chat. Run a new linked \
+                          investigation before retrying synthesis."
+                    .into(),
+            },
+            cd_core::events::StreamEvent::TurnCompleted {
+                reason: "linked_synthesis_retry_stale".into(),
+            },
+        ] {
+            let _ = on_event.send(cd_core::research::event_to_dto(&event));
+        }
+        return Ok(());
+    }
+    if let (Some(context), Some(checkpoint)) = (
+        log_explorer_context.as_ref(),
+        linked_synthesis_retry.as_ref(),
+    ) {
+        if !checkpoint.matches(
+            &req.session_id,
+            &context.corpus_id,
+            Some(profile.chat_model.as_str()),
+        ) {
+            for event in [
+                cd_core::events::StreamEvent::TurnStarted {
+                    session_id: req.session_id.clone(),
+                    model: Some(profile.chat_model.clone()),
+                },
+                cd_core::events::StreamEvent::Error {
+                    code: "linked_synthesis_retry_stale".into(),
+                    message: "The preserved evidence belongs to a different chat, corpus, or \
+                              model. Run a new linked investigation instead."
+                        .into(),
+                },
+                cd_core::events::StreamEvent::TurnCompleted {
+                    reason: "linked_synthesis_retry_stale".into(),
+                },
+            ] {
+                let _ = on_event.send(cd_core::research::event_to_dto(&event));
+            }
+            return Ok(());
+        }
+    }
 
     // Validate the durable corpus before capability checks or provider/host
     // construction. A stale link must never be masked by a tools-disabled
     // profile or silently broadened into an ordinary turn.
     if let Some(context) = log_explorer_context.as_ref() {
         let cache = log_cache_dir(&state)?;
-        let tools_profile = (!req.force_local).then_some(&profile);
+        let tools_profile =
+            (!req.force_local && linked_synthesis_retry.is_none()).then_some(&profile);
         if let Some(events) =
             linked_log_preflight_at(&cache, context, tools_profile, &req.session_id)
         {
@@ -3446,6 +3543,7 @@ async fn agent_turn(
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
     }
+    let mut next_synthesis_checkpoint = linked_synthesis_retry.clone();
     let result = if req.force_local {
         let ev = cd_core::research::research_local_with_skills(
             &mut host,
@@ -3462,7 +3560,7 @@ async fn agent_turn(
         }
         ev
     } else {
-        cd_core::research::research_turn_with_cancel_and_context(
+        cd_core::research::research_turn_with_cancel_and_context_and_checkpoint(
             &mut host,
             &profile,
             api_key,
@@ -3472,11 +3570,24 @@ async fn agent_turn(
             false,
             Some(cancel.clone()),
             log_explorer_context,
+            linked_synthesis_retry,
+            Some(&mut next_synthesis_checkpoint),
             Some(&mut sink),
         )
         .await
         .map_err(|e| e.to_string())
     };
+    {
+        let mut checkpoints = state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints");
+        if let Some(checkpoint) = next_synthesis_checkpoint {
+            checkpoints.insert(req.session_id.clone(), checkpoint);
+        } else {
+            checkpoints.remove(&req.session_id);
+        }
+    }
     if !using_fallback_host {
         host.set_log_corpus_scope(previous_log_scope);
         host.set_active_log_corpus(previous_log_corpus);
@@ -4077,6 +4188,7 @@ async fn list_models_for_draft(
         embedding_model: None,
         embedding_base_url: None,
         local_only,
+        deadline_preference: Default::default(),
         capabilities: desc.default_capabilities,
     };
     Ok(models_for_profile_with_key(&profile, api_key.as_deref()).await)
@@ -7046,6 +7158,7 @@ pub fn run() {
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
+        linked_synthesis_checkpoints: Mutex::new(HashMap::new()),
         backup_cancel: Mutex::new(None),
         index_watch: Mutex::new(None),
         index_status: Arc::new(Mutex::new(cd_core::index::IndexStatus {

@@ -21,6 +21,7 @@ Produced by `cd_core::research::event_to_dto` — **snake_case** names:
 | `kind` | Payload highlights |
 |--------|--------------------|
 | `turn_started` | `session_id`, `model` |
+| `turn_phase` | `phase` (`choosing_evidence`/`retrieving_evidence`/`synthesizing_answer`) |
 | `text_delta` | `text` |
 | `thought_delta` | `text` |
 | `tool` | single event with `phase` (`started`/`finished`), `id`, `name`, `summary`, `detail`, `ok` |

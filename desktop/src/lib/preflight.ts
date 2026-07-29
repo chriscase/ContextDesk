@@ -50,6 +50,8 @@ export type AppSetupState = {
   toolsEnabled?: boolean;
   /** Refuse non-loopback bases (local-only profile). */
   localOnly?: boolean;
+  /** Adaptive latency class for the selected provider profile. */
+  deadlinePreference?: "auto" | "patient" | "standard";
   /** Simulated / later real probes */
   ollamaReachable: boolean | null;
   remoteReachable: boolean | null;

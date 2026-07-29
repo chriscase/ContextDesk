@@ -1,7 +1,8 @@
 //! Offline and host research entry points (real tool path, no demo shell).
 
 use crate::agent::{
-    run_agent_turn, run_agent_turn_with_sink, AgentOptions, ChatBackend, ScriptedBackend,
+    run_agent_turn, run_agent_turn_with_sink_and_checkpoint, AgentOptions, ChatBackend,
+    LinkedSynthesisCheckpoint, ScriptedBackend,
 };
 use crate::audit::AuditLog;
 use crate::chat::{
@@ -38,6 +39,7 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             "turn_started",
             serde_json::json!({ "session_id": session_id, "model": model }),
         ),
+        StreamEvent::TurnPhase { phase } => ("turn_phase", serde_json::json!({ "phase": phase })),
         StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
         StreamEvent::ThoughtDelta { text } => {
             ("thought_delta", serde_json::json!({ "text": text }))
@@ -696,9 +698,53 @@ pub async fn research_turn_with_cancel_and_context(
     force_local: bool,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+) -> CoreResult<Vec<StreamEvent>> {
+    research_turn_with_cancel_and_context_and_checkpoint(
+        host,
+        profile,
+        api_key,
+        user_text,
+        history,
+        session_id,
+        force_local,
+        cancel,
+        log_explorer_context,
+        None,
+        None,
+        live,
+    )
+    .await
+}
+
+/// Research turn with optional host-retained linked synthesis evidence.
+#[allow(clippy::too_many_arguments)] // explicit trust inputs avoid ambient retry state
+pub async fn research_turn_with_cancel_and_context_and_checkpoint(
+    host: &mut ToolHost,
+    profile: &ProviderProfile,
+    api_key: Option<String>,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    session_id: &str,
+    force_local: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    log_explorer_context: Option<crate::agent::LogExplorerTurnContext>,
+    linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+    checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
     mut live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
     if force_local {
+        if linked_synthesis_retry.is_some() {
+            return Ok(emit_provider_error(
+                "linked_synthesis_retry_stale",
+                "Synthesis-only retry must use the original linked chat model. The local \
+                 keyword fallback cannot consume preserved model evidence."
+                    .into(),
+                session_id,
+                Some(profile.chat_model.clone()),
+                live,
+            ));
+        }
         let ev = research_local(host, user_text, session_id).await?;
         if let Some(sink) = live {
             for e in &ev {
@@ -708,7 +754,7 @@ pub async fn research_turn_with_cancel_and_context(
         return Ok(ev);
     }
 
-    if log_explorer_context.is_some() {
+    if log_explorer_context.is_some() && linked_synthesis_retry.is_none() {
         if let Some(events) = linked_tools_unavailable_events(profile, session_id) {
             if let Some(sink) = live {
                 for event in &events {
@@ -762,7 +808,7 @@ pub async fn research_turn_with_cancel_and_context(
 
     // #125: honor capability matrix with explicit degrade notices.
     let caps = profile.capabilities;
-    let tools_notice = if !caps.tools {
+    let tools_notice = if !caps.tools && linked_synthesis_retry.is_none() {
         Some(StreamEvent::SearchTrail {
             steps: vec![format!(
                 "tools disabled for profile “{}” (capabilities.tools=false)",
@@ -784,14 +830,27 @@ pub async fn research_turn_with_cancel_and_context(
     );
     opts.cancel = cancel;
     opts.log_explorer_context = log_explorer_context;
+    opts.linked_synthesis_retry = linked_synthesis_retry;
+    opts.deadline_plan = Some(crate::router::TurnDeadlinePlan::for_profile(
+        host.router_budget(),
+        profile,
+    ));
     // Ambient recall follows host config (set by attach_durable_memory / rebuild_host).
     opts.ambient_recall_enabled = host.ambient_recall_enabled() && host.durable_memory_active();
     // Per-model context budget (default / declared / learned).
     opts.context_char_budget = host
         .model_context_budgets()
         .resolve(Some(profile.chat_model.as_str()));
-    let mut events =
-        run_agent_turn_with_sink(&backend, host, user_text, history, &opts, live).await?;
+    let mut events = run_agent_turn_with_sink_and_checkpoint(
+        &backend,
+        host,
+        user_text,
+        history,
+        &opts,
+        live,
+        checkpoint_out,
+    )
+    .await?;
     if let Some(notice) = tools_notice {
         events.insert(0, notice);
     }
@@ -1614,6 +1673,7 @@ mod tests {
         // Documented in docs/PROTOCOL.md — keep in sync.
         const DOCUMENTED: &[&str] = &[
             "turn_started",
+            "turn_phase",
             "text_delta",
             "thought_delta",
             "tool",
@@ -1627,6 +1687,9 @@ mod tests {
             StreamEvent::TurnStarted {
                 session_id: "s".into(),
                 model: None,
+            },
+            StreamEvent::TurnPhase {
+                phase: crate::router::AgentPhase::ChoosingEvidence,
             },
             StreamEvent::TextDelta { text: "t".into() },
             StreamEvent::ThoughtDelta { text: "th".into() },

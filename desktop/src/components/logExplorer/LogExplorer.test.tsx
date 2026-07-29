@@ -5122,6 +5122,7 @@ describe("LogExplorer shell", () => {
           corpus_id: "c1",
           brief: expect.stringContaining("corpusId=c1"),
         }),
+        false,
       );
       expect(stored?.messages.map((message) => message.role)).toEqual([
         "user",
@@ -5400,6 +5401,7 @@ describe("LogExplorer shell", () => {
           corpus_id: "corpus-a",
           brief: expect.stringContaining("corpusId=corpus-a"),
         }),
+        false,
       ),
     );
 
@@ -5433,6 +5435,7 @@ describe("LogExplorer shell", () => {
           corpus_id: "corpus-b",
           brief: expect.stringContaining("corpusId=corpus-b"),
         }),
+        false,
       ),
     );
 

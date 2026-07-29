@@ -324,6 +324,7 @@ export async function agentTurn(
   onEvent?: (ev: EventDto) => void,
   pinnedSkillId?: string | null,
   logExplorerContext?: LogExplorerTurnContextDto | null,
+  retrySynthesisOnly = false,
 ): Promise<EventDto[]> {
   const req = {
     session_id: sessionId,
@@ -333,6 +334,7 @@ export async function agentTurn(
     provider_profile_id: providerProfileId?.trim() || null,
     pinned_skill_id: pinnedSkillId?.trim() || null,
     log_explorer_context: logExplorerContext ?? null,
+    retry_synthesis_only: retrySynthesisOnly,
   };
 
   if (!isTauri()) {
@@ -809,6 +811,8 @@ export type ProviderDto = {
   has_key: boolean;
   /** Native tool calling; false after gateway rejection (#327). */
   tools_enabled?: boolean;
+  /** Provider/profile deadline class; auto performs no network probing. */
+  deadline_preference?: "auto" | "patient" | "standard";
 };
 
 /** Persist active provider profile (refs only) + optional API key to OS keychain. */
@@ -881,6 +885,8 @@ export async function hostSaveActiveProvider(args: {
   localOnly?: boolean;
   /** When set, updates native tools capability (#327). */
   toolsEnabled?: boolean;
+  /** Explicit latency class for adaptive phase deadlines. */
+  deadlinePreference?: "auto" | "patient" | "standard";
 }): Promise<ProviderDto | null> {
   if (!isTauri()) return null;
   return invoke<ProviderDto>("save_active_provider", {
@@ -892,6 +898,7 @@ export async function hostSaveActiveProvider(args: {
       api_key: args.apiKey ?? null,
       local_only: args.localOnly ?? null,
       tools_enabled: args.toolsEnabled ?? null,
+      deadline_preference: args.deadlinePreference ?? null,
     },
   });
 }
@@ -1543,6 +1550,7 @@ export type RouterBudgetDto = {
   max_tool_rounds: number;
   max_results_per_source: number;
   deadline_ms: number;
+  deadline_is_explicit: boolean;
 };
 
 export async function hostGetRouterBudget(): Promise<RouterBudgetDto | null> {

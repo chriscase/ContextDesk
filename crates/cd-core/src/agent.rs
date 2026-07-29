@@ -6,13 +6,15 @@ use crate::chat::{
 use crate::error::{CoreError, CoreResult};
 use crate::events::StreamEvent;
 use crate::injection::{system_policy_with_tools, wrap_untrusted};
+use crate::router::{AgentPhase, TurnDeadlinePlan};
 use crate::tool_host::ToolHost;
 use crate::tools::{ToolSideEffect, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// Chat backend trait (real HTTP or mock).
 #[async_trait]
@@ -77,6 +79,8 @@ pub struct AgentOptions {
     pub max_rounds: usize,
     /// Wall-clock deadline in ms (`0` = no deadline).
     pub deadline_ms: u64,
+    /// Provider-aware phase plan. `None` keeps the legacy uniform test plan.
+    pub deadline_plan: Option<TurnDeadlinePlan>,
     /// Cap for source-query tools (search_kb limit).
     pub max_results_per_source: usize,
     /// Session id for events.
@@ -93,6 +97,40 @@ pub struct AgentOptions {
     pub context_char_budget: usize,
     /// Immutable, session-validated linked-log context for this turn only.
     pub log_explorer_context: Option<LogExplorerTurnContext>,
+    /// Host-retained evidence for an explicit synthesis-only retry.
+    pub linked_synthesis_retry: Option<LinkedSynthesisCheckpoint>,
+}
+
+/// Host-only checkpoint retained after linked evidence succeeds but synthesis
+/// times out. It contains only redacted, bounded tool context already supplied
+/// to the provider and is never serialized to the webview.
+#[derive(Debug, Clone)]
+pub struct LinkedSynthesisCheckpoint {
+    session_id: String,
+    corpus_id: String,
+    model: Option<String>,
+    user_text: String,
+    evidence: String,
+    identities: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+}
+
+impl LinkedSynthesisCheckpoint {
+    /// Whether this checkpoint belongs to the exact chat, corpus, and model.
+    pub fn matches(&self, session_id: &str, corpus_id: &str, model: Option<&str>) -> bool {
+        self.session_id == session_id
+            && self.corpus_id == corpus_id
+            && self.model.as_deref() == model
+    }
+
+    /// Session that owns this checkpoint.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Corpus that owns this checkpoint.
+    pub fn corpus_id(&self) -> &str {
+        &self.corpus_id
+    }
 }
 
 /// Trusted origin for one explicitly linked log turn.
@@ -608,6 +646,7 @@ impl Default for AgentOptions {
         Self {
             max_rounds: b.max_tool_rounds,
             deadline_ms: b.deadline_ms,
+            deadline_plan: None,
             max_results_per_source: b.max_results_per_source,
             session_id: "session".into(),
             model: None,
@@ -616,6 +655,7 @@ impl Default for AgentOptions {
             ambient_recall_enabled: true,
             context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
             log_explorer_context: None,
+            linked_synthesis_retry: None,
         }
     }
 }
@@ -631,6 +671,7 @@ impl AgentOptions {
         Self {
             max_rounds: b.max_tool_rounds,
             deadline_ms: b.deadline_ms,
+            deadline_plan: None,
             max_results_per_source: b.max_results_per_source,
             session_id: session_id.into(),
             model,
@@ -639,6 +680,7 @@ impl AgentOptions {
             ambient_recall_enabled: true,
             context_char_budget: crate::sessions::DEFAULT_CONTEXT_CHAR_BUDGET,
             log_explorer_context: None,
+            linked_synthesis_retry: None,
         }
     }
 
@@ -646,6 +688,16 @@ impl AgentOptions {
     pub fn effective_context_char_budget(&self) -> usize {
         self.context_char_budget
             .max(crate::model_context::MIN_CONTEXT_CHAR_BUDGET)
+    }
+
+    fn effective_deadline_plan(&self) -> TurnDeadlinePlan {
+        self.deadline_plan.unwrap_or(TurnDeadlinePlan {
+            total_ms: self.deadline_ms,
+            choosing_ms: self.deadline_ms,
+            retrieving_ms: self.deadline_ms,
+            synthesizing_ms: self.deadline_ms,
+            explicit: true,
+        })
     }
 }
 
@@ -774,23 +826,89 @@ fn terminal_context_too_long(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TurnDeadlineElapsed;
+enum TurnAwaitError {
+    Deadline,
+    Cancelled,
+}
+
+struct TurnClock {
+    started: Instant,
+    phase_started: Instant,
+    phase: AgentPhase,
+    plan: TurnDeadlinePlan,
+}
+
+impl TurnClock {
+    fn new(plan: TurnDeadlinePlan) -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            phase_started: now,
+            phase: AgentPhase::ChoosingEvidence,
+            plan,
+        }
+    }
+
+    fn enter(&mut self, phase: AgentPhase) -> bool {
+        if self.phase == phase {
+            return false;
+        }
+        self.phase = phase;
+        self.phase_started = Instant::now();
+        true
+    }
+
+    fn expired(&self) -> bool {
+        self.plan.total_ms > 0
+            && self.started.elapsed() >= Duration::from_millis(self.plan.total_ms)
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        if self.plan.total_ms == 0 {
+            return None;
+        }
+        let total =
+            Duration::from_millis(self.plan.total_ms).saturating_sub(self.started.elapsed());
+        let phase = Duration::from_millis(self.plan.for_phase(self.phase))
+            .saturating_sub(self.phase_started.elapsed());
+        Some(total.min(phase))
+    }
+}
+
+async fn wait_for_cancel(cancel: Option<&std::sync::atomic::AtomicBool>) {
+    let Some(cancel) = cancel else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 async fn within_turn_deadline<F, T>(
-    started: Instant,
-    deadline_ms: u64,
+    clock: &TurnClock,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
     future: F,
-) -> Result<T, TurnDeadlineElapsed>
+) -> Result<T, TurnAwaitError>
 where
     F: Future<Output = T>,
 {
-    if deadline_ms == 0 {
-        return Ok(future.await);
+    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(TurnAwaitError::Cancelled);
     }
-    let remaining = Duration::from_millis(deadline_ms).saturating_sub(started.elapsed());
-    tokio::time::timeout(remaining, future)
-        .await
-        .map_err(|_| TurnDeadlineElapsed)
+    let bounded = async {
+        match clock.remaining() {
+            None => Ok(future.await),
+            Some(remaining) if remaining.is_zero() => Err(TurnAwaitError::Deadline),
+            Some(remaining) => tokio::time::timeout(remaining, future)
+                .await
+                .map_err(|_| TurnAwaitError::Deadline),
+        }
+    };
+    tokio::select! {
+        result = bounded => result,
+        _ = wait_for_cancel(cancel) => Err(TurnAwaitError::Cancelled),
+    }
 }
 
 fn terminal_budget_time(
@@ -812,6 +930,206 @@ fn terminal_budget_time(
     out.push(StreamEvent::TurnCompleted {
         reason: "budget_time".into(),
     });
+    Ok(out.into_events())
+}
+
+fn terminal_synthesis_time(
+    mut out: EventCollector<'_>,
+    trail: &[String],
+    deadline_ms: u64,
+    evidence_preserved: bool,
+) -> CoreResult<Vec<StreamEvent>> {
+    if !evidence_preserved {
+        return terminal_budget_time(
+            out,
+            trail,
+            deadline_ms,
+            "waiting for final provider synthesis",
+        );
+    }
+    let mut steps = trail.to_vec();
+    steps.push("linked_evidence_preserved_for_synthesis_retry".into());
+    out.push(StreamEvent::SearchTrail { steps });
+    out.push(StreamEvent::Error {
+        code: "linked_synthesis_timeout".into(),
+        message: format!(
+            "Answer synthesis reached its bounded deadline within the {deadline_ms} ms turn \
+             ceiling. The successful log evidence above is preserved. Retry synthesis to answer \
+             from that evidence without running retrieval again."
+        ),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "linked_synthesis_timeout".into(),
+    });
+    Ok(out.into_events())
+}
+
+fn terminal_cancel(mut out: EventCollector<'_>) -> CoreResult<Vec<StreamEvent>> {
+    out.push(StreamEvent::TurnCompleted {
+        reason: "cancel".into(),
+    });
+    Ok(out.into_events())
+}
+
+fn enter_phase(
+    out: &mut EventCollector<'_>,
+    trail: &mut Vec<String>,
+    clock: &mut TurnClock,
+    phase: AgentPhase,
+) {
+    if clock.enter(phase) || !trail.iter().any(|step| step == "phase:choosing_evidence") {
+        trail.push(format!(
+            "phase:{}",
+            match phase {
+                AgentPhase::ChoosingEvidence => "choosing_evidence",
+                AgentPhase::RetrievingEvidence => "retrieving_evidence",
+                AgentPhase::SynthesizingAnswer => "synthesizing_answer",
+            }
+        ));
+        out.push(StreamEvent::TurnPhase { phase });
+    }
+}
+
+async fn run_linked_synthesis_retry(
+    backend: &dyn ChatBackend,
+    _request_text: &str,
+    history: &mut Vec<ChatMessage>,
+    opts: &AgentOptions,
+    checkpoint: &LinkedSynthesisCheckpoint,
+    mut out: EventCollector<'_>,
+    mut checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+) -> CoreResult<Vec<StreamEvent>> {
+    let Some(context) = opts.log_explorer_context.as_ref() else {
+        out.push(StreamEvent::Error {
+            code: "linked_synthesis_retry_stale".into(),
+            message: "Synthesis-only retry requires the original corpus-linked chat.".into(),
+        });
+        out.push(StreamEvent::TurnCompleted {
+            reason: "linked_synthesis_retry_stale".into(),
+        });
+        return Ok(out.into_events());
+    };
+    if !checkpoint.matches(&opts.session_id, &context.corpus_id, opts.model.as_deref()) {
+        out.push(StreamEvent::Error {
+            code: "linked_synthesis_retry_stale".into(),
+            message: "The preserved evidence belongs to a different chat, corpus, or model. \
+                      Run a new linked investigation instead."
+                .into(),
+        });
+        out.push(StreamEvent::TurnCompleted {
+            reason: "linked_synthesis_retry_stale".into(),
+        });
+        return Ok(out.into_events());
+    }
+    if let Some(slot) = checkpoint_out.as_deref_mut() {
+        *slot = Some(checkpoint.clone());
+    }
+
+    let plan = opts.effective_deadline_plan();
+    let mut clock = TurnClock::new(plan);
+    let mut trail = vec![
+        format!(
+            "budget:deadline={}ms,deadline_policy={}",
+            plan.total_ms,
+            if plan.explicit {
+                "explicit"
+            } else {
+                "adaptive"
+            }
+        ),
+        "linked_synthesis_retry:preserved_evidence".into(),
+    ];
+    enter_phase(
+        &mut out,
+        &mut trail,
+        &mut clock,
+        AgentPhase::SynthesizingAnswer,
+    );
+    let mut model_ctx = vec![
+        ChatMessage {
+            role: Role::System,
+            content: context.staged_synthesis_system_hint(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: checkpoint.user_text.clone(),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+        ChatMessage {
+            role: Role::User,
+            content: format!(
+                "HOST-RETURNED BOUNDED EVIDENCE — synthesis retry; no retrieval is available:\n{}",
+                checkpoint.evidence
+            ),
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    ];
+    enforce_hard_context_budget(&mut model_ctx, opts.effective_context_char_budget())
+        .map_err(CoreError::Message)?;
+
+    let cancel_ref = opts.cancel.as_ref().map(|cancel| cancel.as_ref());
+    let mut withheld = String::new();
+    let mut on_text = |text: String| {
+        if !text.is_empty() {
+            withheld.push_str(&text);
+        }
+    };
+    let completion = match within_turn_deadline(
+        &clock,
+        cancel_ref,
+        backend.complete_streaming(&model_ctx, &[], &mut on_text, cancel_ref),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(TurnAwaitError::Cancelled) => return terminal_cancel(out),
+        Err(TurnAwaitError::Deadline) => {
+            return terminal_synthesis_time(out, &trail, plan.total_ms, true);
+        }
+    }?;
+    let content = if completion.content.trim().is_empty() {
+        withheld
+    } else {
+        completion.content
+    };
+    let invalid = content.trim().is_empty()
+        || linked_answer_mistakes_wrapper_for_evidence(&content)
+        || !linked_answer_cites_concrete_evidence(&content, &checkpoint.identities);
+    if invalid {
+        trail.push("linked_synthesis_retry_invalid_answer_withheld".into());
+        out.push(StreamEvent::Error {
+            code: "linked_invalid_grounded_answer".into(),
+            message: "The synthesis retry did not cite the preserved host evidence correctly. \
+                      ContextDesk withheld it; the evidence remains available for another retry."
+                .into(),
+        });
+        out.push(StreamEvent::SearchTrail { steps: trail });
+        out.push(StreamEvent::TurnCompleted {
+            reason: "linked_invalid_grounded_answer".into(),
+        });
+        return Ok(out.into_events());
+    }
+    out.push(StreamEvent::TextDelta {
+        text: content.clone(),
+    });
+    trail.push("linked_synthesis_retry_completed".into());
+    out.push(StreamEvent::SearchTrail { steps: trail });
+    out.push(StreamEvent::TurnCompleted {
+        reason: "stop".into(),
+    });
+    history.push(ChatMessage {
+        role: Role::Assistant,
+        content,
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    if let Some(slot) = checkpoint_out {
+        *slot = None;
+    }
     Ok(out.into_events())
 }
 
@@ -908,7 +1226,8 @@ pub async fn run_agent_turn(
     history: &mut Vec<ChatMessage>,
     opts: &AgentOptions,
 ) -> CoreResult<Vec<StreamEvent>> {
-    run_agent_turn_with_sink(backend, host, user_text, history, opts, None).await
+    run_agent_turn_with_sink_and_checkpoint(backend, host, user_text, history, opts, None, None)
+        .await
 }
 
 /// Run agent loop with optional live event sink (for Channel streaming to UI).
@@ -920,6 +1239,24 @@ pub async fn run_agent_turn_with_sink(
     opts: &AgentOptions,
     live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
 ) -> CoreResult<Vec<StreamEvent>> {
+    run_agent_turn_with_sink_and_checkpoint(backend, host, user_text, history, opts, live, None)
+        .await
+}
+
+/// Run one turn while returning a host-only synthesis checkpoint when bounded
+/// linked retrieval succeeds but final synthesis cannot complete.
+pub async fn run_agent_turn_with_sink_and_checkpoint(
+    backend: &dyn ChatBackend,
+    host: &mut ToolHost,
+    user_text: &str,
+    history: &mut Vec<ChatMessage>,
+    opts: &AgentOptions,
+    live: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    mut checkpoint_out: Option<&mut Option<LinkedSynthesisCheckpoint>>,
+) -> CoreResult<Vec<StreamEvent>> {
+    if let Some(checkpoint) = checkpoint_out.as_deref_mut() {
+        *checkpoint = None;
+    }
     let mut out = EventCollector {
         events: Vec::new(),
         live,
@@ -930,6 +1267,19 @@ pub async fn run_agent_turn_with_sink(
     });
     // ToolHost owns the per-session web limiter and session-context view.
     host.set_active_session_id(Some(opts.session_id.clone()));
+
+    if let Some(checkpoint) = opts.linked_synthesis_retry.as_ref() {
+        return run_linked_synthesis_retry(
+            backend,
+            user_text,
+            history,
+            opts,
+            checkpoint,
+            out,
+            checkpoint_out,
+        )
+        .await;
+    }
 
     // Linked Log Explorer turns require bounded log evidence, but may also use
     // the host's normal governed read surface (#601). Write tools are not
@@ -1041,11 +1391,19 @@ pub async fn run_agent_turn_with_sink(
     // Enforce per-source result caps on tools for this turn.
     host.set_max_results_per_source(opts.max_results_per_source);
 
+    let deadline_plan = opts.effective_deadline_plan();
     let mut trail: Vec<String> = vec![
         "started".into(),
         format!(
-            "budget:rounds={},per_source={},deadline={}ms",
-            opts.max_rounds, opts.max_results_per_source, opts.deadline_ms
+            "budget:rounds={},per_source={},deadline={}ms,deadline_policy={}",
+            opts.max_rounds,
+            opts.max_results_per_source,
+            deadline_plan.total_ms,
+            if deadline_plan.explicit {
+                "explicit"
+            } else {
+                "adaptive"
+            }
         ),
     ];
     if linked_turn {
@@ -1066,7 +1424,7 @@ pub async fn run_agent_turn_with_sink(
             trail.push("linked_requested_workspace_surface:search_kb".into());
         }
     }
-    let started = Instant::now();
+    let mut clock = TurnClock::new(deadline_plan);
     let mut pending_web_citations = Vec::new();
     // UI notice for hard-budget compaction — once per user turn only.
     let mut compact_notice_sent = false;
@@ -1083,11 +1441,11 @@ pub async fn run_agent_turn_with_sink(
             });
             return Ok(out.into_events());
         }
-        if opts.deadline_ms > 0 && started.elapsed().as_millis() as u64 >= opts.deadline_ms {
+        if clock.expired() {
             return terminal_budget_time(
                 out,
                 &trail,
-                opts.deadline_ms,
+                deadline_plan.total_ms,
                 "starting the next agent round",
             );
         }
@@ -1110,6 +1468,16 @@ pub async fn run_agent_turn_with_sink(
         let linked_required_evidence_satisfied = !linked_turn || missing_required_tool.is_none();
         let linked_staged_synthesis_ready =
             linked_turn && linked_required_evidence_satisfied && !linked_broader_reads_required;
+        enter_phase(
+            &mut out,
+            &mut trail,
+            &mut clock,
+            if linked_staged_synthesis_ready {
+                AgentPhase::SynthesizingAnswer
+            } else {
+                AgentPhase::ChoosingEvidence
+            },
+        );
         // Linked prose is provisional until its final evidence/citation check.
         // Hold it out of the UI so a small model cannot briefly present a
         // fabricated or wrapper-derived conclusion before host validation.
@@ -1328,19 +1696,29 @@ pub async fn run_agent_turn_with_sink(
                 &specs
             };
             let result = match within_turn_deadline(
-                started,
-                opts.deadline_ms,
+                &clock,
+                cancel_ref,
                 backend.complete_streaming(&model_ctx, tool_arg, &mut on_text, cancel_ref),
             )
             .await
             {
                 Ok(result) => result,
-                Err(_) => {
+                Err(TurnAwaitError::Cancelled) => return terminal_cancel(out),
+                Err(TurnAwaitError::Deadline) => {
+                    if clock.phase == AgentPhase::SynthesizingAnswer {
+                        let preserved = checkpoint_out.as_ref().is_some_and(|slot| slot.is_some());
+                        return terminal_synthesis_time(
+                            out,
+                            &trail,
+                            deadline_plan.total_ms,
+                            preserved,
+                        );
+                    }
                     return terminal_budget_time(
                         out,
                         &trail,
-                        opts.deadline_ms,
-                        "waiting for the provider",
+                        deadline_plan.total_ms,
+                        "waiting for the provider to choose bounded evidence",
                     );
                 }
             };
@@ -1364,19 +1742,26 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     });
                     // Soft-ground the model with a local KB prefetch when tools are off.
                     // Prefetch is unbounded from search — re-enforce hard budget before retry.
+                    enter_phase(
+                        &mut out,
+                        &mut trail,
+                        &mut clock,
+                        AgentPhase::RetrievingEvidence,
+                    );
                     let prefetched = match within_turn_deadline(
-                        started,
-                        opts.deadline_ms,
+                        &clock,
+                        cancel_ref,
                         prefetch_context(host, user_text),
                     )
                     .await
                     {
                         Ok(result) => result,
-                        Err(_) => {
+                        Err(TurnAwaitError::Cancelled) => return terminal_cancel(out),
+                        Err(TurnAwaitError::Deadline) => {
                             return terminal_budget_time(
                                 out,
                                 &trail,
-                                opts.deadline_ms,
+                                deadline_plan.total_ms,
                                 "running the local knowledge prefetch",
                             );
                         }
@@ -1403,6 +1788,12 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                             }
                         }
                     }
+                    enter_phase(
+                        &mut out,
+                        &mut trail,
+                        &mut clock,
+                        AgentPhase::ChoosingEvidence,
+                    );
                     continue;
                 }
                 Err(e) if attempt == 0 && classify_context_error(&e) => {
@@ -1666,6 +2057,11 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             out.push(StreamEvent::TurnCompleted {
                 reason: completion.finish_reason,
             });
+            if linked_required_evidence_satisfied {
+                if let Some(slot) = checkpoint_out.as_deref_mut() {
+                    *slot = None;
+                }
+            }
             return Ok(out.into_events());
         }
 
@@ -1788,19 +2184,26 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             // Tool execution errors must not kill the whole turn (e.g. HTTP 401
             // on a news site). Feed the failure back as tool content so the
             // model can try another URL or answer from search snippets.
+            enter_phase(
+                &mut out,
+                &mut trail,
+                &mut clock,
+                AgentPhase::RetrievingEvidence,
+            );
             let tool_result = match within_turn_deadline(
-                started,
-                opts.deadline_ms,
+                &clock,
+                cancel_ref,
                 host.execute(&resolved_tool_name, &args, None),
             )
             .await
             {
                 Ok(result) => result,
-                Err(_) => {
+                Err(TurnAwaitError::Cancelled) => return terminal_cancel(out),
+                Err(TurnAwaitError::Deadline) => {
                     return terminal_budget_time(
                         out,
                         &trail,
-                        opts.deadline_ms,
+                        deadline_plan.total_ms,
                         &format!("executing tool `{resolved_tool_name}`"),
                     );
                 }
@@ -1891,6 +2294,33 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 tool_call_id: Some(tc.id),
                 tool_calls: None,
             });
+            let required_workspace_ready = !linked_workspace_search_required
+                || successful_read_tools.contains(crate::tools::names::SEARCH_KB);
+            if linked_turn
+                && successful_log_tools > 0
+                && required_workspace_ready
+                && !linked_log_evidence_identities.is_empty()
+            {
+                let evidence = history
+                    .iter()
+                    .filter(|message| message.role == Role::Tool)
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if let (Some(context), Some(slot)) = (
+                    opts.log_explorer_context.as_ref(),
+                    checkpoint_out.as_deref_mut(),
+                ) {
+                    *slot = Some(LinkedSynthesisCheckpoint {
+                        session_id: opts.session_id.clone(),
+                        corpus_id: context.corpus_id.clone(),
+                        model: opts.model.clone(),
+                        user_text: user_text.to_string(),
+                        evidence,
+                        identities: linked_log_evidence_identities.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -1964,6 +2394,12 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
         }
     };
     let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
+    enter_phase(
+        &mut out,
+        &mut trail,
+        &mut clock,
+        AgentPhase::SynthesizingAnswer,
+    );
     let mut streamed_text = false;
     let mut withheld_linked_synthesis = String::new();
     let mut on_text = |t: String| {
@@ -1977,20 +2413,17 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
         }
     };
     let synthesis = match within_turn_deadline(
-        started,
-        opts.deadline_ms,
+        &clock,
+        cancel_ref,
         backend.complete_streaming(&model_ctx, &[], &mut on_text, cancel_ref),
     )
     .await
     {
         Ok(result) => result,
-        Err(_) => {
-            return terminal_budget_time(
-                out,
-                &trail,
-                opts.deadline_ms,
-                "waiting for final provider synthesis",
-            );
+        Err(TurnAwaitError::Cancelled) => return terminal_cancel(out),
+        Err(TurnAwaitError::Deadline) => {
+            let preserved = checkpoint_out.as_ref().is_some_and(|slot| slot.is_some());
+            return terminal_synthesis_time(out, &trail, deadline_plan.total_ms, preserved);
         }
     };
     match synthesis {
@@ -2053,6 +2486,9 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             out.push(StreamEvent::TurnCompleted {
                 reason: "budget_rounds_answer".into(),
             });
+            if let Some(slot) = checkpoint_out {
+                *slot = None;
+            }
             Ok(out.into_events())
         }
         Err(e) if e.to_string().contains("cancelled") => {
@@ -3951,6 +4387,311 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::TextDelta { text } if text.contains("should not"))));
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    fn linked_timeout_fixture() -> (tempfile::TempDir, ToolHost, LogExplorerTurnContext) {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let mut file = fs::File::create(logs.join("worker.log")).unwrap();
+        writeln!(
+            file,
+            r#"{{"ts":1700000100,"level":"error","message":"event_id=worker-loop job-7f3a pool exhausted"}}"#
+        )
+        .unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let report =
+            crate::log_analysis::ingest_path(&cache, &logs, "deadline", None, "none").unwrap();
+        let workspace = Workspace::new("deadline", vec![dir.path().to_path_buf()]);
+        let mut host = ToolHost::new(workspace, KeywordIndex::new(), None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(report.corpus_id.clone()));
+        let context =
+            LogExplorerTurnContext::new("deadline-window", report.corpus_id, "All sources")
+                .unwrap();
+        (dir, host, context)
+    }
+
+    struct ToolThenNeverBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatBackend for ToolThenNeverBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(ChatCompletion {
+                    content: String::new(),
+                    tool_calls: vec![ToolCallMsg {
+                        id: "search".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::log_analysis::SEARCH_LOGS.into(),
+                            arguments: r#"{"query":"job-7f3a"}"#.into(),
+                        },
+                    }],
+                    finish_reason: "tool_calls".into(),
+                });
+            }
+            std::future::pending().await
+        }
+    }
+
+    struct RejectLinkedToolsBackend;
+
+    #[async_trait]
+    impl ChatBackend for RejectLinkedToolsBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            if !tools.is_empty() {
+                return Err(CoreError::Message(
+                    r#"chat HTTP 400 Bad Request: {"message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"}"#
+                        .into(),
+                ));
+            }
+            Ok(ChatCompletion {
+                content: "I inspected the logs and everything is fine.".into(),
+                tool_calls: vec![],
+                finish_reason: "stop".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_tool_rejection_stays_honest_and_creates_no_checkpoint() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        let mut history = Vec::new();
+        let mut checkpoint = None;
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &RejectLinkedToolsBackend,
+            &mut host,
+            "What failed?",
+            &mut history,
+            &AgentOptions {
+                session_id: "linked-rejected-tools".into(),
+                model: Some("chat-only-endpoint".into()),
+                log_explorer_context: Some(context),
+                max_rounds: 2,
+                ..Default::default()
+            },
+            None,
+            Some(&mut checkpoint),
+        )
+        .await
+        .unwrap();
+
+        assert!(checkpoint.is_none());
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "tools_unsupported")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "linked_no_tool")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn linked_retrieval_survives_synthesis_timeout_and_retries_without_tools() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        let backend = ToolThenNeverBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let mut history = Vec::new();
+        let mut checkpoint = None;
+        let plan = TurnDeadlinePlan {
+            total_ms: 100,
+            choosing_ms: 40,
+            retrieving_ms: 40,
+            synthesizing_ms: 20,
+            explicit: true,
+        };
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &backend,
+            &mut host,
+            "What caused the worker failure?",
+            &mut history,
+            &AgentOptions {
+                session_id: "linked-timeout".into(),
+                model: Some("slow-private".into()),
+                log_explorer_context: Some(context.clone()),
+                deadline_plan: Some(plan),
+                max_rounds: 4,
+                ..Default::default()
+            },
+            None,
+            Some(&mut checkpoint),
+        )
+        .await
+        .unwrap();
+
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Tool { name, ok: Some(true), .. } if name == crate::log_analysis::SEARCH_LOGS)
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::Error { code, .. } if code == "linked_synthesis_timeout")
+        ));
+        let phases = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TurnPhase { phase } => Some(*phase),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            vec![
+                AgentPhase::ChoosingEvidence,
+                AgentPhase::RetrievingEvidence,
+                AgentPhase::SynthesizingAnswer
+            ]
+        );
+        let checkpoint = checkpoint.expect("bounded evidence checkpoint");
+
+        let retry = ScriptedBackend::new(vec![ChatCompletion {
+            content: "Observed pool exhaustion at seq=0 source=worker.log.".into(),
+            tool_calls: vec![],
+            finish_reason: "stop".into(),
+        }]);
+        let mut retry_checkpoint = Some(checkpoint.clone());
+        let retry_events = run_agent_turn_with_sink_and_checkpoint(
+            &retry,
+            &mut host,
+            "",
+            &mut history,
+            &AgentOptions {
+                session_id: "linked-timeout".into(),
+                model: Some("slow-private".into()),
+                log_explorer_context: Some(context),
+                linked_synthesis_retry: Some(checkpoint),
+                deadline_plan: Some(plan),
+                ..Default::default()
+            },
+            None,
+            Some(&mut retry_checkpoint),
+        )
+        .await
+        .unwrap();
+        assert!(!retry_events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Tool { .. })));
+        assert_eq!(
+            retry_events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::TurnPhase { phase } => Some(*phase),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![AgentPhase::SynthesizingAnswer]
+        );
+        assert!(retry_events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta { text } if text.contains("seq=0 source=worker.log"))
+        ));
+        assert!(retry_checkpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn synthesis_checkpoint_rejects_wrong_chat_corpus_and_model() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        let checkpoint = LinkedSynthesisCheckpoint {
+            session_id: "chat-a".into(),
+            corpus_id: context.corpus_id.clone(),
+            model: Some("model-a".into()),
+            user_text: "question".into(),
+            evidence: "redacted bounded evidence".into(),
+            identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+                seq: 0,
+                source: "worker.log".into(),
+                template_id: 1,
+            }]),
+        };
+        let backend = ScriptedBackend::new(Vec::new());
+        let mut history = Vec::new();
+        for (session, corpus, model) in [
+            ("chat-b", context.corpus_id.as_str(), "model-a"),
+            ("chat-a", "wrong-corpus", "model-a"),
+            ("chat-a", context.corpus_id.as_str(), "model-b"),
+        ] {
+            let retry_context =
+                LogExplorerTurnContext::new("retry-window", corpus, "All sources").unwrap();
+            let events = run_agent_turn(
+                &backend,
+                &mut host,
+                "",
+                &mut history,
+                &AgentOptions {
+                    session_id: session.into(),
+                    model: Some(model.into()),
+                    log_explorer_context: Some(retry_context),
+                    linked_synthesis_retry: Some(checkpoint.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(events.iter().any(
+                |event| matches!(event, StreamEvent::Error { code, .. } if code == "linked_synthesis_retry_stale")
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_races_every_bounded_phase() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        for phase in [
+            AgentPhase::ChoosingEvidence,
+            AgentPhase::RetrievingEvidence,
+            AgentPhase::SynthesizingAnswer,
+        ] {
+            let flag = Arc::new(AtomicBool::new(false));
+            let trigger = Arc::clone(&flag);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                trigger.store(true, Ordering::SeqCst);
+            });
+            let mut clock = TurnClock::new(TurnDeadlinePlan {
+                total_ms: 1_000,
+                choosing_ms: 900,
+                retrieving_ms: 900,
+                synthesizing_ms: 900,
+                explicit: true,
+            });
+            clock.enter(phase);
+            let result =
+                within_turn_deadline(&clock, Some(flag.as_ref()), std::future::pending::<()>())
+                    .await;
+            assert_eq!(result, Err(TurnAwaitError::Cancelled), "phase={phase:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phase_caps_never_extend_the_monotonic_whole_turn_deadline() {
+        let mut clock = TurnClock::new(TurnDeadlinePlan {
+            total_ms: 100,
+            choosing_ms: 90,
+            retrieving_ms: 90,
+            synthesizing_ms: 90,
+            explicit: true,
+        });
+        tokio::time::advance(Duration::from_millis(90)).await;
+        clock.enter(AgentPhase::SynthesizingAnswer);
+        let result =
+            within_turn_deadline(&clock, None, tokio::time::sleep(Duration::from_millis(20))).await;
+        assert_eq!(result, Err(TurnAwaitError::Deadline));
+        assert!(clock.started.elapsed() <= Duration::from_millis(101));
     }
 
     #[tokio::test]

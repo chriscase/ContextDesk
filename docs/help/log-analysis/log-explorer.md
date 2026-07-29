@@ -239,6 +239,13 @@ permission-blocked sources remain visible rather than becoming silent success.
 Raw corpora, workspaces, databases, evaluator truth, credentials, and absolute
 source paths are not inserted wholesale.
 
+During a linked turn, the chat reports whether it is choosing evidence,
+retrieving bounded evidence, or synthesizing an evidence-cited answer. **Stop**
+interrupts the active provider or tool wait. If retrieval succeeded but
+synthesis reached its bounded deadline, the evidence remains visible and
+**Retry synthesis** answers from that preserved evidence without another log
+search. The retry is accepted only for the same chat, corpus, and model.
+
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.
 

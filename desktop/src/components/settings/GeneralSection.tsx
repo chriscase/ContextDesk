@@ -14,7 +14,7 @@ import {
   type SourceGitStatusDto,
 } from "../../lib/host";
 import type { AppSetupState } from "../../lib/preflight";
-import { TextField } from "../forms";
+import { SelectField, TextField } from "../forms";
 
 export type GeneralSectionProps = {
   baseId: string;
@@ -377,9 +377,14 @@ export function GeneralSection({
       />
       <TextField
         id={`${baseId}-deadline`}
-        label="Deadline (ms)"
-        hint="Whole-turn stop across provider calls, tools, and synthesis. Cancel remains immediate."
+        label="Whole-turn ceiling (ms)"
+        hint={
+          routerBudget.deadline_is_explicit
+            ? "Your custom monotonic ceiling. Choosing, retrieval, and synthesis remain separately bounded inside it."
+            : "Adaptive: 5 minutes for local/private profiles and 2 minutes for managed profiles. Every phase remains bounded."
+        }
         value={String(routerBudget.deadline_ms)}
+        disabled={!routerBudget.deadline_is_explicit}
         onChange={(e) =>
           setRouterBudget((b) => ({
             ...b,
@@ -387,6 +392,21 @@ export function GeneralSection({
           }))
         }
       />
+      <SelectField
+        id={`${baseId}-deadline-policy`}
+        label="Deadline policy"
+        hint="Adaptive is patient with local and private-network models. Custom keeps the exact ceiling you enter above."
+        value={routerBudget.deadline_is_explicit ? "explicit" : "adaptive"}
+        onChange={(event) =>
+          setRouterBudget((budget) => ({
+            ...budget,
+            deadline_is_explicit: event.target.value === "explicit",
+          }))
+        }
+      >
+        <option value="adaptive">Adaptive by provider</option>
+        <option value="explicit">Custom whole-turn ceiling</option>
+      </SelectField>
     </div>
   );
 }
