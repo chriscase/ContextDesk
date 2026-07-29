@@ -592,6 +592,10 @@ describe("TimelineNavigator", () => {
     const style = getComputedStyle(body!);
     expect(style.overflowY).toBe("auto");
     expect((body as HTMLElement).style.maxHeight).toBe("min(44vh, 30rem)");
+    expect(body?.getAttribute("aria-label")).toBe(
+      "Timeline and aligned metric tracks",
+    );
+    expect(body?.getAttribute("tabindex")).toBe("0");
     expect(
       screen
         .getByTestId("timeline-session-metrics")

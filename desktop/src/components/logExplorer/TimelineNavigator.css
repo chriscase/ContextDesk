@@ -51,11 +51,17 @@
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 0.25rem 0.55rem;
+  min-height: 0;
   width: 100%;
   padding-right: 0.15rem;
   overflow-x: hidden;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.timeline-navigator .timeline-navigator__body:focus-visible {
+  outline: 2px solid var(--accent, #5b9fd4);
+  outline-offset: -2px;
 }
 
 .timeline-navigator__track {

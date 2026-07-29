@@ -586,6 +586,9 @@ export function TimelineNavigator({
         <div
           id="log-explorer-timeline-navigator"
           className="log-explorer__navigator-body timeline-navigator__body"
+          role="region"
+          aria-label="Timeline and aligned metric tracks"
+          tabIndex={0}
           style={{ maxHeight: "min(44vh, 30rem)", overflowY: "auto" }}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
