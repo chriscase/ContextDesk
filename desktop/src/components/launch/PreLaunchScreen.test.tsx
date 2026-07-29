@@ -220,7 +220,7 @@ describe("optional first-run demo corpus (#732)", () => {
     const enter = screen.getByRole("button", {
       name: "Enter app · Open Logs",
     });
-    expect(document.activeElement).toBe(enter);
+    await waitFor(() => expect(document.activeElement).toBe(enter));
     expect((enter as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -264,7 +264,7 @@ describe("optional first-run demo corpus (#732)", () => {
     expect(screen.getByText("Installation cancelled")).toBeTruthy();
     expect(screen.getByText(/No demo corpus was installed/)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(document.activeElement).toBe(retry);
+    await waitFor(() => expect(document.activeElement).toBe(retry));
   });
 
   it("keeps cancellation failure visible while installation continues", async () => {
@@ -344,7 +344,7 @@ describe("optional first-run demo corpus (#732)", () => {
     expect(screen.getByRole("alert").textContent).toContain(
       "Synthetic import failure",
     );
-    expect(document.activeElement).toBe(retry);
+    await waitFor(() => expect(document.activeElement).toBe(retry));
     fireEvent.click(retry);
     await screen.findByText("Demo installed");
     expect(hostMocks.install).toHaveBeenCalledTimes(2);
@@ -397,7 +397,7 @@ describe("optional first-run demo corpus (#732)", () => {
       const enter = await screen.findByRole("button", {
         name: "Enter app · Open Logs",
       });
-      expect(document.activeElement).toBe(enter);
+      await waitFor(() => expect(document.activeElement).toBe(enter));
       fireEvent.click(enter);
       expect(onEnterApp).toHaveBeenCalledWith({ openLogs: true });
 
