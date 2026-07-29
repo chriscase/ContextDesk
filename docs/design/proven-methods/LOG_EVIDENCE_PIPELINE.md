@@ -294,6 +294,21 @@ Current local #681 behavior additionally:
 - deterministically truncates fractional input to whole seconds; and
 - keeps offsetless, yearless, malformed, and missing timestamps order-only.
 
+The #747 parser slice also recognizes the common JBoss/WildFly
+`server.log` prefix
+`YYYY-MM-DD HH:mm:ss,SSS LEVEL [logger] (thread) message` (including a dot
+millisecond separator). Logger and thread text remain in the parsed message and
+the redacted Original retains the complete normalized line. An attached or
+separate `Z`/numeric offset is normalized to a whole Unix second. An offsetless
+local calendar timestamp is validated but the event deliberately retains
+ingest-order time. The transient parser result exposes that validated source
+text as `unresolved_local_timestamp` so a bounded import-preview sampler can
+ask for timezone policy without guessing. Current ingest does not persist this
+field because the event schema has no honest place for the local datetime,
+timezone provenance, or DST ambiguity. A future #670 per-source timezone rule
+must preserve that source text, preview the chosen interpretation, and record
+the rule before the event becomes wall-time alignable.
+
 The last two points are limitations, not a complete timestamp system. A
 reimplementation should design the richer #670 contract before writing data:
 original timestamp evidence, precision, explicit time basis, timezone rule
@@ -598,6 +613,7 @@ instant while ambiguous controls remain order-only.
 | Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
+| JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
 | Arbitrary timestamp diversity  | **Planned/partial**           | Ambiguous inputs fail to order rather than guess              | #670 timezone/year/DST/skew contract    |
 | Query/facets/search            | **Shipped**                   | Bounded event and template-aware retrieval                    | Unbounded regex or raw dumps            |
 | Timeline                       | **Partial**                   | Shared-axis log summary, metric tracks, scrubber, severity signal, resident range, lane coverage, and viewport-follow cursor | Durable metric attachment, metric chat context, and full #670 time policy |
