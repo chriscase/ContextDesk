@@ -548,8 +548,13 @@ describe("LogExplorer shell", () => {
   it("loads first evidence rows before starting large-corpus facet aggregation", async () => {
     const firstPage = deferred<host.EventPageDto>();
     const facetPage = deferred<host.LogFacetsDto>();
+    let evidenceVisibleWhenFacetsStarted = false;
     vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
-    vi.mocked(host.hostLogFacets).mockReturnValue(facetPage.promise);
+    vi.mocked(host.hostLogFacets).mockImplementation(() => {
+      evidenceVisibleWhenFacetsStarted =
+        screen.queryByText(/auth failure/) != null;
+      return facetPage.promise;
+    });
 
     render(<LogExplorer corpusId="c1" />);
 
@@ -569,6 +574,7 @@ describe("LogExplorer shell", () => {
 
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
     await waitFor(() => expect(host.hostLogFacets).toHaveBeenCalledTimes(1));
+    expect(evidenceVisibleWhenFacetsStarted).toBe(true);
     expect(screen.getByTestId("log-explorer-facets-loading")).toBeTruthy();
 
     await act(async () => {
@@ -3713,7 +3719,9 @@ describe("LogExplorer shell", () => {
 
     const eventQueryCalls = vi.mocked(host.hostLogQueryEvents).mock.calls
       .length;
-    fireEvent.click(screen.getByRole("checkbox", { name: /db\.log/ }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: /db\.log/ }),
+    );
 
     await waitFor(() =>
       expect(
@@ -4574,6 +4582,11 @@ describe("LogExplorer shell", () => {
       timeQuality: "order_only",
     });
     render(<LogExplorer corpusId="c1" />);
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("log-explorer-facets-loading"),
+      ).toBeNull(),
+    );
     fireEvent.click(await screen.findByTestId("log-explorer-advanced-toggle"));
     const utcStart = screen.getByLabelText(
       "UTC start filter",

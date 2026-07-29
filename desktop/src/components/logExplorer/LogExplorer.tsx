@@ -998,6 +998,8 @@ export function LogExplorer({ corpusId }: Props) {
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
+  const facetAfterPaintFrameRef = useRef<number | null>(null);
+  const facetStartFrameRef = useRef<number | null>(null);
   const laneSourceRequestRef = useRef(0);
   const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
@@ -1458,6 +1460,14 @@ export function LogExplorer({ corpusId }: Props) {
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
     let loadedCurrentView = false;
+    if (facetAfterPaintFrameRef.current != null) {
+      window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
+      facetAfterPaintFrameRef.current = null;
+    }
+    if (facetStartFrameRef.current != null) {
+      window.cancelAnimationFrame(facetStartFrameRef.current);
+      facetStartFrameRef.current = null;
+    }
     setTimelineReady(false);
     setFacetsLoading(true);
     const visibleLanes = lanes.slice(0, laneCount);
@@ -1612,9 +1622,20 @@ export function LogExplorer({ corpusId }: Props) {
         setTimelineReady(loadedCurrentView);
         // Keep first useful rows on the critical path. Facet aggregation can
         // scan a large corpus and is useful only after the evidence page is
-        // available, so start it in the background after the current page.
-        if (loadedCurrentView) void loadFacets();
-        else setFacetsLoading(false);
+        // available. Two animation frames give React/browser one committed
+        // paint boundary before the background aggregation begins.
+        if (loadedCurrentView) {
+          facetAfterPaintFrameRef.current = window.requestAnimationFrame(() => {
+            facetAfterPaintFrameRef.current = null;
+            if (requestId !== eventsRequestRef.current) return;
+            facetStartFrameRef.current = window.requestAnimationFrame(() => {
+              facetStartFrameRef.current = null;
+              if (requestId === eventsRequestRef.current) void loadFacets();
+            });
+          });
+        } else {
+          setFacetsLoading(false);
+        }
       }
     }
   }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
@@ -1645,6 +1666,14 @@ export function LogExplorer({ corpusId }: Props) {
     return () => {
       eventsRequestRef.current += 1;
       facetRequestRef.current += 1;
+      if (facetAfterPaintFrameRef.current != null) {
+        window.cancelAnimationFrame(facetAfterPaintFrameRef.current);
+        facetAfterPaintFrameRef.current = null;
+      }
+      if (facetStartFrameRef.current != null) {
+        window.cancelAnimationFrame(facetStartFrameRef.current);
+        facetStartFrameRef.current = null;
+      }
     };
   }, [loadEvents]);
 
@@ -5118,7 +5147,6 @@ export function LogExplorer({ corpusId }: Props) {
               {facetsLoading ? (
                 <div
                   className="log-explorer__loading-inline"
-                  role="status"
                   aria-live="polite"
                   data-testid="log-explorer-facets-loading"
                 >
