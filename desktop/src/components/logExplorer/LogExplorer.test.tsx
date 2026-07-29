@@ -545,6 +545,26 @@ describe("LogExplorer shell", () => {
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
   });
 
+  it("loads first evidence rows before starting large-corpus facet aggregation", async () => {
+    const firstPage = deferred<host.EventPageDto>();
+    vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
+
+    render(<LogExplorer corpusId="c1" />);
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
+    );
+    expect(host.hostLogFacets).not.toHaveBeenCalled();
+
+    await act(async () => {
+      firstPage.resolve(defaultEventPage());
+      await firstPage.promise;
+    });
+
+    expect(await screen.findByText(/auth failure/)).toBeTruthy();
+    await waitFor(() => expect(host.hostLogFacets).toHaveBeenCalledTimes(1));
+  });
+
   it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
     const writeText = vi.fn(async (_value: string) => undefined);
     Object.defineProperty(navigator, "clipboard", {

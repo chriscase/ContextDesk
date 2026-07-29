@@ -1452,6 +1452,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
+    let loadedCurrentView = false;
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
       visibleLanes.map((lane) => [
@@ -1594,24 +1595,24 @@ export function LogExplorer({ corpusId }: Props) {
           `${laneCount} lanes · ${shown} resident rows · largest lane match ${maxLaneMatched}`,
         );
       }
+      loadedCurrentView = true;
     } catch (e) {
       if (requestId !== eventsRequestRef.current) return;
       setError(String(e));
     } finally {
-      if (requestId === eventsRequestRef.current) setBusy(false);
+      if (requestId === eventsRequestRef.current) {
+        setBusy(false);
+        // Keep first useful rows on the critical path. Facet aggregation can
+        // scan a large corpus and is useful only after the evidence page is
+        // available, so start it in the background after the current page.
+        if (loadedCurrentView) void loadFacets();
+      }
     }
-  }, [corpusId, filters, laneCount, lanes, setAutoStatus]);
+  }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
 
   useEffect(() => {
     void refreshMeta();
   }, [refreshMeta]);
-
-  useEffect(() => {
-    void loadFacets();
-    return () => {
-      facetRequestRef.current += 1;
-    };
-  }, [loadFacets]);
 
   useEffect(() => {
     if (!laneEditorOpen) {
@@ -1634,6 +1635,7 @@ export function LogExplorer({ corpusId }: Props) {
     void loadEvents();
     return () => {
       eventsRequestRef.current += 1;
+      facetRequestRef.current += 1;
     };
   }, [loadEvents]);
 
