@@ -4368,12 +4368,7 @@ async fn agent_turn(
                         let notice = linked_log_fallback_notice();
                         let _ = on_event.send(cd_core::research::event_to_dto(&notice));
                     }
-                    (
-                        host,
-                        using_fallback,
-                        borrowed_generation,
-                        validated_corpus,
-                    )
+                    (host, using_fallback, borrowed_generation, validated_corpus)
                 }
                 Ok(LinkedTurnPreparation::Terminal(events)) => {
                     persist_and_emit_host_terminal(
