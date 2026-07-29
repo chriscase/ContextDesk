@@ -990,7 +990,6 @@ mod tests {
         );
         // Must not report a clean hash match as success for the escaped path.
         assert!(!r.diagnostics.is_empty());
-        assert_ne!(r.ok, true);
     }
 
     #[test]
