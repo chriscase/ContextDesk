@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -777,6 +778,7 @@ export function LogExplorer({ corpusId }: Props) {
     | { status: "error"; message: string }
   >({ status: "idle" });
   const detailOriginalRequestRef = useRef(0);
+  const renderedCorpusRef = useRef(corpusId);
   const detailSeqRef = useRef<number | null>(null);
   const detailRepresentationRef = useRef<"formatted" | "original">("formatted");
   const showDetail = useCallback((event: ExplorerEventDto) => {
@@ -1787,6 +1789,46 @@ export function LogExplorer({ corpusId }: Props) {
     loadOptionalMetadata,
     setAutoStatus,
   ]);
+
+  useLayoutEffect(() => {
+    if (renderedCorpusRef.current === corpusId) return;
+    renderedCorpusRef.current = corpusId;
+    // A reused Explorer surface must never paint evidence or metadata from the
+    // previous corpus while the next corpus is loading. Invalidate every
+    // evidence-producing lifecycle and synchronously clear payload-bearing
+    // state before the browser paints the new corpus prop.
+    eventsRequestRef.current += 1;
+    countRequestRef.current += 1;
+    facetRequestRef.current += 1;
+    laneSourceRequestRef.current += 1;
+    setLaneEvents({});
+    setLaneCursors({});
+    setLanePaging({});
+    setLaneMatched({});
+    setLaneCountStates({});
+    setLaneTimeStates({});
+    setLaneScrollSeq({});
+    setNextCursor(null);
+    setSelected(new Set());
+    setHighlight(new Set());
+    setFocusLaneId(null);
+    setFacets(null);
+    setTimelineReady(false);
+    setTimeQuality("order_only");
+    setGaps([]);
+    setLaneSourceCatalog([]);
+    setLaneSourceCatalogNextCursor(null);
+    setLaneSourceCatalogTotal(null);
+    setLaneSourceCatalogUnavailable(false);
+    setLaneSourceQuery("");
+    clearDetail();
+
+    const savedLanes = loadLanes(corpusId);
+    setLanes(savedLanes && savedLanes.length > 0 ? savedLanes : defaultLanes(1));
+    setPreferredLaneCount(1);
+    setLaneCount(1);
+    setLinkMode(loadLinkMode(corpusId));
+  }, [clearDetail, corpusId]);
 
   useEffect(() => {
     bookmarkMetadataStartedRef.current = false;

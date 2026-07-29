@@ -1481,24 +1481,36 @@ fn query_event_count_with_post_scan(
     }
 
     let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
-    let (snapshot_revision, count) = corpus.with_connection(|conn| {
+    let (snapshot_revision, count, scanned) = corpus.with_connection(|conn| {
         // Event appends publish their revision while holding this same database
         // lock. Reading it here therefore identifies the exact event snapshot
         // counted below.
         let snapshot_revision = corpus.event_revision();
+        // Another identical caller may have populated the cache while this
+        // request waited for the database lock. Recheck under that lock so
+        // concurrent lane/count requests collapse to one exact scan.
+        if let Some(count) = corpus.cached_event_count(&key, snapshot_revision) {
+            return Ok((snapshot_revision, count, false));
+        }
         #[cfg(test)]
         corpus.record_event_count_scan();
         let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
         let count = bind_and_query_row_i64(&mut stmt, &binds)?.max(0) as u64;
-        Ok((snapshot_revision, count))
+        // Publish the cache entry before releasing the database lock. The next
+        // waiter then observes either this exact snapshot or a later append
+        // revision, never another miss for the same snapshot.
+        let _ = corpus.cache_event_count_if_current(key, snapshot_revision, count);
+        Ok((snapshot_revision, count, true))
     })?;
 
     // A count remains a truthful linearizable snapshot if an append commits
-    // after the database lock is released. Do not retry indefinitely: cache it
-    // only when that snapshot is still current, then return the snapshot either
-    // way. A later caller will count the newer revision.
-    post_scan();
-    let _ = corpus.cache_event_count_if_current(key, snapshot_revision, count);
+    // after the database lock is released. Do not retry indefinitely. The
+    // test-only post-scan hook models that append; it invalidates the cache and
+    // a later caller counts the newer revision.
+    if scanned {
+        post_scan();
+    }
+    debug_assert!(snapshot_revision <= corpus.event_revision());
     Ok(EventCount {
         total_matched: count,
     })
@@ -2675,6 +2687,7 @@ mod tests {
     use crate::embed::ConceptEmbedBackend;
     use crate::log_analysis::ingest::ingest_path;
     use std::io::Write;
+    use std::sync::{Arc, Barrier};
 
     fn multi_source_fixture() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
@@ -3711,6 +3724,42 @@ mod tests {
             corpus.event_count_scan_count(),
             4,
             "a successful append must invalidate every prior filter count"
+        );
+    }
+
+    #[test]
+    fn concurrent_identical_exact_counts_share_one_scan() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(LogCorpus::open(&cache, &id).expect("open corpus"));
+        let workers = 8;
+        let start = Arc::new(Barrier::new(workers));
+        let mut joins = Vec::with_capacity(workers);
+
+        for _ in 0..workers {
+            let corpus = Arc::clone(&corpus);
+            let start = Arc::clone(&start);
+            joins.push(std::thread::spawn(move || {
+                start.wait();
+                query_event_count(
+                    &corpus,
+                    &EventQuery {
+                        levels: vec!["error".into()],
+                        ..Default::default()
+                    },
+                )
+                .expect("concurrent exact count")
+                .total_matched
+            }));
+        }
+
+        for join in joins {
+            assert_eq!(join.join().expect("count thread"), 40);
+        }
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            1,
+            "identical concurrent count requests must single-flight per snapshot"
         );
     }
 

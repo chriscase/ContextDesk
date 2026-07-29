@@ -765,6 +765,59 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("clears prior-corpus evidence and inspector before the next corpus resolves", async () => {
+    const nextPage = deferred<host.EventRowsPageDto>();
+    vi.mocked(host.hostLogQueryEventRows).mockImplementation(
+      async (requestedCorpusId) => {
+        if (requestedCorpusId === "c2") return nextPage.promise;
+        const base = defaultEventPage();
+        return eventRows({
+          ...base,
+          events: [
+            {
+              ...base.events[0]!,
+              seq: 101,
+              source: "c1.log",
+              message: "private evidence from prior corpus",
+            },
+          ],
+        });
+      },
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(
+      await screen.findByText("private evidence from prior corpus"),
+    );
+    expect(await screen.findByTestId("log-explorer-detail")).toBeTruthy();
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(
+      screen.queryByText("private evidence from prior corpus"),
+    ).toBeNull();
+    expect(screen.queryByTestId("log-explorer-detail")).toBeNull();
+    expect(screen.getByText("Loading first evidence rows…")).toBeTruthy();
+
+    const base = defaultEventPage();
+    await act(async () => {
+      nextPage.resolve(
+        eventRows({
+          ...base,
+          events: [
+            {
+              ...base.events[0]!,
+              seq: 202,
+              source: "c2.log",
+              message: "current corpus evidence",
+            },
+          ],
+        }),
+      );
+      await nextPage.promise;
+    });
+    expect(await screen.findByText("current corpus evidence")).toBeTruthy();
+  });
+
   it("resolves visible lane counts independently without inventing a global total", async () => {
     const laneCounts = {
       "a.log": deferred<host.EventCountDto>(),
