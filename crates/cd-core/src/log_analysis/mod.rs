@@ -11,6 +11,7 @@ pub mod bookmarks;
 pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
+pub mod format_profile;
 pub mod ingest;
 pub mod lanes;
 pub mod package;
@@ -41,6 +42,11 @@ pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{
     LogEmbedMode, LogEmbedPolicy, CLOUD_LEAVE_MACHINE_CONFIRM, LOCAL_EMBED_DEFER_SOURCE_BYTES,
 };
+pub use format_profile::{
+    fingerprint_format, BuiltInFormatProfile, BuiltInGrammar, FormatFingerprint,
+    FormatFingerprintOutcome, FormatProfileIdentity, BUILT_IN_FORMAT_PROFILES,
+    MIN_STRUCTURED_FORMAT_SCORE,
+};
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
     ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
@@ -55,7 +61,10 @@ pub use package::{
     validate_package_versions, PackageImportReport, PackageManifest, PackageReader,
     PACKAGE_FORMAT_VERSION, PACKAGE_READERS, PACKAGE_READER_VERSION,
 };
-pub use parse::{detect_format, parse_line, LogFormat, ParsedLine};
+pub use parse::{
+    detect_format, parse_line, parse_line_with_fingerprint, FingerprintedParsedLine, LogFormat,
+    ParsedLine,
+};
 pub use query::{
     classify_ts, corpus_time_quality, query_event_neighborhood, query_events, query_facets,
     query_shared_timeline_summary, query_source_catalog, query_timeline_summary, search_events,

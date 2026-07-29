@@ -29,7 +29,7 @@ The single most important consequence: **you never embed raw lines. You template
 
 ```text
 sources (files / dir / S3 / journald…)   ── post-mortem batch ──►
-   │  parse (format detect: json / logfmt / syslog / plain)
+   │  fingerprint + parse (versioned grammar identity; plain fallback)
    ▼
 line events  ──►  columnar event store  (timestamp, level, service, template_id, params, trace_id, host)
    │  Drain-style templating
@@ -50,7 +50,14 @@ The heavy row count (10–100M) lives in the **columnar event store**; the vecto
 
 ## 3. Ingest & templating (the core of it)
 
-**Format detection + parse** per line/record → `{ ts, level, service?, host?, trace_id?, message, raw }`. Support JSON logs, logfmt, common syslog, and plain text with a configurable timestamp/level regex; unknown formats fall back to `message = whole line`, `ts = ingest order`.
+**Format fingerprint + parse** per bounded physical record → `{ ts, level,
+service?, host?, trace_id?, message, raw }`. An immutable versioned built-in
+registry identifies the record grammar from strict content clues and reports
+matched, unknown, or ambiguous without declaration-order tie-breaking. A
+possible producer is only a non-authoritative hint. Filename extensions do not
+decide the result, and a file's first non-empty line does not lock later
+records to one parser. Unknown, ambiguous, and failed parses fall back to
+`message = whole line`, `ts = ingest order`.
 
 **Templating (Drain-style):** collapse `"GET /users/8123 200 14ms"` and `"GET /users/9971 200 9ms"` into template `"GET /users/<*> <*> <*>ms"` + extracted params. Maintain a template table: `template_id, pattern, token_count, count, first_seen, last_seen, severity`. This is a 100–1000× reduction in what must be embedded and is itself the "what problems exist" clustering. Use an incremental parse tree (Drain3 algorithm, reimplemented in Rust — small) so ingest is single‑pass and streaming‑ready.
 

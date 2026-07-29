@@ -2,7 +2,7 @@
 
 use super::drain::DrainMiner;
 use super::embed_policy::{LogEmbedMode, LogEmbedPolicy};
-use super::parse::{detect_format, parse_line, LogFormat};
+use super::parse::{parse_line_with_fingerprint, LogFormat};
 use super::redact_log::{prepare_original_record, redact_message, redact_params};
 use super::store::{
     template_content_hash, CorpusEmbeddingStatus, EmbeddingState, IngestedLogEvent, LogCorpus,
@@ -1406,7 +1406,6 @@ fn ingest_lines_from_reader(
     stats: &mut IngestStats,
     seq: &mut u64,
     batch: &mut Vec<IngestedLogEvent>,
-    format_hint: &mut Option<LogFormat>,
     files_done: u64,
     file_count: u64,
     progress: &dyn ProcessProgressObserver,
@@ -1457,10 +1456,10 @@ fn ingest_lines_from_reader(
         if line.trim().is_empty() {
             continue;
         }
-        if format_hint.is_none() {
-            *format_hint = Some(detect_format(line, file_hint));
-        }
-        let parsed = parse_line(line, *format_hint, *seq);
+        // Every bounded physical record is fingerprinted independently. A
+        // plain banner cannot lock the rest of a file to Plain, and mixed
+        // structured records remain independently explainable.
+        let parsed = parse_line_with_fingerprint(line, file_hint, *seq).parsed;
         let fmt_key = match parsed.format {
             LogFormat::Json => "json",
             LogFormat::Logfmt => "logfmt",
@@ -1949,7 +1948,6 @@ fn ingest_from_zip_file(
         }
         reader.get_mut().commit_to_aggregate()?;
 
-        let mut format_hint = None;
         let lines_before = stats.lines;
         let completely_read = ingest_lines_from_reader(
             &mut reader,
@@ -1960,7 +1958,6 @@ fn ingest_from_zip_file(
             stats,
             seq,
             batch,
-            &mut format_hint,
             files_done,
             entry_count,
             progress,
@@ -2444,7 +2441,6 @@ fn ingest_path_into_cache(
             }
             reader.get_mut().commit_to_aggregate()?;
 
-            let mut format_hint = None;
             let lines_before = stats.lines;
             let completely_read = ingest_lines_from_reader(
                 &mut reader,
@@ -2455,7 +2451,6 @@ fn ingest_path_into_cache(
                 &mut stats,
                 &mut seq,
                 &mut batch,
-                &mut format_hint,
                 files_done,
                 file_count,
                 progress,
@@ -4491,6 +4486,51 @@ mod tests {
             report.stats.templates,
             report.stats.reduction_ratio,
             report.stats.embedded
+        );
+    }
+
+    #[test]
+    fn banner_then_structured_and_mixed_formats_are_record_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("mixed.jsonl");
+        std::fs::write(
+            &source,
+            concat!(
+                "Synthetic startup banner\n",
+                "{\"ts\":1700000000,\"level\":\"error\",\"message\":\"json failure\"}\n",
+                "ts=1700000001 level=warn msg=\"logfmt retry\"\n",
+                "[2026-07-29 14:05:06,324][INFO][transport][node.example] bracketed event\n",
+                "request text includes user=42 and retry=true as payload\n",
+            ),
+        )
+        .unwrap();
+
+        let cache = dir.path().join("cache");
+        let report = ingest_path(&cache, &source, "mixed-records", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 5);
+        assert_eq!(report.stats.format_counts.get("plain"), Some(&2));
+        assert_eq!(report.stats.format_counts.get("json"), Some(&1));
+        assert_eq!(report.stats.format_counts.get("logfmt"), Some(&1));
+        assert_eq!(report.stats.format_counts.get("syslog"), Some(&1));
+
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let page = crate::log_analysis::query_events(
+            &corpus,
+            &crate::log_analysis::EventQuery {
+                limit: 20,
+                sort_by_time: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.events.len(), 5);
+        assert_eq!(page.events[0].message, "Synthetic startup banner");
+        assert_eq!(page.events[1].message, "json failure");
+        assert_eq!(page.events[2].message, "logfmt retry");
+        assert_eq!(page.events[3].message, "bracketed event");
+        assert_eq!(
+            page.events[4].message,
+            "request text includes user=42 and retry=true as payload"
         );
     }
 

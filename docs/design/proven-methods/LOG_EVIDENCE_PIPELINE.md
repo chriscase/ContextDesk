@@ -5,9 +5,11 @@ pipeline: bounded ingest, redaction, parsing, Drain-style templates, DuckDB
 events, template-scale vectors, structured/keyword/semantic search, facets,
 analysis tools, packages, and Log Explorer query APIs. Bounded redacted
 Original records, explicit-offset logfmt/RFC5424 normalization, and the shared
-timeline/metric presentation are present on `main`. Full timestamp provenance,
-subsecond precision, timezone rules, and clock-skew review remain #670; durable
-noise policy remains #671.
+timeline/metric presentation are present on `main`. Built-in record grammars
+use deterministic versioned fingerprints with content-only tie handling and
+record-level dispatch. Full timestamp provenance, subsecond precision,
+timezone rules, and clock-skew review remain #670; user-authored profiles and
+multiline framing remain #751; durable noise policy remains #671.
 
 ## 1. Problem
 
@@ -46,6 +48,7 @@ The reusable method is a layered evidence plane:
 | JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
 | Explicit-offset logfmt/RFC5424 normalization                | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs) and current-main proof on #681                                                  | Whole-second storage and full #670 provenance policy        |
 | Offsetless/yearless timestamps remain unresolved/order-only | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Per-source timezone/year policy remains #670                |
+| Versioned built-in grammar fingerprints                     | **Shipped**                               | [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs), [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs), and record-level ingest dispatch in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) | User-authored profiles, durable provenance, and multiline framing remain #751 |
 | Full timestamp provenance, precision, DST, skew policy      | **Planned**                               | #670                                                                                                                                           | No current claim of seamless arbitrary timestamp alignment  |
 | DuckDB event store                                          | **Shipped**                               | [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs)                                                                                | None for current batch architecture                         |
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
@@ -282,17 +285,49 @@ Current production:
 
 - JSON accepts numeric Unix seconds/milliseconds and RFC3339 strings with an
   explicit offset;
-- logfmt accepts numeric time;
+- logfmt accepts numeric time and explicit-offset RFC3339 timestamps;
+- RFC5424 accepts explicit-offset timestamps;
 - classic syslog and plain text fall back to ingest order; and
 - storage is whole-second.
 
-Current local #681 behavior additionally:
+Equivalent positive/negative offsets and epoch forms map to one UTC second.
+Fractional input is deterministically truncated to whole seconds. Offsetless,
+yearless, malformed, and missing timestamps remain order-only.
 
-- normalizes logfmt RFC3339 timestamps with `Z` or numeric offsets;
-- parses RFC5424 timestamps with `Z` or numeric offsets;
-- maps equivalent positive/negative offsets and epoch forms to one UTC second;
-- deterministically truncates fractional input to whole seconds; and
-- keeps offsetless, yearless, malformed, and missing timestamps order-only.
+Before parser dispatch, every non-empty bounded physical record receives a
+transient `FormatFingerprint`. The immutable built-in registry is:
+
+| Grammar ID | Version | Decisive content clue | Optional producer hint |
+| ---------- | ------: | --------------------- | ---------------------- |
+| `json-object-line` | 1 | complete valid JSON object | none |
+| `logfmt-record` | 1 | at least two valid pairs including a recognized semantic field | none |
+| `rfc5424-record` | 1 | valid numeric PRI plus RFC5424 header/structured-data framing | none |
+| `classic-syslog-record` | 1 | exact month, day, time, host, and message framing | none |
+| `date-level-logger-thread-record` | 1 | date/level/bracketed logger/parenthesized thread grammar | possibly WildFly/JBoss family |
+| `bracketed-timestamp-level-component-node-record` | 1 | four strict timestamp/level/component/node bracket groups | possibly Elasticsearch classic family |
+| `local-minute-zone-level-record` | 1 | strict local minute/fraction, uppercase zone, level, and payload grammar | none |
+| `plain-line` | 1 | no defensible structured match | none |
+
+The fingerprint reports outcome (`matched`, `unknown`, or `ambiguous`), grammar
+ID/version, optional producer hint, decisive clue codes, top score, runner-up
+margin, and equal-scoring candidate IDs/versions when ambiguous. Registry
+declaration order has no semantic effect. Equal top scores have a zero margin
+and no selected grammar; candidates below the fixed eligibility threshold and
+insufficient content evidence are `unknown`. Both outcomes preserve the
+complete redacted line through `plain-line` and ingest-order time.
+
+Path and extension can be supplied to the API for future bounded shortlisting,
+but cannot score or select a grammar. This makes `.jsonl` ordinary text remain
+plain. Conversely, a startup banner cannot lock later JSON or logfmt records
+to plain: the current bounded strategy classifies each physical record
+independently. Mixed-format files therefore remain honest without buffering a
+whole source or sampling unbounded content.
+
+Grammar identity is not producer identity. A record matching the
+date/level/logger/thread grammar can carry a `wildfly-or-jboss-family` hint,
+but the parser does not assert that WildFly emitted it. The fingerprint is
+transient in this slice; durable per-source/per-event profile provenance,
+custom profiles, preview/approval UI, and profile drift belong to #751.
 
 The #747 parser slice also recognizes the common JBoss/WildFly
 `server.log` prefix
@@ -583,7 +618,7 @@ details, not only a hover tooltip.
 
 | Layer                | Required proof                                                                                                                               |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Parser unit          | JSON/logfmt/RFC5424/plain; positive/negative offsets; `Z`; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
+| Parser unit          | Registry identity/version uniqueness; JSON/logfmt/RFC5424/classic/special/plain fingerprints; equal-score ambiguity independent of order; banner/mixed records; incidental pairs; extension disagreement; pseudo-PRI; non-syslog `Jan…`; positive/negative offsets; malformed, offsetless, yearless, overflow; fractional precision contract; Unicode |
 | Redaction unit       | Complete-record redaction precedes truncation; secret absent from parser/store; invalid UTF-8 and CRLF accounting                            |
 | Store integration    | Stable corpus+seq+source identity; exact/noncontiguous references; legacy schema read; additive Original unavailable/available behavior      |
 | Query integration    | Filter intersection; keyset forward/backward; time bounds; regex cap; semantic template-to-event resolution; dense gap buckets               |
@@ -603,8 +638,10 @@ instant while ambiguous controls remain order-only.
   import, progress, cancellation, accounting.
 - [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs):
   redaction and local-integration Original contract.
-- [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs): format and
-  timestamp parsing, including local #681 changes.
+- [`format_profile.rs`](../../../crates/cd-core/src/log_analysis/format_profile.rs):
+  immutable built-in registry and explainable transient fingerprint contract.
+- [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs): record-level
+  parser dispatch and timestamp parsing.
 - [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs): DuckDB event
   store, corpus metadata, embedding state.
 - [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs): incremental
@@ -631,6 +668,7 @@ instant while ambiguous controls remain order-only.
 | Redacted Original              | **Shipped**                   | Bounded, redacted, tested source representation                | Unbounded raw retention or perfect domain-specific PII removal |
 | Explicit-offset JSON           | **Shipped**                   | Defensible RFC3339/epoch to whole seconds                     | Full provenance/subseconds              |
 | Explicit-offset logfmt/RFC5424 | **Shipped**                   | Explicit `Z`/offset forms normalize to whole seconds           | Full #670 provenance/subsecond/timezone policy          |
+| Built-in grammar fingerprints | **Shipped**                    | Immutable versioned registry, record-level dispatch, explicit unknown/ambiguous outcomes, and grammar/producer separation | Durable provenance, custom profiles, profile drift, and multiline framing (#751) |
 | JBoss/WildFly `server.log`      | **Partial**                   | Structure and explicit offsets parse; offsetless lines remain intact and order-only | Persisted local-calendar provenance and per-source timezone rule (#670) |
 | Classic Elasticsearch logs     | **Partial**                   | Bracketed structure and explicit offsets parse; padded metadata is normalized | Persisted local-calendar provenance and per-source timezone rule (#670) |
 | Incomplete time + zone abbreviation | **Partial**              | Strict shape, level, payload, and unresolved source token are preserved | Comma-field semantics and abbreviation mapping require a versioned source profile (#751/#670) |
@@ -669,9 +707,9 @@ to “helpfully” interpret an offsetless production timestamp.
 - #670: first-class time basis, original timestamp provenance, subsecond
   precision, per-source timezone and year rules, DST ambiguity, skew proposals,
   UI disclosure, package compatibility, and import preview.
-- #681: local explicit-offset logfmt/RFC5424 work must be promoted, pass the
-  full gate, and receive packaged proof before closure.
 - #671: durable transparent noise/squelch rules for viewer, analysis, and model.
+- #751: durable profile provenance, user-authored profile lifecycle,
+  preview/approval UI, profile drift, and bounded multiline framing.
 - #667: optional metric/time-series tracks on the shared axis.
 - #639: final persistent timeline acceptance and future richer interactions.
 - The current Original representation is redacted text after normalization, not

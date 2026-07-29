@@ -1,5 +1,6 @@
 //! Format detection + line parse (#355). LOG_ANALYSIS.md §3.
 
+use super::format_profile::{fingerprint_format, BuiltInGrammar, FormatFingerprint};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -45,87 +46,222 @@ pub struct ParsedLine {
     pub format: LogFormat,
 }
 
-/// Detect format from a sample line (and optionally filename hint).
-pub fn detect_format(sample: &str, path: Option<&Path>) -> LogFormat {
-    let t = sample.trim();
-    if t.starts_with('{')
-        && t.ends_with('}')
-        && serde_json::from_str::<serde_json::Value>(t).is_ok()
-    {
-        return LogFormat::Json;
-    }
-    if looks_like_zone_abbreviated_incomplete_time(t) {
-        return LogFormat::Syslog;
-    }
-    if looks_like_elasticsearch(t) {
-        return LogFormat::Syslog;
-    }
-    if looks_like_wildfly(t) {
-        return LogFormat::Syslog;
-    }
-    if looks_like_logfmt(t) {
-        return LogFormat::Logfmt;
-    }
-    if looks_like_syslog(t) {
-        return LogFormat::Syslog;
-    }
-    if let Some(p) = path {
-        let name = p
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if name.ends_with(".json") || name.ends_with(".jsonl") || name.ends_with(".ndjson") {
-            return LogFormat::Json;
-        }
-    }
-    LogFormat::Plain
+/// A parsed line paired with its explainable transient grammar fingerprint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FingerprintedParsedLine {
+    /// Parsed record; existing field behavior remains unchanged.
+    pub parsed: ParsedLine,
+    /// Content-evidence result used for parser dispatch.
+    pub fingerprint: FormatFingerprint,
 }
 
-fn looks_like_logfmt(t: &str) -> bool {
-    // At least two key=value tokens and no leading brace.
+/// Detect the existing coarse format from one bounded sample record.
+///
+/// Exact grammar identity and ambiguity are available from
+/// [`fingerprint_format`]. Filename hints cannot decide this result.
+pub fn detect_format(sample: &str, path: Option<&Path>) -> LogFormat {
+    fingerprint_format(sample, path).log_format()
+}
+
+pub(super) fn looks_like_json_object(t: &str) -> bool {
+    t.starts_with('{')
+        && t.ends_with('}')
+        && matches!(
+            serde_json::from_str::<serde_json::Value>(t),
+            Ok(serde_json::Value::Object(_))
+        )
+}
+
+pub(super) fn looks_like_logfmt(t: &str) -> bool {
+    // At least two valid pairs in a record dominated by key/value tokens.
+    // Recognized semantic fields establish a strong clue; a record made
+    // entirely of pairs also preserves generic logfmt without turning
+    // incidental `foo=bar` payload fragments into structure.
     if t.starts_with('{') {
         return false;
     }
-    let pairs = t
-        .split_whitespace()
-        .filter(|tok| {
-            if let Some((k, _)) = tok.split_once('=') {
-                !k.is_empty()
-                    && k.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-            } else {
-                false
+    let mut tokens = 0usize;
+    let mut pairs = 0usize;
+    let mut known_fields = 0usize;
+
+    let mut start = None;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, ch) in t.char_indices() {
+        if start.is_none() {
+            if ch.is_whitespace() {
+                continue;
             }
-        })
-        .count();
-    pairs >= 2
-}
+            start = Some(index);
+        }
 
-fn looks_like_syslog(t: &str) -> bool {
-    // "<pri>timestamp host ..." or "Mon DD HH:MM:SS host ..."
-    if t.starts_with('<') && t.find('>').is_some_and(|i| i < 6) {
-        return true;
+        if escaped {
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if ch.is_whitespace() && !quoted {
+            if let Some(token) = start
+                .take()
+                .and_then(|start_index| t.get(start_index..index))
+            {
+                inspect_logfmt_token(token, &mut tokens, &mut pairs, &mut known_fields);
+            }
+        }
     }
-    looks_like_classic_syslog(t)
+    if let Some(token) = start.and_then(|start_index| t.get(start_index..)) {
+        inspect_logfmt_token(token, &mut tokens, &mut pairs, &mut known_fields);
+    }
+
+    pairs >= 2 && pairs.saturating_mul(2) >= tokens && (known_fields >= 1 || pairs == tokens)
 }
 
-fn looks_like_classic_syslog(t: &str) -> bool {
-    let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    months.iter().any(|m| t.starts_with(m) && t.len() > 16)
+fn inspect_logfmt_token(
+    token: &str,
+    tokens: &mut usize,
+    pairs: &mut usize,
+    known_fields: &mut usize,
+) {
+    *tokens += 1;
+    let Some((key, value)) = token.split_once('=') else {
+        return;
+    };
+    if key.is_empty()
+        || value.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return;
+    }
+    *pairs += 1;
+    if is_known_logfmt_field(key) {
+        *known_fields += 1;
+    }
 }
 
-fn looks_like_wildfly(t: &str) -> bool {
+fn is_known_logfmt_field(key: &str) -> bool {
+    [
+        "ts",
+        "time",
+        "timestamp",
+        "level",
+        "lvl",
+        "severity",
+        "msg",
+        "message",
+        "service",
+        "app",
+        "component",
+        "host",
+        "hostname",
+        "node",
+        "trace_id",
+        "traceid",
+        "request_id",
+        "req_id",
+        "span_id",
+    ]
+    .iter()
+    .any(|known| key.eq_ignore_ascii_case(known))
+}
+
+fn strip_valid_pri(t: &str) -> Option<&str> {
+    let rest = t.strip_prefix('<')?;
+    let end = rest.find('>')?;
+    let pri = rest.get(..end)?;
+    if pri.is_empty()
+        || pri.len() > 3
+        || !pri.bytes().all(|byte| byte.is_ascii_digit())
+        || pri.parse::<u16>().ok()? > 191
+    {
+        return None;
+    }
+    rest.get(end + 1..)
+}
+
+pub(super) fn looks_like_rfc5424(t: &str) -> bool {
+    let Some(rest) = strip_valid_pri(t) else {
+        return false;
+    };
+    let Some((version, rest)) = take_token(rest) else {
+        return false;
+    };
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let Some((_timestamp, rest)) = take_token(rest) else {
+        return false;
+    };
+    let Some((_host, rest)) = take_token(rest) else {
+        return false;
+    };
+    let Some((_app, rest)) = take_token(rest) else {
+        return false;
+    };
+    let Some((_procid, rest)) = take_token(rest) else {
+        return false;
+    };
+    let Some((_msgid, structured_and_message)) = take_token(rest) else {
+        return false;
+    };
+    structured_and_message.starts_with('-') || structured_and_message.starts_with('[')
+}
+
+pub(super) fn looks_like_classic_syslog(t: &str) -> bool {
+    let rest = strip_valid_pri(t).unwrap_or(t);
+    let Some((month, rest)) = take_token(rest) else {
+        return false;
+    };
+    if !matches!(
+        month,
+        "Jan"
+            | "Feb"
+            | "Mar"
+            | "Apr"
+            | "May"
+            | "Jun"
+            | "Jul"
+            | "Aug"
+            | "Sep"
+            | "Oct"
+            | "Nov"
+            | "Dec"
+    ) {
+        return false;
+    }
+    let Some((day, rest)) = take_token(rest) else {
+        return false;
+    };
+    if day
+        .parse::<u8>()
+        .ok()
+        .is_none_or(|value| !(1..=31).contains(&value))
+    {
+        return false;
+    }
+    let Some((time, rest)) = take_token(rest) else {
+        return false;
+    };
+    if chrono::NaiveTime::parse_from_str(time, "%H:%M:%S").is_err() {
+        return false;
+    }
+    let Some((host, message)) = take_token(rest) else {
+        return false;
+    };
+    !host.is_empty() && !message.is_empty()
+}
+
+pub(super) fn looks_like_wildfly(t: &str) -> bool {
     parse_wildfly_parts(t).is_some()
 }
 
-fn looks_like_elasticsearch(t: &str) -> bool {
+pub(super) fn looks_like_elasticsearch(t: &str) -> bool {
     parse_elasticsearch_parts(t).is_some()
 }
 
-fn looks_like_zone_abbreviated_incomplete_time(t: &str) -> bool {
+pub(super) fn looks_like_zone_abbreviated_incomplete_time(t: &str) -> bool {
     parse_zone_abbreviated_incomplete_parts(t).is_some()
 }
 
@@ -133,24 +269,62 @@ fn looks_like_zone_abbreviated_incomplete_time(t: &str) -> bool {
 ///
 /// `ingest_seq` is used as synthetic timestamp when none is found.
 pub fn parse_line(raw: &str, format: Option<LogFormat>, ingest_seq: u64) -> ParsedLine {
-    // File-level detection is only a hint. A banner or continuation can precede
-    // a structured application-server record, so recognize strict content
-    // shapes regardless of the file's initial hint.
-    if let Some(parsed) = parse_zone_abbreviated_incomplete_time(raw, ingest_seq) {
-        return parsed;
+    if let Some(format) = format {
+        // Preserve the compatibility API's historical contract: strict
+        // application-server shapes override a coarse file hint, while every
+        // other explicit hint remains authoritative for this call.
+        if let Some(parsed) = parse_zone_abbreviated_incomplete_time(raw, ingest_seq) {
+            return parsed;
+        }
+        if let Some(parsed) = parse_elasticsearch(raw, ingest_seq) {
+            return parsed;
+        }
+        if let Some(parsed) = parse_wildfly(raw, ingest_seq) {
+            return parsed;
+        }
+        return match format {
+            LogFormat::Json => parse_json(raw, ingest_seq),
+            LogFormat::Logfmt => parse_logfmt(raw, ingest_seq),
+            LogFormat::Syslog => parse_syslog(raw, ingest_seq),
+            LogFormat::Plain => parse_plain(raw, ingest_seq),
+        };
     }
-    if let Some(parsed) = parse_elasticsearch(raw, ingest_seq) {
-        return parsed;
-    }
-    if let Some(parsed) = parse_wildfly(raw, ingest_seq) {
-        return parsed;
-    }
-    let format = format.unwrap_or_else(|| detect_format(raw, None));
-    match format {
-        LogFormat::Json => parse_json(raw, ingest_seq),
-        LogFormat::Logfmt => parse_logfmt(raw, ingest_seq),
-        LogFormat::Syslog => parse_syslog(raw, ingest_seq),
-        LogFormat::Plain => parse_plain(raw, ingest_seq),
+
+    parse_line_with_fingerprint(raw, None, ingest_seq).parsed
+}
+
+/// Parse one bounded physical record using the exact built-in fingerprint.
+///
+/// Unknown and ambiguous records use the complete whole-line fallback. No
+/// registry order, path extension, timezone, or producer assertion can decide
+/// the parse.
+pub fn parse_line_with_fingerprint(
+    raw: &str,
+    path: Option<&Path>,
+    ingest_seq: u64,
+) -> FingerprintedParsedLine {
+    let fingerprint = fingerprint_format(raw, path);
+    let parsed = match fingerprint.grammar {
+        Some(BuiltInGrammar::JsonObjectLine) => parse_json(raw, ingest_seq),
+        Some(BuiltInGrammar::LogfmtRecord) => parse_logfmt(raw, ingest_seq),
+        Some(BuiltInGrammar::Rfc5424 | BuiltInGrammar::ClassicSyslog) => {
+            parse_syslog(raw, ingest_seq)
+        }
+        Some(BuiltInGrammar::DateLevelLoggerThread) => {
+            parse_wildfly(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::BracketedTimestampLevelComponentNode) => {
+            parse_elasticsearch(raw, ingest_seq).unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::LocalMinuteZoneLevel) => {
+            parse_zone_abbreviated_incomplete_time(raw, ingest_seq)
+                .unwrap_or_else(|| parse_plain(raw, ingest_seq))
+        }
+        Some(BuiltInGrammar::PlainLine) | None => parse_plain(raw, ingest_seq),
+    };
+    FingerprintedParsedLine {
+        parsed,
+        fingerprint,
     }
 }
 
@@ -1015,6 +1189,7 @@ pub fn level_severity(level: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_analysis::FormatFingerprintOutcome;
 
     #[test]
     fn detect_and_parse_json() {
@@ -1056,6 +1231,86 @@ mod tests {
         assert_eq!(p.format, LogFormat::Plain);
         assert_eq!(p.message, line);
         assert_eq!(p.ts, Some(42));
+    }
+
+    #[test]
+    fn banner_then_json_and_logfmt_are_fingerprinted_per_record() {
+        let records = [
+            "Synthetic service startup banner",
+            r#"{"ts":1700000000,"level":"error","message":"json failure"}"#,
+            "ts=1700000001 level=warn msg=\"logfmt retry\"",
+        ];
+
+        let parsed = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                parse_line_with_fingerprint(record, Some(Path::new("mixed.jsonl")), index as u64)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            parsed[0].fingerprint.outcome,
+            FormatFingerprintOutcome::Unknown
+        );
+        assert_eq!(parsed[0].fingerprint.format_id, Some("plain-line"));
+        assert_eq!(parsed[1].fingerprint.format_id, Some("json-object-line"));
+        assert_eq!(parsed[1].parsed.message, "json failure");
+        assert_eq!(parsed[2].fingerprint.format_id, Some("logfmt-record"));
+        assert_eq!(parsed[2].parsed.message, "logfmt retry");
+    }
+
+    #[test]
+    fn explicit_compatibility_hint_remains_authoritative_except_strict_special_shapes() {
+        let logfmt = "level=warn msg=retry";
+        let hinted_json = parse_line(logfmt, Some(LogFormat::Json), 7);
+        assert_eq!(hinted_json.format, LogFormat::Plain);
+        assert_eq!(hinted_json.message, logfmt);
+
+        let wildfly = "2026-07-29 09:14:05,123 INFO [com.example.Logger] (worker) shaped";
+        let hinted_plain = parse_line(wildfly, Some(LogFormat::Plain), 8);
+        assert_eq!(hinted_plain.format, LogFormat::Syslog);
+        assert_eq!(hinted_plain.message, "[com.example.Logger] (worker) shaped");
+    }
+
+    #[test]
+    fn mixed_builtin_grammars_preserve_raw_and_exact_transient_identity() {
+        let records = [
+            (r#"{"level":"info","message":"json"}"#, "json-object-line"),
+            ("level=warn msg=logfmt", "logfmt-record"),
+            (
+                "<34>1 2025-01-01T13:20:00Z host app 1 ID47 - rfc5424",
+                "rfc5424-record",
+            ),
+            (
+                "Oct 11 22:14:15 host classic syslog",
+                "classic-syslog-record",
+            ),
+            (
+                "2026-07-29 09:14:05,123 INFO [com.example.Logger] (worker) shaped",
+                "date-level-logger-thread-record",
+            ),
+            (
+                "[2026-07-29 14:05:06,324][INFO][transport][node.example] bracketed",
+                "bracketed-timestamp-level-component-node-record",
+            ),
+            (
+                "2026-07-29T14:05,321 CET. INFO: unresolved",
+                "local-minute-zone-level-record",
+            ),
+            ("ordinary payload", "plain-line"),
+        ];
+
+        for (index, (record, expected_id)) in records.into_iter().enumerate() {
+            let result = parse_line_with_fingerprint(record, None, index as u64);
+            assert_eq!(
+                result.fingerprint.format_id,
+                Some(expected_id),
+                "record={record}"
+            );
+            assert_eq!(result.parsed.raw, record);
+            assert!(!result.parsed.message.is_empty());
+        }
     }
 
     #[test]
