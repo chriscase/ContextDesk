@@ -80,10 +80,10 @@ For a longer repeatable investigation, select this exact folder:
 
 `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/`
 
-The expected import is **25,000 events**, **10 files**, and **4,201,238 source
+The expected import is **25,000 events**, **10 files**, and **4,201,281 source
 bytes** spanning exactly **2025-01-01 12:00:00Z through 2025-01-08
-12:00:00Z** with wall-clock time quality. Expected levels are 24,165 INFO, 460
-DEBUG, 256 WARN, and 119 ERROR.
+12:00:00Z** with wall-clock time quality. Expected levels are 23,984 INFO, 458
+DEBUG, 394 WARN, and 164 ERROR.
 
 Useful probes are `FIND_RARE_BEYOND_PAGE`, `FIND_RARE_BEYOND_4K`,
 `FIND_RARE_DEEP`, `BOOKMARK_PAGE_BOUNDARY`, `BOOKMARK_EVICT_WINDOW`,
@@ -113,9 +113,27 @@ investigation is unaffected.
 
 | Track | Exact fixture coverage |
 | --- | --- |
-| CPU | 25 points · 22% minimum · 96% maximum |
-| Heap used | 25 points · 410,000,000-byte minimum · 824,000,000-byte maximum |
-| Concurrent clients | 25 points · 10-client minimum · 120-client maximum |
+| CPU | 673 points · 16% minimum · 98% maximum |
+| Heap used | 668 points · 316,800,000-byte minimum · 952,000,000-byte maximum · one declared collector gap |
+| Concurrent clients | 673 points · 12-client minimum · 180-client maximum |
+
+The three series cover the entire seven-day log horizon at 15-minute
+resolution. The synthetic test begins at low load, raises concurrent clients
+through staged plateaus, and reaches its primary overload window around
+**2025-01-05 13:00Z–20:00Z**. CPU follows the prior load sample with bounded
+variation. Heap pressure accumulates, then drops at a synthetic major-GC
+sample. Warnings and errors become more prevalent near overload and return
+toward baseline after load drops.
+
+For a useful triage walkthrough:
+
+1. Brush the primary overload window and compare all three tracks.
+2. Inspect the denser warning/error bars near **2025-01-05 15:00Z**.
+3. Find `event_id=behavior-14763` to inspect an existing multiline
+   `STACK_TRACE_SENTINEL`.
+4. Compare the heap drop around **2025-01-05 17:15Z** with nearby logs.
+5. Treat these as visible correlations that focus investigation, not proof that
+   load, CPU, heap, GC, or any individual log caused another signal.
 
 Do not choose `metrics/manifest.v1.json`,
 `metrics/operational-metrics-patterns.v1.json`, or anything under `truth/` for

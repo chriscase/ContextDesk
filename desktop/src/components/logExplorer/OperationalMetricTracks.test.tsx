@@ -61,17 +61,17 @@ describe("OperationalMetricTracks", () => {
     expect(
       screen
         .getByTestId("operational-metric-track-cpu-percent")
-        .textContent?.includes("Scale 22 %–96 %"),
+        .textContent?.includes("Scale 16 %–98 %"),
     ).toBe(true);
     expect(
       screen
         .getByTestId("operational-metric-track-heap-used-bytes")
-        .textContent?.includes("Scale 410M bytes–824M bytes"),
+        .textContent?.includes("Scale 316.8M bytes–952M bytes"),
     ).toBe(true);
     expect(
       screen
         .getByTestId("operational-metric-track-concurrent-clients")
-        .textContent?.includes("Scale 10 clients–120 clients"),
+        .textContent?.includes("Scale 12 clients–180 clients"),
     ).toBe(true);
     expect(screen.getAllByRole("slider")).toHaveLength(3);
   });
@@ -90,7 +90,7 @@ describe("OperationalMetricTracks", () => {
       Array.from(
         track.querySelectorAll(".operational-metric-track__scale-label"),
       ).map((label) => label.textContent),
-    ).toEqual(["Max 96 %", "Min 22 %"]);
+    ).toEqual(["Max 98 %", "Min 16 %"]);
     expect(
       screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
     ).toBeNull();
@@ -265,10 +265,10 @@ describe("OperationalMetricTracks", () => {
     fireEvent.pointerUp(cpuPlot, { clientX: 120, pointerId: 1 });
 
     expect(onSeekTimestamp).toHaveBeenCalledTimes(1);
-    expect(onSeekTimestamp).toHaveBeenCalledWith(1736100000);
+    expect(onSeekTimestamp).toHaveBeenCalledWith(1736337600);
     const finalRange = onRangeSelect.mock.calls.at(-1)?.[0];
-    expect(finalRange.from).toBeGreaterThanOrEqual(1736078400);
-    expect(finalRange.to).toBeLessThanOrEqual(1736100000);
+    expect(finalRange.from).toBeGreaterThanOrEqual(1735732800);
+    expect(finalRange.to).toBeLessThanOrEqual(1736337600);
     const selections = screen.getAllByTestId(/operational-metric-selection-/);
     expect(selections).toHaveLength(3);
     expect(
@@ -328,13 +328,13 @@ describe("OperationalMetricTracks", () => {
 
     fireEvent.keyDown(heapPlot, { key: "ArrowRight" });
     fireEvent.keyDown(heapPlot, { key: "Enter" });
-    expect(onSeekTimestamp).toHaveBeenLastCalledWith(1736078616);
+    expect(onSeekTimestamp).toHaveBeenLastCalledWith(1735738848);
 
     const clientsPlot = screen.getByRole("slider", {
       name: "Concurrent clients shared time cursor",
     });
     fireEvent.keyDown(clientsPlot, { key: " " });
-    expect(onSeekTimestamp).toHaveBeenLastCalledWith(1736078616);
+    expect(onSeekTimestamp).toHaveBeenLastCalledWith(1735738848);
     expect(onSeekTimestamp).toHaveBeenCalledTimes(2);
   });
 
@@ -358,8 +358,8 @@ describe("OperationalMetricTracks", () => {
 
     expect(onCursorChange).toHaveBeenCalledTimes(2);
     expect(onRangeSelect).toHaveBeenLastCalledWith({
-      from: 1736078616,
-      to: 1736078832,
+      from: 1735738848,
+      to: 1735744896,
     });
     expect(screen.getAllByTestId(/operational-metric-selection-/)).toHaveLength(
       3,

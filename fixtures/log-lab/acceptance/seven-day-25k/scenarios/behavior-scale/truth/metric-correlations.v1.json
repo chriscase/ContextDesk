@@ -1,47 +1,61 @@
 {
-  "schemaVersion": 1,
-  "scenarioId": "behavior-scale",
   "evaluatorOnly": true,
-  "mustNotEnterProductChatContext": true,
-  "metricBundle": "../metrics/manifest.v1.json",
-  "incidentWindow": {
-    "from": 1736087400,
-    "to": 1736092800,
-    "description": "Synthetic client ramp reaches peak load, followed by CPU and heap pressure and a locally concentrated warning/error sequence."
-  },
   "expectedCorrelations": [
     {
-      "id": "clients-lead-pressure",
-      "description": "Concurrent clients rise from 10 to 120 before CPU crosses 80 percent and heap crosses 750000000 bytes."
+      "description": "Concurrent clients rise in stages from 12 to 180; CPU follows the prior 15-minute load sample with bounded variation, while heap pressure accumulates.",
+      "id": "clients-lead-pressure"
     },
     {
+      "description": "The overload interval contains a denser warning/error sequence and an existing multiline stack sentinel. These co-occurring signals identify a useful inspection window without asserting cause.",
       "id": "pressure-overlaps-log-signals",
-      "description": "Peak pressure overlaps the checked-in queue-worker warning, checkout-queue error, and database warning.",
       "logEvents": [
         {
-          "timestamp": 1736089501,
           "level": "warn",
           "source": "worker/worker.log",
-          "stableMessageToken": "event_id=behavior-14744"
+          "stableMessageToken": "event_id=behavior-14744",
+          "timestamp": 1736089501
         },
         {
-          "timestamp": 1736090130,
+          "level": "error",
+          "source": "api/app.jsonl",
+          "stableMessageToken": "event_id=behavior-14763 STACK_TRACE_SENTINEL",
+          "timestamp": 1736089870
+        },
+        {
           "level": "error",
           "source": "queue/events.jsonl",
-          "stableMessageToken": "event_id=behavior-14770"
+          "stableMessageToken": "event_id=behavior-14770",
+          "timestamp": 1736090130
         },
         {
-          "timestamp": 1736091757,
           "level": "warn",
           "source": "db/database.log",
-          "stableMessageToken": "event_id=behavior-14841"
+          "stableMessageToken": "event_id=behavior-14841",
+          "timestamp": 1736091757
         }
       ]
     },
     {
-      "id": "recovery-after-ramp",
-      "description": "Clients, CPU, and heap all decline after the peak; the fixture asserts correlation only, not causation."
+      "description": "Heap drops sharply at the declared major-GC sample, then clients and CPU fall as the load stage ends; warning/error prevalence returns toward baseline. The fixture asserts correlation only, not causation.",
+      "id": "gc-and-load-recovery"
     }
   ],
-  "safety": "Expected answers live outside both import/ and metrics/. Product context may include imported measurements and their provenance, but never this evaluator truth."
+  "incidentWindow": {
+    "description": "The staged client ramp reaches overload while CPU and heap pressure rise and warning/error logs become more frequent; the aligned signals are evidence for investigation, not proof of causation.",
+    "from": 1736082000,
+    "to": 1736107200
+  },
+  "intentionalGap": {
+    "from": 1735952400,
+    "reason": "intentional synthetic heap collector restart",
+    "seriesId": "heap-used-bytes",
+    "to": 1735956000
+  },
+  "majorGcAt": 1736097300,
+  "metricBundle": "../metrics/manifest.v1.json",
+  "mustNotEnterProductChatContext": true,
+  "responseLagSeconds": 900,
+  "safety": "Expected answers live outside both import/ and metrics/. Product context may include imported measurements and their provenance, but never this evaluator truth.",
+  "scenarioId": "behavior-scale",
+  "schemaVersion": 1
 }

@@ -293,11 +293,15 @@ fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/
 └── truth/                          # evaluator-only expected correlations
 ```
 
-The first metric fixture is a coherent rising-load incident: clients rise, CPU
-and heap pressure follow, and the peak overlaps checked-in warning/error log
-events. The second fixture is a pattern gallery with isolated CPU, heap, and
-client spikes, one overlapping spike, quiet periods, and explicit missing
-samples.
+The first metric fixture is a seven-day staged load test: client plateaus span
+the full log horizon, CPU follows load with a 15-minute response lag and
+bounded variation, and heap pressure includes ordinary sawtooth movement plus
+a major-GC recovery. Its primary overload window overlaps a denser
+warning/error sequence and a checked-in multiline stack sentinel. The fixture
+documents correlation and investigation steps, never a causal answer. One
+declared heap-collector restart remains visibly missing. The second fixture is
+a pattern gallery with isolated CPU, heap, and client spikes, one overlapping
+spike, quiet periods, and explicit missing samples.
 
 ## Validation and failure behavior
 

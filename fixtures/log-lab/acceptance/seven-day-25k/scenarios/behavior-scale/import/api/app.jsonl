@@ -4858,26 +4858,26 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14435 step=3","service":"checkout-api","trace_id":"trace-behavior-00014435","ts":1736081935}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14436 step=4","service":"checkout-api","trace_id":"trace-behavior-00014436","ts":1736081959}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14440 step=8","service":"checkout-api","trace_id":"trace-behavior-00014440","ts":1736082056}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14441 step=9","service":"checkout-api","trace_id":"trace-behavior-00014441","ts":1736082080}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14441 step=9","service":"checkout-api","trace_id":"trace-behavior-00014441","ts":1736082080}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14445 step=2","service":"checkout-api","trace_id":"trace-behavior-00014445","ts":1736082177}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14451 step=8","service":"checkout-api","trace_id":"trace-behavior-00014451","ts":1736082322}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14455 step=1","service":"checkout-api","trace_id":"trace-behavior-00014455","ts":1736082419}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14455 step=1","service":"checkout-api","trace_id":"trace-behavior-00014455","ts":1736082419}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14457 step=3","service":"checkout-api","trace_id":"trace-behavior-00014457","ts":1736082467}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14458 step=4","service":"checkout-api","trace_id":"trace-behavior-00014458","ts":1736082491}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14459 step=5","service":"checkout-api","trace_id":"trace-behavior-00014459","ts":1736082516}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14464 step=10","service":"checkout-api","trace_id":"trace-behavior-00014464","ts":1736082637}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14466 step=1","service":"checkout-api","trace_id":"trace-behavior-00014466","ts":1736082685}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14467 step=2","service":"checkout-api","trace_id":"trace-behavior-00014467","ts":1736082709}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14467 step=2","service":"checkout-api","trace_id":"trace-behavior-00014467","ts":1736082709}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14468 step=3","service":"checkout-api","trace_id":"trace-behavior-00014468","ts":1736082733}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14471 step=6","service":"checkout-api","trace_id":"trace-behavior-00014471","ts":1736082806}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14473 step=8","service":"checkout-api","trace_id":"trace-behavior-00014473","ts":1736082854}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14480 step=4","service":"checkout-api","trace_id":"trace-behavior-00014480","ts":1736083024}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14483 step=7","service":"checkout-api","trace_id":"trace-behavior-00014483","ts":1736083096}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14483 step=7","service":"checkout-api","trace_id":"trace-behavior-00014483","ts":1736083096}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14486 step=10","service":"checkout-api","trace_id":"trace-behavior-00014486","ts":1736083169}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14487 step=0","service":"checkout-api","trace_id":"trace-behavior-00014487","ts":1736083193}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14492 step=5","service":"checkout-api","trace_id":"trace-behavior-00014492","ts":1736083314}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14502 STACK_TRACE_SENTINEL failure in handler\n    at lab_module_handler(file=example_rs line=42)\n    at lab_module_dispatch(file=example_rs line=12)\nCaused by: simulated timeout after 202ms","service":"checkout-api","trace_id":"trace-behavior-00014502","ts":1736083556}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14504 step=6","service":"checkout-api","trace_id":"trace-behavior-00014504","ts":1736083604}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14504 step=6","service":"checkout-api","trace_id":"trace-behavior-00014504","ts":1736083604}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14505 step=7","service":"checkout-api","trace_id":"trace-behavior-00014505","ts":1736083628}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14510 step=1","service":"checkout-api","trace_id":"trace-behavior-00014510","ts":1736083749}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14512 step=3","service":"checkout-api","trace_id":"trace-behavior-00014512","ts":1736083798}
@@ -4890,23 +4890,23 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14543 step=1","service":"checkout-api","trace_id":"trace-behavior-00014543","ts":1736084548}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14548 step=6","service":"checkout-api","trace_id":"trace-behavior-00014548","ts":1736084669}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14552 step=10","service":"checkout-api","trace_id":"trace-behavior-00014552","ts":1736084766}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14560 step=7","service":"checkout-api","trace_id":"trace-behavior-00014560","ts":1736084959}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14560 step=7","service":"checkout-api","trace_id":"trace-behavior-00014560","ts":1736084959}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14577 step=2","service":"checkout-api","trace_id":"trace-behavior-00014577","ts":1736085370}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14580 step=5","service":"checkout-api","trace_id":"trace-behavior-00014580","ts":1736085443}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14584 step=9","service":"checkout-api","trace_id":"trace-behavior-00014584","ts":1736085540}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14586 step=0","service":"checkout-api","trace_id":"trace-behavior-00014586","ts":1736085588}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14587 step=1","service":"checkout-api","trace_id":"trace-behavior-00014587","ts":1736085612}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14588 step=2","service":"checkout-api","trace_id":"trace-behavior-00014588","ts":1736085637}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14588 step=2","service":"checkout-api","trace_id":"trace-behavior-00014588","ts":1736085637}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14590 step=4","service":"checkout-api","trace_id":"trace-behavior-00014590","ts":1736085685}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14591 step=5","service":"checkout-api","trace_id":"trace-behavior-00014591","ts":1736085709}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14594 step=8","service":"checkout-api","trace_id":"trace-behavior-00014594","ts":1736085782}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14596 step=10","service":"checkout-api","trace_id":"trace-behavior-00014596","ts":1736085830}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14602 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014602","ts":1736085975}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14602 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014602","ts":1736085975}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14603 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014603","ts":1736085999}
-{"host":"host-02.example","level":"debug","message":"event_id=behavior-14605 step=8","service":"checkout-api","trace_id":"trace-behavior-00014605","ts":1736086048}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14605 step=8","service":"checkout-api","trace_id":"trace-behavior-00014605","ts":1736086048}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14606 step=9","service":"checkout-api","trace_id":"trace-behavior-00014606","ts":1736086072}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14608 step=0","service":"checkout-api","trace_id":"trace-behavior-00014608","ts":1736086120}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14609 step=1","service":"checkout-api","trace_id":"trace-behavior-00014609","ts":1736086145}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14609 step=1","service":"checkout-api","trace_id":"trace-behavior-00014609","ts":1736086145}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14610 step=2","service":"checkout-api","trace_id":"trace-behavior-00014610","ts":1736086169}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14626 step=7","service":"checkout-api","trace_id":"trace-behavior-00014626","ts":1736086556}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14627 step=8","service":"checkout-api","trace_id":"trace-behavior-00014627","ts":1736086580}
@@ -4929,7 +4929,7 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14687 step=2","service":"checkout-api","trace_id":"trace-behavior-00014687","ts":1736088032}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14688 step=3","service":"checkout-api","trace_id":"trace-behavior-00014688","ts":1736088056}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14692 step=7","service":"checkout-api","trace_id":"trace-behavior-00014692","ts":1736088153}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14693 step=8","service":"checkout-api","trace_id":"trace-behavior-00014693","ts":1736088177}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14693 step=8","service":"checkout-api","trace_id":"trace-behavior-00014693","ts":1736088177}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14699 step=3","service":"checkout-api","trace_id":"trace-behavior-00014699","ts":1736088322}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14702 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014702","ts":1736088395}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14705 step=9","service":"checkout-api","trace_id":"trace-behavior-00014705","ts":1736088467}
@@ -4937,7 +4937,7 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14710 step=3","service":"checkout-api","trace_id":"trace-behavior-00014710","ts":1736088588}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14712 step=5","service":"checkout-api","trace_id":"trace-behavior-00014712","ts":1736088636}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14716 step=9","service":"checkout-api","trace_id":"trace-behavior-00014716","ts":1736088733}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14721 step=3","service":"checkout-api","trace_id":"trace-behavior-00014721","ts":1736088854}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14721 step=3","service":"checkout-api","trace_id":"trace-behavior-00014721","ts":1736088854}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14727 step=9","service":"checkout-api","trace_id":"trace-behavior-00014727","ts":1736088999}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14731 step=2","service":"checkout-api","trace_id":"trace-behavior-00014731","ts":1736089096}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14736 step=7","service":"checkout-api","trace_id":"trace-behavior-00014736","ts":1736089217}
@@ -4945,21 +4945,21 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14739 step=10","service":"checkout-api","trace_id":"trace-behavior-00014739","ts":1736089290}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14740 step=0","service":"checkout-api","trace_id":"trace-behavior-00014740","ts":1736089314}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14741 step=1","service":"checkout-api","trace_id":"trace-behavior-00014741","ts":1736089338}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14742 step=2","service":"checkout-api","trace_id":"trace-behavior-00014742","ts":1736089362}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14742 step=2","service":"checkout-api","trace_id":"trace-behavior-00014742","ts":1736089362}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14748 step=8","service":"checkout-api","trace_id":"trace-behavior-00014748","ts":1736089507}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14755 step=4","service":"checkout-api","trace_id":"trace-behavior-00014755","ts":1736089677}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14759 step=8","service":"checkout-api","trace_id":"trace-behavior-00014759","ts":1736089774}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14760 step=9","service":"checkout-api","trace_id":"trace-behavior-00014760","ts":1736089798}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14763 STACK_TRACE_SENTINEL failure in handler marker=STACK_TRACE_SENTINEL\n    at lab_module_handler(file=example_rs line=43)\n    at lab_module_dispatch(file=example_rs line=13)\nCaused by: simulated timeout after 463ms","service":"checkout-api","trace_id":"trace-behavior-00014763","ts":1736089870}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14763 STACK_TRACE_SENTINEL failure in handler marker=STACK_TRACE_SENTINEL\n    at lab_module_handler(file=example_rs line=43)\n    at lab_module_dispatch(file=example_rs line=13)\nCaused by: simulated timeout after 463ms","service":"checkout-api","trace_id":"trace-behavior-00014763","ts":1736089870}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14767 step=5","service":"checkout-api","trace_id":"trace-behavior-00014767","ts":1736089967}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14769 step=7","service":"checkout-api","trace_id":"trace-behavior-00014769","ts":1736090015}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14772 step=10","service":"checkout-api","trace_id":"trace-behavior-00014772","ts":1736090088}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14774 step=1","service":"checkout-api","trace_id":"trace-behavior-00014774","ts":1736090136}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14775 step=2","service":"checkout-api","trace_id":"trace-behavior-00014775","ts":1736090161}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14777 step=4","service":"checkout-api","trace_id":"trace-behavior-00014777","ts":1736090209}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14777 step=4","service":"checkout-api","trace_id":"trace-behavior-00014777","ts":1736090209}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14779 step=6","service":"checkout-api","trace_id":"trace-behavior-00014779","ts":1736090257}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14780 step=7","service":"checkout-api","trace_id":"trace-behavior-00014780","ts":1736090282}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14784 step=0","service":"checkout-api","trace_id":"trace-behavior-00014784","ts":1736090378}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14784 step=0","service":"checkout-api","trace_id":"trace-behavior-00014784","ts":1736090378}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14787 step=3","service":"checkout-api","trace_id":"trace-behavior-00014787","ts":1736090451}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14788 step=4","service":"checkout-api","trace_id":"trace-behavior-00014788","ts":1736090475}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14794 step=10","service":"checkout-api","trace_id":"trace-behavior-00014794","ts":1736090620}
@@ -4968,21 +4968,21 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14804 step=9","service":"checkout-api","trace_id":"trace-behavior-00014804","ts":1736090862}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14809 step=3","service":"checkout-api","trace_id":"trace-behavior-00014809","ts":1736090983}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14811 step=5","service":"checkout-api","trace_id":"trace-behavior-00014811","ts":1736091032}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14812 step=6","service":"checkout-api","trace_id":"trace-behavior-00014812","ts":1736091056}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14812 step=6","service":"checkout-api","trace_id":"trace-behavior-00014812","ts":1736091056}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14814 step=8","service":"checkout-api","trace_id":"trace-behavior-00014814","ts":1736091104}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14816 step=10","service":"checkout-api","trace_id":"trace-behavior-00014816","ts":1736091153}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14819 step=2","service":"checkout-api","trace_id":"trace-behavior-00014819","ts":1736091225}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14819 step=2","service":"checkout-api","trace_id":"trace-behavior-00014819","ts":1736091225}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14821 step=4","service":"checkout-api","trace_id":"trace-behavior-00014821","ts":1736091273}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14826 step=9","service":"checkout-api","trace_id":"trace-behavior-00014826","ts":1736091394}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14826 step=9","service":"checkout-api","trace_id":"trace-behavior-00014826","ts":1736091394}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14827 step=10","service":"checkout-api","trace_id":"trace-behavior-00014827","ts":1736091419}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14828 step=0","service":"checkout-api","trace_id":"trace-behavior-00014828","ts":1736091443}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14839 step=0","service":"checkout-api","trace_id":"trace-behavior-00014839","ts":1736091709}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14840 step=1","service":"checkout-api","trace_id":"trace-behavior-00014840","ts":1736091733}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14840 step=1","service":"checkout-api","trace_id":"trace-behavior-00014840","ts":1736091733}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14844 step=5","service":"checkout-api","trace_id":"trace-behavior-00014844","ts":1736091830}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14847 step=8","service":"checkout-api","trace_id":"trace-behavior-00014847","ts":1736091902}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14847 step=8","service":"checkout-api","trace_id":"trace-behavior-00014847","ts":1736091902}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14848 step=9","service":"checkout-api","trace_id":"trace-behavior-00014848","ts":1736091927}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14850 step=0","service":"checkout-api","trace_id":"trace-behavior-00014850","ts":1736091975}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14854 step=4","service":"checkout-api","trace_id":"trace-behavior-00014854","ts":1736092072}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14854 step=4","service":"checkout-api","trace_id":"trace-behavior-00014854","ts":1736092072}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14855 step=5","service":"checkout-api","trace_id":"trace-behavior-00014855","ts":1736092096}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14870 step=9","service":"checkout-api","trace_id":"trace-behavior-00014870","ts":1736092459}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14871 step=10","service":"checkout-api","trace_id":"trace-behavior-00014871","ts":1736092483}
@@ -4992,22 +4992,22 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14892 step=9","service":"checkout-api","trace_id":"trace-behavior-00014892","ts":1736092991}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14893 step=10","service":"checkout-api","trace_id":"trace-behavior-00014893","ts":1736093015}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14895 step=1","service":"checkout-api","trace_id":"trace-behavior-00014895","ts":1736093064}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14896 step=2","service":"checkout-api","trace_id":"trace-behavior-00014896","ts":1736093088}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14896 step=2","service":"checkout-api","trace_id":"trace-behavior-00014896","ts":1736093088}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14900 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014900","ts":1736093185}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14901 STACK_TRACE_SENTINEL failure in handler\n    at lab_module_handler(file=example_rs line=41)\n    at lab_module_dispatch(file=example_rs line=11)\nCaused by: simulated timeout after 601ms","service":"checkout-api","trace_id":"trace-behavior-00014901","ts":1736093209}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14902 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00014902","ts":1736093233}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14915 step=10","service":"checkout-api","trace_id":"trace-behavior-00014915","ts":1736093548}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14917 step=1","service":"checkout-api","trace_id":"trace-behavior-00014917","ts":1736093596}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14917 step=1","service":"checkout-api","trace_id":"trace-behavior-00014917","ts":1736093596}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14921 step=5","service":"checkout-api","trace_id":"trace-behavior-00014921","ts":1736093693}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14926 step=10","service":"checkout-api","trace_id":"trace-behavior-00014926","ts":1736093814}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14927 step=0","service":"checkout-api","trace_id":"trace-behavior-00014927","ts":1736093838}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14927 step=0","service":"checkout-api","trace_id":"trace-behavior-00014927","ts":1736093838}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14933 step=6","service":"checkout-api","trace_id":"trace-behavior-00014933","ts":1736093983}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14934 step=7","service":"checkout-api","trace_id":"trace-behavior-00014934","ts":1736094007}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14940 step=2","service":"checkout-api","trace_id":"trace-behavior-00014940","ts":1736094152}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14942 step=4","service":"checkout-api","trace_id":"trace-behavior-00014942","ts":1736094201}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14947 step=9","service":"checkout-api","trace_id":"trace-behavior-00014947","ts":1736094322}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14949 step=0","service":"checkout-api","trace_id":"trace-behavior-00014949","ts":1736094370}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14950 step=1","service":"checkout-api","trace_id":"trace-behavior-00014950","ts":1736094394}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14950 step=1","service":"checkout-api","trace_id":"trace-behavior-00014950","ts":1736094394}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14955 step=6","service":"checkout-api","trace_id":"trace-behavior-00014955","ts":1736094515}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14965 step=5","service":"checkout-api","trace_id":"trace-behavior-00014965","ts":1736094757}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14967 step=7","service":"checkout-api","trace_id":"trace-behavior-00014967","ts":1736094806}
@@ -5015,19 +5015,19 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14972 step=1","service":"checkout-api","trace_id":"trace-behavior-00014972","ts":1736094927}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14974 step=3","service":"checkout-api","trace_id":"trace-behavior-00014974","ts":1736094975}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14976 step=5","service":"checkout-api","trace_id":"trace-behavior-00014976","ts":1736095023}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14980 step=9","service":"checkout-api","trace_id":"trace-behavior-00014980","ts":1736095120}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-14980 step=9","service":"checkout-api","trace_id":"trace-behavior-00014980","ts":1736095120}
 {"host":"host-02.example","level":"error","message":"event_id=behavior-14981 step=10","service":"checkout-api","trace_id":"trace-behavior-00014981","ts":1736095144}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-14985 step=3","service":"checkout-api","trace_id":"trace-behavior-00014985","ts":1736095241}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-14996 step=3","service":"checkout-api","trace_id":"trace-behavior-00014996","ts":1736095507}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-14996 step=3","service":"checkout-api","trace_id":"trace-behavior-00014996","ts":1736095507}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15000 STACK_TRACE_SENTINEL failure in handler\n    at lab_module_handler(file=example_rs line=40)\n    at lab_module_dispatch(file=example_rs line=10)\nCaused by: simulated timeout after 700ms","service":"checkout-api","trace_id":"trace-behavior-00015000","ts":1736095580}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15002 LONG_JSON_SENTINEL payload=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","service":"checkout-api","trace_id":"trace-behavior-00015002","ts":1736095652}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15005 step=1","service":"checkout-api","trace_id":"trace-behavior-00015005","ts":1736095725}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15010 step=6","service":"checkout-api","trace_id":"trace-behavior-00015010","ts":1736095846}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15012 step=8","service":"checkout-api","trace_id":"trace-behavior-00015012","ts":1736095894}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15013 step=9","service":"checkout-api","trace_id":"trace-behavior-00015013","ts":1736095919}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15015 step=0","service":"checkout-api","trace_id":"trace-behavior-00015015","ts":1736095967}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15015 step=0","service":"checkout-api","trace_id":"trace-behavior-00015015","ts":1736095967}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15018 step=3","service":"checkout-api","trace_id":"trace-behavior-00015018","ts":1736096039}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15019 step=4","service":"checkout-api","trace_id":"trace-behavior-00015019","ts":1736096064}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-15019 step=4","service":"checkout-api","trace_id":"trace-behavior-00015019","ts":1736096064}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15020 step=5","service":"checkout-api","trace_id":"trace-behavior-00015020","ts":1736096088}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15025 step=10","service":"checkout-api","trace_id":"trace-behavior-00015025","ts":1736096209}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15026 step=0","service":"checkout-api","trace_id":"trace-behavior-00015026","ts":1736096233}
@@ -5038,13 +5038,13 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15041 step=4","service":"checkout-api","trace_id":"trace-behavior-00015041","ts":1736096596}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15044 step=7","service":"checkout-api","trace_id":"trace-behavior-00015044","ts":1736096669}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15048 step=0","service":"checkout-api","trace_id":"trace-behavior-00015048","ts":1736096765}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15050 step=2","service":"checkout-api","trace_id":"trace-behavior-00015050","ts":1736096814}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15050 step=2","service":"checkout-api","trace_id":"trace-behavior-00015050","ts":1736096814}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15053 step=5","service":"checkout-api","trace_id":"trace-behavior-00015053","ts":1736096886}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15060 step=1","service":"checkout-api","trace_id":"trace-behavior-00015060","ts":1736097056}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15064 step=5","service":"checkout-api","trace_id":"trace-behavior-00015064","ts":1736097152}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15064 step=5","service":"checkout-api","trace_id":"trace-behavior-00015064","ts":1736097152}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15066 step=7","service":"checkout-api","trace_id":"trace-behavior-00015066","ts":1736097201}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15070 step=0","service":"checkout-api","trace_id":"trace-behavior-00015070","ts":1736097298}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15071 step=1","service":"checkout-api","trace_id":"trace-behavior-00015071","ts":1736097322}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15071 step=1","service":"checkout-api","trace_id":"trace-behavior-00015071","ts":1736097322}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15072 step=2","service":"checkout-api","trace_id":"trace-behavior-00015072","ts":1736097346}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15073 step=3","service":"checkout-api","trace_id":"trace-behavior-00015073","ts":1736097370}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15077 step=7","service":"checkout-api","trace_id":"trace-behavior-00015077","ts":1736097467}
@@ -5076,9 +5076,9 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15187 step=7","service":"checkout-api","trace_id":"trace-behavior-00015187","ts":1736100128}
 {"host":"host-02.example","level":"debug","message":"event_id=behavior-15188 step=8","service":"checkout-api","trace_id":"trace-behavior-00015188","ts":1736100152}
 {"host":"host-02.example","level":"error","message":"event_id=behavior-15192 step=1","service":"checkout-api","trace_id":"trace-behavior-00015192","ts":1736100249}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15197 step=6","service":"checkout-api","trace_id":"trace-behavior-00015197","ts":1736100370}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15197 step=6","service":"checkout-api","trace_id":"trace-behavior-00015197","ts":1736100370}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15199 step=8","service":"checkout-api","trace_id":"trace-behavior-00015199","ts":1736100418}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15204 step=2","service":"checkout-api","trace_id":"trace-behavior-00015204","ts":1736100539}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15204 step=2","service":"checkout-api","trace_id":"trace-behavior-00015204","ts":1736100539}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15205 step=3","service":"checkout-api","trace_id":"trace-behavior-00015205","ts":1736100564}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15212 step=10","service":"checkout-api","trace_id":"trace-behavior-00015212","ts":1736100733}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15213 step=0","service":"checkout-api","trace_id":"trace-behavior-00015213","ts":1736100757}
@@ -5088,7 +5088,7 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15230 step=6","service":"checkout-api","trace_id":"trace-behavior-00015230","ts":1736101168}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15233 step=9","service":"checkout-api","trace_id":"trace-behavior-00015233","ts":1736101241}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15238 step=3","service":"checkout-api","trace_id":"trace-behavior-00015238","ts":1736101362}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15246 step=0","service":"checkout-api","trace_id":"trace-behavior-00015246","ts":1736101555}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15246 step=0","service":"checkout-api","trace_id":"trace-behavior-00015246","ts":1736101555}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15248 step=2","service":"checkout-api","trace_id":"trace-behavior-00015248","ts":1736101604}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15250 step=4","service":"checkout-api","trace_id":"trace-behavior-00015250","ts":1736101652}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15252 step=6","service":"checkout-api","trace_id":"trace-behavior-00015252","ts":1736101701}
@@ -5099,16 +5099,16 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15275 step=7","service":"checkout-api","trace_id":"trace-behavior-00015275","ts":1736102257}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15277 step=9","service":"checkout-api","trace_id":"trace-behavior-00015277","ts":1736102305}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15280 step=1","service":"checkout-api","trace_id":"trace-behavior-00015280","ts":1736102378}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15281 step=2","service":"checkout-api","trace_id":"trace-behavior-00015281","ts":1736102402}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15281 step=2","service":"checkout-api","trace_id":"trace-behavior-00015281","ts":1736102402}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15282 step=3","service":"checkout-api","trace_id":"trace-behavior-00015282","ts":1736102426}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15283 step=4","service":"checkout-api","trace_id":"trace-behavior-00015283","ts":1736102451}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15294 step=4","service":"checkout-api","trace_id":"trace-behavior-00015294","ts":1736102717}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15300 STACK_TRACE_SENTINEL failure in handler\n    at lab_module_handler(file=example_rs line=40)\n    at lab_module_dispatch(file=example_rs line=10)\nCaused by: simulated timeout after 100ms","service":"checkout-api","trace_id":"trace-behavior-00015300","ts":1736102862}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15309 step=8","service":"checkout-api","trace_id":"trace-behavior-00015309","ts":1736103080}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15309 step=8","service":"checkout-api","trace_id":"trace-behavior-00015309","ts":1736103080}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15312 step=0","service":"checkout-api","trace_id":"trace-behavior-00015312","ts":1736103152}
 {"host":"host-02.example","level":"debug","message":"event_id=behavior-15314 step=2","service":"checkout-api","trace_id":"trace-behavior-00015314","ts":1736103201}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15317 step=5","service":"checkout-api","trace_id":"trace-behavior-00015317","ts":1736103273}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15318 step=6","service":"checkout-api","trace_id":"trace-behavior-00015318","ts":1736103297}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-15318 step=6","service":"checkout-api","trace_id":"trace-behavior-00015318","ts":1736103297}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15320 step=8","service":"checkout-api","trace_id":"trace-behavior-00015320","ts":1736103346}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15333 step=10","service":"checkout-api","trace_id":"trace-behavior-00015333","ts":1736103660}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15347 step=2","service":"checkout-api","trace_id":"trace-behavior-00015347","ts":1736103999}
@@ -5117,7 +5117,7 @@
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15361 step=5","service":"checkout-api","trace_id":"trace-behavior-00015361","ts":1736104338}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15362 step=6","service":"checkout-api","trace_id":"trace-behavior-00015362","ts":1736104362}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15369 step=2","service":"checkout-api","trace_id":"trace-behavior-00015369","ts":1736104531}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15372 step=5","service":"checkout-api","trace_id":"trace-behavior-00015372","ts":1736104604}
+{"host":"host-02.example","level":"warn","message":"event_id=behavior-15372 step=5","service":"checkout-api","trace_id":"trace-behavior-00015372","ts":1736104604}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15374 step=7","service":"checkout-api","trace_id":"trace-behavior-00015374","ts":1736104652}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15381 step=3","service":"checkout-api","trace_id":"trace-behavior-00015381","ts":1736104822}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15396 step=7","service":"checkout-api","trace_id":"trace-behavior-00015396","ts":1736105184}
@@ -5132,10 +5132,10 @@
 {"host":"host-02.example","level":"warn","message":"event_id=behavior-15423 step=1","service":"checkout-api","trace_id":"trace-behavior-00015423","ts":1736105838}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15425 step=3","service":"checkout-api","trace_id":"trace-behavior-00015425","ts":1736105886}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15432 step=10","service":"checkout-api","trace_id":"trace-behavior-00015432","ts":1736106055}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15433 step=0","service":"checkout-api","trace_id":"trace-behavior-00015433","ts":1736106080}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-15433 step=0","service":"checkout-api","trace_id":"trace-behavior-00015433","ts":1736106080}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15444 step=0","service":"checkout-api","trace_id":"trace-behavior-00015444","ts":1736106346}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15451 step=7","service":"checkout-api","trace_id":"trace-behavior-00015451","ts":1736106515}
-{"host":"host-02.example","level":"info","message":"event_id=behavior-15456 step=1","service":"checkout-api","trace_id":"trace-behavior-00015456","ts":1736106636}
+{"host":"host-02.example","level":"error","message":"event_id=behavior-15456 step=1","service":"checkout-api","trace_id":"trace-behavior-00015456","ts":1736106636}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15459 step=4","service":"checkout-api","trace_id":"trace-behavior-00015459","ts":1736106709}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15466 step=0","service":"checkout-api","trace_id":"trace-behavior-00015466","ts":1736106878}
 {"host":"host-02.example","level":"info","message":"event_id=behavior-15467 step=1","service":"checkout-api","trace_id":"trace-behavior-00015467","ts":1736106902}
