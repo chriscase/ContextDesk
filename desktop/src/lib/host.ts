@@ -2169,6 +2169,27 @@ export type LogFacetsDto = {
   timeQuality: TimeQuality;
 };
 
+export type LogSourceCatalogEntryDto = {
+  /** Exact corpus-relative path; duplicate basenames remain distinct. */
+  source: string;
+  eventCount: number;
+};
+
+export type LogSourceCatalogQueryDto = {
+  /** Case-insensitive literal substring over the full relative path. */
+  search?: string | null;
+  /** Exclusive full-path keyset returned by the preceding page. */
+  cursor?: string | null;
+  /** Zero uses the core default; the core rejects values above its hard cap. */
+  limit?: number;
+};
+
+export type LogSourceCatalogPageDto = {
+  sources: LogSourceCatalogEntryDto[];
+  nextCursor: string | null;
+  totalMatched: number;
+};
+
 export type EventSearchHitDto = {
   event: ExplorerEventDto;
   score: number;
@@ -2515,6 +2536,24 @@ export async function hostLogFacets(
     };
   }
   return invoke<LogFacetsDto>("log_facets", { corpusId, query });
+}
+
+/** Complete source inventory; deliberately separate from top-N filter facets. */
+export async function hostLogSourceCatalog(
+  corpusId: string,
+  query: LogSourceCatalogQueryDto = {},
+): Promise<LogSourceCatalogPageDto> {
+  if (!isTauri()) {
+    return {
+      sources: [],
+      nextCursor: null,
+      totalMatched: 0,
+    };
+  }
+  return invoke<LogSourceCatalogPageDto>("log_source_catalog", {
+    corpusId,
+    query,
+  });
 }
 
 export async function hostLogSearchEvents(

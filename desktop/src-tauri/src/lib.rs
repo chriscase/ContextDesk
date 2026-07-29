@@ -7694,6 +7694,27 @@ fn log_facets(
     cd_core::log_analysis::query_facets(&c, &query).map_err(|e| e.to_string())
 }
 
+fn query_log_source_catalog_at(
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::LogSourceCatalogQuery,
+) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
+    let corpus =
+        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    cd_core::log_analysis::query_source_catalog(&corpus, query).map_err(|e| e.to_string())
+}
+
+/// Dedicated, stable, paginated full-path source catalog for lane composition.
+#[tauri::command]
+fn log_source_catalog(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::LogSourceCatalogQuery,
+) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
+    let cache = log_cache_dir(&state)?;
+    query_log_source_catalog_at(&cache, &corpus_id, &query)
+}
+
 /// IPC args for advanced log search (#523).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -9328,6 +9349,7 @@ pub fn run() {
             log_shared_timeline_summary,
             log_query_event_neighborhood,
             log_facets,
+            log_source_catalog,
             log_search_events,
             cancel_log_search,
             log_list_bookmarks,
@@ -9723,6 +9745,87 @@ mod log_original_host_tests {
             !shared_command.contains("ensure_host("),
             "local bounded summary must not construct the agent host"
         );
+    }
+}
+
+#[cfg(test)]
+mod log_source_catalog_host_tests {
+    use super::*;
+
+    #[test]
+    fn source_catalog_binding_preserves_relative_paths_and_pages_stably() {
+        let root = tempfile::tempdir().expect("temp root");
+        let logs = root.path().join("logs");
+        for region in ["region-a", "region-b"] {
+            let dir = logs.join(region);
+            std::fs::create_dir_all(&dir).expect("nested fixture directory");
+            std::fs::write(
+                dir.join("application.log"),
+                format!("2026-07-29T12:00:00Z INFO {region}\n"),
+            )
+            .expect("fixture");
+        }
+        let cache = root.path().join("cache");
+        let report =
+            cd_core::log_analysis::ingest_path(&cache, &logs, "source-catalog-host", None, "none")
+                .expect("ingest");
+
+        let first = query_log_source_catalog_at(
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::LogSourceCatalogQuery {
+                search: Some("REGION-".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .expect("first page");
+        assert_eq!(first.total_matched, 2);
+        assert_eq!(first.sources.len(), 1);
+        assert_eq!(first.sources[0].source, "region-a/application.log");
+        assert_eq!(first.sources[0].event_count, 1);
+        assert_eq!(
+            first.next_cursor.as_deref(),
+            Some("region-a/application.log")
+        );
+
+        let second = query_log_source_catalog_at(
+            &cache,
+            &report.corpus_id,
+            &cd_core::log_analysis::LogSourceCatalogQuery {
+                search: Some("region-".into()),
+                cursor: first.next_cursor,
+                limit: 1,
+            },
+        )
+        .expect("second page");
+        assert_eq!(second.total_matched, 2);
+        assert_eq!(second.sources.len(), 1);
+        assert_eq!(second.sources[0].source, "region-b/application.log");
+        assert_eq!(second.next_cursor, None);
+
+        let wire = serde_json::to_value(&second).expect("serialize host DTO");
+        assert_eq!(wire["sources"][0]["source"], "region-b/application.log");
+        assert_eq!(wire["sources"][0]["eventCount"], 1);
+        assert_eq!(wire["totalMatched"], 2);
+        assert!(wire.get("nextCursor").is_some());
+    }
+
+    #[test]
+    fn source_catalog_command_is_registered_local_and_independent_of_facets() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("log_source_catalog,"));
+        let command_start = source
+            .find("fn log_source_catalog(")
+            .expect("source catalog command");
+        let command_end = source[command_start..]
+            .find("/// IPC args for advanced log search")
+            .map(|offset| command_start + offset)
+            .expect("source catalog command boundary");
+        let command = &source[command_start..command_end];
+        assert!(command.contains("query_log_source_catalog_at"));
+        assert!(!command.contains("query_facets"));
+        assert!(!command.contains("ensure_host("));
     }
 }
 

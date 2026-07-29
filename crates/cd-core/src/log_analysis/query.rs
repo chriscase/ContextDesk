@@ -16,6 +16,18 @@ pub const MAX_EVENT_PAGE: usize = 500;
 /// Default page size when caller omits limit.
 pub const DEFAULT_EVENT_PAGE: usize = 100;
 
+/// Default number of source identities returned by the dedicated catalog.
+pub const DEFAULT_SOURCE_CATALOG_PAGE: usize = 100;
+
+/// Hard max source identities per catalog page.
+pub const MAX_SOURCE_CATALOG_PAGE: usize = 200;
+
+/// Hard max case-insensitive substring length for source-catalog search.
+pub const MAX_SOURCE_CATALOG_SEARCH_CHARS: usize = 256;
+
+/// Hard max serialized source identity accepted as a catalog cursor.
+pub const MAX_SOURCE_CATALOG_CURSOR_BYTES: usize = 4_096;
+
 /// Default number of fixed summary buckets used by the Explorer navigator.
 pub const DEFAULT_TIMELINE_BUCKETS: usize = 96;
 
@@ -596,6 +608,40 @@ pub struct LogFacets {
     pub hosts: BTreeMap<String, u64>,
     /// Corpus time quality.
     pub time_quality: TimeQuality,
+}
+
+/// One stable full-path identity in the corpus source catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSourceCatalogEntry {
+    /// Exact source value stored on events (relative path, never basename-only).
+    pub source: String,
+    /// Exact number of events attributed to this source.
+    pub event_count: u64,
+}
+
+/// Bounded request for the dedicated corpus source catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LogSourceCatalogQuery {
+    /// Optional case-insensitive literal substring over the full relative path.
+    pub search: Option<String>,
+    /// Exclusive full-path keyset cursor returned by the preceding page.
+    pub cursor: Option<String>,
+    /// Requested page size. Zero selects [`DEFAULT_SOURCE_CATALOG_PAGE`].
+    pub limit: usize,
+}
+
+/// One deterministic page of distinct source identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSourceCatalogPage {
+    /// Full relative paths in deterministic ascending lexical order.
+    pub sources: Vec<LogSourceCatalogEntry>,
+    /// Exclusive keyset cursor for the next page, present only when more exist.
+    pub next_cursor: Option<String>,
+    /// Exact distinct-source count under the current search, before the cursor.
+    pub total_matched: u64,
 }
 
 /// Event-level search hit (keyword, regex, or via template-semantic).
@@ -1345,6 +1391,130 @@ pub fn query_facets(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<LogFacets>
         Ok(())
     })?;
     Ok(facets)
+}
+
+/// Query the complete, corpus-scoped source inventory independently of facets.
+///
+/// Sources are grouped by their exact stored relative path and ordered by the
+/// database's deterministic default binary collation. The cursor is the last
+/// full path returned and is exclusive. Before advancing, it must still exist
+/// under the same search predicate; a stale or search-mismatched cursor fails
+/// explicitly rather than returning a plausible page with silently skipped
+/// sources.
+pub fn query_source_catalog(
+    corpus: &LogCorpus,
+    q: &LogSourceCatalogQuery,
+) -> CoreResult<LogSourceCatalogPage> {
+    let limit = if q.limit == 0 {
+        DEFAULT_SOURCE_CATALOG_PAGE
+    } else if q.limit <= MAX_SOURCE_CATALOG_PAGE {
+        q.limit
+    } else {
+        return Err(CoreError::Message(format!(
+            "source catalog page limit {} exceeds maximum {}",
+            q.limit, MAX_SOURCE_CATALOG_PAGE
+        )));
+    };
+
+    let search = normalize_source_catalog_search(q.search.as_deref())?;
+    let cursor = validate_source_catalog_cursor(q.cursor.as_deref())?;
+    let mut base_clauses = vec!["1=1".to_string()];
+    let mut base_binds = Vec::new();
+    if let Some(search) = &search {
+        base_clauses.push("contains(lower(source), ?)".into());
+        base_binds.push(Value::Text(search.clone()));
+    }
+    let base_where = base_clauses.join(" AND ");
+
+    corpus.with_connection(|conn| {
+        if let Some(cursor) = cursor {
+            let cursor_sql =
+                format!("SELECT COUNT(*) FROM events WHERE {base_where} AND source = ?");
+            let mut cursor_binds = base_binds.clone();
+            cursor_binds.push(Value::Text(cursor.to_string()));
+            let mut stmt = conn.prepare(&cursor_sql).map_err(duck_err)?;
+            let cursor_count = bind_and_query_row_i64(&mut stmt, &cursor_binds)?;
+            if cursor_count == 0 {
+                return Err(CoreError::Message(
+                    "source catalog cursor is not present under the current corpus search".into(),
+                ));
+            }
+        }
+
+        let total_sql = format!(
+            "SELECT COUNT(*) FROM (SELECT source FROM events WHERE {base_where} GROUP BY source)"
+        );
+        let mut total_stmt = conn.prepare(&total_sql).map_err(duck_err)?;
+        let total_matched = bind_and_query_row_i64(&mut total_stmt, &base_binds)?.max(0) as u64;
+
+        let mut page_where = base_where;
+        let mut page_binds = base_binds;
+        if let Some(cursor) = cursor {
+            page_where.push_str(" AND source > ?");
+            page_binds.push(Value::Text(cursor.to_string()));
+        }
+        page_binds.push(Value::BigInt((limit + 1) as i64));
+        let page_sql = format!(
+            "SELECT source, COUNT(*) AS event_count \
+             FROM events WHERE {page_where} \
+             GROUP BY source ORDER BY source ASC LIMIT ?"
+        );
+        let mut page_stmt = conn.prepare(&page_sql).map_err(duck_err)?;
+        let mut rows = bind_and_map_source_catalog(&mut page_stmt, &page_binds)?;
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.truncate(limit);
+        }
+        let next_cursor = has_more
+            .then(|| rows.last().map(|entry| entry.source.clone()))
+            .flatten();
+
+        Ok(LogSourceCatalogPage {
+            sources: rows,
+            next_cursor,
+            total_matched,
+        })
+    })
+}
+
+fn normalize_source_catalog_search(search: Option<&str>) -> CoreResult<Option<String>> {
+    let Some(search) = search else {
+        return Ok(None);
+    };
+    let search = search.trim();
+    if search.is_empty() {
+        return Ok(None);
+    }
+    if search.contains('\0') {
+        return Err(CoreError::Message(
+            "source catalog search must not contain NUL".into(),
+        ));
+    }
+    let chars = search.chars().count();
+    if chars > MAX_SOURCE_CATALOG_SEARCH_CHARS {
+        return Err(CoreError::Message(format!(
+            "source catalog search length {chars} exceeds maximum {MAX_SOURCE_CATALOG_SEARCH_CHARS}"
+        )));
+    }
+    Ok(Some(search.to_lowercase()))
+}
+
+fn validate_source_catalog_cursor(cursor: Option<&str>) -> CoreResult<Option<&str>> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    if cursor.is_empty() || cursor.contains('\0') {
+        return Err(CoreError::Message(
+            "source catalog cursor must be a non-empty source path without NUL".into(),
+        ));
+    }
+    if cursor.len() > MAX_SOURCE_CATALOG_CURSOR_BYTES {
+        return Err(CoreError::Message(format!(
+            "source catalog cursor exceeds maximum {} bytes",
+            MAX_SOURCE_CATALOG_CURSOR_BYTES
+        )));
+    }
+    Ok(Some(cursor))
 }
 
 /// Keyword / regex / optional template-semantic → **events** (template-first for semantic).
@@ -2260,6 +2430,25 @@ fn bind_and_map_kv(
     Ok(out)
 }
 
+fn bind_and_map_source_catalog(
+    stmt: &mut duckdb::Statement<'_>,
+    values: &[Value],
+) -> CoreResult<Vec<LogSourceCatalogEntry>> {
+    let rows = stmt
+        .query_map(params_ref(values).as_slice(), |row| {
+            Ok(LogSourceCatalogEntry {
+                source: row.get(0)?,
+                event_count: row.get::<_, i64>(1)?.max(0) as u64,
+            })
+        })
+        .map_err(duck_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(duck_err)?);
+    }
+    Ok(out)
+}
+
 fn duck_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Message(format!("duckdb: {e}"))
 }
@@ -2328,6 +2517,44 @@ mod tests {
         let cache = dir.path().join("cache");
         let report = ingest_path(&cache, &logs, "shared-timeline", None, "none").unwrap();
         (dir, report.corpus_id)
+    }
+
+    fn high_cardinality_source_catalog_fixture() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::create(&cache, "source-catalog").unwrap();
+        let corpus_id = corpus.id().to_string();
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch("BEGIN TRANSACTION").map_err(duck_err)?;
+                let mut seq = 0_i64;
+                for index in 1..=241 {
+                    let source = format!("services/service-{index:03}/application.log");
+                    conn.execute(
+                        "INSERT INTO events \
+                         (seq, ts, level, service, host, template_id, params, trace_id, message, source) \
+                         VALUES (?1, ?2, 'info', NULL, NULL, 0, '[]', NULL, 'event', ?3)",
+                        duckdb::params![seq, 1_700_000_000_i64 + seq, source],
+                    )
+                    .map_err(duck_err)?;
+                    seq += 1;
+                }
+                conn.execute(
+                    "INSERT INTO events \
+                     (seq, ts, level, service, host, template_id, params, trace_id, message, source) \
+                     VALUES (?1, ?2, 'error', NULL, NULL, 0, '[]', NULL, 'second event', ?3)",
+                    duckdb::params![
+                        seq,
+                        1_700_000_000_i64 + seq,
+                        "services/service-001/application.log"
+                    ],
+                )
+                .map_err(duck_err)?;
+                conn.execute_batch("COMMIT").map_err(duck_err)?;
+                Ok(())
+            })
+            .unwrap();
+        (dir, corpus_id)
     }
 
     #[test]
@@ -3396,6 +3623,185 @@ mod tests {
             f.time_quality,
             TimeQuality::Wall | TimeQuality::Mixed | TimeQuality::OrderOnly
         ));
+    }
+
+    #[test]
+    fn source_catalog_pages_all_241_full_paths_without_gaps_or_duplicates() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let mut cursor = None;
+        let mut sources = Vec::new();
+        let mut pages = 0;
+
+        loop {
+            let page = query_source_catalog(
+                &corpus,
+                &LogSourceCatalogQuery {
+                    cursor: cursor.clone(),
+                    limit: 37,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            pages += 1;
+            assert_eq!(page.total_matched, 241);
+            assert!(page.sources.len() <= 37);
+            assert!(page
+                .sources
+                .windows(2)
+                .all(|pair| pair[0].source < pair[1].source));
+            if let Some(next) = &page.next_cursor {
+                assert_eq!(
+                    Some(next.as_str()),
+                    page.sources.last().map(|entry| entry.source.as_str()),
+                    "continuation must be the last returned full-path identity"
+                );
+            }
+            sources.extend(page.sources);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+            assert!(pages < 20, "source catalog pagination did not terminate");
+        }
+
+        assert_eq!(pages, 7);
+        assert_eq!(sources.len(), 241);
+        assert!(sources
+            .windows(2)
+            .all(|pair| pair[0].source < pair[1].source));
+        assert_eq!(
+            sources
+                .iter()
+                .map(|entry| entry.source.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            241
+        );
+        assert!(sources
+            .iter()
+            .any(|entry| entry.source == "services/service-241/application.log"));
+        assert_eq!(
+            sources
+                .iter()
+                .find(|entry| entry.source == "services/service-001/application.log")
+                .map(|entry| entry.event_count),
+            Some(2)
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|entry| entry.source.ends_with("/application.log")),
+            "duplicate basenames must remain distinct by full relative path"
+        );
+
+        let repeated_first = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                limit: 37,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(repeated_first.sources, sources[..37]);
+    }
+
+    #[test]
+    fn source_catalog_search_is_case_insensitive_literal_and_cursor_safe() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let matched = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("SERVICE-241/APPLICATION".into()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(matched.total_matched, 1);
+        assert_eq!(
+            matched.sources,
+            vec![LogSourceCatalogEntry {
+                source: "services/service-241/application.log".into(),
+                event_count: 1,
+            }]
+        );
+        assert_eq!(matched.next_cursor, None);
+
+        let wildcard_literal = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("%_".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(wildcard_literal.total_matched, 0);
+
+        let first = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = query_source_catalog(
+            &corpus,
+            &LogSourceCatalogQuery {
+                search: Some("service-241".into()),
+                cursor: first.next_cursor,
+                limit: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not present under the current corpus search"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn source_catalog_rejects_unbounded_or_invalid_requests() {
+        let (dir, id) = high_cardinality_source_catalog_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let defaults: LogSourceCatalogQuery =
+            serde_json::from_str("{}").expect("omitted IPC fields use bounded defaults");
+        let default_page = query_source_catalog(&corpus, &defaults).unwrap();
+        assert_eq!(default_page.sources.len(), DEFAULT_SOURCE_CATALOG_PAGE);
+        assert_eq!(default_page.total_matched, 241);
+        assert!(default_page.next_cursor.is_some());
+
+        for query in [
+            LogSourceCatalogQuery {
+                limit: MAX_SOURCE_CATALOG_PAGE + 1,
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                search: Some("x".repeat(MAX_SOURCE_CATALOG_SEARCH_CHARS + 1)),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some(String::new()),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some("missing/source.log".into()),
+                ..Default::default()
+            },
+            LogSourceCatalogQuery {
+                cursor: Some("x".repeat(MAX_SOURCE_CATALOG_CURSOR_BYTES + 1)),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                query_source_catalog(&corpus, &query).is_err(),
+                "request must fail closed: {query:?}"
+            );
+        }
     }
 
     #[test]

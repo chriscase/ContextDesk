@@ -9,6 +9,7 @@ import {
   hostResolveHandbookLink,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
+  hostLogSourceCatalog,
   hostPrepareLogDiagnosticReport,
   hostReleaseLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
@@ -59,6 +60,52 @@ describe("hostLogSharedTimelineSummary", () => {
         maxBuckets: 96,
       },
     });
+  });
+});
+
+describe("hostLogSourceCatalog", () => {
+  it("uses the dedicated corpus-scoped paginated source command", async () => {
+    invokeMock.mockResolvedValue({
+      sources: [
+        {
+          source: "region-b/application.log",
+          eventCount: 7,
+        },
+      ],
+      nextCursor: "region-b/application.log",
+      totalMatched: 241,
+    });
+
+    await expect(
+      hostLogSourceCatalog("corpus-1", {
+        search: "APPLICATION",
+        cursor: "region-a/application.log",
+        limit: 40,
+      }),
+    ).resolves.toMatchObject({
+      sources: [{ source: "region-b/application.log", eventCount: 7 }],
+      totalMatched: 241,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("log_source_catalog", {
+      corpusId: "corpus-1",
+      query: {
+        search: "APPLICATION",
+        cursor: "region-a/application.log",
+        limit: 40,
+      },
+    });
+  });
+
+  it("returns an honest empty catalog outside the desktop host", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+
+    await expect(hostLogSourceCatalog("corpus-1")).resolves.toEqual({
+      sources: [],
+      nextCursor: null,
+      totalMatched: 0,
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 
