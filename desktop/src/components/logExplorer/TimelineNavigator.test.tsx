@@ -458,6 +458,91 @@ describe("TimelineNavigator", () => {
     expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
   });
 
+  it("shares log-histogram hover with every metric readout without seeking", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+    await screen.findByTestId("timeline-session-metrics");
+
+    const chart = screen.getByTestId("timeline-navigator-bars");
+    Object.defineProperty(chart, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    act(() => {
+      fireEvent.pointerMove(chart, { clientX: 90, pointerId: 1 });
+    });
+
+    expect(
+      screen.getByTestId("operational-metric-reading-cpu-percent").textContent,
+    ).toContain("95 %");
+    expect(
+      screen.getByTestId("operational-metric-reading-heap-bytes").textContent,
+    ).toContain("800M bytes");
+    expect(
+      screen.getByTestId("operational-metric-reading-clients").textContent,
+    ).toContain("120 clients");
+    expect(screen.getByTestId("timeline-bucket-detail")).toBeTruthy();
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+
+    act(() => {
+      fireEvent.pointerLeave(chart);
+    });
+    expect(screen.queryByTestId("timeline-bucket-detail")).toBeNull();
+  });
+
+  it("keeps detailed metric tracks inside a bounded scrollable timeline pane", async () => {
+    render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("timeline-navigator-track");
+    fireEvent.change(screen.getByTestId("timeline-metric-input"), {
+      target: { files: [metricFile(sessionMetrics)] },
+    });
+    await screen.findByTestId("timeline-session-metrics");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Metric track size" }),
+      { target: { value: "detailed" } },
+    );
+
+    const body = document.getElementById("log-explorer-timeline-navigator");
+    expect(body).toBeTruthy();
+    const style = getComputedStyle(body!);
+    expect(style.overflowY).toBe("auto");
+    expect((body as HTMLElement).style.maxHeight).toBe("min(44vh, 30rem)");
+    expect(
+      screen
+        .getByTestId("timeline-session-metrics")
+        .querySelector(".operational-metric-tracks")
+        ?.getAttribute("data-density"),
+    ).toBe("detailed");
+  });
+
   it("zooms a brushed metric range and restores the full shared timeline", async () => {
     render(
       <TimelineNavigator

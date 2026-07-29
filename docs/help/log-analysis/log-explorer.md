@@ -126,6 +126,14 @@ replace a long machine timestamp, while exact bucket bounds and a complete
 textual bucket list remain available through hover, focus, and **Timeline
 data**.
 
+When session metric tracks are open, hovering the log histogram or any metric
+track moves one shared preview line. Each metric header shows its nearest real
+sample value and sample time; the small right-edge labels are explicitly the
+visible **Max** and **Min**, not the hovered value. Hovering only inspects—the
+logs move only after a deliberate click, pointer release, or keyboard commit.
+If **Detailed** tracks exceed the bounded Timeline height, scroll inside the
+Timeline panel; the log viewport remains available below it.
+
 With two to four lanes, compact coverage rows summarize each lane and retain
 its own wall/mixed/order-only label; one lane cannot make another clock more
 trustworthy. Wall-clock data uses UTC, order-only data is described as order,

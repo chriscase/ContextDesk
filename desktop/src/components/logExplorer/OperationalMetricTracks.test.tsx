@@ -90,7 +90,7 @@ describe("OperationalMetricTracks", () => {
       Array.from(
         track.querySelectorAll(".operational-metric-track__scale-label"),
       ).map((label) => label.textContent),
-    ).toEqual(["96 %", "22 %"]);
+    ).toEqual(["Max 96 %", "Min 22 %"]);
     expect(
       screen.queryByTestId("operational-metric-hover-reading-cpu-percent"),
     ).toBeNull();

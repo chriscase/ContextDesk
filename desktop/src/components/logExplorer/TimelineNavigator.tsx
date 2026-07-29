@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   hostLogQueryEvents,
@@ -385,6 +386,30 @@ export function TimelineNavigator({
     [summary],
   );
 
+  const previewTimelinePointer = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (
+        !summary ||
+        summary.spanFrom == null ||
+        summary.spanTo == null ||
+        summary.spanTo <= summary.spanFrom
+      ) {
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const ratio = Math.max(
+        0,
+        Math.min(1, (event.clientX - rect.left) / rect.width),
+      );
+      const index = previewTimestamp(
+        summary.spanFrom + ratio * (summary.spanTo - summary.spanFrom),
+      );
+      if (index != null) setDetailIndex(index);
+    },
+    [previewTimestamp, summary],
+  );
+
   const importSessionMetrics = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
@@ -540,6 +565,7 @@ export function TimelineNavigator({
         <div
           id="log-explorer-timeline-navigator"
           className="log-explorer__navigator-body timeline-navigator__body"
+          style={{ maxHeight: "min(44vh, 30rem)", overflowY: "auto" }}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             event.preventDefault();
@@ -643,6 +669,8 @@ export function TimelineNavigator({
                   style={{
                     gridTemplateColumns: `repeat(${summary.bucketCount}, minmax(2px, 1fr))`,
                   }}
+                  onPointerMove={previewTimelinePointer}
+                  onPointerLeave={clearDetail}
                 >
                   {residentRange ? (
                     <span

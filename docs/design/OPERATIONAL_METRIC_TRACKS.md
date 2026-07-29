@@ -72,10 +72,14 @@ are outside this slice.
 The renderer separately supports compact, standard, and detailed track sizes.
 Compact is a sparkline-like evidence companion: it shortens plots and removes
 nonessential visible metadata while retaining the complete accessible
-description. A parent may provide shared time bounds; the renderer expands
-those bounds when necessary so no imported measurement is silently discarded.
-An explicit visible range is narrower by design and clips the chart to the
-shared zoom domain.
+description. The right-edge scale marks are explicitly labeled **Max** and
+**Min**; the track header reports the nearest actual sample value and sample
+time at the shared cursor. Hovering or focusing any metric track—or hovering
+the aligned log histogram—moves that one preview cursor and updates every
+track's readout without seeking or filtering. A parent may provide shared time
+bounds; the renderer expands those bounds when necessary so no imported
+measurement is silently discarded. An explicit visible range is narrower by
+design and clips the chart to the shared zoom domain.
 
 ## Two explicit ingestion paths
 
@@ -101,7 +105,10 @@ standard and detailed choices in the metric header. In the stacked
 presentation, metric tracks precede the log-volume histogram so the histogram
 acts as the bottom evidence track. Brushing and zooming preserve that shared
 domain; each zoom reissues the existing fixed-bucket backend summary rather than
-loading all matching log events.
+loading all matching log events. At every track size, the Timeline body is
+bounded to 44% of the viewport (and at most 30rem) and scrolls internally when
+its contents exceed that share, so a larger metric presentation never makes
+the log workspace unreachable.
 
 ### 1. Separately imported metric bundle
 

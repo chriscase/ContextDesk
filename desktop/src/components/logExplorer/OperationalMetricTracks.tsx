@@ -422,13 +422,13 @@ function MetricTrack({
           className="operational-metric-track__scale-label operational-metric-track__scale-label--max"
           aria-hidden="true"
         >
-          {formatValue(domain.max, series.unit)}
+          Max {formatValue(domain.max, series.unit)}
         </span>
         <span
           className="operational-metric-track__scale-label operational-metric-track__scale-label--min"
           aria-hidden="true"
         >
-          {formatValue(domain.min, series.unit)}
+          Min {formatValue(domain.min, series.unit)}
         </span>
         {showReading ? (
           <output
