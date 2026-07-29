@@ -369,15 +369,8 @@ describe("TimelineNavigator", () => {
       "timeline-navigator__bucket--has-error",
     );
     expect(
-      screen
-        .getByTestId("timeline-bucket-0")
-        .style.getPropertyValue("--error-signal-height"),
-    ).toBe("4px");
-    expect(
-      screen
-        .getByTestId("timeline-bucket-3")
-        .style.getPropertyValue("--error-signal-height"),
-    ).toBe("12px");
+      screen.getByTestId("timeline-bucket-0").getAttribute("aria-label"),
+    ).toContain("Error 1");
     expect(
       screen.getByTestId("timeline-bucket-3").getAttribute("aria-label"),
     ).toContain("Error 12");

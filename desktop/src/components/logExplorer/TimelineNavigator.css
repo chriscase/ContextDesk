@@ -184,18 +184,14 @@
   content: "";
   position: absolute;
   z-index: 3;
-  top: 0.15rem;
+  top: 0.16rem;
   left: 50%;
-  width: 0.2rem;
-  height: var(--error-signal-height, 0.2rem);
-  border: 1px solid var(--bg-app, #0b0c0e);
+  width: max(100%, 0.34rem);
+  height: 0.16rem;
+  border: 0;
   border-radius: 999px;
   background: var(--danger, #e06c75);
-  background-image: repeating-linear-gradient(
-    0deg,
-    transparent 0 2px,
-    rgb(0 0 0 / 28%) 2px 3px
-  );
+  box-shadow: 0 0 0 1px var(--bg-app, #0b0c0e);
   transform: translateX(-50%);
 }
 

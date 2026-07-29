@@ -299,12 +299,6 @@ export function TimelineNavigator({
 
   const counts = summary?.counts ?? [];
   const maxCount = Math.max(1, ...counts);
-  const maxErrorCount = summary
-    ? Math.max(
-        1,
-        ...counts.map((_, index) => levelCounts(summary, index).error),
-      )
-    : 1;
   const sharedCursorPosition =
     summary?.spanFrom != null &&
     summary.spanTo != null &&
@@ -733,10 +727,6 @@ export function TimelineNavigator({
                               count === 0
                                 ? "0%"
                                 : `${Math.round((count / maxCount) * 100)}%`,
-                            "--error-signal-height":
-                              levels.error === 0
-                                ? "0px"
-                                : `${3 + Math.round((levels.error / maxErrorCount) * 9)}px`,
                           } as CSSProperties
                         }
                         onPointerEnter={() => {

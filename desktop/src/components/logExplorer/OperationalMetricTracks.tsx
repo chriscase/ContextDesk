@@ -426,6 +426,7 @@ function MetricTrack({
                 scaleTimestamp(selection.from, bounds)
               }
               height={VIEWBOX_SIZE}
+              vectorEffect="non-scaling-stroke"
             />
           ) : null}
           {(series.thresholds ?? []).map((threshold) => (

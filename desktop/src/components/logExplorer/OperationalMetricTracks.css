@@ -8,7 +8,7 @@
   --metric-cursor: var(--fg-primary, var(--text, #ffffff));
   --metric-selection: color-mix(
     in srgb,
-    var(--accent, #64a8ff) 22%,
+    var(--fg-muted, #aab4c3) 12%,
     transparent
   );
   --metric-gap: color-mix(in srgb, var(--text-muted, #aab4c3) 20%, transparent);
@@ -209,8 +209,9 @@
 
 .operational-metric-track__selection {
   fill: var(--metric-selection);
-  stroke: color-mix(in srgb, var(--metric-line) 70%, transparent);
-  stroke-width: 0.5;
+  stroke: color-mix(in srgb, var(--metric-line) 78%, var(--metric-text));
+  stroke-width: 0.75;
+  stroke-dasharray: 2 1;
 }
 
 .operational-metric-track__gap {

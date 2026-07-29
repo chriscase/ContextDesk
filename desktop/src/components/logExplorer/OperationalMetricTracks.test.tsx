@@ -242,9 +242,18 @@ describe("OperationalMetricTracks", () => {
     const finalRange = onRangeSelect.mock.calls.at(-1)?.[0];
     expect(finalRange.from).toBeGreaterThanOrEqual(1736078400);
     expect(finalRange.to).toBeLessThanOrEqual(1736100000);
-    expect(screen.getAllByTestId(/operational-metric-selection-/)).toHaveLength(
-      3,
+    const selections = screen.getAllByTestId(
+      /operational-metric-selection-/,
     );
+    expect(selections).toHaveLength(3);
+    expect(
+      new Set(
+        selections.map(
+          (selection) =>
+            `${selection.getAttribute("x")}:${selection.getAttribute("width")}`,
+        ),
+      ).size,
+    ).toBe(1);
   });
 
   it("commits the one shared keyboard cursor with Enter or Space", () => {
