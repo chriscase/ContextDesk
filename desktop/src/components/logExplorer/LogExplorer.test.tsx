@@ -547,7 +547,9 @@ describe("LogExplorer shell", () => {
 
   it("loads first evidence rows before starting large-corpus facet aggregation", async () => {
     const firstPage = deferred<host.EventPageDto>();
+    const facetPage = deferred<host.LogFacetsDto>();
     vi.mocked(host.hostLogQueryEvents).mockReturnValue(firstPage.promise);
+    vi.mocked(host.hostLogFacets).mockReturnValue(facetPage.promise);
 
     render(<LogExplorer corpusId="c1" />);
 
@@ -555,6 +557,10 @@ describe("LogExplorer shell", () => {
       expect(host.hostLogQueryEvents).toHaveBeenCalledTimes(1),
     );
     expect(host.hostLogFacets).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("Loading first evidence rows…"),
+    ).toBeTruthy();
+    expect(screen.getByTestId("log-explorer-facets-loading")).toBeTruthy();
 
     await act(async () => {
       firstPage.resolve(defaultEventPage());
@@ -563,6 +569,23 @@ describe("LogExplorer shell", () => {
 
     expect(await screen.findByText(/auth failure/)).toBeTruthy();
     await waitFor(() => expect(host.hostLogFacets).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("log-explorer-facets-loading")).toBeTruthy();
+
+    await act(async () => {
+      facetPage.resolve({
+        sources: { "api.log": 5, "worker.log": 5 },
+        levels: { error: 3, info: 7 },
+        services: { api: 5 },
+        hosts: {},
+        timeQuality: "wall",
+      });
+      await facetPage.promise;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("log-explorer-facets-loading"),
+      ).toBeNull(),
+    );
   });
 
   it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
@@ -4024,7 +4047,7 @@ describe("LogExplorer shell", () => {
           .mocked(host.hostLogSharedTimelineSummary)
           .mock.calls.some(
             ([, , lanes]) =>
-              lanes.length === 2 &&
+              lanes?.length === 2 &&
               lanes.every(
                 (lane) =>
                   lane.allSources === true && lane.sources.length === 0,

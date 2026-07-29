@@ -707,6 +707,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [summary, setSummary] = useState<LogCorpusSummaryDto | null>(null);
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
+  const [facetsLoading, setFacetsLoading] = useState(true);
   const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
   const [laneSourceCatalogNextCursor, setLaneSourceCatalogNextCursor] =
     useState<string | null>(null);
@@ -1381,6 +1382,7 @@ export function LogExplorer({ corpusId }: Props) {
 
   const loadFacets = useCallback(async () => {
     const requestId = ++facetRequestRef.current;
+    setFacetsLoading(true);
     try {
       const f = await hostLogFacets(
         corpusId,
@@ -1391,6 +1393,8 @@ export function LogExplorer({ corpusId }: Props) {
     } catch (e) {
       if (requestId !== facetRequestRef.current) return;
       setError(String(e));
+    } finally {
+      if (requestId === facetRequestRef.current) setFacetsLoading(false);
     }
   }, [corpusId, filters]);
 
@@ -1453,6 +1457,7 @@ export function LogExplorer({ corpusId }: Props) {
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
     let loadedCurrentView = false;
+    setFacetsLoading(true);
     const visibleLanes = lanes.slice(0, laneCount);
     const unloaded = Object.fromEntries(
       visibleLanes.map((lane) => [
@@ -1606,6 +1611,7 @@ export function LogExplorer({ corpusId }: Props) {
         // scan a large corpus and is useful only after the evidence page is
         // available, so start it in the background after the current page.
         if (loadedCurrentView) void loadFacets();
+        else setFacetsLoading(false);
       }
     }
   }, [corpusId, filters, laneCount, lanes, loadFacets, setAutoStatus]);
@@ -3969,6 +3975,7 @@ export function LogExplorer({ corpusId }: Props) {
     const n = (laneEvents[laneId] ?? []).length;
     const cur = laneCursors[laneId];
     const matched = laneMatched[laneId];
+    if (busy && matched == null) return "Loading first evidence rows…";
     const more = cur?.hasNewer || cur?.hasOlder ? "+" : "";
     return `${matched == null ? "matched unavailable" : `${matched} matched`} · ${n}${more} resident`;
   };
@@ -5105,6 +5112,17 @@ export function LogExplorer({ corpusId }: Props) {
                   : ""}
               </div>
 
+              {facetsLoading ? (
+                <div
+                  className="log-explorer__loading-inline"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="log-explorer-facets-loading"
+                >
+                  Updating filter counts…
+                </div>
+              ) : null}
+
               <div className="log-explorer__section-title">Levels</div>
               <div className="log-explorer__facet">
                 {Object.entries(facets?.levels ?? {})
@@ -5460,8 +5478,13 @@ export function LogExplorer({ corpusId }: Props) {
                       {laneTimeLabel}
                     </span>
                     <span
-                      className="log-explorer__chat-preview"
+                      className={`log-explorer__chat-preview ${
+                        busy && laneMatched[lane.id] == null
+                          ? "log-explorer__loading-inline"
+                          : ""
+                      }`}
                       data-testid={`lane-count-${lane.id}`}
+                      aria-live="polite"
                     >
                       {laneMatchedHint(lane.id)}
                       {focusLaneId === lane.id ? " · focused" : ""}
