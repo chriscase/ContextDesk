@@ -49,13 +49,14 @@ Out of scope:
 | --- | --- | --- | --- |
 | Compact deterministic incident | **Shipped** | [`checkout-cascade`](../../../fixtures/log-lab/scenarios/checkout-cascade/) and `log_lab_checkout_directory_zip_query_bookmark_and_package_round_trip` in [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) | Live model quality varies |
 | Pinned seven-day 25k corpus | **Shipped** | [fixture README](../../../fixtures/log-lab/README.md) and `pinned_seven_day_acceptance_corpus_matches_generator_and_truth` in [`log_lab_fixtures.rs`](../../../crates/cd-core/tests/log_lab_fixtures.rs) | None for pinned fixture identity |
+| Optional first-run 25k install | **Local integration** | #732 packages only the 25k `import/` tree and delegates to ordinary bounded ingest with a managed idempotency marker | Exact packaged/native proof remains before promotion |
 | Generated seven-day 100k corpus | **Shipped** | [`generate_log_lab.rs`](../../../crates/cd-core/examples/generate_log_lab.rs) and ignored product-path test in [`log_lab.rs`](../../../crates/cd-core/tests/log_lab.rs) | Output is generated locally, not checked in |
 | Optional aligned metric document | **Shipped** | [`operational-metrics.v1.json`](../../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json) and [metric-track design](../OPERATIONAL_METRIC_TRACKS.md) | Session-only; durable attachment and chat metric context are not shipped |
 | Exact Find, Filter, bookmark, and evidence workflow | **Partial** | [Log Explorer Help](../../help/log-analysis/log-explorer.md) and [investigation method](INVESTIGATION_LOOP.md) | Remaining packaged acceptance and proposal/report work are tracked by #656/#646/#532 |
 | Ordinary chat isolation | **Shipped** | [`agent.rs`](../../../crates/cd-core/src/agent.rs) and [context assembly method](DETERMINISTIC_CONTEXT_ASSEMBLY.md) | Repeat native proof per supported host |
 | Tools-disabled linked-chat refusal | **Shipped** | [`research.rs`](../../../crates/cd-core/src/research.rs) | Cannot pass a grounded linked-log evaluation |
 | Tools-enabled provider/model evaluation | **Partial** | Bounded tool loop and evidence validation ship in [`agent.rs`](../../../crates/cd-core/src/agent.rs) | Requires a real tools-enabled profile; provider quality is environment-dependent |
-| Quick in-app demo guide | **Partial** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and packaged responsive proof | Fixtures remain source-checkout assets rather than installed-app content |
+| Quick in-app demo guide | **Local integration** | [demo Help page](../../help/log-analysis/demo-datasets.md), explicit fenced-command copy, and #732 optional first-run 25k install | Other fixtures and optional metrics remain source-checkout inputs |
 | Deep in-app handbook chapter/export | **Shipped** | This chapter, [`handbook.rs`](../../../desktop/src-tauri/src/handbook.rs), current-main proof on #719 | Live provider evaluation remains environment-dependent |
 
 Status applies to each row, not to the lab as one undifferentiated feature.
@@ -585,13 +586,14 @@ recorded evidence for that provider/build, not a deterministic unit-test oracle.
 | Slice | Status | What is true now | What is not claimed |
 | --- | --- | --- | --- |
 | Synthetic compact/25k input | **Shipped** | Pinned, deterministic, manifest-backed fixtures | Live-model correctness |
+| Optional packaged 25k seed | **Local integration** | #732 maps only runtime input, reuses ordinary ingest, and preserves one managed identity | Exact packaged/native install proof before promotion |
 | Seven-day 100k | **Shipped** | Deterministic on-demand generator and bounded product-path test | Checked-in 100k tree or universal latency |
 | Deterministic Explorer evaluation | **Partial** | Find, Filter, timeline, lanes, bookmarks, evidence, paging, and source identity have production paths | Every open owner/native acceptance item complete |
 | Operational metrics | **Partial** | Explicit bounded session import, aligned tracks, shared cursor/range | Durable attachment, metric chat context, incident-bundle import |
 | Ordinary/linked isolation | **Shipped** | Ordinary chat has no ambient corpus; linked answer requires evidence | Multi-corpus chat |
 | Tools-disabled evaluation | **Shipped** | Honest unavailable state before provider contact | Grounded log answer |
 | Tools-enabled provider comparison | **Partial** | Host tool/evidence contracts ship | Every provider/model proven; #649 lifecycle residuals |
-| Quick Help guide | **Partial** | Searchable demo guide, explicit fenced-command copy, and responsive package rendering ship | Fixtures remain source-checkout assets rather than installed-app content |
+| Quick Help guide | **Local integration** | Searchable guide, explicit path copy, and #732 first-run 25k option | Compact fixtures and optional metrics still require a source checkout |
 | Deep handbook lab | **Shipped** | #719 chapter, manifest, export, tests, and packaged proof | Live tools-enabled provider quality remains environment-dependent |
 | Finding proposals/reports | **Planned** | Manual evidence-led investigation exists | #646 model proposal queue and #532 report workflow |
 
@@ -810,8 +812,9 @@ complete.
 
 ## 16. Open residuals
 
-- Demo fixtures remain source-checkout assets rather than installed-app content;
-  the quick Help guide says so and provides a portable path command.
+- #732 locally integrates one optional packaged 25k runtime-input seed. Exact
+  packaged/native import proof remains; compact fixtures, evaluator truth, and
+  optional metrics are intentionally not bundled by that path.
 - #649 retains native cold/slow tools-enabled provider acceptance; deterministic
   phase deadlines, cancellation, evidence preservation, and synthesis-only
   retry ship.

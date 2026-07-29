@@ -47,7 +47,8 @@
       "../../docs/PROTOCOL.md": "handbook/docs/PROTOCOL.md",
       "../../docs/AGENT_WORKFLOW.md": "handbook/docs/AGENT_WORKFLOW.md",
       "../../docs/ISSUE_HONESTY.md": "handbook/docs/ISSUE_HONESTY.md",
-      "../../docs/CLOSE_PROOF.md": "handbook/docs/CLOSE_PROOF.md"
+      "../../docs/CLOSE_PROOF.md": "handbook/docs/CLOSE_PROOF.md",
+      "../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import": "demo-log-corpus/seven-day-25k"
     },
     "icon": [
       "icons/32x32.png",

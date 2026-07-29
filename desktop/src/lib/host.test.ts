@@ -4,6 +4,7 @@ import {
   hostClearFailedLogIngestDiagnostic,
   hostGetFailedLogIngestDiagnostic,
   hostGetHandbookPage,
+  hostInstallDemoLogCorpus,
   hostOpenEngineeringHandbook,
   hostResolveHandbookLink,
   hostLogQueryEventOriginal,
@@ -96,6 +97,45 @@ describe("failed-ingest diagnostic host boundary", () => {
       ["get_failed_log_ingest_diagnostic", undefined],
       ["clear_failed_log_ingest_diagnostic", undefined],
     ]);
+  });
+});
+
+describe("first-run demo corpus host boundary", () => {
+  it("invokes only the narrow packaged-demo command in Tauri", async () => {
+    invokeMock.mockResolvedValue({
+      status: "installed",
+      demoIdentity: "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1",
+      corpusId: "demo-corpus",
+      corpusName: "Demo · seven-day performance triage",
+      events: 25_000,
+      detail: "installed",
+      retryable: false,
+    });
+
+    const result = await hostInstallDemoLogCorpus();
+
+    expect(result.status).toBe("installed");
+    expect(result.events).toBe(25_000);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "install_demo_log_corpus",
+      undefined,
+    );
+  });
+
+  it("is honest in browser rendering and never claims an install", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+
+    const result = await hostInstallDemoLogCorpus();
+
+    expect(result).toMatchObject({
+      status: "unavailable",
+      corpusId: null,
+      events: null,
+      retryable: false,
+    });
+    expect(result.detail).toContain("installed desktop app");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

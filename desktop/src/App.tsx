@@ -666,7 +666,10 @@ export function App() {
         onSaveSetup={shell.onSaveSetup}
         onApplyAi={applyAiFromLaunch}
         onRecheck={shell.refreshHostPreflight}
-        onEnterApp={shell.enterAppFromPrelaunch}
+        onEnterApp={(options) => {
+          if (options?.openLogs) shell.setPane("logs");
+          shell.enterAppFromPrelaunch();
+        }}
         onOpenSettings={(sec) =>
           shell.openSettings(
             (sec as "workspace" | "ai" | "connectors" | "health") || "health",

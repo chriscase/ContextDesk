@@ -1693,6 +1693,16 @@ export type LogIngestReportDto = {
   embedding?: LogEmbeddingStatusDto | null;
 };
 
+export type DemoLogInstallDto = {
+  status: "installed" | "already_installed" | "unavailable" | "failed";
+  demoIdentity: string;
+  corpusId: string | null;
+  corpusName: string;
+  events: number | null;
+  detail: string;
+  retryable: boolean;
+};
+
 export type FailedLogIngestDiagnosticDto = {
   schemaVersion: number;
   generatedAt: number;
@@ -1798,6 +1808,22 @@ export async function hostIngestLogPath(
     path,
     name: name ?? null,
   });
+}
+
+/** Explicit first-run install of the packaged synthetic 25k log corpus. */
+export async function hostInstallDemoLogCorpus(): Promise<DemoLogInstallDto> {
+  if (!isTauri()) {
+    return {
+      status: "unavailable",
+      demoIdentity: "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1",
+      corpusId: null,
+      corpusName: "Demo · seven-day performance triage",
+      events: null,
+      detail: "Packaged demo logs require the installed desktop app.",
+      retryable: false,
+    };
+  }
+  return invoke<DemoLogInstallDto>("install_demo_log_corpus", undefined);
 }
 
 /** Request cancel of SoftWrite log ingest (#498). */

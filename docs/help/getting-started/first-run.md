@@ -66,7 +66,26 @@ partial capability without pretending it is healthy.
 News and X are optional research sources, not work-context requirements for
 the Ready state.
 
-## 4. Ask a grounded question
+## 4. Optionally install the demo logs
+
+The **Ready** step offers **Install demo log corpus**. It is unchecked by
+default and doing nothing leaves the Logs library empty. The option installs
+25,000 entirely synthetic events (about 4 MB of bundled source logs) designed
+for a seven-day performance-triage investigation.
+
+Select the option, then choose **Install demo**. ContextDesk shows the same
+bounded scan, parse, template, redact, store, and embedding progress used by an
+ordinary Logs import. While an installation you explicitly started is active,
+finish or cancel it before entering the app. A failure stays visible and can be
+retried. Repeating a successful install selects the existing managed demo
+instead of creating another corpus; user-created corpora are never replaced.
+
+After success, **Enter app · Open Logs** opens the Logs library with the demo
+selected. Choose **Open Explorer** to begin the investigation. The installed
+resource contains only the synthetic log input; evaluator answer manifests and
+optional operational metrics are not part of this first-run install.
+
+## 5. Ask a grounded question
 
 The empty chat home distinguishes two action types:
 

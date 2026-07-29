@@ -13,6 +13,10 @@ const pageRaw = readFileSync(
   ),
   "utf8",
 );
+const firstRunRaw = readFileSync(
+  resolve(process.cwd(), "../docs/help/getting-started/first-run.md"),
+  "utf8",
+);
 
 function bodyWithoutFrontmatter(raw: string): string {
   const lines = raw.replace(/\r\n/g, "\n").split("\n");
@@ -87,6 +91,17 @@ function compactManifest(scenario: string) {
 }
 
 describe("rendered demo-dataset Help (#715)", () => {
+  it("keeps first-run Help explicit about opt-in, progress, idempotency, and truth isolation", () => {
+    const normalized = firstRunRaw.replace(/\s+/g, " ");
+    expect(normalized).toContain("Install demo log corpus");
+    expect(normalized).toContain("unchecked by default");
+    expect(normalized).toContain("25,000 entirely synthetic events");
+    expect(normalized).toContain("same bounded scan, parse, template, redact");
+    expect(normalized).toContain("Repeating a successful install");
+    expect(normalized).toContain("evaluator answer manifests");
+    expect(normalized).toContain("Enter app · Open Logs");
+  });
+
   it("renders safe import steps, portable path resolution, and the evaluator boundary", () => {
     renderDemoHelp();
 
@@ -112,7 +127,13 @@ describe("rendered demo-dataset Help (#715)", () => {
     );
     expect(document.body.textContent).not.toContain("/Users/chriscase");
     expect(document.body.textContent).toContain(
-      "they are not bundled inside an installed ContextDesk application",
+      "bundles only the input logs for the pinned 25,000-event investigation",
+    );
+    expect(document.body.textContent).toContain(
+      "does not contain evaluator truth",
+    );
+    expect(document.body.textContent).toContain(
+      "same bounded ingest, redaction, diagnostics, and cancellation path",
     );
 
     const steps = screen

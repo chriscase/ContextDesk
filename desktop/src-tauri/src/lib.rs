@@ -4922,6 +4922,237 @@ struct LogIngestReportDto {
     embedding: cd_core::log_analysis::CorpusEmbeddingStatus,
 }
 
+const DEMO_LOG_IDENTITY: &str = "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1";
+const DEMO_LOG_NAME: &str = "Demo · seven-day performance triage";
+const DEMO_LOG_RESOURCE_DIR: &str = "demo-log-corpus/seven-day-25k";
+const DEMO_LOG_MARKER_DIR: &str = ".contextdesk-demo-corpora";
+const DEMO_LOG_MARKER_FILE: &str = "seven-day-25k-behavior-scale.v1.json";
+const DEMO_LOG_REQUIRED_FILES: &[&str] = &[
+    "api/app.jsonl",
+    "auth/auth.jsonl",
+    "db/database.log",
+    "db/database.log.1",
+    "edge/access.jsonl",
+    "queue/events.jsonl",
+    "region-a/app.jsonl",
+    "region-b/app.jsonl",
+    "worker/worker.log",
+    "worker/worker.log.1",
+];
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DemoLogInstallStatus {
+    Installed,
+    AlreadyInstalled,
+    Unavailable,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoLogInstallDto {
+    status: DemoLogInstallStatus,
+    demo_identity: String,
+    corpus_id: Option<String>,
+    corpus_name: String,
+    events: Option<u64>,
+    detail: String,
+    retryable: bool,
+}
+
+impl DemoLogInstallDto {
+    fn unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Unavailable,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: detail.into(),
+            retryable: false,
+        }
+    }
+
+    fn failed(detail: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            status: DemoLogInstallStatus::Failed,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: detail.into(),
+            retryable,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DemoLogMarker {
+    schema_version: u32,
+    demo_identity: String,
+    corpus_id: String,
+}
+
+fn demo_log_marker_path(cache: &std::path::Path) -> PathBuf {
+    cache.join(DEMO_LOG_MARKER_DIR).join(DEMO_LOG_MARKER_FILE)
+}
+
+fn validate_demo_log_resource(path: &std::path::Path) -> bool {
+    const REQUIRED_DIRS: &[&str] = &[
+        "api", "auth", "db", "edge", "queue", "region-a", "region-b", "worker",
+    ];
+
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        files: &mut std::collections::BTreeSet<String>,
+        directories: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), ()> {
+        let entries = std::fs::read_dir(current).map_err(|_| ())?;
+        for entry in entries {
+            let entry = entry.map_err(|_| ())?;
+            let kind = entry.file_type().map_err(|_| ())?;
+            if kind.is_symlink() {
+                return Err(());
+            }
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|_| ())?;
+            let relative = relative.to_str().ok_or(())?.replace('\\', "/");
+            if kind.is_dir() {
+                directories.insert(relative);
+                visit(root, &path, files, directories)?;
+            } else if kind.is_file() {
+                files.insert(relative);
+            } else {
+                return Err(());
+            }
+        }
+        Ok(())
+    }
+
+    if !path.is_dir() {
+        return false;
+    }
+    let mut files = std::collections::BTreeSet::new();
+    let mut directories = std::collections::BTreeSet::new();
+    if visit(path, path, &mut files, &mut directories).is_err() {
+        return false;
+    }
+    files
+        == DEMO_LOG_REQUIRED_FILES
+            .iter()
+            .map(|path| (*path).to_string())
+            .collect()
+        && directories
+            == REQUIRED_DIRS
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect()
+}
+
+fn resolve_demo_log_resource_from_candidates(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| validate_demo_log_resource(candidate))
+}
+
+fn resolve_demo_log_resource(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join(DEMO_LOG_RESOURCE_DIR));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("fixtures")
+                .join("log-lab")
+                .join("acceptance")
+                .join("seven-day-25k")
+                .join("scenarios")
+                .join("behavior-scale")
+                .join("import"),
+        );
+    }
+    resolve_demo_log_resource_from_candidates(candidates)
+}
+
+fn existing_demo_log_corpus(
+    cache: &std::path::Path,
+) -> Result<Option<cd_core::log_analysis::LogCorpus>, String> {
+    let marker_path = demo_log_marker_path(cache);
+    if !marker_path.exists() {
+        return Ok(None);
+    }
+    let metadata = std::fs::metadata(&marker_path)
+        .map_err(|error| format!("could not inspect the installed demo marker: {error}"))?;
+    if metadata.len() > 4096 {
+        return Err("installed demo marker exceeds its bounded size".into());
+    }
+    let marker: DemoLogMarker = serde_json::from_slice(
+        &std::fs::read(&marker_path)
+            .map_err(|error| format!("could not read the installed demo marker: {error}"))?,
+    )
+    .map_err(|error| format!("installed demo marker is invalid: {error}"))?;
+    if marker.schema_version != 1 || marker.demo_identity != DEMO_LOG_IDENTITY {
+        return Err("installed demo marker has an unknown identity or version".into());
+    }
+    match cd_core::log_analysis::LogCorpus::open(cache, &marker.corpus_id) {
+        Ok(corpus) => Ok(Some(corpus)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn persist_demo_log_marker(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
+    use std::io::Write;
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let marker_path = demo_log_marker_path(cache);
+    let marker_dir = marker_path
+        .parent()
+        .ok_or_else(|| "demo marker has no parent directory".to_string())?;
+    std::fs::create_dir_all(marker_dir)
+        .map_err(|error| format!("could not prepare the demo marker: {error}"))?;
+    let temp_path = marker_dir.join(format!(
+        ".{DEMO_LOG_MARKER_FILE}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let marker = DemoLogMarker {
+        schema_version: 1,
+        demo_identity: DEMO_LOG_IDENTITY.into(),
+        corpus_id: corpus_id.into(),
+    };
+    let bytes = serde_json::to_vec_pretty(&marker)
+        .map_err(|error| format!("could not encode the demo marker: {error}"))?;
+    let mut temp = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(|error| format!("could not create the demo marker: {error}"))?;
+    let result = (|| -> Result<(), String> {
+        temp.write_all(&bytes)
+            .map_err(|error| format!("could not write the demo marker: {error}"))?;
+        temp.sync_all()
+            .map_err(|error| format!("could not sync the demo marker: {error}"))?;
+        if marker_path.exists() {
+            std::fs::remove_file(&marker_path)
+                .map_err(|error| format!("could not replace the stale demo marker: {error}"))?;
+        }
+        std::fs::rename(&temp_path, &marker_path)
+            .map_err(|error| format!("could not publish the demo marker: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogPackageImportDto {
@@ -5289,23 +5520,18 @@ fn desktop_log_ingest_embed_plan_nonblocking(
         .unwrap_or_else(|| (cd_core::log_analysis::LogEmbedPolicy::local_default(), None))
 }
 
-/// Ingest a local log file/dir into a disposable corpus (UI SoftWrite path).
-/// Emits `process-progress` phases (scan/parse/template/redact/store/embed).
+/// Shared trusted host orchestration for ordinary and packaged-demo ingest.
 ///
-/// Runs on a blocking thread pool so the UI event loop is not starved (macOS
-/// "Not Responding" during large zip/dir imports). Ordinary imports use the
-/// product-local ONNX backend when it is already available. Import never waits
-/// for the broader workspace/tool host: keyword/structured analysis remains
-/// available while that host is still starting, and input over 64 MiB remains
-/// deferred.
-#[tauri::command]
-async fn ingest_log_path(
+/// Runs on a blocking thread pool so the UI event loop is not starved. Both
+/// callers use the same exclusive admission, diagnostics, cancellation,
+/// progress, bounded core ingest policy, and active-corpus handoff.
+async fn run_log_ingest(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    path: String,
+    state: &AppState,
+    path: PathBuf,
     name: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
-    let selected_path = std::path::PathBuf::from(&path);
+    let selected_path = path;
     let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
     let recorder = Arc::new(cd_core::log_analysis::FailedIngestDiagnosticRecorder::default());
     let cancel = cd_core::process_progress::CancelFlag::new();
@@ -5327,7 +5553,7 @@ async fn ingest_log_path(
         .lock()
         .expect("failed_log_ingest_diagnostic")
         .begin_attempt();
-    let cache = match log_cache_dir(&state) {
+    let cache = match log_cache_dir(state) {
         Ok(cache) => cache,
         Err(error) => {
             let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
@@ -5399,7 +5625,7 @@ async fn ingest_log_path(
     };
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
-    set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
+    set_active_log_corpus_state_nonblocking(state, Some(report.corpus_id.clone()));
     Ok(LogIngestReportDto {
         corpus_id: report.corpus_id,
         lines: report.stats.lines,
@@ -5432,6 +5658,86 @@ async fn ingest_log_path(
             .collect(),
         embedding: report.embedding,
     })
+}
+
+/// Ingest a user-selected local log file/dir into a disposable corpus
+/// (UI SoftWrite path).
+#[tauri::command]
+async fn ingest_log_path(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    name: Option<String>,
+) -> Result<LogIngestReportDto, String> {
+    run_log_ingest(app, &state, PathBuf::from(path), name).await
+}
+
+/// Explicit first-run convenience. The resource resolver can only select the
+/// packaged input directory (or its debug checkout equivalent); trusted ingest
+/// remains identical to an ordinary user-selected import.
+async fn install_demo_log_corpus_inner(
+    app: tauri::AppHandle,
+    state: &AppState,
+) -> DemoLogInstallDto {
+    let cache = match log_cache_dir(state) {
+        Ok(cache) => cache,
+        Err(error) => return DemoLogInstallDto::failed(error, true),
+    };
+    match existing_demo_log_corpus(&cache) {
+        Ok(Some(corpus)) => {
+            let summary = corpus.summary();
+            set_active_log_corpus_state_nonblocking(state, Some(summary.id.clone()));
+            return DemoLogInstallDto {
+                status: DemoLogInstallStatus::AlreadyInstalled,
+                demo_identity: DEMO_LOG_IDENTITY.into(),
+                corpus_id: Some(summary.id),
+                corpus_name: summary.name,
+                events: Some(summary.event_count),
+                detail: "The packaged demo corpus is already installed and selected.".into(),
+                retryable: false,
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return DemoLogInstallDto::failed(error, false),
+    }
+    let Some(resource) = resolve_demo_log_resource(&app) else {
+        return DemoLogInstallDto::unavailable(
+            "The packaged demo logs are unavailable in this installation.",
+        );
+    };
+    let prior_active_corpus = active_log_corpus_snapshot(state);
+    let report = match run_log_ingest(app, state, resource, Some(DEMO_LOG_NAME.into())).await {
+        Ok(report) => report,
+        Err(error) => return DemoLogInstallDto::failed(error, true),
+    };
+    if let Err(error) = persist_demo_log_marker(&cache, &report.corpus_id) {
+        let cleanup = cd_core::log_analysis::LogCorpus::discard(&cache, &report.corpus_id);
+        set_active_log_corpus_state_nonblocking(state, prior_active_corpus);
+        if cleanup.is_err() {
+            return DemoLogInstallDto::failed(
+                format!("{error}; the unmarked disposable demo corpus could not be cleaned up"),
+                true,
+            );
+        }
+        return DemoLogInstallDto::failed(error, true);
+    }
+    DemoLogInstallDto {
+        status: DemoLogInstallStatus::Installed,
+        demo_identity: DEMO_LOG_IDENTITY.into(),
+        corpus_id: Some(report.corpus_id),
+        corpus_name: DEMO_LOG_NAME.into(),
+        events: Some(report.lines),
+        detail: "The packaged demo corpus is installed and selected.".into(),
+        retryable: false,
+    }
+}
+
+#[tauri::command]
+async fn install_demo_log_corpus(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DemoLogInstallDto, String> {
+    Ok(install_demo_log_corpus_inner(app, &state).await)
 }
 
 /// Trusted local re-analysis of template vectors; raw events are not reparsed.
@@ -7367,6 +7673,7 @@ pub fn run() {
             get_log_corpus,
             list_log_templates,
             ingest_log_path,
+            install_demo_log_corpus,
             cancel_log_ingest,
             get_failed_log_ingest_diagnostic,
             clear_failed_log_ingest_diagnostic,
@@ -7759,6 +8066,215 @@ mod help_host_tests {
         ] {
             assert!(source.contains(registration), "{registration}");
         }
+    }
+}
+
+#[cfg(test)]
+mod demo_log_host_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn write_required_demo_files(root: &Path) {
+        for relative in DEMO_LOG_REQUIRED_FILES {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().expect("fixture parent"))
+                .expect("fixture parent");
+            std::fs::write(path, b"2025-01-01T12:00:00Z INFO demo\n").expect("fixture file");
+        }
+    }
+
+    #[test]
+    fn packaging_maps_only_the_demo_import_directory_and_never_truth() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri config");
+        let resources = config["bundle"]["resources"]
+            .as_object()
+            .expect("resource mapping");
+        let source =
+            "../../fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import";
+        assert_eq!(
+            resources.get(source),
+            Some(&serde_json::json!(DEMO_LOG_RESOURCE_DIR))
+        );
+        for (from, to) in resources {
+            assert!(
+                !from.to_ascii_lowercase().contains("truth")
+                    && !to
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains("truth"),
+                "packaged resources must never include evaluator truth: {from} -> {to}"
+            );
+        }
+        assert_eq!(
+            resources
+                .keys()
+                .filter(|path| path.contains("fixtures/log-lab"))
+                .count(),
+            1
+        );
+        let checked_in_import = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source);
+        assert!(
+            validate_demo_log_resource(&checked_in_import),
+            "the exact mapped source tree must contain only the approved runtime files"
+        );
+    }
+
+    #[test]
+    fn resource_resolution_prefers_the_exact_packaged_mapping_then_debug_fallback() {
+        let installed = tempfile::tempdir().expect("installed root");
+        let fallback = tempfile::tempdir().expect("fallback root");
+        let installed_import = installed.path().join(DEMO_LOG_RESOURCE_DIR);
+        let fallback_import = fallback.path().join("import");
+        write_required_demo_files(&installed_import);
+        write_required_demo_files(&fallback_import);
+
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([
+                installed_import.clone(),
+                fallback_import.clone(),
+            ]),
+            Some(installed_import.clone())
+        );
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([
+                installed.path().join("missing"),
+                fallback_import.clone(),
+            ]),
+            Some(fallback_import)
+        );
+        assert_eq!(
+            resolve_demo_log_resource_from_candidates([installed.path().join("missing")]),
+            None
+        );
+
+        std::fs::write(installed_import.join("unexpected.txt"), b"not approved")
+            .expect("unexpected file");
+        assert!(
+            resolve_demo_log_resource_from_candidates([installed_import.clone()]).is_none(),
+            "an unexpected packaged file must make the resource unavailable"
+        );
+        std::fs::remove_file(installed_import.join("unexpected.txt")).expect("remove extra");
+        let forbidden = installed_import.join("truth");
+        std::fs::create_dir(&forbidden).expect("forbidden dir");
+        std::fs::write(forbidden.join("manifest.json"), b"{}").expect("forbidden file");
+        assert!(
+            resolve_demo_log_resource_from_candidates([installed_import]).is_none(),
+            "truth-like sibling content must never pass resource validation"
+        );
+    }
+
+    #[test]
+    fn stable_marker_is_idempotent_and_cannot_match_a_same_named_user_corpus() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&cache).expect("cache");
+        let user_corpus =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        assert!(
+            existing_demo_log_corpus(&cache)
+                .expect("marker lookup")
+                .is_none(),
+            "a user corpus with the same display name is not the managed demo"
+        );
+
+        let managed = cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME)
+            .expect("managed corpus");
+        persist_demo_log_marker(&cache, managed.id()).expect("persist marker");
+        let first = existing_demo_log_corpus(&cache)
+            .expect("marker lookup")
+            .expect("managed corpus");
+        let second = existing_demo_log_corpus(&cache)
+            .expect("marker lookup")
+            .expect("managed corpus");
+        assert_eq!(first.id(), managed.id());
+        assert_eq!(second.id(), managed.id());
+        assert_ne!(first.id(), user_corpus.id());
+
+        cd_core::log_analysis::LogCorpus::discard(&cache, managed.id()).expect("discard demo");
+        assert!(
+            existing_demo_log_corpus(&cache)
+                .expect("stale marker lookup")
+                .is_none(),
+            "discarding the managed demo permits an explicit reinstall"
+        );
+    }
+
+    #[test]
+    fn ordinary_and_demo_commands_delegate_to_one_trusted_ingest_orchestration() {
+        let source = include_str!("lib.rs");
+        let shared_start = source
+            .find("async fn run_log_ingest(")
+            .expect("shared ingest");
+        let ordinary_start = source
+            .find("async fn ingest_log_path(")
+            .expect("ordinary command");
+        let demo_inner_start = source
+            .find("async fn install_demo_log_corpus_inner(")
+            .expect("demo orchestration");
+        let demo_command_start = source
+            .find("async fn install_demo_log_corpus(")
+            .expect("demo command");
+        let reanalysis_start = source
+            .find("async fn reanalyze_log_corpus(")
+            .expect("command boundary");
+        let shared = &source[shared_start..ordinary_start];
+        let ordinary = &source[ordinary_start..demo_inner_start];
+        let demo = &source[demo_inner_start..reanalysis_start];
+
+        assert!(shared.contains("ingest_path_with_policy_and_observer("));
+        assert!(shared.contains("register_exclusive_cancel("));
+        assert!(shared.contains("FailedIngestDiagnosticRecorder"));
+        assert!(ordinary.contains("run_log_ingest("));
+        assert!(demo.contains("run_log_ingest("));
+        assert!(
+            demo.find("let prior_active_corpus = active_log_corpus_snapshot(state)")
+                < demo.find("run_log_ingest("),
+            "the prior user selection must be captured before trusted ingest selects the demo"
+        );
+        assert!(
+            demo.contains("set_active_log_corpus_state_nonblocking(state, prior_active_corpus)"),
+            "marker failure must restore the prior user selection"
+        );
+        assert!(
+            source[demo_command_start..reanalysis_start].contains("install_demo_log_corpus_inner(")
+        );
+        assert!(!ordinary.contains("ingest_path_with_policy_and_observer("));
+        assert!(!demo.contains("ingest_path_with_policy_and_observer("));
+    }
+
+    #[test]
+    fn resolved_checked_in_resource_imports_through_the_real_bounded_core_path() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("log-lab")
+            .join("acceptance")
+            .join("seven-day-25k")
+            .join("scenarios")
+            .join("behavior-scale")
+            .join("import");
+        let resolved =
+            resolve_demo_log_resource_from_candidates([source]).expect("checked-in demo resource");
+        let cache = tempfile::tempdir().expect("ingest cache");
+        let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+            cache.path(),
+            &resolved,
+            DEMO_LOG_NAME,
+            &cd_core::log_analysis::LogEmbedPolicy::local_default(),
+            None,
+            &cd_core::process_progress::NoopProcessProgress,
+            None,
+        )
+        .expect("real bounded demo ingest");
+        assert_eq!(report.stats.lines, 25_000);
+        assert_eq!(report.stats.files, 10);
+        assert_eq!(report.stats.discovered_files, 10);
+        assert!(!report.stats.partial);
+        let corpus = cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id)
+            .expect("installed demo corpus");
+        assert_eq!(corpus.summary().event_count, 25_000);
     }
 }
 
