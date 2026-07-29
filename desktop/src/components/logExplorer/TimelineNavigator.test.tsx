@@ -198,7 +198,9 @@ describe("TimelineNavigator", () => {
         96,
       ),
     );
-    expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4);
+    await waitFor(() =>
+      expect(screen.getAllByTestId(/^timeline-bucket-/)).toHaveLength(4),
+    );
     expect(screen.getByText(/42 matching events summarized/)).toBeTruthy();
     const toggle = screen.getByTestId("timeline-navigator-toggle");
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
