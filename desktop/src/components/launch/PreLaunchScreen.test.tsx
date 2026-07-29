@@ -1,9 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  DemoLogInstallDto,
-  ProcessProgressDto,
-} from "../../lib/host";
+import type { DemoLogInstallDto, ProcessProgressDto } from "../../lib/host";
 import type { AppSetupState, PreflightReport } from "../../lib/preflight";
 import { PreLaunchScreen } from "./PreLaunchScreen";
 
@@ -121,9 +125,7 @@ function renderReady() {
   fireEvent.click(
     screen.getByRole("button", { name: "Continue to AI setup →" }),
   );
-  fireEvent.click(
-    screen.getByRole("button", { name: "Continue to Ready →" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "Continue to Ready →" }));
   return { onEnterApp, onOpenSettings };
 }
 
@@ -192,7 +194,9 @@ describe("optional first-run demo corpus (#732)", () => {
         name: "Demo corpus installation progress",
       }),
     ).toBeTruthy();
-    await waitFor(() => expect(hostMocks.progressCallback).toBeTypeOf("function"));
+    await waitFor(() =>
+      expect(hostMocks.progressCallback).toBeTypeOf("function"),
+    );
     act(() => {
       hostMocks.progressCallback?.({
         kind: "log_ingest",
@@ -221,7 +225,12 @@ describe("optional first-run demo corpus (#732)", () => {
   });
 
   it("requests cancellation through the ordinary ingest cancel path", async () => {
-    hostMocks.install.mockReturnValue(new Promise(() => {}));
+    let resolveInstall: (value: DemoLogInstallDto) => void = () => {};
+    hostMocks.install.mockReturnValue(
+      new Promise<DemoLogInstallDto>((resolve) => {
+        resolveInstall = resolve;
+      }),
+    );
     renderReady();
     fireEvent.click(
       screen.getByRole("checkbox", { name: /Install demo log corpus/ }),
@@ -237,6 +246,25 @@ describe("optional first-run demo corpus (#732)", () => {
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+
+    await act(async () =>
+      resolveInstall({
+        status: "cancelled",
+        demoIdentity: "contextdesk.demo.logs.seven-day-25k.behavior-scale.v1",
+        corpusId: null,
+        corpusName: "Demo · seven-day performance triage",
+        events: null,
+        detail: "Installation cancelled. No demo corpus was installed.",
+        retryable: true,
+      }),
+    );
+    const retry = await screen.findByRole("button", {
+      name: "Retry installation",
+    });
+    expect(screen.getByText("Installation cancelled")).toBeTruthy();
+    expect(screen.getByText(/No demo corpus was installed/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.activeElement).toBe(retry);
   });
 
   it("handles the idempotent already-installed result and routes Enter to Logs", async () => {
@@ -310,24 +338,34 @@ describe("optional first-run demo corpus (#732)", () => {
     ).toBe(false);
   });
 
-  it("keeps the compact option operable at a narrow launch width", () => {
-    Object.defineProperty(window, "innerWidth", {
-      configurable: true,
-      value: 480,
-    });
-    renderReady();
+  it("keeps the full optional flow operable at narrow, normal, and wide widths", async () => {
+    for (const width of [360, 960, 1_600]) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: width,
+      });
+      window.dispatchEvent(new Event("resize"));
+      hostMocks.install.mockResolvedValueOnce(installed());
+      const { onEnterApp } = renderReady();
 
-    const choice = screen.getByRole("checkbox", {
-      name: /25,000 synthetic events/,
-    });
-    fireEvent.click(choice);
-    expect((choice as HTMLInputElement).checked).toBe(true);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Install demo",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(false);
+      const choice = screen.getByRole("checkbox", {
+        name: /25,000 synthetic events/,
+      });
+      choice.focus();
+      expect(document.activeElement).toBe(choice);
+      fireEvent.click(choice);
+      expect((choice as HTMLInputElement).checked).toBe(true);
+      const install = screen.getByRole("button", { name: "Install demo" });
+      expect((install as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(install);
+      const enter = await screen.findByRole("button", {
+        name: "Enter app · Open Logs",
+      });
+      expect(document.activeElement).toBe(enter);
+      fireEvent.click(enter);
+      expect(onEnterApp).toHaveBeenCalledWith({ openLogs: true });
+
+      cleanup();
+    }
   });
 });

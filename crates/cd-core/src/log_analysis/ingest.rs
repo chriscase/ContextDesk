@@ -192,6 +192,7 @@ pub fn ingest_path_with_observer(
         None,
         progress,
         cancel,
+        None,
     )
 }
 
@@ -249,6 +250,48 @@ pub fn ingest_path_with_policy_and_observer(
         policy.defer_above_source_bytes,
         progress,
         cancel,
+        None,
+    )
+}
+
+/// Policy ingest with a reserved host-managed identity.
+///
+/// This is the same bounded ingest orchestration as
+/// [`ingest_path_with_policy_and_observer`]. The identity is written into the
+/// hidden staged corpus before validation and atomic publication, allowing the
+/// host to reconcile a crash before its own installation marker is published.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_path_with_policy_and_observer_managed(
+    cache_root: &Path,
+    path: &Path,
+    name: &str,
+    policy: &LogEmbedPolicy,
+    embed: Option<Arc<dyn EmbedBackend>>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    managed_identity: &str,
+) -> CoreResult<IngestReport> {
+    policy.assert_embed_allowed()?;
+    let backend = match policy.mode {
+        LogEmbedMode::None => None,
+        LogEmbedMode::Local | LogEmbedMode::Cloud => embed,
+    };
+    if policy.mode == LogEmbedMode::Cloud && backend.is_none() {
+        return Err(CoreError::Config(
+            "cloud embed mode requires an EmbedBackend (key from keychain)".into(),
+        ));
+    }
+    ingest_path_inner(
+        cache_root,
+        path,
+        name,
+        backend.as_deref(),
+        policy.model_id.as_str(),
+        policy.mode,
+        policy.defer_above_source_bytes,
+        progress,
+        cancel,
+        Some(managed_identity),
     )
 }
 
@@ -1191,9 +1234,7 @@ fn preflight_raw_log_zip(
         .map_err(|e| CoreError::Message(format!("seek zip central directory: {e}")))?;
     for _ in 0..entry_count {
         if cancelled(cancel) {
-            return Err(CoreError::Message(
-                "ingest cancelled during zip preflight".into(),
-            ));
+            return Err(CoreError::Cancelled);
         }
         let mut header = [0u8; CENTRAL_HEADER_BYTES];
         file.read_exact(&mut header)
@@ -1312,9 +1353,7 @@ fn read_bounded_line(
     let mut total = 0usize;
     loop {
         if cancelled(cancel) {
-            return Err(CoreError::Message(
-                "ingest cancelled during line read".into(),
-            ));
+            return Err(CoreError::Cancelled);
         }
         let available = match reader.fill_buf() {
             Ok(available) => available,
@@ -1390,7 +1429,7 @@ fn ingest_lines_from_reader(
                 .with_files(files_done)
                 .with_bytes(stats.source_bytes),
             );
-            return Err(CoreError::Message("ingest cancelled".into()));
+            return Err(CoreError::Cancelled);
         }
         raw_line.clear();
         let bytes = read_bounded_line(
@@ -1544,9 +1583,7 @@ fn stage_nested_archive(
     let mut buffer = [0u8; 64 * 1024];
     loop {
         if cancelled(cancel) {
-            return Err(CoreError::Message(
-                "ingest cancelled while staging nested archive".into(),
-            ));
+            return Err(CoreError::Cancelled);
         }
         let read = match reader.read(&mut buffer) {
             Ok(read) => read,
@@ -1645,7 +1682,7 @@ fn ingest_from_zip_file(
                 false,
             ),
         );
-        return Err(CoreError::Message("ingest cancelled".into()));
+        return Err(CoreError::Cancelled);
     }
     if archive_depth == 0 || archive_depth > limits.max_archive_depth {
         return Err(CoreError::Policy(format!(
@@ -1715,7 +1752,7 @@ fn ingest_from_zip_file(
                 .with_files(files_done)
                 .with_bytes(stats.source_bytes),
             );
-            return Err(CoreError::Message("ingest cancelled".into()));
+            return Err(CoreError::Cancelled);
         }
 
         stats.discover();
@@ -1991,6 +2028,7 @@ fn ingest_path_inner(
     defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
+    managed_identity: Option<&str>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_fault(
         cache_root,
@@ -2002,6 +2040,7 @@ fn ingest_path_inner(
         defer_above_source_bytes,
         progress,
         cancel,
+        managed_identity,
         None,
     )
 }
@@ -2017,6 +2056,7 @@ fn ingest_path_inner_with_fault(
     defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
+    managed_identity: Option<&str>,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
     ingest_path_inner_with_limits_and_fault(
@@ -2029,6 +2069,7 @@ fn ingest_path_inner_with_fault(
         defer_above_source_bytes,
         progress,
         cancel,
+        managed_identity,
         RawIngestLimits::default(),
         fault,
     )
@@ -2045,6 +2086,7 @@ fn ingest_path_inner_with_limits_and_fault(
     defer_above_source_bytes: Option<u64>,
     progress: &dyn ProcessProgressObserver,
     cancel: Option<&CancelFlag>,
+    managed_identity: Option<&str>,
     limits: RawIngestLimits,
     fault: IngestFaultHook<'_>,
 ) -> CoreResult<IngestReport> {
@@ -2072,7 +2114,7 @@ fn ingest_path_inner_with_limits_and_fault(
                 false,
             ),
         );
-        return Err(CoreError::Message("ingest cancelled".into()));
+        return Err(CoreError::Cancelled);
     }
 
     emit(
@@ -2102,27 +2144,29 @@ fn ingest_path_inner_with_limits_and_fault(
             fault,
         ) {
             Ok(report) => report,
-            Err(error) if cancelled(cancel) => {
-                // Lower phases that already emitted Cancelled return this exact
-                // canonical message. Scan/preflight/read cancellation carries a
-                // more specific error and is translated here with one terminal
-                // progress event so hosts never present it as an ordinary failure.
-                if error.to_string() != "ingest cancelled" {
-                    emit(
-                        progress,
-                        ProcessProgress::phase(
-                            kind,
-                            ProcessProgressPhase::Cancelled,
-                            "ingest cancelled",
-                            false,
-                        ),
-                    );
-                }
-                return Err(CoreError::Message("ingest cancelled".into()));
+            Err(_error) if cancelled(cancel) => {
+                // Emit the canonical terminal phase here even when a lower
+                // streaming phase noticed cancellation first. This keeps every
+                // cancellation path terminal and typed; duplicate lower-phase
+                // notices are harmless and the final update is deterministic.
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Cancelled,
+                        "ingest cancelled",
+                        false,
+                    ),
+                );
+                return Err(CoreError::Cancelled);
             }
             Err(error) => return Err(error),
         };
 
+        if let Some(identity) = managed_identity {
+            let staged = LogCorpus::open(staging.cache_root(), &report.corpus_id)?;
+            staged.write_managed_identity(identity)?;
+        }
         check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
         validate_staged_ingest(staging.cache_root(), &report)?;
         check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
@@ -2262,7 +2306,7 @@ fn ingest_path_into_cache(
                     .with_lines(stats.lines)
                     .with_files(files_done),
                 );
-                return Err(CoreError::Message("ingest cancelled".into()));
+                return Err(CoreError::Cancelled);
             }
 
             let file_bytes = match std::fs::symlink_metadata(file) {
@@ -2486,7 +2530,7 @@ fn ingest_path_into_cache(
             )
             .with_lines(stats.lines),
         );
-        return Err(CoreError::Message("ingest cancelled".into()));
+        return Err(CoreError::Cancelled);
     }
 
     // Persist templates
@@ -2551,7 +2595,7 @@ fn ingest_path_into_cache(
                     .with_lines(stats.lines)
                     .with_templates(embedded as u64),
                 );
-                return Err(CoreError::Message("ingest cancelled".into()));
+                return Err(CoreError::Cancelled);
             }
             if let Some(v) = hash_cache.get(&row.content_hash) {
                 corpus.set_template_vector(row.info.template_id, v.clone())?;
@@ -2755,9 +2799,7 @@ fn walk_dir(
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         if cancelled(cancel) {
-            return Err(CoreError::Message(
-                "ingest cancelled during directory scan".into(),
-            ));
+            return Err(CoreError::Cancelled);
         }
         budget.add_entries(1, limits)?;
         entries.push(entry?);
@@ -2765,9 +2807,7 @@ fn walk_dir(
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         if cancelled(cancel) {
-            return Err(CoreError::Message(
-                "ingest cancelled during directory scan".into(),
-            ));
+            return Err(CoreError::Cancelled);
         }
         let path = entry.path();
         let name = entry.file_name();
@@ -2925,6 +2965,7 @@ mod tests {
             None,
             progress,
             cancel,
+            None,
             limits,
             None,
         )
@@ -4612,6 +4653,7 @@ mod tests {
             Some(&flag),
         )
         .unwrap_err();
+        assert!(matches!(error, CoreError::Cancelled));
         assert_eq!(error.to_string(), "ingest cancelled");
         assert_eq!(
             observer.recorder.phases().last(),
@@ -4666,6 +4708,7 @@ mod tests {
             Some(&flag),
         )
         .unwrap_err();
+        assert!(matches!(error, CoreError::Cancelled));
         assert_eq!(error.to_string(), "ingest cancelled");
         let phases = observer.rec.phases();
         assert_eq!(phases.last(), Some(&ProcessProgressPhase::Cancelled));
@@ -4718,6 +4761,7 @@ mod tests {
                 LogEmbedMode::Local,
                 None,
                 &NoopProcessProgress,
+                None,
                 None,
                 Some(&hook),
             )

@@ -260,6 +260,8 @@ struct AppState {
     /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
     /// later ingest starts, explicitly clearable, and absent after restart.
     failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
+    /// Serializes the complete demo check/import/marker transaction.
+    demo_log_install: tokio::sync::Mutex<()>,
     /// Serializes chat-session writes across windows so governed fields cannot
     /// race ordinary transcript saves (#695).
     chat_session_mutation: Mutex<()>,
@@ -5250,6 +5252,7 @@ const DEMO_LOG_REQUIRED_FILES: &[&str] = &[
 enum DemoLogInstallStatus {
     Installed,
     AlreadyInstalled,
+    Cancelled,
     Unavailable,
     Failed,
 }
@@ -5288,6 +5291,18 @@ impl DemoLogInstallDto {
             events: None,
             detail: detail.into(),
             retryable,
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self {
+            status: DemoLogInstallStatus::Cancelled,
+            demo_identity: DEMO_LOG_IDENTITY.into(),
+            corpus_id: None,
+            corpus_name: DEMO_LOG_NAME.into(),
+            events: None,
+            detail: "Installation cancelled. No demo corpus was installed.".into(),
+            retryable: true,
         }
     }
 }
@@ -5387,30 +5402,104 @@ fn resolve_demo_log_resource(app: &tauri::AppHandle) -> Option<PathBuf> {
     resolve_demo_log_resource_from_candidates(candidates)
 }
 
-fn existing_demo_log_corpus(
-    cache: &std::path::Path,
-) -> Result<Option<cd_core::log_analysis::LogCorpus>, String> {
+enum DemoLogMarkerState {
+    Missing,
+    Installed(cd_core::log_analysis::LogCorpus),
+    RepairRequired,
+}
+
+fn read_demo_log_marker(cache: &std::path::Path) -> Result<DemoLogMarkerState, String> {
     let marker_path = demo_log_marker_path(cache);
-    if !marker_path.exists() {
-        return Ok(None);
+    let metadata = match std::fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DemoLogMarkerState::Missing)
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the installed demo marker: {error}"
+            ))
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return Ok(DemoLogMarkerState::RepairRequired);
     }
-    let metadata = std::fs::metadata(&marker_path)
-        .map_err(|error| format!("could not inspect the installed demo marker: {error}"))?;
-    if metadata.len() > 4096 {
-        return Err("installed demo marker exceeds its bounded size".into());
-    }
-    let marker: DemoLogMarker = serde_json::from_slice(
-        &std::fs::read(&marker_path)
-            .map_err(|error| format!("could not read the installed demo marker: {error}"))?,
-    )
-    .map_err(|error| format!("installed demo marker is invalid: {error}"))?;
+    let bytes = std::fs::read(&marker_path)
+        .map_err(|error| format!("could not read the installed demo marker: {error}"))?;
+    let Ok(marker) = serde_json::from_slice::<DemoLogMarker>(&bytes) else {
+        return Ok(DemoLogMarkerState::RepairRequired);
+    };
     if marker.schema_version != 1 || marker.demo_identity != DEMO_LOG_IDENTITY {
-        return Err("installed demo marker has an unknown identity or version".into());
+        return Ok(DemoLogMarkerState::RepairRequired);
     }
     match cd_core::log_analysis::LogCorpus::open(cache, &marker.corpus_id) {
-        Ok(corpus) => Ok(Some(corpus)),
-        Err(_) => Ok(None),
+        Ok(corpus) => Ok(DemoLogMarkerState::Installed(corpus)),
+        Err(_) => Ok(DemoLogMarkerState::RepairRequired),
     }
+}
+
+fn managed_demo_log_corpora(
+    cache: &std::path::Path,
+) -> Result<Vec<cd_core::log_analysis::LogCorpus>, String> {
+    let mut managed = Vec::new();
+    for id in cd_core::log_analysis::LogCorpus::list_ids(cache).map_err(|e| e.to_string())? {
+        let Ok(corpus) = cd_core::log_analysis::LogCorpus::open(cache, &id) else {
+            continue;
+        };
+        if corpus
+            .meta()
+            .ok()
+            .and_then(|meta| meta.managed_identity)
+            .as_deref()
+            == Some(DEMO_LOG_IDENTITY)
+        {
+            managed.push(corpus);
+        }
+    }
+    managed.sort_by(|left, right| {
+        let left_created = left.meta().map(|meta| meta.created_at).unwrap_or_default();
+        let right_created = right.meta().map(|meta| meta.created_at).unwrap_or_default();
+        right_created
+            .cmp(&left_created)
+            .then_with(|| right.id().cmp(left.id()))
+    });
+    Ok(managed)
+}
+
+fn quarantine_demo_log_marker(cache: &std::path::Path) -> Result<(), String> {
+    static QUARANTINE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let marker_path = demo_log_marker_path(cache);
+    match std::fs::symlink_metadata(&marker_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the damaged demo marker: {error}"
+            ))
+        }
+    }
+    let parent = marker_path
+        .parent()
+        .ok_or_else(|| "demo marker has no parent directory".to_string())?;
+    let quarantine = parent.join(format!(
+        "{DEMO_LOG_MARKER_FILE}.invalid.{}.{}",
+        std::process::id(),
+        QUARANTINE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::rename(&marker_path, quarantine)
+        .map_err(|error| format!("could not quarantine the damaged demo marker: {error}"))
+}
+
+#[cfg(unix)]
+fn sync_demo_marker_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("could not sync the demo marker directory: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_demo_marker_dir(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn persist_demo_log_marker(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
@@ -5440,17 +5529,38 @@ fn persist_demo_log_marker(cache: &std::path::Path, corpus_id: &str) -> Result<(
         .write(true)
         .open(&temp_path)
         .map_err(|error| format!("could not create the demo marker: {error}"))?;
+    let backup_path = marker_dir.join(format!(
+        ".{DEMO_LOG_MARKER_FILE}.{}.{}.previous",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let result = (|| -> Result<(), String> {
         temp.write_all(&bytes)
             .map_err(|error| format!("could not write the demo marker: {error}"))?;
         temp.sync_all()
             .map_err(|error| format!("could not sync the demo marker: {error}"))?;
-        if marker_path.exists() {
-            std::fs::remove_file(&marker_path)
-                .map_err(|error| format!("could not replace the stale demo marker: {error}"))?;
+        if std::fs::symlink_metadata(&marker_path).is_ok() {
+            std::fs::rename(&marker_path, &backup_path)
+                .map_err(|error| format!("could not stage the previous demo marker: {error}"))?;
         }
-        std::fs::rename(&temp_path, &marker_path)
-            .map_err(|error| format!("could not publish the demo marker: {error}"))
+        if let Err(error) = std::fs::rename(&temp_path, &marker_path) {
+            let restore = if backup_path.exists() {
+                std::fs::rename(&backup_path, &marker_path)
+            } else {
+                Ok(())
+            };
+            return Err(match restore {
+                Ok(()) => format!("could not publish the demo marker: {error}"),
+                Err(restore_error) => format!(
+                    "could not publish the demo marker: {error}; could not restore the previous marker: {restore_error}"
+                ),
+            });
+        }
+        if backup_path.exists() {
+            std::fs::remove_file(&backup_path)
+                .map_err(|error| format!("could not retire the previous demo marker: {error}"))?;
+        }
+        sync_demo_marker_dir(marker_dir)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);
@@ -5773,6 +5883,25 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriLogIngestProgre
 const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
 const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
 
+#[derive(Debug, PartialEq, Eq)]
+enum LogIngestRunError {
+    Cancelled,
+    Failed(String),
+}
+
+impl LogIngestRunError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Cancelled => "ingest cancelled",
+            Self::Failed(message) => message,
+        }
+    }
+
+    fn into_message(self) -> String {
+        self.message().to_string()
+    }
+}
+
 fn register_exclusive_cancel(
     cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
     key: &str,
@@ -5835,7 +5964,8 @@ async fn run_log_ingest(
     state: &AppState,
     path: PathBuf,
     name: Option<String>,
-) -> Result<LogIngestReportDto, String> {
+    managed_identity: Option<String>,
+) -> Result<LogIngestReportDto, LogIngestRunError> {
     let selected_path = path;
     let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
     let recorder = Arc::new(cd_core::log_analysis::FailedIngestDiagnosticRecorder::default());
@@ -5848,7 +5978,8 @@ async fn run_log_ingest(
             LOG_INGEST_CANCEL_KEY,
             Arc::clone(&cancel_registration),
             "a log import is already running",
-        )?;
+        )
+        .map_err(LogIngestRunError::Failed)?;
     }
     // Exclusive admission is not itself an ingest attempt. Once admitted,
     // invalidate the previous generation before cache setup, provider lookup,
@@ -5872,7 +6003,7 @@ async fn run_log_ingest(
                 LOG_INGEST_CANCEL_KEY,
                 &cancel_registration,
             );
-            return Err(error);
+            return Err(LogIngestRunError::Failed(error));
         }
     };
     let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
@@ -5883,16 +6014,32 @@ async fn run_log_ingest(
     let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        cd_core::log_analysis::ingest_path_with_policy_and_observer(
-            &cache,
-            &selected_path,
-            &name_owned,
-            &policy,
-            embed_backend,
-            &progress,
-            Some(&cancel_for_job),
-        )
-        .map_err(|e| e.to_string())
+        let result = if let Some(identity) = managed_identity {
+            cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
+                &cache,
+                &selected_path,
+                &name_owned,
+                &policy,
+                embed_backend,
+                &progress,
+                Some(&cancel_for_job),
+                &identity,
+            )
+        } else {
+            cd_core::log_analysis::ingest_path_with_policy_and_observer(
+                &cache,
+                &selected_path,
+                &name_owned,
+                &policy,
+                embed_backend,
+                &progress,
+                Some(&cancel_for_job),
+            )
+        };
+        result.map_err(|error| match error {
+            cd_core::error::CoreError::Cancelled => LogIngestRunError::Cancelled,
+            other => LogIngestRunError::Failed(other.to_string()),
+        })
     })
     .await;
     {
@@ -5909,7 +6056,11 @@ async fn run_log_ingest(
             report
         }
         Ok(Err(error)) => {
-            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            let diagnostic = recorder.finish(
+                error.message(),
+                source_kind,
+                cd_core::embed::now_unix_secs(),
+            );
             state
                 .failed_log_ingest_diagnostic
                 .lock()
@@ -5918,8 +6069,12 @@ async fn run_log_ingest(
             return Err(error);
         }
         Err(error) => {
-            let error = format!("ingest task join: {error}");
-            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            let error = LogIngestRunError::Failed(format!("ingest task join: {error}"));
+            let diagnostic = recorder.finish(
+                error.message(),
+                source_kind,
+                cd_core::embed::now_unix_secs(),
+            );
             state
                 .failed_log_ingest_diagnostic
                 .lock()
@@ -5974,56 +6129,168 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
-    run_log_ingest(app, &state, PathBuf::from(path), name).await
+    run_log_ingest(app, &state, PathBuf::from(path), name, None)
+        .await
+        .map_err(LogIngestRunError::into_message)
+}
+
+struct DemoLogIngestReceipt {
+    corpus_id: String,
+    events: u64,
+}
+
+#[async_trait::async_trait]
+trait DemoLogInstallBackend: Send + Sync {
+    fn cache_dir(&self) -> Result<PathBuf, String>;
+    fn resolve_resource(&self) -> Option<PathBuf>;
+    fn active_corpus(&self) -> Option<String>;
+    fn select_corpus(&self, corpus_id: Option<String>);
+    fn publish_marker(&self, cache: &std::path::Path, corpus_id: &str) -> Result<(), String>;
+    async fn ingest(&self, resource: PathBuf) -> Result<DemoLogIngestReceipt, LogIngestRunError>;
+}
+
+struct TauriDemoLogInstallBackend<'a> {
+    app: tauri::AppHandle,
+    state: &'a AppState,
+}
+
+#[async_trait::async_trait]
+impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
+    fn cache_dir(&self) -> Result<PathBuf, String> {
+        log_cache_dir(self.state)
+    }
+
+    fn resolve_resource(&self) -> Option<PathBuf> {
+        resolve_demo_log_resource(&self.app)
+    }
+
+    fn active_corpus(&self) -> Option<String> {
+        active_log_corpus_snapshot(self.state)
+    }
+
+    fn select_corpus(&self, corpus_id: Option<String>) {
+        set_active_log_corpus_state_nonblocking(self.state, corpus_id);
+    }
+
+    fn publish_marker(&self, cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
+        persist_demo_log_marker(cache, corpus_id)
+    }
+
+    async fn ingest(&self, resource: PathBuf) -> Result<DemoLogIngestReceipt, LogIngestRunError> {
+        let report = run_log_ingest(
+            self.app.clone(),
+            self.state,
+            resource,
+            Some(DEMO_LOG_NAME.into()),
+            Some(DEMO_LOG_IDENTITY.into()),
+        )
+        .await?;
+        Ok(DemoLogIngestReceipt {
+            corpus_id: report.corpus_id,
+            events: report.lines,
+        })
+    }
+}
+
+struct ReconciledDemoLog {
+    corpus: cd_core::log_analysis::LogCorpus,
+    recovered: bool,
+    managed_copies: usize,
+}
+
+fn reconcile_demo_log_corpus<B: DemoLogInstallBackend>(
+    backend: &B,
+    cache: &std::path::Path,
+) -> Result<Option<ReconciledDemoLog>, String> {
+    let marker_needs_repair = match read_demo_log_marker(cache)? {
+        DemoLogMarkerState::Installed(corpus) => {
+            return Ok(Some(ReconciledDemoLog {
+                corpus,
+                recovered: false,
+                managed_copies: 1,
+            }))
+        }
+        DemoLogMarkerState::Missing => false,
+        DemoLogMarkerState::RepairRequired => true,
+    };
+    let managed = managed_demo_log_corpora(cache)?;
+    if marker_needs_repair {
+        quarantine_demo_log_marker(cache)?;
+    }
+    let managed_copies = managed.len();
+    let Some(corpus) = managed.into_iter().next() else {
+        return Ok(None);
+    };
+    backend.publish_marker(cache, corpus.id())?;
+    Ok(Some(ReconciledDemoLog {
+        corpus,
+        recovered: true,
+        managed_copies,
+    }))
 }
 
 /// Explicit first-run convenience. The resource resolver can only select the
 /// packaged input directory (or its debug checkout equivalent); trusted ingest
 /// remains identical to an ordinary user-selected import.
-async fn install_demo_log_corpus_inner(
-    app: tauri::AppHandle,
-    state: &AppState,
+async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
+    backend: &B,
 ) -> DemoLogInstallDto {
-    let cache = match log_cache_dir(state) {
+    let cache = match backend.cache_dir() {
         Ok(cache) => cache,
         Err(error) => return DemoLogInstallDto::failed(error, true),
     };
-    match existing_demo_log_corpus(&cache) {
-        Ok(Some(corpus)) => {
-            let summary = corpus.summary();
-            set_active_log_corpus_state_nonblocking(state, Some(summary.id.clone()));
+    match reconcile_demo_log_corpus(backend, &cache) {
+        Ok(Some(reconciled)) => {
+            let summary = reconciled.corpus.summary();
+            backend.select_corpus(Some(summary.id.clone()));
+            let detail = if reconciled.recovered {
+                if reconciled.managed_copies > 1 {
+                    format!(
+                        "Recovered the newest packaged demo after an interrupted install; {} older managed copies were left untouched.",
+                        reconciled.managed_copies - 1
+                    )
+                } else {
+                    "Recovered the packaged demo after an interrupted install and selected it."
+                        .into()
+                }
+            } else {
+                "The packaged demo corpus is already installed and selected.".into()
+            };
             return DemoLogInstallDto {
                 status: DemoLogInstallStatus::AlreadyInstalled,
                 demo_identity: DEMO_LOG_IDENTITY.into(),
                 corpus_id: Some(summary.id),
                 corpus_name: summary.name,
                 events: Some(summary.event_count),
-                detail: "The packaged demo corpus is already installed and selected.".into(),
+                detail,
                 retryable: false,
             };
         }
         Ok(None) => {}
-        Err(error) => return DemoLogInstallDto::failed(error, false),
+        Err(error) => return DemoLogInstallDto::failed(error, true),
     }
-    let Some(resource) = resolve_demo_log_resource(&app) else {
+    let Some(resource) = backend.resolve_resource() else {
         return DemoLogInstallDto::unavailable(
             "The packaged demo logs are unavailable in this installation.",
         );
     };
-    let prior_active_corpus = active_log_corpus_snapshot(state);
-    let report = match run_log_ingest(app, state, resource, Some(DEMO_LOG_NAME.into())).await {
+    let prior_active_corpus = backend.active_corpus();
+    let report = match backend.ingest(resource).await {
         Ok(report) => report,
-        Err(error) => return DemoLogInstallDto::failed(error, true),
-    };
-    if let Err(error) = persist_demo_log_marker(&cache, &report.corpus_id) {
-        let cleanup = cd_core::log_analysis::LogCorpus::discard(&cache, &report.corpus_id);
-        set_active_log_corpus_state_nonblocking(state, prior_active_corpus);
-        if cleanup.is_err() {
-            return DemoLogInstallDto::failed(
-                format!("{error}; the unmarked disposable demo corpus could not be cleaned up"),
-                true,
-            );
+        Err(LogIngestRunError::Cancelled) => {
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::cancelled();
         }
+        Err(LogIngestRunError::Failed(error)) => {
+            backend.select_corpus(prior_active_corpus);
+            return DemoLogInstallDto::failed(error, true);
+        }
+    };
+    if let Err(error) = backend.publish_marker(&cache, &report.corpus_id) {
+        // The corpus is intentionally retained: its reserved identity was
+        // written before atomic publication, so retry can prove and reconcile
+        // this crash window without guessing at user corpora.
+        backend.select_corpus(prior_active_corpus);
         return DemoLogInstallDto::failed(error, true);
     }
     DemoLogInstallDto {
@@ -6031,10 +6298,18 @@ async fn install_demo_log_corpus_inner(
         demo_identity: DEMO_LOG_IDENTITY.into(),
         corpus_id: Some(report.corpus_id),
         corpus_name: DEMO_LOG_NAME.into(),
-        events: Some(report.lines),
+        events: Some(report.events),
         detail: "The packaged demo corpus is installed and selected.".into(),
         retryable: false,
     }
+}
+
+async fn install_demo_log_corpus_serialized<B: DemoLogInstallBackend>(
+    serial: &tokio::sync::Mutex<()>,
+    backend: &B,
+) -> DemoLogInstallDto {
+    let _transaction = serial.lock().await;
+    install_demo_log_corpus_transaction(backend).await
 }
 
 #[tauri::command]
@@ -6042,7 +6317,8 @@ async fn install_demo_log_corpus(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DemoLogInstallDto, String> {
-    Ok(install_demo_log_corpus_inner(app, &state).await)
+    let backend = TauriDemoLogInstallBackend { app, state: &state };
+    Ok(install_demo_log_corpus_serialized(&state.demo_log_install, &backend).await)
 }
 
 /// Trusted local re-analysis of template vectors; raw events are not reparsed.
@@ -7843,6 +8119,7 @@ pub fn run() {
         failed_log_ingest_diagnostic: Mutex::new(
             cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
         ),
+        demo_log_install: tokio::sync::Mutex::new(()),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
@@ -8385,7 +8662,105 @@ mod help_host_tests {
 #[cfg(test)]
 mod demo_log_host_tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    enum FakeIngestOutcome {
+        Success,
+        Cancelled,
+        Failed,
+    }
+
+    struct FakeDemoLogBackend {
+        cache: PathBuf,
+        resource: Option<PathBuf>,
+        active: Mutex<Option<String>>,
+        outcomes: Mutex<VecDeque<FakeIngestOutcome>>,
+        ingest_calls: AtomicUsize,
+        fail_next_marker: AtomicBool,
+    }
+
+    impl FakeDemoLogBackend {
+        fn new(cache: PathBuf, outcomes: impl IntoIterator<Item = FakeIngestOutcome>) -> Self {
+            Self {
+                resource: Some(cache.join("packaged-demo")),
+                cache,
+                active: Mutex::new(None),
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                ingest_calls: AtomicUsize::new(0),
+                fail_next_marker: AtomicBool::new(false),
+            }
+        }
+
+        fn with_active(self, corpus_id: &str) -> Self {
+            *self.active.lock().expect("active") = Some(corpus_id.into());
+            self
+        }
+
+        fn create_managed_corpus(&self) -> cd_core::log_analysis::LogCorpus {
+            let corpus = cd_core::log_analysis::LogCorpus::create(&self.cache, DEMO_LOG_NAME)
+                .expect("managed corpus");
+            corpus
+                .write_managed_identity(DEMO_LOG_IDENTITY)
+                .expect("managed identity");
+            corpus
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DemoLogInstallBackend for FakeDemoLogBackend {
+        fn cache_dir(&self) -> Result<PathBuf, String> {
+            Ok(self.cache.clone())
+        }
+
+        fn resolve_resource(&self) -> Option<PathBuf> {
+            self.resource.clone()
+        }
+
+        fn active_corpus(&self) -> Option<String> {
+            self.active.lock().expect("active").clone()
+        }
+
+        fn select_corpus(&self, corpus_id: Option<String>) {
+            *self.active.lock().expect("active") = corpus_id;
+        }
+
+        fn publish_marker(&self, cache: &Path, corpus_id: &str) -> Result<(), String> {
+            if self.fail_next_marker.swap(false, Ordering::SeqCst) {
+                return Err("injected marker publication failure".into());
+            }
+            persist_demo_log_marker(cache, corpus_id)
+        }
+
+        async fn ingest(
+            &self,
+            _resource: PathBuf,
+        ) -> Result<DemoLogIngestReceipt, LogIngestRunError> {
+            self.ingest_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            match self
+                .outcomes
+                .lock()
+                .expect("outcomes")
+                .pop_front()
+                .unwrap_or(FakeIngestOutcome::Success)
+            {
+                FakeIngestOutcome::Success => {
+                    let corpus = self.create_managed_corpus();
+                    Ok(DemoLogIngestReceipt {
+                        corpus_id: corpus.id().into(),
+                        events: 25_000,
+                    })
+                }
+                FakeIngestOutcome::Cancelled => Err(LogIngestRunError::Cancelled),
+                FakeIngestOutcome::Failed => {
+                    Err(LogIngestRunError::Failed("injected ingest failure".into()))
+                }
+            }
+        }
+    }
 
     fn write_required_demo_files(root: &Path) {
         for relative in DEMO_LOG_REQUIRED_FILES {
@@ -8478,83 +8853,160 @@ mod demo_log_host_tests {
         );
     }
 
-    #[test]
-    fn stable_marker_is_idempotent_and_cannot_match_a_same_named_user_corpus() {
+    #[tokio::test]
+    async fn transaction_is_idempotent_and_never_matches_a_same_named_user_corpus() {
         let root = tempfile::tempdir().expect("cache root");
         let cache = root.path().join("cache");
         std::fs::create_dir_all(&cache).expect("cache");
         let user_corpus =
             cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
-        assert!(
-            existing_demo_log_corpus(&cache)
-                .expect("marker lookup")
-                .is_none(),
-            "a user corpus with the same display name is not the managed demo"
-        );
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success]);
+        let serial = tokio::sync::Mutex::new(());
 
-        let managed = cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME)
-            .expect("managed corpus");
-        persist_demo_log_marker(&cache, managed.id()).expect("persist marker");
-        let first = existing_demo_log_corpus(&cache)
-            .expect("marker lookup")
-            .expect("managed corpus");
-        let second = existing_demo_log_corpus(&cache)
-            .expect("marker lookup")
-            .expect("managed corpus");
-        assert_eq!(first.id(), managed.id());
-        assert_eq!(second.id(), managed.id());
-        assert_ne!(first.id(), user_corpus.id());
+        let first = install_demo_log_corpus_serialized(&serial, &backend).await;
+        let second = install_demo_log_corpus_serialized(&serial, &backend).await;
 
-        cd_core::log_analysis::LogCorpus::discard(&cache, managed.id()).expect("discard demo");
+        assert_eq!(first.status, DemoLogInstallStatus::Installed);
+        assert_eq!(second.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(first.corpus_id, second.corpus_id);
+        assert_ne!(first.corpus_id.as_deref(), Some(user_corpus.id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
         assert!(
-            existing_demo_log_corpus(&cache)
-                .expect("stale marker lookup")
-                .is_none(),
-            "discarding the managed demo permits an explicit reinstall"
+            cd_core::log_analysis::LogCorpus::open(&cache, user_corpus.id()).is_ok(),
+            "the same-named user corpus must remain untouched"
         );
     }
 
-    #[test]
-    fn ordinary_and_demo_commands_delegate_to_one_trusted_ingest_orchestration() {
-        let source = include_str!("lib.rs");
-        let shared_start = source
-            .find("async fn run_log_ingest(")
-            .expect("shared ingest");
-        let ordinary_start = source
-            .find("async fn ingest_log_path(")
-            .expect("ordinary command");
-        let demo_inner_start = source
-            .find("async fn install_demo_log_corpus_inner(")
-            .expect("demo orchestration");
-        let demo_command_start = source
-            .find("async fn install_demo_log_corpus(")
-            .expect("demo command");
-        let reanalysis_start = source
-            .find("async fn reanalyze_log_corpus(")
-            .expect("command boundary");
-        let shared = &source[shared_start..ordinary_start];
-        let ordinary = &source[ordinary_start..demo_inner_start];
-        let demo = &source[demo_inner_start..reanalysis_start];
+    #[tokio::test]
+    async fn cancellation_is_typed_retryable_and_restores_selection() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend =
+            FakeDemoLogBackend::new(cache, [FakeIngestOutcome::Cancelled]).with_active("user");
 
-        assert!(shared.contains("ingest_path_with_policy_and_observer("));
-        assert!(shared.contains("register_exclusive_cancel("));
-        assert!(shared.contains("FailedIngestDiagnosticRecorder"));
-        assert!(ordinary.contains("run_log_ingest("));
-        assert!(demo.contains("run_log_ingest("));
+        let result = install_demo_log_corpus_transaction(&backend).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Cancelled);
+        assert_eq!(
+            result.detail,
+            "Installation cancelled. No demo corpus was installed."
+        );
+        assert!(result.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_invocations_serialize_the_complete_transaction() {
+        let root = tempfile::tempdir().expect("cache root");
+        let backend = FakeDemoLogBackend::new(
+            root.path().join("cache"),
+            [FakeIngestOutcome::Success, FakeIngestOutcome::Failed],
+        );
+        let serial = tokio::sync::Mutex::new(());
+
+        let (first, second) = tokio::join!(
+            install_demo_log_corpus_serialized(&serial, &backend),
+            install_demo_log_corpus_serialized(&serial, &backend)
+        );
+
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
         assert!(
-            demo.find("let prior_active_corpus = active_log_corpus_snapshot(state)")
-                < demo.find("run_log_ingest("),
-            "the prior user selection must be captured before trusted ingest selects the demo"
+            matches!(first.status, DemoLogInstallStatus::Installed)
+                ^ matches!(second.status, DemoLogInstallStatus::Installed)
         );
         assert!(
-            demo.contains("set_active_log_corpus_state_nonblocking(state, prior_active_corpus)"),
-            "marker failure must restore the prior user selection"
+            matches!(first.status, DemoLogInstallStatus::AlreadyInstalled)
+                ^ matches!(second.status, DemoLogInstallStatus::AlreadyInstalled)
         );
+        assert_eq!(first.corpus_id, second.corpus_id);
+    }
+
+    #[tokio::test]
+    async fn marker_fault_leaves_provable_corpus_for_retry_and_restores_selection() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success])
+            .with_active("user");
+        backend.fail_next_marker.store(true, Ordering::SeqCst);
+
+        let failed = install_demo_log_corpus_transaction(&backend).await;
+        assert_eq!(failed.status, DemoLogInstallStatus::Failed);
+        assert!(failed.retryable);
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        let managed = managed_demo_log_corpora(&cache).expect("managed scan");
+        assert_eq!(
+            managed.len(),
+            1,
+            "published managed corpus survives marker fault"
+        );
+        assert!(!demo_log_marker_path(&cache).exists());
+
+        let recovered = install_demo_log_corpus_transaction(&backend).await;
+        assert_eq!(recovered.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(recovered.corpus_id.as_deref(), Some(managed[0].id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.active_corpus(), recovered.corpus_id);
+    }
+
+    #[tokio::test]
+    async fn damaged_unknown_marker_is_quarantined_without_touching_user_corpora() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(
+            demo_log_marker_path(&cache)
+                .parent()
+                .expect("marker parent"),
+        )
+        .expect("marker parent");
+        std::fs::write(
+            demo_log_marker_path(&cache),
+            br#"{"schemaVersion":99,"demoIdentity":"unknown","corpusId":"user"}"#,
+        )
+        .expect("damaged marker");
+        let user =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Success]);
+
+        let result = install_demo_log_corpus_transaction(&backend).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Installed);
+        assert!(cd_core::log_analysis::LogCorpus::open(&cache, user.id()).is_ok());
+        assert_ne!(result.corpus_id.as_deref(), Some(user.id()));
+        let marker_path = demo_log_marker_path(&cache);
+        let marker_dir = marker_path.parent().expect("marker parent");
         assert!(
-            source[demo_command_start..reanalysis_start].contains("install_demo_log_corpus_inner(")
+            std::fs::read_dir(marker_dir)
+                .expect("marker entries")
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains(".invalid.")),
+            "unknown marker is retained as a quarantined diagnostic"
         );
-        assert!(!ordinary.contains("ingest_path_with_policy_and_observer("));
-        assert!(!demo.contains("ingest_path_with_policy_and_observer("));
+    }
+
+    #[tokio::test]
+    async fn damaged_marker_repairs_to_provably_managed_corpus_without_reimport() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(cache.clone(), [FakeIngestOutcome::Failed]);
+        let managed = backend.create_managed_corpus();
+        std::fs::create_dir_all(
+            demo_log_marker_path(&cache)
+                .parent()
+                .expect("marker parent"),
+        )
+        .expect("marker parent");
+        std::fs::write(demo_log_marker_path(&cache), b"not-json").expect("damaged marker");
+
+        let repaired = install_demo_log_corpus_transaction(&backend).await;
+
+        assert_eq!(repaired.status, DemoLogInstallStatus::AlreadyInstalled);
+        assert_eq!(repaired.corpus_id.as_deref(), Some(managed.id()));
+        assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            read_demo_log_marker(&cache).expect("repaired marker"),
+            DemoLogMarkerState::Installed(corpus) if corpus.id() == managed.id()
+        ));
     }
 
     #[test]
@@ -8571,7 +9023,7 @@ mod demo_log_host_tests {
         let resolved =
             resolve_demo_log_resource_from_candidates([source]).expect("checked-in demo resource");
         let cache = tempfile::tempdir().expect("ingest cache");
-        let report = cd_core::log_analysis::ingest_path_with_policy_and_observer(
+        let report = cd_core::log_analysis::ingest_path_with_policy_and_observer_managed(
             cache.path(),
             &resolved,
             DEMO_LOG_NAME,
@@ -8579,6 +9031,7 @@ mod demo_log_host_tests {
             None,
             &cd_core::process_progress::NoopProcessProgress,
             None,
+            DEMO_LOG_IDENTITY,
         )
         .expect("real bounded demo ingest");
         assert_eq!(report.stats.lines, 25_000);
@@ -8588,6 +9041,11 @@ mod demo_log_host_tests {
         let corpus = cd_core::log_analysis::LogCorpus::open(cache.path(), &report.corpus_id)
             .expect("installed demo corpus");
         assert_eq!(corpus.summary().event_count, 25_000);
+        assert_eq!(
+            corpus.meta().expect("meta").managed_identity.as_deref(),
+            Some(DEMO_LOG_IDENTITY),
+            "managed identity must be durable before public corpus reconciliation"
+        );
     }
 }
 

@@ -1694,7 +1694,8 @@ export type LogIngestReportDto = {
 };
 
 export type DemoLogInstallDto = {
-  status: "installed" | "already_installed" | "unavailable" | "failed";
+  status:
+    "installed" | "already_installed" | "cancelled" | "unavailable" | "failed";
   demoIdentity: string;
   corpusId: string | null;
   corpusName: string;

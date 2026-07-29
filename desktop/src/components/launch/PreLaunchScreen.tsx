@@ -550,9 +550,11 @@ export function PreLaunchScreen({
                           ? "Demo installed"
                           : demoResult.status === "already_installed"
                             ? "Demo already installed"
-                            : demoResult.status === "unavailable"
-                              ? "Demo unavailable"
-                              : "Installation failed"}
+                            : demoResult.status === "cancelled"
+                              ? "Installation cancelled"
+                              : demoResult.status === "unavailable"
+                                ? "Demo unavailable"
+                                : "Installation failed"}
                       </strong>
                       <span>{demoResult.detail}</span>
                       {demoInstalled ? (

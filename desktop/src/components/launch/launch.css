@@ -352,6 +352,10 @@
   border-color: color-mix(in srgb, #c44 55%, #293241);
 }
 
+.launch-demo[data-state="cancelled"] {
+  border-color: color-mix(in srgb, #d3a53d 50%, #293241);
+}
+
 .launch-demo__choice {
   display: flex;
   align-items: flex-start;

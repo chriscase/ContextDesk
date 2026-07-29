@@ -8,6 +8,10 @@ pub type CoreResult<T> = Result<T, CoreError>;
 /// Errors returned by core APIs.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// Cooperative cancellation requested by the caller.
+    #[error("ingest cancelled")]
+    Cancelled,
+
     /// Invalid configuration or branding.
     #[error("config: {0}")]
     Config(String),

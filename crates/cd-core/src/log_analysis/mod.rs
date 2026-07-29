@@ -43,7 +43,8 @@ pub use embed_policy::{
 };
 pub use ingest::{
     ingest_path, ingest_path_with_observer, ingest_path_with_policy,
-    ingest_path_with_policy_and_observer, IngestReport, IngestStats,
+    ingest_path_with_policy_and_observer, ingest_path_with_policy_and_observer_managed,
+    IngestReport, IngestStats,
 };
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
