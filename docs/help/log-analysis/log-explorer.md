@@ -244,11 +244,14 @@ retrieving bounded evidence, or synthesizing an evidence-cited answer. **Stop**
 interrupts the active provider or tool wait. If retrieval succeeded but
 synthesis reached its bounded deadline, the evidence remains visible and
 **Retry synthesis** answers from that preserved evidence without another log
-search. The retry is accepted only for the same chat, corpus, and model.
-The control appears only after the host confirms a still-valid checkpoint; a
-timeout message alone cannot enable it. Checkpoints are memory-only,
-age/count/size bounded, and cleared when a chat is trashed, deleted, archived,
-relinked, or superseded by a new linked turn.
+search. The retry is accepted only for the same chat, corpus, provider profile,
+and model. Switching either provider or model clears the checkpoint. The
+control appears only after the host confirms a still-valid checkpoint; a
+timeout or provider-error message alone cannot enable it. A checkpoint is
+published only after every explicitly requested source succeeds and synthesis
+then times out, fails provider-side, or is rejected as ungrounded. Checkpoints
+are memory-only, age/count/payload-byte bounded, and cleared when a chat is
+trashed, deleted, archived, relinked, or superseded by a new linked turn.
 
 The complete cross-source and provider-boundary explanation is available at
 help://context-selection-model-boundary.

@@ -288,7 +288,11 @@ universal recommendations:
 | Whole-turn deadline         | Adaptive: 300,000 ms local/private, 120,000 ms managed; explicit 500–600,000 ms | [`router.rs`](../../../crates/cd-core/src/router.rs) | Phase timeout or visible whole-turn timeout |
 | Phase deadlines             | Choosing, retrieval, and synthesis are each capped inside the one monotonic turn ceiling | [`agent.rs`](../../../crates/cd-core/src/agent.rs) `TurnClock` | A phase cap never resets or extends the whole turn |
 | Provider readiness          | Same absolute turn deadline starts before health/readiness/backend construction | [`research.rs`](../../../crates/cd-core/src/research.rs) | Stop and explicit short deadlines remain authoritative during cold local/private startup |
+| Linked corpus preflight     | Same absolute deadline and cancel signal govern corpus validation/open in a bounded blocking task | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Setup cannot outlive Stop or consume time outside the turn ceiling |
 | Model-facing context        |                 120,000 characters default | [`sessions.rs`](../../../crates/cd-core/src/sessions.rs)                      | Pair-safe compaction then deterministic truncation or fail |
+| Current-turn evidence payload |                                 256 KiB | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | UTF-8-safe truncation; successful governed results only    |
+| Current-turn log identities |                                     512 | [`agent.rs`](../../../crates/cd-core/src/agent.rs)                            | Independent deduplicated identity cap                      |
+| Retry checkpoint store      | 30-minute TTL; 16 entries; 2 MiB retained payload bytes total | [`lib.rs`](../../../desktop/src-tauri/src/lib.rs) | Deterministic oldest-first eviction; this is a payload-byte bound, not an allocator/heap-size claim |
 | View selection identities   |                                         64 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Sort, deduplicate, truncate                                |
 | View bookmark summaries     |                                         24 | [`view_context.rs`](../../../crates/cd-core/src/log_analysis/view_context.rs) | Truncate                                                   |
 | Session context files       |                                200 default | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)        | Reject over cap                                            |
@@ -318,14 +322,20 @@ setting; new installs default to adaptive.
 | Requested source unavailable            | Eligibility computation                       | Name unavailable source class without secrets                         | Configure/authorize source                        | Remaining answer discloses gap           |
 | Context cannot fit                      | Deterministic budget helper                   | `context_too_long`                                                    | New chat/remove history/increase supported budget | Stored transcript not silently rewritten |
 | Timeout before retrieval                | Deadline                                      | Visible timeout                                                       | Retry                                             | No success claim                         |
-| Timeout after retrieval                 | Synthesis phase or remaining whole-turn deadline | Visible timeout; successful bounded evidence remains in the transcript and in a host-only checkpoint | Retry synthesis without running retrieval again | Checkpoint is bound to exact chat, corpus, and model |
+| Timeout/provider failure after complete retrieval | Synthesis phase or remaining whole-turn deadline; typed provider terminal | Visible failure; successful bounded evidence remains in the transcript and in a host-only checkpoint | Retry synthesis without running retrieval again | Checkpoint is bound to exact chat, corpus, provider profile, and model |
+| Provider failure during partial retrieval | Typed linked-retrieval terminal | Original user turn and successful tool events remain visible; no retry checkpoint | Retry the complete investigation | Missing explicitly requested sources cannot become silent success |
 | Cancellation                            | Per-turn cancel race around every provider/tool await | Cancelled terminal state                                           | Start another turn or retry preserved synthesis   | Cancellation is immediate and session-specific |
 | Malicious retrieved instructions        | Untrusted wrapper and system policy           | Usually not surfaced as instructions                                  | Continue with data-only interpretation            | No permission elevation                  |
 | Citation mismatch                       | Host validation against structured identities | Reject/downgrade answer                                               | Correct synthesis retry                           | Rendered text cannot forge identity      |
 
 Retry evidence comes only from a dedicated, bounded current-turn buffer
-populated by successful governed tool results. Historical tool messages,
-including stale or cross-corpus messages, are never swept into synthesis.
+populated by successful governed tool results for the resolved corpus. Every
+linked model-facing round strips historical `tool` messages and historical
+assistant tool-call protocol, including broader connector, database, memory,
+workspace, and web turns. A checkpoint is published only after all explicitly
+requested source classes succeeded and subsequent synthesis failed or was
+rejected. Historical, stale, cross-corpus, and partial-source evidence is never
+swept into synthesis.
 Single-owner session admission prevents another window from replacing the
 active turn's cancellation or checkpoint ownership. The host keeps checkpoints
 memory-only, applies TTL, entry-count, and total-byte caps with deterministic

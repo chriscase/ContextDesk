@@ -154,7 +154,7 @@ impl LinkedCheckpointStore {
         session_id: String,
         checkpoint: cd_core::agent::LinkedSynthesisCheckpoint,
     ) -> bool {
-        let bytes = checkpoint.retained_bytes();
+        let bytes = checkpoint.retained_payload_bytes();
         self.insert_value_at(session_id, checkpoint, bytes, StdInstant::now())
     }
 
@@ -484,6 +484,46 @@ where
     }
 }
 
+async fn run_blocking_for_turn<T, F>(
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    task: F,
+) -> Result<Result<T, String>, HostReadinessFailure>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let remaining = if plan.total_ms == 0 {
+        None
+    } else {
+        Some(
+            Duration::from_millis(plan.total_ms)
+                .checked_sub(started.elapsed())
+                .ok_or(HostReadinessFailure::TurnDeadline)?,
+        )
+    };
+    tokio::select! {
+        biased;
+        _ = wait_for_atomic_cancel(cancel) => Err(HostReadinessFailure::Cancelled),
+        result = async {
+            let worker = tauri::async_runtime::spawn_blocking(task);
+            match remaining {
+                Some(remaining) => tokio::time::timeout(remaining, worker)
+                    .await
+                    .map_err(|_| HostReadinessFailure::TurnDeadline),
+                None => Ok(worker.await),
+            }
+        } => match result? {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                tracing::warn!(error = %error, "linked turn blocking setup worker failed");
+                Err(HostReadinessFailure::Worker)
+            }
+        }
+    }
+}
+
 async fn wait_for_host_readiness<F>(
     timeout: Duration,
     initialize: F,
@@ -564,6 +604,7 @@ fn validate_linked_log_corpus_at(cache: &std::path::Path, corpus_id: &str) -> Re
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn linked_log_preflight_at(
     cache: &std::path::Path,
     context: &cd_core::agent::LogExplorerTurnContext,
@@ -575,6 +616,49 @@ fn linked_log_preflight_at(
     }
     tools_profile
         .and_then(|profile| cd_core::research::linked_tools_unavailable_events(profile, session_id))
+}
+
+#[derive(Debug)]
+enum LinkedTurnPreparation<T> {
+    Ready(T),
+    Terminal(Vec<cd_core::events::StreamEvent>),
+}
+
+async fn prepare_linked_turn_with<V, C, H, T>(
+    started: tokio::time::Instant,
+    plan: cd_core::router::TurnDeadlinePlan,
+    cancel: &std::sync::atomic::AtomicBool,
+    validate_corpus: V,
+    capability_refusal: C,
+    construct_host: H,
+) -> Result<LinkedTurnPreparation<T>, HostReadinessFailure>
+where
+    V: FnOnce() -> Result<(), String> + Send + 'static,
+    C: FnOnce() -> Option<Vec<cd_core::events::StreamEvent>>,
+    H: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    match run_blocking_for_turn(started, plan, cancel, validate_corpus).await? {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "linked corpus validation failed");
+            return Ok(LinkedTurnPreparation::Terminal(
+                linked_log_host_terminal_events().into(),
+            ));
+        }
+    }
+    if let Some(events) = capability_refusal() {
+        return Ok(LinkedTurnPreparation::Terminal(events));
+    }
+    match run_blocking_for_turn(started, plan, cancel, construct_host).await? {
+        Ok(host) => Ok(LinkedTurnPreparation::Ready(host)),
+        Err(error) => {
+            tracing::warn!(error = %error, "linked host construction failed");
+            Ok(LinkedTurnPreparation::Terminal(
+                linked_log_host_terminal_events().into(),
+            ))
+        }
+    }
 }
 
 fn take_ready_linked_host<F>(
@@ -634,6 +718,30 @@ fn linked_log_host_terminal_events() -> [cd_core::events::StreamEvent; 2] {
             reason: "linked_log_host_unavailable".into(),
         },
     ]
+}
+
+fn linked_setup_failure_events(
+    failure: &HostReadinessFailure,
+) -> Vec<cd_core::events::StreamEvent> {
+    match failure {
+        HostReadinessFailure::Cancelled => vec![cd_core::events::StreamEvent::TurnCompleted {
+            reason: "cancel".into(),
+        }],
+        HostReadinessFailure::TurnDeadline | HostReadinessFailure::Timeout => vec![
+            cd_core::events::StreamEvent::Error {
+                code: "budget_time".into(),
+                message: "The whole-turn deadline expired while validating or opening the linked \
+                          corpus. No provider request was started."
+                    .into(),
+            },
+            cd_core::events::StreamEvent::TurnCompleted {
+                reason: "budget_time".into(),
+            },
+        ],
+        HostReadinessFailure::Initialization | HostReadinessFailure::Worker => {
+            linked_log_host_terminal_events().into()
+        }
+    }
 }
 
 struct BackgroundIndexBuild {
@@ -3526,13 +3634,15 @@ fn linked_retry_event(
     available: bool,
     session_id: &str,
     corpus_id: &str,
-    model: Option<String>,
+    provider_profile_id: Option<String>,
+    model_id: Option<String>,
 ) -> cd_core::events::StreamEvent {
     cd_core::events::StreamEvent::LinkedSynthesisRetry {
         available,
         session_id: session_id.to_string(),
         corpus_id: corpus_id.to_string(),
-        model,
+        provider_profile_id,
+        model_id,
     }
 }
 
@@ -3693,8 +3803,14 @@ async fn agent_turn(
         if !checkpoint.matches(
             &req.session_id,
             &context.corpus_id,
+            Some(profile.id.as_str()),
             Some(profile.chat_model.as_str()),
         ) {
+            state
+                .linked_synthesis_checkpoints
+                .lock()
+                .expect("linked synthesis checkpoints")
+                .remove(&req.session_id);
             for event in [
                 cd_core::events::StreamEvent::TurnStarted {
                     session_id: req.session_id.clone(),
@@ -3702,31 +3818,15 @@ async fn agent_turn(
                 },
                 cd_core::events::StreamEvent::Error {
                     code: "linked_synthesis_retry_stale".into(),
-                    message: "The preserved evidence belongs to a different chat, corpus, or \
-                              model. Run a new linked investigation instead."
-                        .into(),
+                    message:
+                        "The preserved evidence belongs to a different chat, corpus, provider \
+                              profile, or model. Run a new linked investigation instead."
+                            .into(),
                 },
                 cd_core::events::StreamEvent::TurnCompleted {
                     reason: "linked_synthesis_retry_stale".into(),
                 },
             ] {
-                let _ = on_event.send(cd_core::research::event_to_dto(&event));
-            }
-            return Ok(());
-        }
-    }
-
-    // Validate the durable corpus before capability checks or provider/host
-    // construction. A stale link must never be masked by a tools-disabled
-    // profile or silently broadened into an ordinary turn.
-    if let Some(context) = log_explorer_context.as_ref() {
-        let cache = log_cache_dir(&state)?;
-        let tools_profile =
-            (!req.force_local && linked_synthesis_retry.is_none()).then_some(&profile);
-        if let Some(events) =
-            linked_log_preflight_at(&cache, context, tools_profile, &req.session_id)
-        {
-            for event in events {
                 let _ = on_event.send(cd_core::research::event_to_dto(&event));
             }
             return Ok(());
@@ -3739,19 +3839,50 @@ async fn agent_turn(
     let mut turn_prelude_emitted = false;
     let (mut host, using_fallback_host, borrowed_host_generation) =
         if let Some(context) = log_explorer_context.as_ref() {
-            match take_ready_linked_host(&state.host, &state.host_generation, || {
-                build_linked_log_fallback_host(&state, context)
-            }) {
-                Ok((host, using_fallback, borrowed_generation)) => {
+            let cache = log_cache_dir(&state)?;
+            let corpus_id = context.corpus_id.clone();
+            let capability_profile =
+                (!req.force_local && linked_synthesis_retry.is_none()).then_some(profile.clone());
+            let capability_session_id = req.session_id.clone();
+            let app_for_host = window.app_handle().clone();
+            let fallback_context = context.clone();
+            match prepare_linked_turn_with(
+                turn_started_at,
+                deadline_plan,
+                cancel.as_ref(),
+                move || validate_linked_log_corpus_at(&cache, &corpus_id),
+                move || {
+                    capability_profile.as_ref().and_then(|profile| {
+                        cd_core::research::linked_tools_unavailable_events(
+                            profile,
+                            &capability_session_id,
+                        )
+                    })
+                },
+                move || {
+                    let state = app_for_host.state::<AppState>();
+                    take_ready_linked_host(&state.host, &state.host_generation, || {
+                        build_linked_log_fallback_host(&state, &fallback_context)
+                    })
+                },
+            )
+            .await
+            {
+                Ok(LinkedTurnPreparation::Ready((host, using_fallback, borrowed_generation))) => {
                     if using_fallback {
                         let notice = linked_log_fallback_notice();
                         let _ = on_event.send(cd_core::research::event_to_dto(&notice));
                     }
                     (host, using_fallback, borrowed_generation)
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "linked log-only fallback construction failed");
-                    for event in linked_log_host_terminal_events() {
+                Ok(LinkedTurnPreparation::Terminal(events)) => {
+                    for event in events {
+                        let _ = on_event.send(cd_core::research::event_to_dto(&event));
+                    }
+                    return Ok(());
+                }
+                Err(failure) => {
+                    for event in linked_setup_failure_events(&failure) {
                         let _ = on_event.send(cd_core::research::event_to_dto(&event));
                     }
                     return Ok(());
@@ -3885,6 +4016,7 @@ async fn agent_turn(
             retry_available,
             &req.session_id,
             corpus_id,
+            Some(profile.id.clone()),
             Some(profile.chat_model.clone()),
         ));
     }
@@ -4025,6 +4157,11 @@ fn save_chat_session_at(
     Ok(session)
 }
 
+fn chat_provider_binding_changed(previous: &Session, next: &Session) -> bool {
+    previous.provider_profile_id != next.provider_profile_id
+        || previous.chat_model != next.chat_model
+}
+
 #[tauri::command]
 fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Session, String> {
     let _mutation = state
@@ -4032,7 +4169,18 @@ fn save_chat_session(state: State<'_, AppState>, session: Session) -> Result<Ses
         .lock()
         .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
     let store = session_store(&state)?;
+    let provider_binding_changed = store
+        .load(&session.id)
+        .ok()
+        .is_some_and(|previous| chat_provider_binding_changed(&previous, &session));
     let session = save_chat_session_at(&store, session)?;
+    if provider_binding_changed {
+        state
+            .linked_synthesis_checkpoints
+            .lock()
+            .expect("linked synthesis checkpoints")
+            .remove(&session.id);
+    }
     seed_history_from_session(&state, &session);
     Ok(session)
 }
@@ -9164,15 +9312,16 @@ mod demo_log_host_tests {
 #[cfg(test)]
 mod startup_host_tests {
     use super::{
-        admit_agent_turn, build_and_install_background_index,
+        admit_agent_turn, build_and_install_background_index, chat_provider_binding_changed,
         desktop_log_ingest_embed_plan_nonblocking, event_to_dto_with_linked_corpus,
         finish_agent_turn, host_readiness_terminal_events, install_prepared_durable_memory,
         linked_log_fallback_notice, linked_log_host_terminal_events, linked_log_preflight_at,
-        log_search_cancel_key, normalize_log_corpus_id, restore_host_if_generation_matches,
-        save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
-        validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
-        HostInitFlight, HostReadinessFailure, LinkedCheckpointStore, StdInstant,
-        LINKED_CHECKPOINT_ENTRY_CAP, LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
+        log_search_cancel_key, normalize_log_corpus_id, prepare_linked_turn_with,
+        restore_host_if_generation_matches, save_chat_session_at, set_chat_linked_corpus_at,
+        take_ready_linked_host, validate_linked_log_corpus_at, wait_for_host_readiness,
+        BackgroundIndexBuild, HostInitFlight, HostReadinessFailure, LinkedCheckpointStore,
+        LinkedTurnPreparation, StdInstant, LINKED_CHECKPOINT_ENTRY_CAP,
+        LINKED_CHECKPOINT_TOTAL_BYTES, LINKED_CHECKPOINT_TTL,
     };
     use cd_core::events::StreamEvent;
     use cd_core::index::{KeywordIndex, ReindexStats};
@@ -9397,48 +9546,200 @@ mod startup_host_tests {
         assert!(!replaced.durable_memory_active());
     }
 
-    #[test]
-    fn linked_tools_disabled_guard_precedes_host_construction() {
-        let src = include_str!("lib.rs");
-        let preflight_start = src
-            .find("fn linked_log_preflight_at(")
-            .expect("linked_log_preflight_at");
-        let preflight_end = src[preflight_start..]
-            .find("\nfn take_ready_linked_host<")
-            .map(|offset| preflight_start + offset)
-            .expect("linked preflight boundary");
-        let preflight_src = &src[preflight_start..preflight_end];
-        let corpus_validation = preflight_src
-            .find("validate_linked_log_corpus_at")
-            .expect("linked corpus validation");
-        let capability_guard = preflight_src
-            .find("linked_tools_unavailable_events")
-            .expect("linked tools-disabled guard");
-        assert!(
-            corpus_validation < capability_guard,
-            "stale linked corpora must fail before provider capability refusal"
-        );
+    #[tokio::test]
+    async fn linked_setup_behavior_orders_validation_capability_then_host() {
+        use std::sync::atomic::AtomicBool;
 
-        let turn_start = src.find("async fn agent_turn(").expect("agent_turn");
-        let turn_end = src[turn_start..]
-            .find("/// Signal cooperative cancel")
-            .map(|offset| turn_start + offset)
-            .expect("agent_turn boundary");
-        let turn_src = &src[turn_start..turn_end];
-        let preflight = turn_src
-            .find("linked_log_preflight_at(")
-            .expect("linked preflight call");
-        let linked_host = turn_src
-            .find("take_ready_linked_host(")
-            .expect("linked fallback host construction");
-        let ordinary_host = turn_src
-            .find("wait_for_host_readiness(AGENT_HOST_READY_TIMEOUT")
-            .expect("bounded host readiness wait");
+        let plan = cd_core::router::TurnDeadlinePlan {
+            total_ms: 1_000,
+            choosing_ms: 1_000,
+            retrieving_ms: 1_000,
+            synthesizing_ms: 1_000,
+            explicit: true,
+        };
+        let cancel = AtomicBool::new(false);
 
-        assert!(
-            preflight < linked_host && preflight < ordinary_host,
-            "provider-free linked refusal must precede linked and ordinary host construction"
+        let invalid_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = invalid_order.clone();
+        let capability_order = invalid_order.clone();
+        let host_order = invalid_order.clone();
+        let invalid = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order.lock().unwrap().push("validate");
+                Err("invalid corpus".into())
+            },
+            move || {
+                capability_order.lock().unwrap().push("capability");
+                None
+            },
+            move || {
+                host_order.lock().unwrap().push("host");
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(invalid, LinkedTurnPreparation::Terminal(_)));
+        assert_eq!(*invalid_order.lock().unwrap(), ["validate"]);
+
+        let refusal_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = refusal_order.clone();
+        let capability_order = refusal_order.clone();
+        let host_order = refusal_order.clone();
+        let refused = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order.lock().unwrap().push("validate");
+                Ok(())
+            },
+            move || {
+                capability_order.lock().unwrap().push("capability");
+                Some(vec![StreamEvent::TurnCompleted {
+                    reason: "linked_tools_unavailable".into(),
+                }])
+            },
+            move || {
+                host_order.lock().unwrap().push("host");
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(refused, LinkedTurnPreparation::Terminal(_)));
+        assert_eq!(*refusal_order.lock().unwrap(), ["validate", "capability"]);
+
+        let ready_order = Arc::new(Mutex::new(Vec::new()));
+        let validate_order = ready_order.clone();
+        let capability_order = ready_order.clone();
+        let host_order = ready_order.clone();
+        let ready = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            plan,
+            &cancel,
+            move || {
+                validate_order.lock().unwrap().push("validate");
+                Ok(())
+            },
+            move || {
+                capability_order.lock().unwrap().push("capability");
+                None
+            },
+            move || {
+                host_order.lock().unwrap().push("host");
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ready, LinkedTurnPreparation::Ready(7)));
+        assert_eq!(
+            *ready_order.lock().unwrap(),
+            ["validate", "capability", "host"]
         );
+    }
+
+    #[tokio::test]
+    async fn linked_corpus_open_obeys_original_deadline_and_cancel_during_setup() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        let plan = cd_core::router::TurnDeadlinePlan {
+            total_ms: 1,
+            choosing_ms: 1_000,
+            retrieving_ms: 1_000,
+            synthesizing_ms: 1_000,
+            explicit: true,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let deadline_calls = calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now() - Duration::from_millis(2),
+            plan,
+            &AtomicBool::new(false),
+            move || {
+                deadline_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || None,
+            || Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let cancel = AtomicBool::new(true);
+        let cancel_calls = calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 1_000,
+                ..plan
+            },
+            &cancel,
+            move || {
+                cancel_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || None,
+            || Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::Cancelled);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let slow_deadline_calls = Arc::new(AtomicUsize::new(0));
+        let slow_deadline_worker = slow_deadline_calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 20,
+                ..plan
+            },
+            &AtomicBool::new(false),
+            move || {
+                slow_deadline_worker.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            },
+            || None,
+            || Ok(7),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
+        assert_eq!(slow_deadline_calls.load(Ordering::SeqCst), 1);
+
+        let active_cancel = Arc::new(AtomicBool::new(false));
+        let cancel_trigger = active_cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel_trigger.store(true, AtomicOrdering::SeqCst);
+        });
+        let host_calls = Arc::new(AtomicUsize::new(0));
+        let host_worker_calls = host_calls.clone();
+        let result = prepare_linked_turn_with(
+            tokio::time::Instant::now(),
+            cd_core::router::TurnDeadlinePlan {
+                total_ms: 1_000,
+                ..plan
+            },
+            active_cancel.as_ref(),
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            },
+            || None,
+            move || {
+                host_worker_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(7)
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), HostReadinessFailure::Cancelled);
+        assert_eq!(host_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -9723,6 +10024,20 @@ mod startup_host_tests {
             .expect("reopen new session")
             .linked_corpus_id
             .is_none());
+    }
+
+    #[test]
+    fn retry_binding_changes_on_provider_or_model_switch_only() {
+        let original = cd_core::sessions::Session::new("Bound");
+        let mut same = original.clone();
+        assert!(!chat_provider_binding_changed(&original, &same));
+
+        same.provider_profile_id = Some("private-provider".into());
+        assert!(chat_provider_binding_changed(&original, &same));
+
+        let mut model_changed = original.clone();
+        model_changed.chat_model = Some("other-model".into());
+        assert!(chat_provider_binding_changed(&original, &model_changed));
     }
 
     #[test]

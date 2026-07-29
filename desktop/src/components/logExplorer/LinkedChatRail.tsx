@@ -45,6 +45,7 @@ export function hasHostLinkedSynthesisRetry(
   events: EventDto[],
   sessionId: string,
   corpusId: string,
+  providerProfileId: string,
   modelId: string,
 ): boolean {
   return events.some(
@@ -53,7 +54,8 @@ export function hasHostLinkedSynthesisRetry(
       event.payload.available === true &&
       event.payload.session_id === sessionId &&
       event.payload.corpus_id === corpusId &&
-      event.payload.model === modelId,
+      event.payload.provider_profile_id === providerProfileId &&
+      event.payload.model_id === modelId,
   );
 }
 import {
@@ -839,7 +841,8 @@ export function LinkedChatRail({
             ev.kind === "linked_synthesis_retry" &&
             ev.payload.session_id === sessionId &&
             ev.payload.corpus_id === corpusId &&
-            ev.payload.model === turnModel.id
+            ev.payload.provider_profile_id === turnModel.provider_id &&
+            ev.payload.model_id === turnModel.id
           ) {
             setSynthesisRetryByChat((current) => ({
               ...current,
@@ -930,6 +933,7 @@ export function LinkedChatRail({
         events,
         sessionId,
         corpusId,
+        turnModel.provider_id,
         turnModel.id,
       );
       setSynthesisRetryByChat((current) => ({

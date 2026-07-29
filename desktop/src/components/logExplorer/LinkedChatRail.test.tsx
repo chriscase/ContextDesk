@@ -27,7 +27,13 @@ it("requires an exact host-authored retry availability event", () => {
     },
   ];
   expect(
-    hasHostLinkedSynthesisRetry(timeoutOnly, "chat", "corpus", "model"),
+    hasHostLinkedSynthesisRetry(
+      timeoutOnly,
+      "chat",
+      "corpus",
+      "provider",
+      "model",
+    ),
   ).toBe(false);
   expect(
     hasHostLinkedSynthesisRetry(
@@ -39,12 +45,14 @@ it("requires an exact host-authored retry availability event", () => {
             available: true,
             session_id: "chat",
             corpus_id: "corpus",
-            model: "model",
+            provider_profile_id: "provider",
+            model_id: "model",
           },
         },
       ],
       "chat",
       "corpus",
+      "provider",
       "model",
     ),
   ).toBe(true);
@@ -57,12 +65,34 @@ it("requires an exact host-authored retry availability event", () => {
             available: true,
             session_id: "other-chat",
             corpus_id: "corpus",
-            model: "model",
+            provider_profile_id: "provider",
+            model_id: "model",
           },
         },
       ],
       "chat",
       "corpus",
+      "provider",
+      "model",
+    ),
+  ).toBe(false);
+  expect(
+    hasHostLinkedSynthesisRetry(
+      [
+        {
+          kind: "linked_synthesis_retry",
+          payload: {
+            available: true,
+            session_id: "chat",
+            corpus_id: "corpus",
+            provider_profile_id: "other-provider",
+            model_id: "model",
+          },
+        },
+      ],
+      "chat",
+      "corpus",
+      "provider",
       "model",
     ),
   ).toBe(false);
@@ -1637,7 +1667,8 @@ describe("LinkedChatRail", () => {
       ],
     );
     vi.mocked(host.agentTurn)
-      .mockImplementationOnce(async (id, _text, _fl, model, _p, onEvent) => {
+      .mockImplementationOnce(
+        async (id, _text, _fl, model, provider, onEvent) => {
         const events: host.EventDto[] = [
           {
             kind: "turn_phase",
@@ -1674,7 +1705,8 @@ describe("LinkedChatRail", () => {
               available: true,
               session_id: id,
               corpus_id: "c1",
-              model,
+              provider_profile_id: provider,
+              model_id: model,
             },
           },
           {
@@ -1684,7 +1716,8 @@ describe("LinkedChatRail", () => {
         ];
         for (const event of events) onEvent?.(event);
         return events;
-      })
+        },
+      )
       .mockImplementationOnce(async (_id, text, _fl, _m, _p, onEvent) => {
         expect(text).toBe("");
         const events: host.EventDto[] = [
@@ -1742,6 +1775,87 @@ describe("LinkedChatRail", () => {
     expect(
       stored.messages.filter((message) => message.role === "user"),
     ).toHaveLength(1);
+  });
+
+  it("persists a post-retrieval provider failure and trusts only its bound retry event", async () => {
+    let stored: host.ChatSessionDto | null = null;
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (session) => {
+      stored = session;
+      return session;
+    });
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async () => stored);
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (id, _text, _forceLocal, model, provider, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "tool",
+            payload: {
+              id: "search-provider-failure",
+              name: "search_logs",
+              summary: "1 matching log event",
+              ok: true,
+            },
+          },
+          {
+            kind: "error",
+            payload: {
+              code: "linked_synthesis_provider_error",
+              message:
+                "The provider failed after retrieval; governed evidence is preserved.",
+            },
+          },
+          {
+            kind: "turn_completed",
+            payload: { reason: "linked_synthesis_provider_error" },
+          },
+          {
+            kind: "linked_synthesis_retry",
+            payload: {
+              available: true,
+              session_id: id,
+              corpus_id: "c1",
+              provider_profile_id: provider,
+              model_id: model,
+            },
+          },
+        ];
+        for (const event of events) onEvent?.(event);
+        return events;
+      },
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "Preserve this exact question" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+
+    expect(await screen.findByTestId("retry-linked-synthesis")).toBeTruthy();
+    await waitFor(() => {
+      const saved = stored;
+      expect(
+        saved?.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content === "Preserve this exact question",
+        ),
+      ).toBe(true);
+      expect(
+        saved?.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.content.includes("governed evidence is preserved"),
+        ),
+      ).toBe(true);
+    });
   });
 
   it("jump-to-latest restores follow mode after deliberate upward scroll", async () => {

@@ -91,6 +91,8 @@ pub struct AgentOptions {
     pub session_id: String,
     /// Model label.
     pub model: Option<String>,
+    /// Provider profile identity. Model ids are not globally unique.
+    pub provider_profile_id: Option<String>,
     /// Cooperative cancel flag (checked each round). When true, stop cleanly.
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Keep last N messages in model context (full history retained in `history`).
@@ -112,18 +114,26 @@ pub struct AgentOptions {
 pub struct LinkedSynthesisCheckpoint {
     session_id: String,
     corpus_id: String,
-    model: Option<String>,
+    provider_profile_id: Option<String>,
+    model_id: Option<String>,
     user_text: String,
     evidence: String,
     identities: HashSet<crate::log_analysis::SearchEvidenceIdentity>,
 }
 
 impl LinkedSynthesisCheckpoint {
-    /// Whether this checkpoint belongs to the exact chat, corpus, and model.
-    pub fn matches(&self, session_id: &str, corpus_id: &str, model: Option<&str>) -> bool {
+    /// Whether this checkpoint belongs to the exact chat, corpus, provider, and model.
+    pub fn matches(
+        &self,
+        session_id: &str,
+        corpus_id: &str,
+        provider_profile_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> bool {
         self.session_id == session_id
             && self.corpus_id == corpus_id
-            && self.model.as_deref() == model
+            && self.provider_profile_id.as_deref() == provider_profile_id
+            && self.model_id.as_deref() == model_id
     }
 
     /// Session that owns this checkpoint.
@@ -137,10 +147,11 @@ impl LinkedSynthesisCheckpoint {
     }
 
     /// Conservative in-memory size used by the host's non-serialized bounds.
-    pub fn retained_bytes(&self) -> usize {
+    pub fn retained_payload_bytes(&self) -> usize {
         self.session_id.len()
             + self.corpus_id.len()
-            + self.model.as_ref().map_or(0, String::len)
+            + self.provider_profile_id.as_ref().map_or(0, String::len)
+            + self.model_id.as_ref().map_or(0, String::len)
             + self.user_text.len()
             + self.evidence.len()
             + self
@@ -152,6 +163,7 @@ impl LinkedSynthesisCheckpoint {
 }
 
 const CURRENT_TURN_EVIDENCE_BYTES: usize = 256 * 1024;
+const CURRENT_TURN_IDENTITY_CAP: usize = 512;
 
 #[derive(Debug, Default)]
 struct CurrentTurnEvidence {
@@ -188,6 +200,62 @@ impl CurrentTurnEvidence {
     fn render(&self) -> String {
         self.blocks.join("\n\n")
     }
+}
+
+fn linked_safe_prior_history(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    history
+        .iter()
+        .filter(|message| {
+            message.role != Role::Tool
+                && !(message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty()))
+        })
+        .cloned()
+        .collect()
+}
+
+fn linked_round_model_context(
+    prior_history: &[ChatMessage],
+    system: String,
+    user_text: &str,
+    evidence: &CurrentTurnEvidence,
+    char_budget: usize,
+) -> CoreResult<Vec<ChatMessage>> {
+    let mut safe = prior_history
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .cloned()
+        .collect::<Vec<_>>();
+    safe.insert(
+        0,
+        ChatMessage {
+            role: Role::System,
+            content: system,
+            tool_call_id: None,
+            tool_calls: None,
+        },
+    );
+    safe.push(ChatMessage {
+        role: Role::User,
+        content: user_text.to_string(),
+        tool_call_id: None,
+        tool_calls: None,
+    });
+    let evidence = evidence.render();
+    if !evidence.is_empty() {
+        safe.push(ChatMessage {
+            role: Role::User,
+            content: format!("HOST-RETURNED BOUNDED EVIDENCE — current turn only:\n{evidence}"),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    crate::sessions::prepare_model_context(&safe, safe.len().max(1), char_budget)
+        .map(|prepared| prepared.messages)
+        .map_err(|error| CoreError::Message(error.to_string()))
 }
 
 /// Trusted origin for one explicitly linked log turn.
@@ -485,31 +553,103 @@ fn linked_unavailable_requested_sources(user_text: &str, specs: &[ToolSpec]) -> 
     unavailable
 }
 
-fn linked_available_broader_read_requested(user_text: &str, specs: &[ToolSpec]) -> bool {
-    let requested = linked_broader_source_requests(user_text);
-    (requested.memory
-        && specs
+#[derive(Debug, Clone)]
+struct LinkedRequiredRead {
+    label: &'static str,
+    tool_names: Vec<String>,
+}
+
+impl LinkedRequiredRead {
+    fn succeeded(&self, successful_tools: &HashSet<String>) -> bool {
+        self.tool_names
             .iter()
-            .any(|tool| tool.name == crate::tools::names::RECALL_MEMORY))
-        || (requested.database
-            && specs
-                .iter()
-                .any(|tool| tool.name.starts_with("sql_query__")))
-        || (requested.connector
-            && specs.iter().any(|tool| {
-                tool.name.starts_with("mcp__")
-                    || tool.name.starts_with("sql_query__")
-                    || tool.name.starts_with("http_request__")
-                    || tool.name.starts_with("confluence_")
-            }))
-        || (requested.confluence
-            && specs
-                .iter()
-                .any(|tool| tool.name.starts_with("confluence_")))
-        || (requested.web
-            && specs
-                .iter()
-                .any(|tool| tool.name == crate::tools::names::WEB_SEARCH))
+            .any(|tool| successful_tools.contains(tool))
+    }
+}
+
+fn matching_tool_names(specs: &[ToolSpec], predicate: impl Fn(&str) -> bool) -> Vec<String> {
+    specs
+        .iter()
+        .filter(|tool| predicate(&tool.name))
+        .map(|tool| tool.name.clone())
+        .collect()
+}
+
+fn linked_required_reads(user_text: &str, specs: &[ToolSpec]) -> Vec<LinkedRequiredRead> {
+    let requested = linked_broader_source_requests(user_text);
+    let mut required = vec![LinkedRequiredRead {
+        label: "linked logs",
+        tool_names: matching_tool_names(specs, |name| name == crate::log_analysis::SEARCH_LOGS),
+    }];
+    if linked_workspace_search_requested(user_text) {
+        required.push(LinkedRequiredRead {
+            label: "workspace files/runbooks",
+            tool_names: matching_tool_names(specs, |name| name == crate::tools::names::SEARCH_KB),
+        });
+    }
+    if requested.memory {
+        required.push(LinkedRequiredRead {
+            label: "durable memory",
+            tool_names: matching_tool_names(specs, |name| {
+                name == crate::tools::names::RECALL_MEMORY
+            }),
+        });
+    }
+    if requested.database {
+        required.push(LinkedRequiredRead {
+            label: "database connectors",
+            tool_names: matching_tool_names(specs, |name| name.starts_with("sql_query__")),
+        });
+    }
+    if requested.connector {
+        required.push(LinkedRequiredRead {
+            label: "configured connectors",
+            tool_names: matching_tool_names(specs, |name| {
+                name.starts_with("mcp__")
+                    || name.starts_with("sql_query__")
+                    || name.starts_with("http_request__")
+                    || name.starts_with("confluence_")
+            }),
+        });
+    }
+    if requested.confluence {
+        required.push(LinkedRequiredRead {
+            label: "Confluence",
+            tool_names: matching_tool_names(specs, |name| name.starts_with("confluence_")),
+        });
+    }
+    if requested.web {
+        required.push(LinkedRequiredRead {
+            label: "web research",
+            tool_names: matching_tool_names(specs, |name| name == crate::tools::names::WEB_SEARCH),
+        });
+    }
+    required
+}
+
+fn missing_linked_required_sources<'a>(
+    required_reads: &'a [LinkedRequiredRead],
+    successful_tools: &HashSet<String>,
+    unavailable_sources: &[&'a str],
+) -> Vec<&'a str> {
+    required_reads
+        .iter()
+        .filter(|required| !required.succeeded(successful_tools))
+        .map(|required| required.label)
+        .chain(unavailable_sources.iter().copied())
+        .collect()
+}
+
+fn extend_linked_log_identities(
+    identities: &mut HashSet<crate::log_analysis::SearchEvidenceIdentity>,
+    incoming: &[crate::log_analysis::SearchEvidenceIdentity],
+) {
+    for identity in incoming {
+        if identities.len() >= CURRENT_TURN_IDENTITY_CAP {
+            break;
+        }
+        identities.insert(identity.clone());
+    }
 }
 
 /// Heuristic: assistant text that defers work instead of answering from evidence.
@@ -709,6 +849,7 @@ impl Default for AgentOptions {
             max_results_per_source: b.max_results_per_source,
             session_id: "session".into(),
             model: None,
+            provider_profile_id: None,
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
             ambient_recall_enabled: true,
@@ -736,6 +877,7 @@ impl AgentOptions {
             max_results_per_source: b.max_results_per_source,
             session_id: session_id.into(),
             model,
+            provider_profile_id: None,
             cancel: None,
             compact_keep_last: crate::sessions::default_compact_keep_last(),
             ambient_recall_enabled: true,
@@ -1032,6 +1174,48 @@ fn terminal_cancel(mut out: EventCollector<'_>) -> CoreResult<Vec<StreamEvent>> 
     Ok(out.into_events())
 }
 
+fn terminal_linked_provider_failure(
+    mut out: EventCollector<'_>,
+    trail: &mut Vec<String>,
+    synthesis_retry_available: bool,
+    missing_sources: &[&str],
+) -> CoreResult<Vec<StreamEvent>> {
+    let (code, message) = if synthesis_retry_available {
+        trail.push("linked_synthesis_provider_failure:evidence_preserved".into());
+        (
+            "linked_synthesis_provider_error",
+            "The provider failed after every requested bounded source was retrieved. \
+             ContextDesk preserved that governed evidence for synthesis-only retry."
+                .to_string(),
+        )
+    } else {
+        trail.push(format!(
+            "linked_retrieval_provider_failure:missing={}",
+            missing_sources.join(",")
+        ));
+        (
+            "linked_retrieval_provider_error",
+            format!(
+                "The provider failed after linked retrieval began, before every explicitly \
+                 requested source was retrieved (missing: {}). The turn was preserved, but no \
+                 synthesis-only retry is available; retry the investigation.",
+                missing_sources.join(", ")
+            ),
+        )
+    };
+    out.push(StreamEvent::Error {
+        code: code.into(),
+        message,
+    });
+    out.push(StreamEvent::SearchTrail {
+        steps: trail.clone(),
+    });
+    out.push(StreamEvent::TurnCompleted {
+        reason: code.into(),
+    });
+    Ok(out.into_events())
+}
+
 fn enter_phase(
     out: &mut EventCollector<'_>,
     trail: &mut Vec<String>,
@@ -1070,7 +1254,12 @@ async fn run_linked_synthesis_retry(
         });
         return Ok(out.into_events());
     };
-    if !checkpoint.matches(&opts.session_id, &context.corpus_id, opts.model.as_deref()) {
+    if !checkpoint.matches(
+        &opts.session_id,
+        &context.corpus_id,
+        opts.provider_profile_id.as_deref(),
+        opts.model.as_deref(),
+    ) {
         out.push(StreamEvent::Error {
             code: "linked_synthesis_retry_stale".into(),
             message: "The preserved evidence belongs to a different chat, corpus, or model. \
@@ -1367,9 +1556,9 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         specs.iter().map(|tool| tool.name.clone()).collect();
     // Weaker tools-capable local models are materially more reliable when the
     // first linked decision is constrained to one safe, general log search.
-    // Once that deterministic grounding succeeds, the next provider round gets
-    // the complete governed read surface (including advanced log, workspace,
-    // memory, and connector tools). This changes routing only, not permissions.
+    // Once that deterministic grounding succeeds, each explicitly requested
+    // source is staged through its eligible governed read surface before
+    // synthesis. This changes routing only, not permissions.
     let linked_grounding_specs = if linked_turn {
         specs
             .iter()
@@ -1381,19 +1570,13 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
     };
     let linked_workspace_search_required =
         linked_turn && linked_workspace_evidence_required(user_text, &specs);
-    let linked_broader_reads_required =
-        linked_turn && linked_available_broader_read_requested(user_text, &specs);
-    let linked_unavailable_sources = if linked_turn {
-        linked_unavailable_requested_sources(user_text, &specs)
+    let linked_required_reads = if linked_turn {
+        linked_required_reads(user_text, &specs)
     } else {
         Vec::new()
     };
-    let linked_workspace_specs = if linked_workspace_search_required {
-        specs
-            .iter()
-            .filter(|tool| tool.name == crate::tools::names::SEARCH_KB)
-            .cloned()
-            .collect::<Vec<_>>()
+    let linked_unavailable_sources = if linked_turn {
+        linked_unavailable_requested_sources(user_text, &specs)
     } else {
         Vec::new()
     };
@@ -1447,6 +1630,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
             sys.content = system_content;
         }
     }
+    let linked_prior_history = linked_turn.then(|| linked_safe_prior_history(history));
     history.push(ChatMessage {
         role: Role::User,
         content: user_text.into(),
@@ -1486,7 +1670,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         if !linked_grounding_specs.is_empty() {
             trail.push("linked_grounding_surface:search_logs".into());
         }
-        if linked_workspace_search_required && !linked_workspace_specs.is_empty() {
+        if linked_workspace_search_required {
             trail.push("linked_requested_workspace_surface:search_kb".into());
         }
     }
@@ -1523,18 +1707,14 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         // narrate or fabricate tool-shaped output despite receiving native tool
         // schemas. ContextDesk may retry, but must never present that prose as
         // an evidence-backed answer.
-        let missing_required_tool = if linked_turn && successful_log_tools == 0 {
-            Some(crate::log_analysis::SEARCH_LOGS)
-        } else if linked_workspace_search_required
-            && !successful_read_tools.contains(crate::tools::names::SEARCH_KB)
-        {
-            Some(crate::tools::names::SEARCH_KB)
-        } else {
-            None
-        };
-        let linked_required_evidence_satisfied = !linked_turn || missing_required_tool.is_none();
-        let linked_staged_synthesis_ready =
-            linked_turn && linked_required_evidence_satisfied && !linked_broader_reads_required;
+        let missing_required_read = linked_required_reads
+            .iter()
+            .find(|required| !required.succeeded(&successful_read_tools));
+        let missing_required_tool = missing_required_read
+            .and_then(|required| required.tool_names.first().map(String::as_str));
+        let linked_required_evidence_satisfied = !linked_turn
+            || (missing_required_read.is_none() && linked_unavailable_sources.is_empty());
+        let linked_staged_synthesis_ready = linked_turn && linked_required_evidence_satisfied;
         enter_phase(
             &mut out,
             &mut trail,
@@ -1552,108 +1732,83 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         let mut withheld_text = String::new();
         let char_budget = opts.effective_context_char_budget();
         // #33/#112/#113: hard total model-context budget via production helper.
-        // Full transcript is never mutated; only the model-facing view is bounded.
-        let prepared = match crate::sessions::prepare_model_context(
-            history,
-            opts.compact_keep_last.max(1),
-            char_budget,
+        // Linked turns never rebuild from protocol history: every historical
+        // Tool message and assistant tool-call envelope was removed at turn
+        // admission, and current governed results enter only through the
+        // dedicated bounded evidence buffer.
+        let (mut keep, mut model_ctx, prepared_compacted, prepared_truncated) = if let (
+            Some(context),
+            Some(prior_history),
+        ) = (
+            opts.log_explorer_context.as_ref(),
+            linked_prior_history.as_ref(),
         ) {
-            Ok(p) => p,
-            Err(e) => {
-                out.push(StreamEvent::Error {
-                    code: "context_too_long".into(),
-                    message: format!(
-                        "This chat exceeds the model context budget even after compaction ({e}). Start a new chat or remove older messages."
-                    ),
-                });
-                out.push(StreamEvent::TurnCompleted {
-                    reason: "context_too_long".into(),
-                });
-                return Ok(out.into_events());
-            }
-        };
-        let mut keep = prepared.keep;
-        let mut model_ctx = prepared.messages;
-        // The initial linked grounding phase is deliberately compact. Large
-        // policy/tool menus can cause otherwise tool-capable small local models
-        // to narrate a call instead of using the provider's native channel.
-        // Keep the full policy in durable history; restore it automatically on
-        // the next round after a successful bounded log result.
-        if let Some(context) = opts.log_explorer_context.as_ref() {
-            let mut staged_system = if successful_log_tools == 0 {
-                Some(context.grounding_system_hint())
-            } else if linked_workspace_search_required
-                && !successful_read_tools.contains(crate::tools::names::SEARCH_KB)
-            {
-                Some(context.workspace_grounding_system_hint())
+            let mut linked_system = if successful_log_tools == 0 {
+                context.grounding_system_hint()
+            } else if missing_required_tool == Some(crate::tools::names::SEARCH_KB) {
+                context.workspace_grounding_system_hint()
             } else if linked_staged_synthesis_ready {
-                Some(context.staged_synthesis_system_hint())
+                context.staged_synthesis_system_hint()
             } else {
-                None
+                let required = missing_required_read.expect("missing linked source");
+                format!(
+                    "{}\nREQUIRED NEXT SOURCE: retrieve {} with one offered governed tool \
+                         before synthesizing. Do not omit or claim this source.",
+                    context.system_hint(),
+                    required.label
+                )
             };
             if linked_invalid_synthesis_retry {
-                if let Some(system) = staged_system.as_mut() {
-                    system.push_str(
+                linked_system.push_str(
                         "\nPRIOR DRAFT REJECTED: it lacked concrete event identity or treated \
                          host wrapper metadata as evidence. Return a concise corrected answer \
                          citing each event with an exact seq=… plus source=\"…\" pair from the data rows only.",
                     );
-                }
             }
-            if let Some(staged_system) = staged_system {
-                if linked_staged_synthesis_ready {
-                    // Distill the provider transcript to the current request
-                    // plus bounded host-returned evidence. Small models can
-                    // otherwise anchor on old function-call syntax or overlook
-                    // an earlier result among paired protocol messages.
-                    let evidence = current_turn_evidence.render();
-                    model_ctx = vec![
-                        ChatMessage {
-                            role: Role::System,
-                            content: staged_system,
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                        ChatMessage {
-                            role: Role::User,
-                            content: user_text.to_string(),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                        ChatMessage {
-                            role: Role::User,
-                            content: format!(
-                                "HOST-RETURNED BOUNDED EVIDENCE — synthesize all blocks:\n{evidence}"
+            let messages = match linked_round_model_context(
+                prior_history,
+                linked_system,
+                user_text,
+                &current_turn_evidence,
+                char_budget,
+            ) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    return terminal_context_too_long(
+                        out,
+                        format!("Linked model context cannot fit its hard budget ({error})."),
+                    );
+                }
+            };
+            (messages.len().max(1), messages, false, false)
+        } else {
+            match crate::sessions::prepare_model_context(
+                history,
+                opts.compact_keep_last.max(1),
+                char_budget,
+            ) {
+                Ok(prepared) => (
+                    prepared.keep,
+                    prepared.messages,
+                    prepared.compacted,
+                    prepared.truncated,
+                ),
+                Err(e) => {
+                    out.push(StreamEvent::Error {
+                            code: "context_too_long".into(),
+                            message: format!(
+                                "This chat exceeds the model context budget even after compaction ({e}). Start a new chat or remove older messages."
                             ),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                    ];
-                } else {
-                    // Each required retrieval stage is an isolated routing
-                    // decision. Previous assistant/tool messages can anchor a
-                    // small model on the prior function name and make it narrate
-                    // that call again. Full history remains untouched and returns
-                    // for synthesis after required evidence is present.
-                    model_ctx = vec![
-                        ChatMessage {
-                            role: Role::System,
-                            content: staged_system,
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                        ChatMessage {
-                            role: Role::User,
-                            content: user_text.to_string(),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        },
-                    ];
+                        });
+                    out.push(StreamEvent::TurnCompleted {
+                        reason: "context_too_long".into(),
+                    });
+                    return Ok(out.into_events());
                 }
             }
-        }
+        };
         // Notify at most once per user turn (multi-round tool loops re-prepare each round).
-        if (prepared.compacted || prepared.truncated) && !compact_notice_sent {
+        if (prepared_compacted || prepared_truncated) && !compact_notice_sent {
             compact_notice_sent = true;
             out.push(StreamEvent::Error {
                 code: "context_compacted".into(),
@@ -1671,7 +1826,7 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
         // Ambient memory injection (MEMORY.md §4) — after compaction, tight budget.
         // Must re-enforce the hard total budget: ambient can add ~1.5k and would
         // otherwise send an over-budget context when prepare left us near the ceiling.
-        if opts.ambient_recall_enabled && linked_required_evidence_satisfied {
+        if !linked_turn && opts.ambient_recall_enabled && linked_required_evidence_satisfied {
             if let Some(store) = host.durable_memory_store() {
                 let hist_text: String = model_ctx
                     .iter()
@@ -1744,16 +1899,19 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                     }
                 }
             };
+            let required_specs = missing_required_read
+                .map(|required| {
+                    specs
+                        .iter()
+                        .filter(|spec| required.tool_names.contains(&spec.name))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let tool_arg: &[ToolSpec] = if tools_disabled || linked_staged_synthesis_ready {
                 &[]
-            } else if linked_turn && successful_log_tools == 0 && !linked_grounding_specs.is_empty()
-            {
-                &linked_grounding_specs
-            } else if linked_workspace_search_required
-                && !successful_read_tools.contains(crate::tools::names::SEARCH_KB)
-                && !linked_workspace_specs.is_empty()
-            {
-                &linked_workspace_specs
+            } else if linked_turn && !required_specs.is_empty() {
+                &required_specs
             } else {
                 &specs
             };
@@ -1884,7 +2042,9 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     let tighter = (sent.saturating_mul(80) / 100)
                         .max(crate::model_context::MIN_CONTEXT_CHAR_BUDGET)
                         .min(char_budget);
-                    match crate::sessions::prepare_model_context(history, keep, tighter) {
+                    let retry_source: &[ChatMessage] =
+                        if linked_turn { &model_ctx } else { history };
+                    match crate::sessions::prepare_model_context(retry_source, keep, tighter) {
                         Ok(p) => {
                             keep = p.keep;
                             model_ctx = p.messages;
@@ -1927,7 +2087,25 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     });
                     return Ok(out.into_events());
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if linked_turn && successful_log_tools > 0 {
+                        let retry_available = checkpoint_out
+                            .as_ref()
+                            .is_some_and(|checkpoint| checkpoint.is_some());
+                        let missing = missing_linked_required_sources(
+                            &linked_required_reads,
+                            &successful_read_tools,
+                            &linked_unavailable_sources,
+                        );
+                        return terminal_linked_provider_failure(
+                            out,
+                            &mut trail,
+                            retry_available,
+                            &missing,
+                        );
+                    }
+                    return Err(e);
+                }
             }
         };
         let mut tool_calls = if linked_staged_synthesis_ready {
@@ -2099,16 +2277,25 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
 The answer is not log-grounded — retry the corpus search or inspect the visible tool failure."
                     .into(),
                 });
-            } else if linked_workspace_search_required
-                && !successful_read_tools.contains(crate::tools::names::SEARCH_KB)
-            {
-                trail.push("linked_no_successful_workspace_evidence".into());
+            } else if linked_turn && !linked_required_evidence_satisfied {
+                let missing = linked_required_reads
+                    .iter()
+                    .filter(|required| !required.succeeded(&successful_read_tools))
+                    .map(|required| required.label)
+                    .chain(linked_unavailable_sources.iter().copied())
+                    .collect::<Vec<_>>();
+                trail.push(format!(
+                    "linked_no_successful_required_evidence:{}",
+                    missing.join(",")
+                ));
                 out.push(StreamEvent::Error {
                     code: "linked_required_source_missing".into(),
-                    message: "The linked investigation finished without the requested bounded \
-                              workspace/runbook evidence. The answer was withheld — retry the \
-                              workspace search or inspect the visible tool failure."
-                        .into(),
+                    message: format!(
+                        "The linked investigation finished without every explicitly requested \
+                         bounded source ({}). The answer was withheld; inspect the visible source \
+                         failure or start a narrower investigation.",
+                        missing.join(", ")
+                    ),
                 });
             }
             if !trail.is_empty() {
@@ -2301,15 +2488,20 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     }
                 }
             };
+            let mut governed_evidence_success = result.ok;
             if resolved_tool_name == crate::log_analysis::SEARCH_LOGS && result.ok {
                 if result.log_result_count.unwrap_or(0) > 0 && !result.log_evidence.is_empty() {
                     successful_log_tools = successful_log_tools.saturating_add(1);
-                    linked_log_evidence_identities.extend(result.log_evidence.iter().cloned());
+                    extend_linked_log_identities(
+                        &mut linked_log_evidence_identities,
+                        &result.log_evidence,
+                    );
                 } else {
+                    governed_evidence_success = false;
                     trail.push("linked_search_logs_zero_results".into());
                 }
             }
-            if result.ok {
+            if governed_evidence_success {
                 successful_read_tools.insert(resolved_tool_name.clone());
                 if linked_turn {
                     current_turn_evidence.push(&result.detail_for_model);
@@ -2359,11 +2551,11 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                 tool_call_id: Some(tc.id),
                 tool_calls: None,
             });
-            let required_workspace_ready = !linked_workspace_search_required
-                || successful_read_tools.contains(crate::tools::names::SEARCH_KB);
             if linked_turn
-                && successful_log_tools > 0
-                && required_workspace_ready
+                && linked_required_reads
+                    .iter()
+                    .all(|required| required.succeeded(&successful_read_tools))
+                && linked_unavailable_sources.is_empty()
                 && !linked_log_evidence_identities.is_empty()
             {
                 let evidence = current_turn_evidence.render();
@@ -2374,7 +2566,8 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     *slot = Some(LinkedSynthesisCheckpoint {
                         session_id: opts.session_id.clone(),
                         corpus_id: context.corpus_id.clone(),
-                        model: opts.model.clone(),
+                        provider_profile_id: opts.provider_profile_id.clone(),
+                        model_id: opts.model.clone(),
                         user_text: user_text.to_string(),
                         evidence,
                         identities: linked_log_evidence_identities.clone(),
@@ -2412,45 +2605,84 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
              bounded log result was obtained, summarize only clearly attributed non-log evidence \
              if any, and recommend a narrower retry."
         )
-    } else if linked_workspace_search_required
-        && !successful_read_tools.contains(crate::tools::names::SEARCH_KB)
+    } else if linked_turn
+        && (!linked_required_reads
+            .iter()
+            .all(|required| required.succeeded(&successful_read_tools))
+            || !linked_unavailable_sources.is_empty())
     {
-        trail.push("linked_no_successful_workspace_evidence".into());
+        let missing = linked_required_reads
+            .iter()
+            .filter(|required| !required.succeeded(&successful_read_tools))
+            .map(|required| required.label)
+            .chain(linked_unavailable_sources.iter().copied())
+            .collect::<Vec<_>>();
+        trail.push(format!(
+            "linked_no_successful_required_evidence:{}",
+            missing.join(",")
+        ));
         out.push(StreamEvent::Error {
             code: "linked_required_source_missing".into(),
-            message: "The linked turn exhausted its tool budget without the requested bounded \
-                      workspace/runbook result. Any final response must disclose that gap."
-                .into(),
+            message: format!(
+                "The linked turn exhausted its tool budget without every explicitly requested \
+                 bounded source ({}).",
+                missing.join(", ")
+            ),
         });
         format!(
             "{SYNTHESIZE_AFTER_BUDGET}\n\
-             REQUESTED WORKSPACE EVIDENCE MISSING. Attribute only the successful log evidence, \
-             do not claim a runbook conclusion, and recommend a narrower workspace retry."
+             REQUESTED EVIDENCE MISSING: {}. Attribute only successful evidence, explicitly \
+             disclose every gap, and recommend a narrower retry.",
+            missing.join(", ")
         )
     } else {
         SYNTHESIZE_AFTER_BUDGET.to_string()
     };
     history.push(ChatMessage {
         role: Role::System,
-        content: synthesis_instruction,
+        content: synthesis_instruction.clone(),
         tool_call_id: None,
         tool_calls: None,
     });
-    let model_ctx = match crate::sessions::prepare_model_context(
-        history,
-        opts.compact_keep_last.max(1),
-        opts.effective_context_char_budget(),
+    let model_ctx = if let (Some(context), Some(prior_history)) = (
+        opts.log_explorer_context.as_ref(),
+        linked_prior_history.as_ref(),
     ) {
-        Ok(p) => p.messages,
-        Err(e) => {
-            out.push(StreamEvent::Error {
-                code: "context_too_long".into(),
-                message: format!("Context over budget during final synthesis ({e})."),
-            });
-            out.push(StreamEvent::TurnCompleted {
-                reason: "context_too_long".into(),
-            });
-            return Ok(out.into_events());
+        match linked_round_model_context(
+            prior_history,
+            format!(
+                "{}\n{synthesis_instruction}",
+                context.staged_synthesis_system_hint()
+            ),
+            user_text,
+            &current_turn_evidence,
+            opts.effective_context_char_budget(),
+        ) {
+            Ok(messages) => messages,
+            Err(error) => {
+                return terminal_context_too_long(
+                    out,
+                    format!("Context over budget during final linked synthesis ({error})."),
+                );
+            }
+        }
+    } else {
+        match crate::sessions::prepare_model_context(
+            history,
+            opts.compact_keep_last.max(1),
+            opts.effective_context_char_budget(),
+        ) {
+            Ok(p) => p.messages,
+            Err(e) => {
+                out.push(StreamEvent::Error {
+                    code: "context_too_long".into(),
+                    message: format!("Context over budget during final synthesis ({e})."),
+                });
+                out.push(StreamEvent::TurnCompleted {
+                    reason: "context_too_long".into(),
+                });
+                return Ok(out.into_events());
+            }
         }
     };
     let cancel_ref = opts.cancel.as_ref().map(|c| c.as_ref());
@@ -2558,6 +2790,22 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             Ok(out.into_events())
         }
         Err(e) => {
+            if linked_turn && successful_log_tools > 0 {
+                let retry_available = checkpoint_out
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.is_some());
+                let missing = missing_linked_required_sources(
+                    &linked_required_reads,
+                    &successful_read_tools,
+                    &linked_unavailable_sources,
+                );
+                return terminal_linked_provider_failure(
+                    out,
+                    &mut trail,
+                    retry_available,
+                    &missing,
+                );
+            }
             out.push(StreamEvent::Error {
                 code: "budget_rounds_fail".into(),
                 message: format!(
@@ -2823,10 +3071,19 @@ mod tests {
                 "database connectors"
             ]
         );
-        assert!(!linked_available_broader_read_requested(
-            "Check durable memory and the incident database.",
-            &log_only
-        ));
+        let unavailable_required =
+            linked_required_reads("Check durable memory and the incident database.", &log_only);
+        assert_eq!(
+            unavailable_required
+                .iter()
+                .map(|required| (required.label, required.tool_names.len()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("linked logs", 1),
+                ("durable memory", 0),
+                ("database connectors", 0)
+            ]
+        );
         let mut unrelated_connector = log_only.clone();
         unrelated_connector.push(ToolSpec {
             name: "sql_query__incident-db".into(),
@@ -2841,10 +3098,17 @@ mod tests {
             ),
             vec!["Confluence"]
         );
-        assert!(!linked_available_broader_read_requested(
+        let confluence_required = linked_required_reads(
             "Cross-check these logs against Confluence.",
             &unrelated_connector,
-        ));
+        );
+        assert_eq!(
+            confluence_required
+                .iter()
+                .map(|required| (required.label, required.tool_names.len()))
+                .collect::<Vec<_>>(),
+            vec![("linked logs", 1), ("Confluence", 0)]
+        );
     }
 
     /// Fake-model production path: tool request → search_logs → evidence answer (#530).
@@ -3005,7 +3269,7 @@ mod tests {
                 finish_reason: "stop".into(),
             },
             ChatCompletion {
-                content: "Durable memory was unavailable for this turn. The logs show the worker pool exhausted while handling job-7f3a (seq=0 source=worker.log)."
+                content: "The logs show the worker pool exhausted while handling job-7f3a (seq=0 source=worker.log)."
                     .into(),
                 tool_calls: vec![],
                 finish_reason: "stop".into(),
@@ -3018,7 +3282,7 @@ mod tests {
         let events = run_agent_turn(
             &backend,
             &mut host,
-            "What is the most important problem? Cross-check durable memory.",
+            "What is the most important problem?",
             &mut history,
             &AgentOptions {
                 session_id: "linked-wrapper-session".into(),
@@ -3041,20 +3305,6 @@ mod tests {
         assert!(answer.contains("source=worker.log"), "{answer}");
         assert!(!answer.contains("UNTRUSTED_DATA"), "{answer}");
         assert!(!answer.contains("untrusted external data"), "{answer}");
-        assert!(
-            answer.contains("Durable memory was unavailable"),
-            "{answer}"
-        );
-        let system = history
-            .iter()
-            .find(|message| message.role == Role::System)
-            .map(|message| message.content.as_str())
-            .unwrap_or("");
-        assert!(
-            system.contains("requested sources are unavailable")
-                && system.contains("durable memory"),
-            "{system}"
-        );
         let trail = events
             .iter()
             .filter_map(|event| match event {
@@ -3561,6 +3811,17 @@ mod tests {
                     .iter()
                     .map(|tool| tool.name.as_str())
                     .collect::<HashSet<_>>();
+                assert!(
+                    messages.iter().all(|message| {
+                        message.role != Role::Tool
+                            && message
+                                .tool_calls
+                                .as_ref()
+                                .is_none_or(|calls| calls.is_empty())
+                            && !message.content.contains("STALE_CROSS_CORPUS")
+                    }),
+                    "linked model context leaked historical tool protocol: {messages:?}"
+                );
                 if call == 0 {
                     assert_eq!(
                         names,
@@ -3595,26 +3856,22 @@ mod tests {
                         system.contains("only available function, search_kb"),
                         "workspace stage must use compact grounding policy: {system}"
                     );
+                } else if call == 2 {
+                    assert_eq!(
+                        names,
+                        HashSet::from([crate::tools::names::RECALL_MEMORY]),
+                        "explicit memory evidence must be staged independently"
+                    );
+                } else if call == 3 {
+                    assert_eq!(
+                        names,
+                        HashSet::from(["sql_query__incident-db"]),
+                        "explicit database evidence must be staged independently"
+                    );
                 } else {
-                    for expected in [
-                        crate::log_analysis::SEARCH_LOGS,
-                        crate::tools::names::SEARCH_KB,
-                        crate::tools::names::RECALL_MEMORY,
-                        "sql_query__incident-db",
-                    ] {
-                        assert!(names.contains(expected), "missing {expected}: {names:?}");
-                    }
-                    let full_policy = messages
-                        .iter()
-                        .filter(|message| message.role == Role::System)
-                        .map(|message| message.content.as_str())
-                        .find(|content| {
-                            content.contains("other read-only tools offered for this turn")
-                        })
-                        .unwrap_or("");
                     assert!(
-                        !full_policy.is_empty(),
-                        "full linked policy must return after grounding: {messages:?}"
+                        names.is_empty(),
+                        "final synthesis must not expose another retrieval surface: {names:?}"
                     );
                 }
                 assert!(
@@ -3798,7 +4055,27 @@ mod tests {
         assert!(user_text.contains("SKILL_PROCESS_ONLY"));
         assert!(!user_text.contains("EVALUATOR_TRUTH_DO_NOT_RETRIEVE"));
 
-        let mut history = vec![];
+        let mut history = vec![
+            ChatMessage {
+                role: Role::Assistant,
+                content: "STALE_CROSS_CORPUS assistant tool request".into(),
+                tool_call_id: None,
+                tool_calls: Some(vec![ToolCallMsg {
+                    id: "old-cross-corpus-call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: crate::tools::names::RECALL_MEMORY.into(),
+                        arguments: r#"{"query":"STALE_CROSS_CORPUS"}"#.into(),
+                    },
+                }]),
+            },
+            ChatMessage {
+                role: Role::Tool,
+                content: "STALE_CROSS_CORPUS tool result".into(),
+                tool_call_id: Some("old-cross-corpus-call".into()),
+                tool_calls: None,
+            },
+        ];
         let context = LogExplorerTurnContext::new(
             "cross-source-window",
             report.corpus_id.as_str(),
@@ -4503,6 +4780,35 @@ mod tests {
         }
     }
 
+    struct ToolThenProviderFailureBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ChatBackend for ToolThenProviderFailureBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Ok(ChatCompletion {
+                    content: String::new(),
+                    tool_calls: vec![ToolCallMsg {
+                        id: "search".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: crate::log_analysis::SEARCH_LOGS.into(),
+                            arguments: r#"{"query":"job-7f3a"}"#.into(),
+                        },
+                    }],
+                    finish_reason: "tool_calls".into(),
+                });
+            }
+            Err(CoreError::Message("provider connection closed".into()))
+        }
+    }
+
     struct RejectLinkedToolsBackend;
 
     #[async_trait]
@@ -4671,6 +4977,61 @@ mod tests {
         assert!(retry_checkpoint.is_none());
     }
 
+    #[tokio::test]
+    async fn post_retrieval_provider_failure_preserves_turn_and_truthful_retry_scope() {
+        for (question, expected_code, retry_available) in [
+            (
+                "What caused the worker failure?",
+                "linked_synthesis_provider_error",
+                true,
+            ),
+            (
+                "What caused the worker failure? Also check durable memory.",
+                "linked_retrieval_provider_error",
+                false,
+            ),
+        ] {
+            let (_dir, mut host, context) = linked_timeout_fixture();
+            let backend = ToolThenProviderFailureBackend {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let mut history = Vec::new();
+            let mut checkpoint = None;
+            let events = run_agent_turn_with_sink_and_checkpoint(
+                &backend,
+                &mut host,
+                question,
+                &mut history,
+                &AgentOptions {
+                    session_id: format!("provider-failure-{retry_available}"),
+                    provider_profile_id: Some("private-profile".into()),
+                    model: Some("slow-model".into()),
+                    log_explorer_context: Some(context),
+                    max_rounds: 4,
+                    ..Default::default()
+                },
+                None,
+                Some(&mut checkpoint),
+            )
+            .await
+            .expect("a post-retrieval provider failure is a typed terminal turn");
+
+            assert!(events.iter().any(
+                |event| matches!(event, StreamEvent::Error { code, .. } if code == expected_code)
+            ));
+            assert!(events.iter().any(
+                |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == expected_code)
+            ));
+            assert_eq!(checkpoint.is_some(), retry_available);
+            assert!(
+                history
+                    .iter()
+                    .any(|message| message.role == Role::User && message.content == question),
+                "the original user message must remain durable when the provider fails"
+            );
+        }
+    }
+
     #[test]
     fn current_turn_evidence_buffer_is_utf8_safe_and_hard_bounded() {
         let mut evidence = CurrentTurnEvidence::default();
@@ -4682,13 +5043,31 @@ mod tests {
         assert!(!rendered.contains("must-not-extend-the-cap"));
     }
 
+    #[test]
+    fn current_turn_log_identity_buffer_has_an_independent_hard_cap() {
+        let incoming = (0..(CURRENT_TURN_IDENTITY_CAP + 100))
+            .map(|seq| crate::log_analysis::SearchEvidenceIdentity {
+                seq: seq as u64,
+                source: format!("source-{seq}.log"),
+                template_id: seq as u64,
+            })
+            .collect::<Vec<_>>();
+        let mut identities = HashSet::new();
+        extend_linked_log_identities(&mut identities, &incoming);
+        assert_eq!(identities.len(), CURRENT_TURN_IDENTITY_CAP);
+        assert!(identities
+            .iter()
+            .all(|identity| identity.seq < CURRENT_TURN_IDENTITY_CAP as u64));
+    }
+
     #[tokio::test]
-    async fn synthesis_checkpoint_rejects_wrong_chat_corpus_and_model() {
+    async fn synthesis_checkpoint_rejects_wrong_chat_corpus_provider_and_model() {
         let (_dir, mut host, context) = linked_timeout_fixture();
         let checkpoint = LinkedSynthesisCheckpoint {
             session_id: "chat-a".into(),
             corpus_id: context.corpus_id.clone(),
-            model: Some("model-a".into()),
+            provider_profile_id: Some("provider-a".into()),
+            model_id: Some("model-a".into()),
             user_text: "question".into(),
             evidence: "redacted bounded evidence".into(),
             identities: HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
@@ -4699,10 +5078,26 @@ mod tests {
         };
         let backend = ScriptedBackend::new(Vec::new());
         let mut history = Vec::new();
-        for (session, corpus, model) in [
-            ("chat-b", context.corpus_id.as_str(), "model-a"),
-            ("chat-a", "wrong-corpus", "model-a"),
-            ("chat-a", context.corpus_id.as_str(), "model-b"),
+        for (session, corpus, provider, model) in [
+            (
+                "chat-b",
+                context.corpus_id.as_str(),
+                "provider-a",
+                "model-a",
+            ),
+            ("chat-a", "wrong-corpus", "provider-a", "model-a"),
+            (
+                "chat-a",
+                context.corpus_id.as_str(),
+                "provider-b",
+                "model-a",
+            ),
+            (
+                "chat-a",
+                context.corpus_id.as_str(),
+                "provider-a",
+                "model-b",
+            ),
         ] {
             let retry_context =
                 LogExplorerTurnContext::new("retry-window", corpus, "All sources").unwrap();
@@ -4714,6 +5109,7 @@ mod tests {
                 &AgentOptions {
                     session_id: session.into(),
                     model: Some(model.into()),
+                    provider_profile_id: Some(provider.into()),
                     log_explorer_context: Some(retry_context),
                     linked_synthesis_retry: Some(checkpoint.clone()),
                     ..Default::default()

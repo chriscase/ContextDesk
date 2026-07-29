@@ -186,8 +186,11 @@ If bounded linked-log retrieval succeeds but final synthesis times out, the
 successful tool result remains visible and **Retry synthesis** becomes
 available. That retry is tool-closed: it reuses only the redacted bounded
 evidence retained by the trusted host and does not rerun retrieval. The
-checkpoint is valid only for the same chat, corpus, and model. A switch or stale
-request fails visibly instead of borrowing evidence from another context.
+checkpoint is valid only for the same chat, corpus, provider profile, and
+model. Switching either provider or model clears it. ContextDesk does not offer
+synthesis-only retry unless every explicitly requested retrieval source
+succeeded first. A switch, incomplete retrieval, or stale request fails visibly
+instead of borrowing evidence from another context.
 
 Open citations and inspect tool details during triage. Treat uncited synthesis
 as inference, and narrow the question when the available evidence is partial.

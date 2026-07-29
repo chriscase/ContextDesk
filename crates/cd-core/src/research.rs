@@ -47,14 +47,16 @@ pub fn event_to_dto(e: &StreamEvent) -> EventDto {
             available,
             session_id,
             corpus_id,
-            model,
+            provider_profile_id,
+            model_id,
         } => (
             "linked_synthesis_retry",
             serde_json::json!({
                 "available": available,
                 "session_id": session_id,
                 "corpus_id": corpus_id,
-                "model": model,
+                "provider_profile_id": provider_profile_id,
+                "model_id": model_id,
             }),
         ),
         StreamEvent::TextDelta { text } => ("text_delta", serde_json::json!({ "text": text })),
@@ -965,6 +967,7 @@ pub async fn research_turn_with_cancel_and_context_and_checkpoint(
         session_id,
         Some(profile.chat_model.clone()),
     );
+    opts.provider_profile_id = Some(profile.id.clone());
     opts.cancel = cancel;
     opts.log_explorer_context = log_explorer_context;
     opts.linked_synthesis_retry = linked_synthesis_retry;
@@ -1954,7 +1957,8 @@ mod tests {
                 available: true,
                 session_id: "s".into(),
                 corpus_id: "c".into(),
-                model: Some("m".into()),
+                provider_profile_id: Some("p".into()),
+                model_id: Some("m".into()),
             },
             StreamEvent::TextDelta { text: "t".into() },
             StreamEvent::ThoughtDelta { text: "th".into() },

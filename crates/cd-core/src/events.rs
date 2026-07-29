@@ -41,8 +41,10 @@ pub enum StreamEvent {
         session_id: String,
         /// Exact owning corpus.
         corpus_id: String,
-        /// Exact owning model, when known.
-        model: Option<String>,
+        /// Exact owning provider profile, when known.
+        provider_profile_id: Option<String>,
+        /// Exact owning model id, when known.
+        model_id: Option<String>,
     },
     /// Incremental assistant markdown.
     TextDelta {
