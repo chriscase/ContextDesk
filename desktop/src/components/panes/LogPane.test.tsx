@@ -20,11 +20,14 @@ const hostMocks = vi.hoisted(() => ({
   search: vi.fn(),
   timeline: vi.fn(),
   setActiveCorpus: vi.fn(),
+  ingest: vi.fn(),
   reanalyze: vi.fn(),
   cancelReanalysis: vi.fn(),
   discard: vi.fn(),
   confirm: vi.fn(),
   getBranding: vi.fn(),
+  getFailedIngestDiagnostic: vi.fn(),
+  clearFailedIngestDiagnostic: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
   listenProgress: vi.fn(),
@@ -34,12 +37,15 @@ vi.mock("../../lib/host", () => ({
   hostListLogCorpora: hostMocks.listCorpora,
   hostListenProcessProgress: hostMocks.listenProgress,
   hostCancelLogIngest: vi.fn(async () => true),
+  hostClearFailedLogIngestDiagnostic:
+    hostMocks.clearFailedIngestDiagnostic,
   hostCancelLogReanalysis: hostMocks.cancelReanalysis,
   hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
   hostGetBranding: hostMocks.getBranding,
   hostImportLogCorpusPackagePath: vi.fn(),
-  hostIngestLogPath: vi.fn(),
+  hostGetFailedLogIngestDiagnostic: hostMocks.getFailedIngestDiagnostic,
+  hostIngestLogPath: hostMocks.ingest,
   hostListLogTemplates: hostMocks.listTemplates,
   hostLogClusterProblems: hostMocks.clusterProblems,
   hostLogSearch: hostMocks.search,
@@ -94,6 +100,8 @@ describe("LogPane", () => {
     hostMocks.timeline.mockResolvedValue([]);
     hostMocks.listenProgress.mockResolvedValue(() => {});
     hostMocks.setActiveCorpus.mockResolvedValue(null);
+    hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
+    hostMocks.clearFailedIngestDiagnostic.mockResolvedValue(true);
     hostMocks.reanalyze.mockResolvedValue({
       state: "complete",
       modelId: "fixture-local",
@@ -426,6 +434,102 @@ describe("LogPane", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("previews, copies, and clears one failed-ingest diagnostic without publishing a corpus", async () => {
+    const firstFailure = {
+      schemaVersion: 1,
+      generatedAt: 1_753_680_000,
+      sourceKind: "zip" as const,
+      reasonCode: "invalid_archive" as const,
+      summary:
+        "The selected archive could not be validated; no corpus was published.",
+      cancelled: false,
+      progress: {
+        lastPhase: "scan",
+        linesProcessed: 0,
+        filesProcessed: 4,
+        bytesProcessed: 1024,
+        templates: 0,
+        updatesSeen: 3,
+      },
+      redacted: true as const,
+    };
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.ingest.mockRejectedValue(
+      new Error(
+        "zip open failed at /Users/employee/private.internal/secret.zip",
+      ),
+    );
+    hostMocks.getFailedIngestDiagnostic
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(firstFailure);
+    const writeText = vi.fn(async (_value: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <LogPane
+        pickDirectory={async () =>
+          "/Users/employee/private.internal/secret.zip"
+        }
+      />,
+    );
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+
+    const available = await screen.findByRole("region", {
+      name: "Failed import diagnostic",
+    });
+    expect(available.textContent).toContain("No corpus was published");
+    expect(available.textContent).toContain("only in memory");
+    expect(hostMocks.listCorpora).toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: corpusButtonName("incident") }),
+    ).toBeNull();
+
+    const exportButton = within(available).getByRole("button", {
+      name: "Export diagnostics…",
+    });
+    fireEvent.click(exportButton);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export failed-ingest diagnostics",
+    });
+    expect(within(dialog).getByText(/latest failed import/)).toBeTruthy();
+    expect(
+      within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
+    ).toContain("Reason: invalid_archive");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy Markdown" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain("Corpus published: no");
+    expect(copied).not.toContain("/Users/employee");
+    expect(copied).not.toContain("private.internal");
+    expect(copied).not.toContain("secret.zip");
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(exportButton);
+
+    fireEvent.click(
+      within(available).getByRole("button", { name: "Clear diagnostic" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", {
+          name: "Failed import diagnostic",
+        }),
+      ).toBeNull(),
+    );
+    expect(hostMocks.clearFailedIngestDiagnostic).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(
+      screen.getAllByRole("button", { name: "Import logs…" })[0],
+    );
   });
 
   it("requires discard confirmation, preserves the corpus on cancel, and restores trigger focus", async () => {

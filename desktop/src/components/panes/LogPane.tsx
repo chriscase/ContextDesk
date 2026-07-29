@@ -14,7 +14,9 @@ import { createPortal } from "react-dom";
 import {
   hostDiscardLogCorpus,
   hostExportLogCorpusPackage,
+  hostClearFailedLogIngestDiagnostic,
   hostGetBranding,
+  hostGetFailedLogIngestDiagnostic,
   hostImportLogCorpusPackagePath,
   hostCancelLogIngest,
   hostCancelLogReanalysis,
@@ -29,6 +31,7 @@ import {
   hostSetActiveLogCorpus,
   type LogClusterDto,
   type LogCorpusSummaryDto,
+  type FailedLogIngestDiagnosticDto,
   type LogSearchHitDto,
   type LogTemplateRowDto,
   type ProcessProgressDto,
@@ -110,11 +113,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [templates, setTemplates] = useState<LogTemplateRowDto[]>([]);
   const [exemplar, setExemplar] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
+  const [failedIngestDiagnostic, setFailedIngestDiagnostic] =
+    useState<FailedLogIngestDiagnosticDto | null>(null);
   /** In-app Explorer escape hatch when multi-window fails (#503). */
   const [inAppExplorerId, setInAppExplorerId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<{
-    corpus: LogCorpusSummaryDto;
+    corpus: LogCorpusSummaryDto | null;
+    failedIngest: FailedLogIngestDiagnosticDto | null;
     environment: LogDiagnosticEnvironment;
     currentStatus: LogDiagnosticStatus | null;
   } | null>(null);
@@ -128,6 +134,8 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingDiscardFocusRef = useRef<string | null | undefined>(undefined);
+  const failedDiagnosticTriggerRef = useRef<HTMLButtonElement>(null);
+  const importLogsTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -153,6 +161,14 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void hostGetFailedLogIngestDiagnostic()
+      .then(setFailedIngestDiagnostic)
+      .catch(() => {
+        /* The optional transient diagnostic must not block Logs. */
+      });
+  }, []);
 
   const closeCorpusMenu = useCallback(
     (restoreFocus = true) => {
@@ -342,6 +358,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setError(null);
     setNote(null);
     setProgress(null);
+    setFailedIngestDiagnostic(null);
     try {
       const r = await hostIngestLogPath(path, "incident");
       setNote(statsBlurb(r));
@@ -349,6 +366,13 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       await selectCorpus(r.corpusId);
     } catch (e) {
       setError(String(e));
+      try {
+        setFailedIngestDiagnostic(
+          await hostGetFailedLogIngestDiagnostic(),
+        );
+      } catch {
+        /* Preserve the visible ingest error if diagnostic retrieval fails. */
+      }
     } finally {
       setBusy(false);
       setIngesting(false);
@@ -513,16 +537,50 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
     setDiagnostic({
       corpus,
+      failedIngest: null,
       currentStatus,
       environment,
     });
   }
 
+  async function onOpenFailedIngestDiagnostics() {
+    if (!failedIngestDiagnostic) return;
+    let environment: LogDiagnosticEnvironment = {
+      appVersion: "unknown",
+      channel: "unknown",
+      gitSha: null,
+      os: portableDiagnosticOsHint(),
+    };
+    try {
+      environment = diagnosticEnvironmentFromBranding(await hostGetBranding());
+    } catch {
+      /* Keep an honest unknown identity if host branding is unavailable. */
+    }
+    setDiagnostic({
+      corpus: null,
+      failedIngest: failedIngestDiagnostic,
+      currentStatus: null,
+      environment,
+    });
+  }
+
+  async function clearFailedIngestDiagnostic() {
+    try {
+      await hostClearFailedLogIngestDiagnostic();
+    } finally {
+      setFailedIngestDiagnostic(null);
+      queueMicrotask(() => importLogsTriggerRef.current?.focus());
+    }
+  }
+
   function closeDiagnostics() {
-    const corpusId = diagnostic?.corpus.id;
+    const corpusId = diagnostic?.corpus?.id;
+    const failed = diagnostic?.failedIngest != null;
     setDiagnostic(null);
     if (corpusId) {
       queueMicrotask(() => menuTriggerRefs.current.get(corpusId)?.focus());
+    } else if (failed) {
+      queueMicrotask(() => failedDiagnosticTriggerRef.current?.focus());
     }
   }
 
@@ -589,6 +647,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         <h2 className="pane-chrome__title">Logs</h2>
         <div className="pane-chrome__actions">
           <button
+            ref={importLogsTriggerRef}
             type="button"
             className="btn btn--ghost"
             disabled={busy}
@@ -692,6 +751,39 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
         <p className="error" role="alert">
           {error}
         </p>
+      ) : null}
+      {failedIngestDiagnostic ? (
+        <section
+          className="log-ingest-diagnostic"
+          aria-label="Failed import diagnostic"
+        >
+          <div>
+            <strong>Failed import diagnostic available</strong>
+            <span>{failedIngestDiagnostic.summary}</span>
+            <small>
+              No corpus was published. This redacted diagnostic stays only in
+              memory until you clear it, start another import, or restart the
+              app.
+            </small>
+          </div>
+          <div className="log-ingest-diagnostic__actions">
+            <button
+              ref={failedDiagnosticTriggerRef}
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => void onOpenFailedIngestDiagnostics()}
+            >
+              Export diagnostics…
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => void clearFailedIngestDiagnostic()}
+            >
+              Clear diagnostic
+            </button>
+          </div>
+        </section>
       ) : null}
       {note ? <p className="muted log-pane__note">{note}</p> : null}
 
@@ -1088,6 +1180,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
       {diagnostic ? (
         <LogDiagnosticDialog
           corpus={diagnostic.corpus}
+          failedIngest={diagnostic.failedIngest}
           environment={diagnostic.environment}
           currentStatus={diagnostic.currentStatus}
           onDismiss={closeDiagnostics}

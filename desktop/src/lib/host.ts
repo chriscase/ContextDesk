@@ -1685,6 +1685,35 @@ export type LogIngestReportDto = {
   embedding?: LogEmbeddingStatusDto | null;
 };
 
+export type FailedLogIngestDiagnosticDto = {
+  schemaVersion: number;
+  generatedAt: number;
+  sourceKind: "directory" | "zip" | "file" | "unknown";
+  reasonCode:
+    | "cancelled"
+    | "no_importable_files"
+    | "no_safe_events"
+    | "invalid_archive"
+    | "policy_rejected"
+    | "source_metadata_failed"
+    | "source_open_failed"
+    | "source_read_failed"
+    | "source_changed"
+    | "worker_failed"
+    | "ingest_failed";
+  summary: string;
+  cancelled: boolean;
+  progress: {
+    lastPhase: string;
+    linesProcessed: number | null;
+    filesProcessed: number | null;
+    bytesProcessed: number | null;
+    templates: number | null;
+    updatesSeen: number;
+  };
+  redacted: true;
+};
+
 export type LogPackageImportDto = {
   corpusId: string;
   name: string;
@@ -1746,6 +1775,20 @@ export async function hostIngestLogPath(
 export async function hostCancelLogIngest(): Promise<boolean> {
   if (!isTauri()) return false;
   return invoke<boolean>("cancel_log_ingest");
+}
+
+/** One memory-only failed-ingest diagnostic for the latest failed trial. */
+export async function hostGetFailedLogIngestDiagnostic(): Promise<FailedLogIngestDiagnosticDto | null> {
+  if (!isTauri()) return null;
+  return invoke<FailedLogIngestDiagnosticDto | null>(
+    "get_failed_log_ingest_diagnostic",
+  );
+}
+
+/** Clear the memory-only failed-ingest diagnostic. */
+export async function hostClearFailedLogIngestDiagnostic(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("clear_failed_log_ingest_diagnostic");
 }
 
 /** Trusted local template-vector re-analysis; events are not reparsed. */

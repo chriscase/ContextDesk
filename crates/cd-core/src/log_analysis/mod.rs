@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod bookmarks;
+pub mod diagnostics;
 pub mod drain;
 pub mod embed_policy;
 pub mod ingest;
@@ -29,6 +30,11 @@ pub use bookmarks::{
     delete_bookmark, list_bookmarks, list_resolved_bookmarks, resolve_bookmark, update_bookmark,
     Bookmark, BookmarkEventRef, BookmarkEvidenceStatus, BookmarkSummary, NewBookmark,
     NewEvidenceBookmark, ResolvedBookmark, MAX_BOOKMARK_EVENT_REFS,
+};
+pub use diagnostics::{
+    classify_failed_ingest, FailedIngestDiagnostic, FailedIngestDiagnosticRecorder,
+    FailedIngestDiagnosticStore, FailedIngestProgress, FailedIngestReason, FailedIngestSourceKind,
+    FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION,
 };
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{

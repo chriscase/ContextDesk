@@ -49,6 +49,7 @@ import/export, and open investigation. It is not a million-row browser.
 | Follow latest          | While you stay near the bottom, new messages/tools stream into view; scroll up to read history without jumps. **Jump to latest** restores follow                                                                                                                                                                                                                                                                                                                     |
 | Agent context          | **Context shared with agent** discloses filters/lanes/selection counts; the nearby `?` explains the immutable turn snapshot, bounded tools, and privacy boundary. Full dumps stay out of chat context                                                                                                                                                                                                                                                                |
 | Nav chips              | Valid agent navigation proposals appear as opt-in chips; wrong-corpus proposals fail closed. Raw JSON paste is developer-only                                                                                                                                                                                                                                                                                                                                        |
+| Support diagnostics    | **Export diagnostics…** previews a bounded redacted Markdown/JSON report. Explorer reports include payload-free active view settings; a failed import exposes one memory-only diagnostic without publishing a corpus                                                                                                                                                                                                                                                  |
 
 ## Find vs Filter
 
@@ -249,6 +250,30 @@ profile advertises `capabilities.tools=false`, ContextDesk stops before
 contacting the provider and saves visible guidance that names the profile and
 unavailable capability. Ordinary chats keep `linked_corpus_id=null` and do not
 inherit an Explorer corpus or its active-corpus default.
+
+## Cross-computer diagnostic feedback
+
+Use **Export diagnostics…** in an active Explorer when you need to reproduce a
+view or product defect on another machine. Review the exact preview, add a
+short reproduction note, then copy the Markdown or save Markdown/JSON through
+the native file dialog.
+
+If an import fails, return to **Logs**. A **Failed import diagnostic available**
+card appears without creating or publishing a partial corpus. Preview, copy, or
+save it before clearing it. ContextDesk retains only one such diagnostic in
+memory: **Clear diagnostic**, the next ingest attempt, or an app restart removes
+it. A later attempt never silently inherits the previous failure.
+
+These reports exclude log/event payloads, absolute paths, source/service/host
+labels from the active view, filter and trace text, private hosts/IPs, chats,
+provider/model inventories, credentials, and evaluator truth. Redaction runs
+again when the native host writes the selected file, but you must still review
+the preview before sharing.
+
+Do not confuse diagnostics with **Export package…**. A diagnostic is a small
+metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing
+workflow that contains the analyzed corpus and should be handled according to
+your organization’s data policy.
 
 ## Log Lab scale profiles (synthetic)
 

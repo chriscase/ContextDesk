@@ -50,7 +50,7 @@ The reusable method is a layered evidence plane:
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
-| Privacy-reviewed corpus diagnostic handoff                  | **Partial**                               | `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs`                                                                 | Active-Explorer state and failed-ingest handoff remain #713/#527 |
+| Privacy-reviewed diagnostic handoff                         | **Partial**                               | `diagnostics.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs`                                                | Literal failed-ingest transcript accounting remains #527         |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -330,21 +330,42 @@ problems. The package intentionally carries analyzed corpus data. The diagnostic
 is a small metadata report for reproducing product behavior across an isolated
 workstation and a support machine.
 
-The shipped successful-corpus slice builds diagnostics from an explicit
-allowlist: application identity, OS, corpus identity/name, safe scalar counts,
-parse/level summaries, bounded basename-only omission examples, embedding
-state, and an optional bounded reproduction note or current UI status. It does
-not serialize the corpus DTO. That structural choice keeps top-template
-patterns, event payloads, source labels and absolute paths, chats,
-provider/model inventories, evaluator truth, and secrets outside the report.
+Diagnostics are built from explicit allowlists rather than serialized product
+state. A persisted-corpus report contains application identity, OS, corpus
+identity/name, safe scalar counts, parse/level summaries, bounded
+basename-only omission examples, embedding state, and an optional bounded
+reproduction note or current UI status.
+
+An active Explorer adds only payload-free reproduction state: layout and row
+modes, time quality/linking, lane and selected-source counts, filter-presence
+and numeric range information, bounded sequence identities, and logical
+viewport anchors. Filter text, trace values, source/service/host labels, event
+content, chat state, and model/provider state are deliberately not represented.
+
+A failed ingest has no corpus identity. The trusted core recorder discards
+free-form progress messages and original errors after mapping them to one
+stable reason code. It retains only coarse source kind, last typed phase, and
+saturating progress counters. The desktop owns one in-memory slot: starting a
+later ingest clears it, a stale overlapping attempt cannot replace the newer
+slot, explicit Clear removes it, and restart removes it. Failure and
+cancellation therefore cannot publish a partial corpus merely to support
+diagnostics.
+
+These structural choices keep top-template patterns, event payloads, source
+labels and absolute paths, chats, provider/model inventories, evaluator truth,
+private network identities, and secrets outside the report.
 
 The user previews the exact Markdown or JSON before saving. The native writer
 accepts only a bounded payload and a user-selected `.md` or `.json` destination,
 reapplies redaction, refuses symlink destinations, and writes no hidden cache.
-Cancel therefore creates no file, and a later trial cannot inherit a prior
-diagnostic. This is still **partial**: active Explorer view configuration and a
-failed ingest's bounded transient reason set are not yet available through this
-slice and remain open under #713 and #527.
+Cancel therefore creates no file. Diagnostics remain distinct from a
+`.cdlog.zip` package, which intentionally contains analyzed corpus data.
+
+The remaining literal #527 work is a bounded basename/reason transcript plus
+scan-reason counters for binary, empty, hidden, oversized, read-failed, and
+parse-failed exclusions across directory and raw-ZIP trials. The one-slot
+diagnostic path does not invent counters or basename evidence that the failed
+core ingest did not return.
 
 ## 7. Performance and bounds
 

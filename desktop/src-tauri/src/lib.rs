@@ -142,6 +142,9 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
+    /// later ingest starts, explicitly clearable, and absent after restart.
+    failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
     /// Serializes chat-session writes across windows so governed fields cannot
     /// race ordinary transcript saves (#695).
     chat_session_mutation: Mutex<()>,
@@ -4957,6 +4960,28 @@ fn save_log_diagnostic_report(path: String, format: String, content: String) -> 
     log_diagnostics::save_log_diagnostic_report(std::path::Path::new(&path), &format, &content)
 }
 
+/// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
+#[tauri::command]
+fn get_failed_log_ingest_diagnostic(
+    state: State<'_, AppState>,
+) -> Option<cd_core::log_analysis::FailedIngestDiagnostic> {
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .snapshot()
+}
+
+/// Explicitly clear the one memory-only failed-ingest diagnostic.
+#[tauri::command]
+fn clear_failed_log_ingest_diagnostic(state: State<'_, AppState>) -> bool {
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .clear()
+}
+
 /// Import a portable package zip (SoftWrite — creates disposable corpus).
 #[tauri::command]
 fn import_log_corpus_package_path(
@@ -4981,6 +5006,19 @@ struct TauriProcessProgress {
 
 impl cd_core::process_progress::ProcessProgressObserver for TauriProcessProgress {
     fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
+        let _ = self.app.emit("process-progress", update);
+    }
+}
+
+/// Fan one log-ingest progress stream to the UI and the payload-free recorder.
+struct TauriLogIngestProgress {
+    app: tauri::AppHandle,
+    recorder: Arc<cd_core::log_analysis::FailedIngestDiagnosticRecorder>,
+}
+
+impl cd_core::process_progress::ProcessProgressObserver for TauriLogIngestProgress {
+    fn progress(&self, update: cd_core::process_progress::ProcessProgress) {
+        self.recorder.progress(update.clone());
         let _ = self.app.emit("process-progress", update);
     }
 }
@@ -5030,18 +5068,29 @@ async fn ingest_log_path(
 ) -> Result<LogIngestReportDto, String> {
     let cache = log_cache_dir(&state)?;
     let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
-    let progress = TauriProcessProgress { app: app.clone() };
+    let selected_path = std::path::PathBuf::from(&path);
+    let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
+    let recorder = Arc::new(cd_core::log_analysis::FailedIngestDiagnosticRecorder::default());
+    let progress = TauriLogIngestProgress {
+        app: app.clone(),
+        recorder: Arc::clone(&recorder),
+    };
     let name_owned = name.unwrap_or_else(|| "corpus".into());
+    let diagnostic_attempt = state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .begin_attempt();
     let cancel = cd_core::process_progress::CancelFlag::new();
     {
         let mut cancels = state.cancels.lock().expect("cancels");
         cancels.insert(LOG_INGEST_CANCEL_KEY.into(), cancel.inner_arc());
     }
     let cancel_for_job = cancel.clone();
-    let report = tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::ingest_path_with_policy_and_observer(
             &cache,
-            std::path::Path::new(&path),
+            &selected_path,
             &name_owned,
             &policy,
             embed_backend,
@@ -5050,13 +5099,40 @@ async fn ingest_log_path(
         )
         .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| format!("ingest task join: {e}"))?;
+    .await;
     {
         let mut cancels = state.cancels.lock().expect("cancels");
         cancels.remove(LOG_INGEST_CANCEL_KEY);
     }
-    let report = report?;
+    let report = match outcome {
+        Ok(Ok(report)) => {
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_success(diagnostic_attempt);
+            report
+        }
+        Ok(Err(error)) => {
+            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            return Err(error);
+        }
+        Err(error) => {
+            let error = format!("ingest task join: {error}");
+            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            return Err(error);
+        }
+    };
     // Wizard/UI ingest: default subsequent log tools to this corpus without requiring
     // the model (or user) to re-type the id.
     set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
@@ -6883,6 +6959,9 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        failed_log_ingest_diagnostic: Mutex::new(
+            cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
+        ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
@@ -7024,6 +7103,8 @@ pub fn run() {
             list_log_templates,
             ingest_log_path,
             cancel_log_ingest,
+            get_failed_log_ingest_diagnostic,
+            clear_failed_log_ingest_diagnostic,
             reanalyze_log_corpus,
             cancel_log_reanalysis,
             log_cluster_problems,

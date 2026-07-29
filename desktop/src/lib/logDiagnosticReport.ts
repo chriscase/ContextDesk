@@ -1,5 +1,6 @@
 import type {
   BrandingDto,
+  FailedLogIngestDiagnosticDto,
   LogCorpusStatsDto,
   LogCorpusSummaryDto,
 } from "./host";
@@ -23,6 +24,51 @@ export type LogDiagnosticEnvironment = {
   gitSha: string | null;
   os: string;
 };
+
+export type LogDiagnosticActiveViewInput = {
+  breakpoint: "narrow" | "normal" | "ultrawide";
+  density: "comfortable" | "compact";
+  rowMode: "compact" | "wrap" | "full";
+  metadataPresentation: "standard" | "compact";
+  fieldEmphasis: "balanced" | "payload" | "metadata";
+  timeQuality: "wall" | "mixed" | "order_only";
+  linkMode: "independent" | "follow_cursor" | "align_time";
+  visibleLaneCount: number;
+  laneSourceCounts: number[];
+  filters: {
+    levelCount: number;
+    sourceCount: number;
+    serviceCount: number;
+    hostCount: number;
+    keywordPresent: boolean;
+    tracePresent: boolean;
+    timeFrom: number | null;
+    timeTo: number | null;
+    seqFrom: number | null;
+    seqTo: number | null;
+    templateId: number | null;
+  };
+  find: {
+    active: boolean;
+    matchMode: "literal" | "regex";
+    caseSensitive: boolean;
+    semantic: boolean;
+    residentMatches: number;
+  };
+  selectedSeqs: number[];
+  highlightedSeqs: number[];
+  focusedSeq: number | null;
+  viewportAnchors: { laneId: string; seq: number }[];
+  filtersCollapsed: boolean;
+  investigationCollapsed: boolean;
+  uiState: {
+    category: "ready" | "active" | "busy" | "error";
+    busy: boolean;
+    hasError: boolean;
+  };
+};
+
+export type LogDiagnosticActiveView = LogDiagnosticActiveViewInput;
 
 export type LogDiagnosticManifest = {
   schemaVersion: 1;
@@ -65,7 +111,25 @@ export type LogDiagnosticManifest = {
     embedding: {
       state: "keyword_only" | "deferred" | "partial" | "complete";
     };
-  };
+  } | null;
+  failedIngest: {
+    schemaVersion: number;
+    generatedAt: number;
+    sourceKind: string;
+    reasonCode: string;
+    summary: string;
+    cancelled: boolean;
+    progress: {
+      lastPhase: string;
+      linesProcessed: number | null;
+      filesProcessed: number | null;
+      bytesProcessed: number | null;
+      templates: number | null;
+      updatesSeen: number;
+    };
+    retention: "memory_only_until_clear_next_ingest_or_restart";
+  } | null;
+  activeView: LogDiagnosticActiveView | null;
   currentStatus: LogDiagnosticStatus | null;
   userNote: string | null;
 };
@@ -149,7 +213,7 @@ function basenameExample(example: string): string {
 
 function buildStats(
   stats: LogCorpusStatsDto | null,
-): LogDiagnosticManifest["corpus"]["stats"] {
+): NonNullable<LogDiagnosticManifest["corpus"]>["stats"] {
   if (!stats) return null;
   return {
     importedFiles: safeCount(stats.files),
@@ -172,6 +236,99 @@ function buildStats(
   };
 }
 
+function boundedSeqs(values: number[]): number[] {
+  return [
+    ...new Set(
+      values
+        .filter((value) => Number.isSafeInteger(value) && value >= 0)
+        .map((value) => Math.floor(value)),
+    ),
+  ]
+    .sort((left, right) => left - right)
+    .slice(0, 32);
+}
+
+function buildActiveView(
+  view: LogDiagnosticActiveViewInput | null | undefined,
+): LogDiagnosticActiveView | null {
+  if (!view) return null;
+  return {
+    breakpoint: view.breakpoint,
+    density: view.density,
+    rowMode: view.rowMode,
+    metadataPresentation: view.metadataPresentation,
+    fieldEmphasis: view.fieldEmphasis,
+    timeQuality: view.timeQuality,
+    linkMode: view.linkMode,
+    visibleLaneCount: Math.min(4, safeCount(view.visibleLaneCount)),
+    laneSourceCounts: view.laneSourceCounts
+      .slice(0, 4)
+      .map((value) => safeCount(value)),
+    filters: {
+      levelCount: safeCount(view.filters.levelCount),
+      sourceCount: safeCount(view.filters.sourceCount),
+      serviceCount: safeCount(view.filters.serviceCount),
+      hostCount: safeCount(view.filters.hostCount),
+      keywordPresent: Boolean(view.filters.keywordPresent),
+      tracePresent: Boolean(view.filters.tracePresent),
+      timeFrom: safeOptionalNumber(view.filters.timeFrom),
+      timeTo: safeOptionalNumber(view.filters.timeTo),
+      seqFrom: safeOptionalNumber(view.filters.seqFrom),
+      seqTo: safeOptionalNumber(view.filters.seqTo),
+      templateId: safeOptionalNumber(view.filters.templateId),
+    },
+    find: {
+      active: Boolean(view.find.active),
+      matchMode: view.find.matchMode,
+      caseSensitive: Boolean(view.find.caseSensitive),
+      semantic: Boolean(view.find.semantic),
+      residentMatches: safeCount(view.find.residentMatches),
+    },
+    selectedSeqs: boundedSeqs(view.selectedSeqs),
+    highlightedSeqs: boundedSeqs(view.highlightedSeqs),
+    focusedSeq: safeOptionalNumber(view.focusedSeq),
+    viewportAnchors: view.viewportAnchors
+      .filter((anchor) => Number.isSafeInteger(anchor.seq) && anchor.seq >= 0)
+      .slice(0, 4)
+      .map((anchor) => ({
+        laneId: sanitizeIdentifier(anchor.laneId, 32),
+        seq: Math.floor(anchor.seq),
+      })),
+    filtersCollapsed: Boolean(view.filtersCollapsed),
+    investigationCollapsed: Boolean(view.investigationCollapsed),
+    uiState: {
+      category: view.uiState.category,
+      busy: Boolean(view.uiState.busy),
+      hasError: Boolean(view.uiState.hasError),
+    },
+  };
+}
+
+function buildFailedIngest(
+  failure: FailedLogIngestDiagnosticDto | null | undefined,
+): LogDiagnosticManifest["failedIngest"] {
+  if (!failure) return null;
+  return {
+    schemaVersion: safeCount(failure.schemaVersion),
+    generatedAt: safeCount(failure.generatedAt),
+    sourceKind: sanitizeReason(failure.sourceKind),
+    reasonCode: sanitizeReason(failure.reasonCode),
+    summary:
+      sanitizeText(failure.summary, MAX_STATUS_CHARS) ||
+      "Import failed before publication.",
+    cancelled: Boolean(failure.cancelled),
+    progress: {
+      lastPhase: sanitizeReason(failure.progress.lastPhase),
+      linesProcessed: safeOptionalNumber(failure.progress.linesProcessed),
+      filesProcessed: safeOptionalNumber(failure.progress.filesProcessed),
+      bytesProcessed: safeOptionalNumber(failure.progress.bytesProcessed),
+      templates: safeOptionalNumber(failure.progress.templates),
+      updatesSeen: safeCount(failure.progress.updatesSeen),
+    },
+    retention: "memory_only_until_clear_next_ingest_or_restart",
+  };
+}
+
 function lineCounts(values: Record<string, number>): string[] {
   const entries = Object.entries(values);
   return entries.length
@@ -184,9 +341,13 @@ function nullable(value: string | null): string {
 }
 
 function renderMarkdown(manifest: LogDiagnosticManifest): string {
-  const stats = manifest.corpus.stats;
+  const stats = manifest.corpus?.stats ?? null;
+  const failure = manifest.failedIngest;
+  const activeView = manifest.activeView;
   return [
-    "# ContextDesk corpus diagnostic",
+    manifest.corpus
+      ? "# ContextDesk corpus diagnostic"
+      : "# ContextDesk failed-ingest diagnostic",
     "",
     "> Redacted support report. Review before sharing.",
     "> Excludes raw logs/event payloads, absolute paths, chats, provider/model inventories, secrets, and evaluator truth.",
@@ -198,40 +359,86 @@ function renderMarkdown(manifest: LogDiagnosticManifest): string {
     `- OS: ${manifest.application.os}`,
     `- Generated: ${manifest.generatedAt}`,
     "",
-    "## Corpus",
-    `- ID: ${manifest.corpus.id}`,
-    `- Name: ${manifest.corpus.name}`,
-    `- Created (Unix seconds): ${manifest.corpus.createdAt}`,
-    `- Engine: ${manifest.corpus.engine}`,
-    `- Events: ${manifest.corpus.eventCount}`,
-    `- Templates: ${manifest.corpus.templateCount}`,
-    `- Embedding state: ${manifest.corpus.embedding.state}`,
-    ...(stats
+    ...(manifest.corpus
       ? [
-          `- Files: ${stats.importedFiles} imported / ${stats.discoveredFiles} discovered`,
-          `- Omissions: ${stats.excludedFiles} excluded / ${stats.failedFiles} failed / ${stats.ignoredFiles} ignored`,
-          `- Partial corpus: ${stats.partial ? "yes" : "no"}`,
-          `- Source bytes: ${stats.sourceBytes}`,
-          `- Corpus bytes: ${stats.corpusBytes}`,
-          `- Stored time bounds: ${nullable(stats.storedTimeMin?.toString() ?? null)} to ${nullable(stats.storedTimeMax?.toString() ?? null)}`,
-          `- Time quality: ${stats.timeQuality}`,
+          "## Corpus",
+          `- ID: ${manifest.corpus.id}`,
+          `- Name: ${manifest.corpus.name}`,
+          `- Created (Unix seconds): ${manifest.corpus.createdAt}`,
+          `- Engine: ${manifest.corpus.engine}`,
+          `- Events: ${manifest.corpus.eventCount}`,
+          `- Templates: ${manifest.corpus.templateCount}`,
+          `- Embedding state: ${manifest.corpus.embedding.state}`,
+          ...(stats
+            ? [
+                `- Files: ${stats.importedFiles} imported / ${stats.discoveredFiles} discovered`,
+                `- Omissions: ${stats.excludedFiles} excluded / ${stats.failedFiles} failed / ${stats.ignoredFiles} ignored`,
+                `- Partial corpus: ${stats.partial ? "yes" : "no"}`,
+                `- Source bytes: ${stats.sourceBytes}`,
+                `- Corpus bytes: ${stats.corpusBytes}`,
+                `- Stored time bounds: ${nullable(stats.storedTimeMin?.toString() ?? null)} to ${nullable(stats.storedTimeMax?.toString() ?? null)}`,
+                `- Time quality: ${stats.timeQuality}`,
+                "",
+                "### Level counts",
+                ...lineCounts(stats.levelCounts),
+                "",
+                "### Parse-format counts",
+                ...lineCounts(stats.formatCounts),
+                "",
+                "### Import reason counts",
+                ...lineCounts(stats.reasonCounts),
+                "",
+                "### Bounded basename-only examples",
+                ...(stats.basenameExamples.length
+                  ? stats.basenameExamples.map((example) => `- ${example}`)
+                  : ["- none recorded"]),
+              ]
+            : ["- Persisted detailed statistics: unavailable"]),
           "",
-          "### Level counts",
-          ...lineCounts(stats.levelCounts),
-          "",
-          "### Parse-format counts",
-          ...lineCounts(stats.formatCounts),
-          "",
-          "### Import reason counts",
-          ...lineCounts(stats.reasonCounts),
-          "",
-          "### Bounded basename-only examples",
-          ...(stats.basenameExamples.length
-            ? stats.basenameExamples.map((example) => `- ${example}`)
-            : ["- none recorded"]),
         ]
-      : ["- Persisted detailed statistics: unavailable"]),
-    "",
+      : []),
+    ...(failure
+      ? [
+          "## Failed ingest",
+          `- Reason: ${failure.reasonCode}`,
+          `- Summary: ${failure.summary}`,
+          `- Source kind: ${failure.sourceKind}`,
+          `- Cancelled: ${failure.cancelled ? "yes" : "no"}`,
+          `- Last phase: ${failure.progress.lastPhase}`,
+          `- Lines observed: ${nullable(failure.progress.linesProcessed?.toString() ?? null)}`,
+          `- Files observed: ${nullable(failure.progress.filesProcessed?.toString() ?? null)}`,
+          `- Bytes observed: ${nullable(failure.progress.bytesProcessed?.toString() ?? null)}`,
+          `- Templates observed: ${nullable(failure.progress.templates?.toString() ?? null)}`,
+          "- Corpus published: no",
+          "- Retention: memory only; cleared explicitly, by the next ingest attempt, or on app restart",
+          "",
+        ]
+      : []),
+    ...(activeView
+      ? [
+          "## Active Explorer view (payload-free)",
+          `- Layout: ${activeView.breakpoint} / ${activeView.density}`,
+          `- Rows: ${activeView.rowMode} / ${activeView.metadataPresentation} metadata / ${activeView.fieldEmphasis} focus`,
+          `- Time: ${activeView.timeQuality} / ${activeView.linkMode}`,
+          `- Lanes: ${activeView.visibleLaneCount} visible; source counts ${activeView.laneSourceCounts.join(", ") || "none"}`,
+          `- Filter counts: ${activeView.filters.levelCount} levels / ${activeView.filters.sourceCount} sources / ${activeView.filters.serviceCount} services / ${activeView.filters.hostCount} hosts`,
+          `- Filter values withheld: keyword ${activeView.filters.keywordPresent ? "present" : "absent"} / trace ${activeView.filters.tracePresent ? "present" : "absent"}`,
+          `- Time bounds: ${nullable(activeView.filters.timeFrom?.toString() ?? null)} to ${nullable(activeView.filters.timeTo?.toString() ?? null)}`,
+          `- Sequence bounds: ${nullable(activeView.filters.seqFrom?.toString() ?? null)} to ${nullable(activeView.filters.seqTo?.toString() ?? null)}`,
+          `- Template filter: ${nullable(activeView.filters.templateId?.toString() ?? null)}`,
+          `- Find: ${activeView.find.active ? activeView.find.matchMode : "off"}; ${activeView.find.residentMatches} resident identities`,
+          `- Selected seqs (bounded): ${activeView.selectedSeqs.join(", ") || "none"}`,
+          `- Highlighted seqs (bounded): ${activeView.highlightedSeqs.join(", ") || "none"}`,
+          `- Focused seq: ${nullable(activeView.focusedSeq?.toString() ?? null)}`,
+          `- Viewport anchors: ${
+            activeView.viewportAnchors
+              .map((anchor) => `${anchor.laneId}:${anchor.seq}`)
+              .join(", ") || "none"
+          }`,
+          `- UI state: ${activeView.uiState.category}; busy ${activeView.uiState.busy ? "yes" : "no"}; error present ${activeView.uiState.hasError ? "yes" : "no"}`,
+          "",
+        ]
+      : []),
     "## Current app status (redacted)",
     manifest.currentStatus
       ? `- ${manifest.currentStatus.kind}: ${manifest.currentStatus.message}`
@@ -270,13 +477,35 @@ export function portableDiagnosticOsHint(): string {
 }
 
 export function buildLogDiagnosticReport(args: {
-  corpus: LogCorpusSummaryDto;
+  corpus?: LogCorpusSummaryDto | null;
+  failedIngest?: FailedLogIngestDiagnosticDto | null;
+  activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus?: LogDiagnosticStatus | null;
   userNote?: string;
   generatedAt?: Date;
 }): LogDiagnosticReport {
-  const embeddingState = args.corpus.embedding?.state ?? "keyword_only";
+  if (Boolean(args.corpus) === Boolean(args.failedIngest)) {
+    throw new Error(
+      "Diagnostic report requires exactly one corpus or failed-ingest subject",
+    );
+  }
+  const embeddingState = args.corpus?.embedding?.state ?? "keyword_only";
+  const corpus = args.corpus
+    ? {
+        id: sanitizeIdentifier(args.corpus.id),
+        name:
+          sanitizeText(args.corpus.name, MAX_LABEL_CHARS) || "Unnamed corpus",
+        createdAt: safeCount(args.corpus.createdAt),
+        engine: sanitizeIdentifier(args.corpus.engine, 64),
+        eventCount: safeCount(args.corpus.eventCount),
+        templateCount: safeCount(args.corpus.templateCount),
+        stats: buildStats(args.corpus.stats),
+        embedding: {
+          state: embeddingState,
+        },
+      }
+    : null;
   const manifest: LogDiagnosticManifest = {
     schemaVersion: 1,
     generatedAt: (args.generatedAt ?? new Date()).toISOString(),
@@ -293,19 +522,11 @@ export function buildLogDiagnosticReport(args: {
         : null,
       os: sanitizeText(args.environment.os, 64) || "unknown",
     },
-    corpus: {
-      id: sanitizeIdentifier(args.corpus.id),
-      name: sanitizeText(args.corpus.name, MAX_LABEL_CHARS) || "Unnamed corpus",
-      createdAt: safeCount(args.corpus.createdAt),
-      engine: sanitizeIdentifier(args.corpus.engine, 64),
-      eventCount: safeCount(args.corpus.eventCount),
-      templateCount: safeCount(args.corpus.templateCount),
-      stats: buildStats(args.corpus.stats),
-      embedding: {
-        state: embeddingState,
-      },
-    },
-    currentStatus: args.currentStatus
+    corpus,
+    failedIngest: buildFailedIngest(args.failedIngest),
+    activeView: buildActiveView(args.activeView),
+    currentStatus:
+      !args.activeView && !args.failedIngest && args.currentStatus
       ? {
           kind: args.currentStatus.kind,
           message:

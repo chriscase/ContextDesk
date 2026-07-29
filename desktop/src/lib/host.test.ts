@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hostExportHandbookDocument,
+  hostClearFailedLogIngestDiagnostic,
+  hostGetFailedLogIngestDiagnostic,
   hostGetHandbookPage,
   hostOpenEngineeringHandbook,
   hostResolveHandbookLink,
@@ -72,6 +74,26 @@ describe("hostSaveLogDiagnosticReport", () => {
       format: "markdown",
       content: "# redacted diagnostic",
     });
+  });
+});
+
+describe("failed-ingest diagnostic host boundary", () => {
+  it("reads and explicitly clears only the one transient host DTO", async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        reasonCode: "no_safe_events",
+        redacted: true,
+      })
+      .mockResolvedValueOnce(true);
+
+    await hostGetFailedLogIngestDiagnostic();
+    await hostClearFailedLogIngestDiagnostic();
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_failed_log_ingest_diagnostic", undefined],
+      ["clear_failed_log_ingest_diagnostic", undefined],
+    ]);
   });
 });
 

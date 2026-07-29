@@ -33,6 +33,17 @@ vi.mock("../../lib/host", () => ({
     engine: "duckdb",
     createdAt: 0,
   })),
+  hostGetBranding: vi.fn(async () => ({
+    name: "ContextDesk",
+    slug: "contextdesk",
+    tagline: "Developer knowledge workbench",
+    version: "0.1.0",
+    protocol: "cd.v1",
+    channel: "dev",
+    git_sha: "de43caeba66df05068a50db9356efad3b64a4a45",
+    git_describe: null,
+    identity_line: "v0.1.0 · channel=dev",
+  })),
   hostSetActiveLogCorpus: vi.fn(async () => "c1"),
   hostLogListBookmarks: vi.fn(async () => []),
   hostListChatModels: vi.fn(async () => [
@@ -137,6 +148,7 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostSaveLogDiagnosticReport: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
   agentTurn: vi.fn(async () => []),
@@ -448,6 +460,59 @@ describe("LogExplorer shell", () => {
     expect(within(vlist).getByText("worker.log")).toBeTruthy();
     expect(root.getAttribute("data-lane-count")).toBe("1");
     expect(screen.getByText(/Keyword-only corpus/)).toBeTruthy();
+  });
+
+  it("exports a bounded active-view diagnostic without payload, source, filter text, chats, or models", async () => {
+    const writeText = vi.fn(async (_value: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText(/auth failure/);
+
+    fireEvent.change(screen.getByLabelText("Filter logs"), {
+      target: { value: "customer-private-filter" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-filter-apply"));
+    fireEvent.click(screen.getByText(/auth failure/));
+
+    const trigger = screen.getByRole("button", {
+      name: "Export diagnostics…",
+    });
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Export corpus diagnostics",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy Markdown" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const copied = String(writeText.mock.calls[0]?.[0]);
+    expect(copied).toContain("Active Explorer view (payload-free)");
+    expect(copied).toContain("Selected seqs (bounded): 1");
+    expect(copied).toContain("Filter values withheld: keyword present");
+    for (const forbidden of [
+      "customer-private-filter",
+      "auth failure",
+      "api.log",
+      "worker.log",
+      "triage-1",
+      "Tools Provider",
+    ]) {
+      expect(copied).not.toContain(forbidden);
+    }
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    const json = within(dialog).getByLabelText("JSON diagnostic preview")
+      .textContent;
+    expect(json).toContain('"activeView"');
+    expect(json).toContain('"sourceCount": 0');
+    expect(json).not.toContain("customer-private-filter");
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("moves the timeline cursor with the visible log viewport without backend work", async () => {

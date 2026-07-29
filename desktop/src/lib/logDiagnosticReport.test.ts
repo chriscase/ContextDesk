@@ -82,12 +82,12 @@ describe("buildLogDiagnosticReport", () => {
       generatedAt: new Date("2026-07-28T12:00:00.000Z"),
     });
 
-    expect(report.manifest.corpus.stats?.basenameExamples).toEqual([
+    expect(report.manifest.corpus?.stats?.basenameExamples).toEqual([
       "binary: core.bin",
       "open_failed: secret.log",
       "hidden: .ignored.log",
     ]);
-    expect(report.manifest.corpus.embedding).toEqual({ state: "partial" });
+    expect(report.manifest.corpus?.embedding).toEqual({ state: "partial" });
     expect(report.markdown).toContain("25,000".replace(",", ""));
     expect(report.markdown).toContain("json: 20000");
     expect(report.markdown).toContain("raw logs and event payloads");
@@ -139,10 +139,10 @@ describe("buildLogDiagnosticReport", () => {
     );
     expect(report.manifest.currentStatus?.message.length).toBe(800);
     expect(
-      report.manifest.corpus.stats?.basenameExamples,
+      report.manifest.corpus?.stats?.basenameExamples,
     ).toHaveLength(12);
     expect(
-      Object.keys(report.manifest.corpus.stats?.levelCounts ?? {}),
+      Object.keys(report.manifest.corpus?.stats?.levelCounts ?? {}),
     ).toHaveLength(32);
     expect(new TextEncoder().encode(report.markdown).length).toBeLessThanOrEqual(
       LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
@@ -163,9 +163,139 @@ describe("buildLogDiagnosticReport", () => {
       },
     });
 
-    expect(report.manifest.corpus.stats?.timeQuality).toBe(
+    expect(report.manifest.corpus?.stats?.timeQuality).toBe(
       "not_persisted_in_corpus_summary",
     );
     expect(report.markdown).not.toContain("wall clock");
+  });
+
+  it("exports a failed ingest without a corpus, raw error, or source identity", () => {
+    const report = buildLogDiagnosticReport({
+      failedIngest: {
+        schemaVersion: 1,
+        generatedAt: 1_753_680_000,
+        sourceKind: "zip",
+        reasonCode: "invalid_archive",
+        summary:
+          "The selected archive could not be validated; no corpus was published.",
+        cancelled: false,
+        progress: {
+          lastPhase: "scan",
+          linesProcessed: 0,
+          filesProcessed: 12,
+          bytesProcessed: 4096,
+          templates: 0,
+          updatesSeen: 4,
+        },
+        redacted: true,
+      },
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "macOS",
+      },
+      currentStatus: {
+        kind: "error",
+        message:
+          "zip failed at /Users/employee/private.internal/secret.zip Bearer top-secret-token",
+      },
+    });
+
+    expect(report.manifest.corpus).toBeNull();
+    expect(report.manifest.failedIngest?.reasonCode).toBe("invalid_archive");
+    expect(report.markdown).toContain("Corpus published: no");
+    expect(report.markdown).toContain(
+      "cleared explicitly, by the next ingest attempt, or on app restart",
+    );
+    const exported = `${report.markdown}\n${report.json}`;
+    for (const forbidden of [
+      "/Users/employee",
+      "private.internal",
+      "secret.zip",
+      "top-secret-token",
+    ]) {
+      expect(exported).not.toContain(forbidden);
+    }
+  });
+
+  it("bounds active Explorer state without exporting filter or source values", () => {
+    const report = buildLogDiagnosticReport({
+      corpus: privateCorpus(),
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "Linux",
+      },
+      activeView: {
+        breakpoint: "ultrawide",
+        density: "compact",
+        rowMode: "wrap",
+        metadataPresentation: "compact",
+        fieldEmphasis: "payload",
+        timeQuality: "wall",
+        linkMode: "follow_cursor",
+        visibleLaneCount: 2,
+        laneSourceCounts: [3, 2],
+        filters: {
+          levelCount: 1,
+          sourceCount: 2,
+          serviceCount: 1,
+          hostCount: 1,
+          keywordPresent: true,
+          tracePresent: true,
+          timeFrom: 100,
+          timeTo: 200,
+          seqFrom: 10,
+          seqTo: 999,
+          templateId: 42,
+        },
+        find: {
+          active: true,
+          matchMode: "regex",
+          caseSensitive: true,
+          semantic: false,
+          residentMatches: 50,
+        },
+        selectedSeqs: Array.from({ length: 80 }, (_, index) => 80 - index),
+        highlightedSeqs: [12, 11],
+        focusedSeq: 12,
+        viewportAnchors: [
+          { laneId: "lane-0", seq: 11 },
+          { laneId: "lane-1", seq: 12 },
+        ],
+        filtersCollapsed: true,
+        investigationCollapsed: false,
+        uiState: {
+          category: "active",
+          busy: false,
+          hasError: false,
+        },
+      },
+      currentStatus: {
+        kind: "status",
+        message:
+          "Filter: keyword “customer-private-filter” · source api/private-source.log",
+      },
+    });
+
+    expect(report.manifest.activeView?.selectedSeqs).toHaveLength(32);
+    expect(report.manifest.currentStatus).toBeNull();
+    expect(report.manifest.activeView?.selectedSeqs[0]).toBe(1);
+    expect(report.markdown).toContain("Filter values withheld");
+    const exported = `${report.markdown}\n${report.json}`;
+    for (const forbidden of [
+      "customer@example.internal",
+      "trace-private-value",
+      "customer-private-filter",
+      "api/private-source.log",
+      "private-host.internal",
+    ]) {
+      expect(exported).not.toContain(forbidden);
+    }
+    expect(new TextEncoder().encode(report.json).length).toBeLessThanOrEqual(
+      LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
+    );
   });
 });

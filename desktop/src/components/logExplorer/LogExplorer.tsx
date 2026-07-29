@@ -16,6 +16,7 @@ import {
 import {
   createLogSearchRequestId,
   hostCancelLogSearch,
+  hostGetBranding,
   hostGetLogCorpus,
   hostLogAddBookmark,
   hostLogAddInvestigationEvidence,
@@ -47,6 +48,12 @@ import {
   type ResolvedInvestigationDocumentDto,
   type TimeQuality,
 } from "../../lib/host";
+import {
+  diagnosticEnvironmentFromBranding,
+  portableDiagnosticOsHint,
+  type LogDiagnosticActiveViewInput,
+  type LogDiagnosticEnvironment,
+} from "../../lib/logDiagnosticReport";
 import { applyLogNav, type LogNavAction } from "../../lib/logExplorer/logNav";
 import {
   clampLaneCount,
@@ -121,6 +128,7 @@ import {
 import { InvestigationAddMenu } from "./InvestigationAddMenu";
 import { SaveEvidenceDialog } from "./SaveEvidenceDialog";
 import { TimelineNavigator } from "./TimelineNavigator";
+import { LogDiagnosticDialog } from "../panes/LogDiagnosticDialog";
 import {
   centeredLiteralExcerpt,
   eventRowHeight,
@@ -952,6 +960,10 @@ export function LogExplorer({ corpusId }: Props) {
     startW: number;
   } | null>(null);
   const [status, setStatus] = useState("Ready");
+  const [diagnostic, setDiagnostic] = useState<{
+    environment: LogDiagnosticEnvironment;
+    activeView: LogDiagnosticActiveViewInput;
+  } | null>(null);
   // Resizable columns (px)
   const [filterW, setFilterW] = useState(220);
   const [chatW, setChatW] = useState(300);
@@ -966,6 +978,7 @@ export function LogExplorer({ corpusId }: Props) {
   const saveEvidenceTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationAddTriggerRef = useRef<HTMLButtonElement>(null);
   const investigationEditTriggerRef = useRef<HTMLButtonElement>(null);
+  const diagnosticTriggerRef = useRef<HTMLButtonElement>(null);
   const chatDraftRequestIdRef = useRef(0);
   const previousFiltersCollapsedRef = useRef(filtersCollapsed);
   const dragRef = useRef<"filters" | "chat" | null>(null);
@@ -2284,6 +2297,81 @@ export function LogExplorer({ corpusId }: Props) {
         viewportAnchors: laneViewportAnchors,
       });
     };
+
+  const openDiagnostics = async () => {
+    if (!summary) return;
+    let environment: LogDiagnosticEnvironment = {
+      appVersion: "unknown",
+      channel: "unknown",
+      gitSha: null,
+      os: portableDiagnosticOsHint(),
+    };
+    try {
+      environment = diagnosticEnvironmentFromBranding(await hostGetBranding());
+    } catch {
+      /* Keep an honest unknown identity if host branding is unavailable. */
+    }
+    setDiagnostic({
+      environment,
+      activeView: {
+        breakpoint,
+        density,
+        rowMode: lineMode,
+        metadataPresentation,
+        fieldEmphasis,
+        timeQuality,
+        linkMode,
+        visibleLaneCount: laneCount,
+        laneSourceCounts: lanes
+          .slice(0, laneCount)
+          .map((lane) => lane.sources.length),
+        filters: {
+          levelCount: filters.levels.length,
+          sourceCount: filters.sources.length,
+          serviceCount: filters.services.length,
+          hostCount: filters.hosts.length,
+          keywordPresent: Boolean(filters.keyword),
+          tracePresent: Boolean(filters.traceId),
+          timeFrom: filters.timeFrom,
+          timeTo: filters.timeTo,
+          seqFrom: filters.seqFrom,
+          seqTo: filters.seqTo,
+          templateId: filters.templateId,
+        },
+        find: {
+          active: Boolean(findActiveQuery),
+          matchMode: findMatchMode,
+          caseSensitive: findCaseSensitive,
+          semantic: findUseSemantic,
+          residentMatches: findMatches.length,
+        },
+        selectedSeqs: [...selected],
+        highlightedSeqs: [...highlight],
+        focusedSeq: detail?.seq ?? null,
+        viewportAnchors: Object.entries(laneViewportAnchors).map(
+          ([laneId, eventRef]) => ({ laneId, seq: eventRef.seq }),
+        ),
+        filtersCollapsed,
+        investigationCollapsed: chatCollapsed,
+        uiState: {
+          category: error
+            ? "error"
+            : busy
+              ? "busy"
+              : status === "Ready"
+                ? "ready"
+                : "active",
+          busy,
+          hasError: Boolean(error),
+        },
+      },
+    });
+  };
+
+  const closeDiagnostics = () => {
+    setDiagnostic(null);
+    queueMicrotask(() => diagnosticTriggerRef.current?.focus());
+  };
 
   const bookmarkSelection = async () => {
     const selection = selectedEvidenceRefs();
@@ -4109,6 +4197,15 @@ export function LogExplorer({ corpusId }: Props) {
           >
             Bookmark (B)
           </button>
+          <button
+            ref={diagnosticTriggerRef}
+            type="button"
+            className="log-explorer__btn"
+            disabled={!summary}
+            onClick={() => void openDiagnostics()}
+          >
+            Export diagnostics…
+          </button>
         </div>
       </header>
 
@@ -5747,6 +5844,16 @@ export function LogExplorer({ corpusId }: Props) {
           triggerRef={investigationEditTriggerRef}
           onSave={(draft) => void saveEditedInvestigationItem(draft)}
           onDismiss={() => setEditInvestigationItem(null)}
+        />
+      ) : null}
+
+      {diagnostic && summary ? (
+        <LogDiagnosticDialog
+          corpus={summary}
+          activeView={diagnostic.activeView}
+          environment={diagnostic.environment}
+          currentStatus={null}
+          onDismiss={closeDiagnostics}
         />
       ) : null}
 

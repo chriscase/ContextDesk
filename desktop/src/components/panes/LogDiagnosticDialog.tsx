@@ -4,11 +4,13 @@ import { saveFileDialog } from "../../lib/dialogs";
 import {
   buildLogDiagnosticReport,
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
+  type LogDiagnosticActiveViewInput,
   type LogDiagnosticEnvironment,
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import {
   hostSaveLogDiagnosticReport,
+  type FailedLogIngestDiagnosticDto,
   type LogCorpusSummaryDto,
 } from "../../lib/host";
 
@@ -16,11 +18,15 @@ type PreviewFormat = "markdown" | "json";
 
 export function LogDiagnosticDialog({
   corpus,
+  failedIngest = null,
+  activeView = null,
   environment,
   currentStatus,
   onDismiss,
 }: {
-  corpus: LogCorpusSummaryDto;
+  corpus: LogCorpusSummaryDto | null;
+  failedIngest?: FailedLogIngestDiagnosticDto | null;
+  activeView?: LogDiagnosticActiveViewInput | null;
   environment: LogDiagnosticEnvironment;
   currentStatus: LogDiagnosticStatus | null;
   onDismiss: () => void;
@@ -41,13 +47,25 @@ export function LogDiagnosticDialog({
     () =>
       buildLogDiagnosticReport({
         corpus,
+        failedIngest,
+        activeView,
         environment,
         currentStatus,
         userNote,
         generatedAt: generatedAtRef.current,
       }),
-    [corpus, currentStatus, environment, userNote],
+    [
+      activeView,
+      corpus,
+      currentStatus,
+      environment,
+      failedIngest,
+      userNote,
+    ],
   );
+  const failed = failedIngest != null;
+  const subjectLabel = corpus?.name ?? "the latest failed import";
+  const subjectId = corpus?.id.slice(0, 8) ?? "failed-ingest";
 
   useEffect(() => {
     queueMicrotask(() => noteRef.current?.focus());
@@ -70,8 +88,10 @@ export function LogDiagnosticDialog({
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
     const path = await saveFileDialog(
-      markdown ? "Save corpus diagnostics" : "Save corpus diagnostics as JSON",
-      `contextdesk-${corpus.id.slice(0, 8)}-diagnostics.${markdown ? "md" : "json"}`,
+      markdown
+        ? `Save ${failed ? "failed-ingest" : "corpus"} diagnostics`
+        : `Save ${failed ? "failed-ingest" : "corpus"} diagnostics as JSON`,
+      `contextdesk-${subjectId}-diagnostics.${markdown ? "md" : "json"}`,
       [
         markdown
           ? { name: "Markdown", extensions: ["md"] }
@@ -143,9 +163,12 @@ export function LogDiagnosticDialog({
       >
         <header className="log-diagnostic__header">
           <div>
-            <h3 id={titleId}>Export corpus diagnostics</h3>
+            <h3 id={titleId}>
+              Export {failed ? "failed-ingest" : "corpus"} diagnostics
+            </h3>
             <p id={descriptionId}>
-              A bounded, redacted support report for <strong>{corpus.name}</strong>.
+              A bounded, redacted support report for{" "}
+              <strong>{subjectLabel}</strong>.
             </p>
           </div>
           <button

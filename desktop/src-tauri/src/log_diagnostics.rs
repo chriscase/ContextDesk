@@ -295,6 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn failed_ingest_and_active_view_json_are_re_redacted_at_the_host_boundary() {
+        let root = tempfile::tempdir().expect("temp root");
+        let destination = root.path().join("failed-ingest.json");
+        let content = r#"{
+  "schemaVersion": 1,
+  "corpus": null,
+  "failedIngest": {
+    "reasonCode": "invalid_archive",
+    "summary": "failed near /Users/employee/private.internal/incident.zip"
+  },
+  "activeView": {
+    "status": "10.4.3.2 Bearer secret-token-value",
+    "selectedSeqs": [1, 2]
+  }
+}"#;
+
+        save_log_diagnostic_report(&destination, "json", content).expect("save report");
+        let saved = std::fs::read_to_string(destination).expect("read report");
+        let parsed: Value = serde_json::from_str(&saved).expect("valid json");
+        assert_eq!(parsed["failedIngest"]["reasonCode"], "invalid_archive");
+        assert_eq!(
+            parsed["activeView"]["selectedSeqs"],
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(parsed["failedIngest"]["summary"], "[REDACTED_PATH]");
+        assert_eq!(parsed["activeView"]["status"], "[REDACTED_PRIVATE_NETWORK]");
+        for forbidden in [
+            "/Users/employee",
+            "private.internal",
+            "incident.zip",
+            "10.4.3.2",
+            "secret-token-value",
+        ] {
+            assert!(!saved.contains(forbidden), "{saved}");
+        }
+    }
+
+    #[test]
     fn rejects_oversized_wrong_extension_and_missing_parent() {
         let root = tempfile::tempdir().expect("temp root");
         let oversized = "x".repeat(MAX_DIAGNOSTIC_BYTES + 1);
