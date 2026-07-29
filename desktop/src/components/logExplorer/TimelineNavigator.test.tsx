@@ -600,10 +600,15 @@ describe("TimelineNavigator", () => {
     expect(zoomedCpu.getAttribute("aria-valuemin")).toBe("1700000010.2");
     expect(zoomedCpu.getAttribute("aria-valuemax")).toBe("1700000029.8");
     expect(screen.getByText(/zoomed/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Zoom to selection" }),
+    ).toBeNull();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Reset full range" }),
-    );
+    const reset = screen.getByRole("button", { name: "Reset full range" });
+    expect(
+      screen.getAllByRole("button", { name: "Reset full range" }),
+    ).toHaveLength(1);
+    fireEvent.click(reset);
     await waitFor(() => {
       const calls = vi.mocked(host.hostLogSharedTimelineSummary).mock.calls;
       expect(calls[calls.length - 1]?.[1]).toEqual({ levels: ["error"] });

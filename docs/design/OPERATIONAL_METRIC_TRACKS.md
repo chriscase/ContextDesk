@@ -33,7 +33,9 @@ flowchart LR
   matching pointer start is ignored.
 - A nonzero brushed range enables **Zoom to selection**. Zoom requeries the
   backend histogram for that range and gives every metric track the same exact
-  visible bounds. **Reset full range** restores the corpus view.
+  visible bounds. That same stable control becomes **Reset full range** after
+  zooming. A new brush changes it back to **Zoom to selection**, preserving
+  progressive zoom without adding another toolbar control.
 - Arrow keys move the shared cursor. Home and End move to the document bounds.
   Shift plus an arrow extends the selected range. Enter or Space commits the
   shared cursor as one bounded nearby-log seek.

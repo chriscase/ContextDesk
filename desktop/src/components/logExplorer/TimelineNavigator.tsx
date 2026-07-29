@@ -178,6 +178,9 @@ export function TimelineNavigator({
     useState<OperationalMetricRange | null>(null);
   const [metricViewRange, setMetricViewRange] =
     useState<OperationalMetricRange | null>(null);
+  const canZoomMetricSelection =
+    metricSelection != null &&
+    metricSelection.to - metricSelection.from >= 1;
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
@@ -893,30 +896,23 @@ export function TimelineNavigator({
                       <button
                         type="button"
                         className="timeline-navigator__metric-action"
-                        disabled={
-                          metricSelection == null ||
-                          metricSelection.to - metricSelection.from < 1
-                        }
+                        disabled={!canZoomMetricSelection && !metricViewRange}
                         onClick={() => {
-                          if (!metricSelection) return;
-                          setMetricViewRange(metricSelection);
-                          setMetricSelection(null);
-                        }}
-                      >
-                        Zoom to selection
-                      </button>
-                      {metricViewRange ? (
-                        <button
-                          type="button"
-                          className="timeline-navigator__metric-action"
-                          onClick={() => {
+                          if (metricSelection && canZoomMetricSelection) {
+                            setMetricViewRange(metricSelection);
+                            setMetricSelection(null);
+                            return;
+                          }
+                          if (metricViewRange) {
                             setMetricViewRange(null);
                             setMetricSelection(null);
-                          }}
-                        >
-                          Reset full range
-                        </button>
-                      ) : null}
+                          }
+                        }}
+                      >
+                        {canZoomMetricSelection || !metricViewRange
+                          ? "Zoom to selection"
+                          : "Reset full range"}
+                      </button>
                     </div>
                     <span title={metricFileName ?? undefined}>
                       {metricFileName} · session only · not persisted
