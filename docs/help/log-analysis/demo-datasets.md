@@ -149,10 +149,10 @@ Expected default import:
 | --- | --- |
 | Events | 250,000 |
 | Sources/services/hosts | 12 synthetic sources · 12 services · 12 `.example` hosts |
-| Source bytes | 63,906,065 |
+| Source bytes | 63,883,809 |
 | Time | 2025-01-01 12:00:00Z–20:40:49Z · wall clock |
 | Levels | 160,000 INFO · 7,500 DEBUG · 37,500 WARN · 45,000 ERROR |
-| Template truth | 650 generator families · 641 production parser templates |
+| Template truth | 650 generator families · 648 production parser templates |
 
 The corpus contains three deterministic multi-source incident windows:
 
@@ -165,10 +165,11 @@ The corpus contains three deterministic multi-source incident windows:
   contention precede a miss storm, database pressure, API timeout, an edge
   503, and bounded-worker recovery.
 
-Each incident role occurs exactly 16 times. Useful literal probes are
-`TRIAGE_SIGNAL_POOL_SATURATION`, `TRIAGE_SIGNAL_KEY_REJECT`, and
-`TRIAGE_SIGNAL_CACHE_STAMPEDE`; the corresponding trace probes are
-`trace-pool-exhaustion`, `trace-key-rollout`, and `trace-cache-stampede`.
+Each incident role occurs exactly 16 times. Useful opaque literal probes are
+`CDLAB2004`, `CDLAB3102`, and `CDLAB4203`; the corresponding trace probes are
+`trace-fixture-a17`, `trace-fixture-b29`, and `trace-fixture-c41`. Runtime log
+records intentionally contain no evaluator incident names or causal-role
+labels; those conclusions remain only in the separate truth manifest.
 
 The many repetitive ERROR events are intentional. A sound investigation must
 not hide all ERROR events. The generated evaluator manifest defines six narrow,

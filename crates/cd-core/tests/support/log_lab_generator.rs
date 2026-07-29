@@ -32,7 +32,7 @@ pub const TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES: usize = 21;
 pub const TRIAGE_STRESS_TEMPLATE_FAMILIES: usize =
     TRIAGE_STRESS_ROUTINE_TEMPLATE_FAMILIES + TRIAGE_STRESS_INCIDENT_TEMPLATE_FAMILIES;
 pub const TRIAGE_STRESS_INCIDENT_REPETITIONS: usize = 16;
-pub const TRIAGE_STRESS_PARSER_TEMPLATE_COUNT: usize = 641;
+pub const TRIAGE_STRESS_PARSER_TEMPLATE_COUNT: usize = 648;
 
 const TRIAGE_STRESS_SCENARIO_ID: &str = "triage-stress";
 const TRIAGE_STRESS_BASE_TS: i64 = 1_735_732_800;
@@ -391,8 +391,8 @@ pub fn generate_triage_stress(root: &Path, event_count: usize) -> LabResult<Gene
         let (source_index, level, trace_id, family_key, message) =
             if let Some(special) = incident_plan.get(&index) {
                 let message = format!(
-                    "event_id=triage-{index:09} incident_id={} role={} {} occurrence={}",
-                    special.incident_id, special.role, special.message, special.occurrence
+                    "event_id=triage-{index:09} {} occurrence={}",
+                    special.message, special.occurrence
                 );
                 let window = incident_windows
                     .entry(special.incident_id.to_string())
@@ -502,12 +502,12 @@ pub fn generate_triage_stress(root: &Path, event_count: usize) -> LabResult<Gene
                 "denoising_contract": "Noise labels are evaluator-only. A product may propose exact-template suppression, but must keep it inspectable, reversible, count-visible, and scoped. It must never silently suppress by level or feed this truth into runtime chat context.",
                 "canonical_queries": [
                     {"kind": "structured", "level": "error", "semantic": false, "purpose": "bounded first evidence pass"},
-                    {"kind": "literal", "text": "TRIAGE_SIGNAL_POOL_SATURATION"},
-                    {"kind": "literal", "text": "TRIAGE_SIGNAL_KEY_REJECT"},
-                    {"kind": "literal", "text": "TRIAGE_SIGNAL_CACHE_STAMPEDE"},
-                    {"kind": "trace", "text": "trace-pool-exhaustion"},
-                    {"kind": "trace", "text": "trace-key-rollout"},
-                    {"kind": "trace", "text": "trace-cache-stampede"}
+                    {"kind": "literal", "text": "CDLAB2004"},
+                    {"kind": "literal", "text": "CDLAB3102"},
+                    {"kind": "literal", "text": "CDLAB4203"},
+                    {"kind": "trace", "text": "trace-fixture-a17"},
+                    {"kind": "trace", "text": "trace-fixture-b29"},
+                    {"kind": "trace", "text": "trace-fixture-c41"}
                 ],
                 "rubric": {
                     "required": [
@@ -681,8 +681,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "warn",
             role: "configuration-change",
             family_key: "incident-pool-config-shrink",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_CONFIG deploy changed db_pool_max old=48 new=6 release=fixture-204",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2001 deploy changed db_pool_max old=48 new=6 release=fixture-204",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -691,8 +691,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "warn",
             role: "retry-trigger",
             family_key: "incident-pool-poison-retry",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_RETRY poison job retried job=fixture-job-7f3a delivery=4",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2002 poison job retried job=fixture-job-7f3a delivery=4",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -701,8 +701,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "amplifier",
             family_key: "incident-pool-transaction-held",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_WORKER poison job retained transaction job=fixture-job-7f3a transaction_open=true",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2003 poison job retained transaction job=fixture-job-7f3a transaction_open=true",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -711,8 +711,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "resource-exhaustion",
             family_key: "incident-pool-saturation",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_SATURATION database pool exhausted active=6 max=6 waiters=87",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2004 database pool exhausted active=6 max=6 waiters=87",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -721,8 +721,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "service-failure",
             family_key: "incident-pool-checkout-timeout",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_TIMEOUT checkout database acquisition timeout request=fixture-request-7f3a",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2005 checkout database acquisition timeout request=fixture-request-7f3a",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -731,8 +731,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "edge-symptom",
             family_key: "incident-pool-edge-504",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_EDGE gateway returned status=504 request=fixture-request-7f3a",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2006 gateway returned status=504 request=fixture-request-7f3a",
         },
         TriageIncidentSpec {
             incident_id: "pool-exhaustion",
@@ -741,8 +741,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "info",
             role: "recovery",
             family_key: "incident-pool-rollback",
-            trace_id: "trace-pool-exhaustion",
-            message: "TRIAGE_SIGNAL_POOL_RECOVERY rollback restored db_pool_max=48 release=fixture-203",
+            trace_id: "trace-fixture-a17",
+            message: "CDLAB2007 rollback restored db_pool_max=48 release=fixture-203",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -751,8 +751,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "warn",
             role: "partial-rollout",
             family_key: "incident-key-partial-rollout",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_ROLLOUT signing key fixture-key-v17 activated region=region-a pending=region-b",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3101 signing key fixture-key-v17 activated region=region-a pending=region-b",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -761,8 +761,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "verification-failure",
             family_key: "incident-key-unknown-key",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_REJECT verifier rejected unknown signing key key=fixture-key-v17 region=region-b",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3102 verifier rejected unknown signing key key=fixture-key-v17 region=region-b",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -771,8 +771,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "client-symptom",
             family_key: "incident-key-gateway-401",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_GATEWAY gateway authentication spike status=401 region=region-b",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3103 gateway authentication spike status=401 region=region-b",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -781,8 +781,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "stale-cache",
             family_key: "incident-key-cache-stale",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_CACHE verifier key cache stale expected=fixture-key-v17 loaded=fixture-key-v16",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3104 verifier key cache stale expected=fixture-key-v17 loaded=fixture-key-v16",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -791,8 +791,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "checkout-impact",
             family_key: "incident-key-checkout-denied",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_CHECKOUT checkout denied valid synthetic session status=401 region=region-b",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3105 checkout denied valid synthetic session status=401 region=region-b",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -801,8 +801,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "info",
             role: "rollout-complete",
             family_key: "incident-key-rollout-complete",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_RECOVERY signing key rollout completed key=fixture-key-v17 regions=all",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3106 signing key rollout completed key=fixture-key-v17 regions=all",
         },
         TriageIncidentSpec {
             incident_id: "key-rollout",
@@ -811,8 +811,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "info",
             role: "observed-recovery",
             family_key: "incident-key-verify-recovery",
-            trace_id: "trace-key-rollout",
-            message: "TRIAGE_SIGNAL_KEY_VERIFY_RECOVERY verifier accepted key=fixture-key-v17 region=region-b",
+            trace_id: "trace-fixture-b29",
+            message: "CDLAB3107 verifier accepted key=fixture-key-v17 region=region-b",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -821,8 +821,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "warn",
             role: "eviction-pressure",
             family_key: "incident-cache-eviction",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_EVICTION catalog cache evicted hot set reason=memory-pressure keys=6400",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4201 catalog cache evicted hot set reason=memory-pressure keys=6400",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -831,8 +831,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "warn",
             role: "refresh-contention",
             family_key: "incident-cache-refresh-contention",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_REFRESH refresh lease contention workers=48 keyspace=catalog-hot",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4202 refresh lease contention workers=48 keyspace=catalog-hot",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -841,8 +841,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "miss-storm",
             family_key: "incident-cache-miss-storm",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_STAMPEDE inventory cache miss storm misses_per_second=9200",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4203 inventory cache miss storm misses_per_second=9200",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -851,8 +851,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "database-overload",
             family_key: "incident-cache-database-overload",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_DATABASE read replicas overloaded active_queries=384 queue=211",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4204 read replicas overloaded active_queries=384 queue=211",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -861,8 +861,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "service-timeout",
             family_key: "incident-cache-api-timeout",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_TIMEOUT catalog request exceeded deadline duration_ms=8000",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4205 catalog request exceeded deadline duration_ms=8000",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -871,8 +871,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "error",
             role: "edge-symptom",
             family_key: "incident-cache-edge-503",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_EDGE gateway returned status=503 route=/catalog",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4206 gateway returned status=503 route=/catalog",
         },
         TriageIncidentSpec {
             incident_id: "cache-stampede",
@@ -881,8 +881,8 @@ fn triage_incident_specs() -> [TriageIncidentSpec; TRIAGE_STRESS_INCIDENT_TEMPLA
             level: "info",
             role: "recovery",
             family_key: "incident-cache-warm-recovery",
-            trace_id: "trace-cache-stampede",
-            message: "TRIAGE_SIGNAL_CACHE_RECOVERY hot set warmed refresh_workers=4 status=stable",
+            trace_id: "trace-fixture-c41",
+            message: "CDLAB4207 hot set warmed refresh_workers=4 status=stable",
         },
     ]
 }

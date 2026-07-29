@@ -232,7 +232,7 @@ It deliberately combines:
   relative to the corpus but still deterministic and independently searchable.
 
 The generator records 650 exact family identities. Production ingest currently
-reduces those to exactly 641 parser templates; the distinction is explicit in
+reduces those to exactly 648 parser templates; the distinction is explicit in
 the generated truth manifest. The evaluator-only manifest also records exact
 per-source counts, safe exact-template noise candidates, incident windows,
 canonical probes, and a broad-chat rubric.
@@ -243,10 +243,10 @@ Import only:
 target/contextdesk-demo-lab/triage-stress-250k/scenarios/triage-stress/import/
 ```
 
-Do not import or attach its sibling `truth/` directory. Useful probes include
-`TRIAGE_SIGNAL_POOL_SATURATION`, `TRIAGE_SIGNAL_KEY_REJECT`,
-`TRIAGE_SIGNAL_CACHE_STAMPEDE`, `trace-pool-exhaustion`,
-`trace-key-rollout`, and `trace-cache-stampede`.
+Do not import or attach its sibling `truth/` directory. Useful opaque probes
+include `CDLAB2004`, `CDLAB3102`, `CDLAB4203`, `trace-fixture-a17`,
+`trace-fixture-b29`, and `trace-fixture-c41`. The imported records do not name
+the evaluator incidents or causal roles; those remain truth-only.
 
 The generated tree is ignored by Git and must remain local. `--events` may be
 overridden down to 10,000; source count and timestamp design are fixed so the

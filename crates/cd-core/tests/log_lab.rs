@@ -819,7 +819,7 @@ fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
     let saturation = search_events(
         &corpus,
         &EventSearchQuery {
-            query: Some("TRIAGE_SIGNAL_POOL_SATURATION".into()),
+            query: Some("CDLAB2004".into()),
             semantic: false,
             k: 20,
             ..Default::default()
@@ -830,7 +830,9 @@ fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
     assert_eq!(saturation.len(), 16);
     assert!(saturation.iter().all(|hit| {
         hit.event.source == "db/database.log"
-            && hit.event.message.contains("incident_id=pool-exhaustion")
+            && hit.event.message.contains("database pool exhausted")
+            && !hit.event.message.contains("incident_id=")
+            && !hit.event.message.contains("role=")
     }));
 
     let clusters = cluster_problems(&corpus, 40).unwrap();
@@ -839,9 +841,9 @@ fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
         clusters
             .iter()
             .flat_map(|cluster| &cluster.exemplars)
-            .any(|example| example.contains("TRIAGE_SIGNAL_POOL_SATURATION")
-                || example.contains("TRIAGE_SIGNAL_KEY_REJECT")
-                || example.contains("TRIAGE_SIGNAL_CACHE_STAMPEDE")),
+            .any(|example| example.contains("CDLAB2004")
+                || example.contains("CDLAB3102")
+                || example.contains("CDLAB4203")),
         "bounded clustering lost every rare severe incident signal"
     );
     let buckets = timeline(&corpus, 60, None, None).unwrap();
@@ -908,11 +910,7 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     let clusters = cluster_problems(&corpus, 40).unwrap();
     let cluster_ms = cluster_started.elapsed().as_millis();
     assert!(clusters.len() <= 40);
-    for signal in [
-        "TRIAGE_SIGNAL_POOL_SATURATION",
-        "TRIAGE_SIGNAL_KEY_REJECT",
-        "TRIAGE_SIGNAL_CACHE_STAMPEDE",
-    ] {
+    for signal in ["CDLAB2004", "CDLAB3102", "CDLAB4203"] {
         let hits = search_events(
             &corpus,
             &EventSearchQuery {
