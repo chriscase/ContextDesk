@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   collectHandbookHeadings,
@@ -73,14 +73,42 @@ describe("HandbookMarkdown", () => {
       />,
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Copy text block" }),
-    );
+    const copy = screen.getByRole("button", { name: "Copy text block" });
+    fireEvent.click(copy);
 
     expect(writeText).toHaveBeenCalledWith(
       "Design <your architecture> with explicit proof.",
     );
-    expect(await screen.findByText("Copied")).toBeTruthy();
+    await waitFor(() => expect(copy.textContent).toBe("Copied"));
+    expect(screen.getByRole("status").textContent).toContain(
+      "text block copied to clipboard",
+    );
+  });
+
+  it("announces clipboard denial and lets the user retry", async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error("clipboard denied");
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(
+      <HandbookMarkdown
+        body={"```text\nKeep evaluator truth outside runtime context.\n```"}
+        headings={[]}
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    const copy = screen.getByRole("button", { name: "Copy text block" });
+    fireEvent.click(copy);
+
+    await waitFor(() => expect(copy.textContent).toBe("Copy failed"));
+    expect(copy.getAttribute("aria-label")).toContain("failed; retry");
+    expect(screen.getByRole("status").textContent).toContain(
+      "Could not copy text block",
+    );
   });
 
   it("presents Mermaid as an accessible semantic card and readable source", () => {

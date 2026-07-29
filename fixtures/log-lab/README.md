@@ -255,11 +255,11 @@ Pinned identity:
 | --- | --- |
 | Import events | 25,000 |
 | Import files | 10 |
-| Import source bytes | 4,201,238 |
+| Import source bytes | 4,201,281 |
 | Time span | 2025-01-01 12:00:00Z–2025-01-08 12:00:00Z (exactly 7 days) |
 | Time quality | Wall clock |
-| Levels | 24,165 INFO · 460 DEBUG · 256 WARN · 119 ERROR |
-| Generated tree SHA-256 | `2b6173f31036bc2a70fd365effa0c5a02db8644fd8e71642de49fe11e64c2bc4` |
+| Levels | 23,984 INFO · 458 DEBUG · 394 WARN · 164 ERROR |
+| Generated tree SHA-256 | `948551a0ffcc32ce27cb0916027e36babb9b2282519c509c7c23592dbd3665c3` |
 
 Long-term golden checks:
 
@@ -271,7 +271,7 @@ Long-term golden checks:
 | Bookmark `BOOKMARK_PAGE_BOUNDARY` | Reopens the source event at index 100 |
 | Bookmark `BOOKMARK_EVICT_WINDOW` | Reopens the source event at index 2,500 after residency eviction |
 | Bookmark `BOOKMARK_NEAR_END` | Reopens the source event at index 24,949 |
-| Filter level ERROR | Reports 119 matching events |
+| Filter level ERROR | Reports 164 matching events |
 | Search `STACK_TRACE_SENTINEL` | Returns a long multiline stack sample |
 | Search `UTF8_café_λ` | Returns the deterministic UTF-8 sample |
 | Align sources around indices 500/501 | Shows the exact shared timestamp without fabricating a log row |

@@ -123,9 +123,9 @@ All paths are relative to the repository root.
 | Dataset | Runtime input path | Expected deterministic result | Evaluator-only path |
 | --- | --- | --- | --- |
 | Compact incident | `fixtures/log-lab/scenarios/checkout-cascade/import/` | 35 events; 6 files; 6,247 source bytes; 16 INFO, 12 WARN, 7 ERROR; wall clock | `fixtures/log-lab/scenarios/checkout-cascade/truth/manifest.json` |
-| Pinned seven-day 25k | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/` | 25,000 events; 10 files; 4,201,238 source bytes; 24,165 INFO, 460 DEBUG, 256 WARN, 119 ERROR; exact seven-day wall span | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/truth/manifest.json` |
+| Pinned seven-day 25k | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/import/` | 25,000 events; 10 files; 4,201,281 source bytes; 23,984 INFO, 458 DEBUG, 394 WARN, 164 ERROR; exact seven-day wall span | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/truth/manifest.json` |
 | Generated seven-day 100k | `target/contextdesk-demo-lab/seven-day-100k/scenarios/behavior-scale/import/` after generation | Exactly 100,000 requested events; generated manifest/console output is authoritative for files, bytes, severities, and hash | `target/contextdesk-demo-lab/seven-day-100k/scenarios/behavior-scale/truth/manifest.json` |
-| Operational metrics | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json` | 3 wall-clock series; 25 points each; CPU 22–96%, heap 410,000,000–824,000,000 bytes, clients 10–120 | Sibling `truth/metric-correlations.v1.json` |
+| Operational metrics | `fixtures/log-lab/acceptance/seven-day-25k/scenarios/behavior-scale/metrics/operational-metrics.v1.json` | 3 wall-clock series over the full seven-day span; CPU 673 points at 16–98%, heap 668 points at 316,800,000–952,000,000 bytes with one explicit collector gap, clients 673 points at 12–180 | Sibling `truth/metric-correlations.v1.json` |
 
 The 100k generator is checked in; its generated output is intentionally not.
 `target/` is ignored by Git, and the generator requires its output directory
@@ -429,12 +429,25 @@ citations, and rubric version—not narrative persuasiveness.
 | Linked tool/context rounds | Configured hard budgets and deadline | Visible cap, timeout, cancellation, or failure |
 | Evaluation screenshot | Only the intended synthetic/redacted view | Recapture if private data is visible |
 
-Reference-machine measurements for the existing deterministic 100k proof are
-one-machine regression observations, not service-level objectives or universal
-claims: 100,000 events across 10 files, roughly 16.4 MB source, 4.449 seconds
-import, 31 ms first page, 15 ms timeline, 73 ms deep Find, and 3.776 seconds for
-the bounded 50k-row regex. Record machine, OS, build mode, commit, corpus
-identity, elapsed time, resident counts, and peak CPU/memory where available.
+Reference-machine measurements are one-machine regression observations, not
+service-level objectives or universal claims. For this fixture revision, a
+current source generation proof produced 100,000 events, 10 import files,
+16,846,375 import bytes, and tree SHA-256
+`e490930b06e5f053686329948a794c0b0e5b65cbbac0486241a4daaa31ba3153`.
+The enclosing generated tree also contains the optional metrics document, so
+the generator's top-level summary reports 11 files and 16,854,783 bytes.
+Generation took 21.648 seconds on one development machine. Do not combine
+import/query timings from an older fixture identity with this tree. Record
+machine, OS, build mode, commit, corpus identity, elapsed time, resident
+counts, and peak CPU/memory where available.
+
+A separate current `ui-medium` 100k product-path proof on the same development
+machine measured 8.189 seconds import, 26 ms first page, 21 ms timeline, 329 ms
+for 12 forward pages, 25 ms reverse page, 89 ms deep Find, and 3.355 seconds for
+the bounded 50k-row regex. Its tree SHA-256 is
+`d5078c5393743d9d88730cc651d8beda1fe0875c7329e82a9601f9cb7257e393`.
+Those measurements describe that generated fixture and machine only; they are
+not interchangeable with the seven-day tree above.
 
 Complexity and hard caps transfer across stacks; those measured values do not.
 A replacement store or renderer must publish its own bounds and measurements.

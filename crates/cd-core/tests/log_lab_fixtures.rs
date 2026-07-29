@@ -811,6 +811,46 @@ fn pinned_seven_day_acceptance_corpus_matches_generator_and_truth() {
     assert_eq!(manifest["expected"]["bytes"], 4_201_281);
     assert_eq!(manifest["expected"]["time_span_secs"], 604_800);
     assert_eq!(manifest["expected"]["severities"]["error"], 164);
+    let canonical_readme =
+        fs::read_to_string(fixture_root().join("README.md")).expect("canonical Log Lab README");
+    let readme_without_commas = canonical_readme.replace(',', "");
+    assert!(
+        readme_without_commas.contains(&format!(
+            "| Import source bytes | {} |",
+            manifest["expected"]["bytes"].as_u64().unwrap()
+        )),
+        "canonical README byte count drifted from the pinned manifest"
+    );
+    assert!(
+        readme_without_commas.contains(&format!(
+            "| Levels | {} INFO · {} DEBUG · {} WARN · {} ERROR |",
+            manifest["expected"]["severities"]["info"].as_u64().unwrap(),
+            manifest["expected"]["severities"]["debug"]
+                .as_u64()
+                .unwrap(),
+            manifest["expected"]["severities"]["warn"].as_u64().unwrap(),
+            manifest["expected"]["severities"]["error"]
+                .as_u64()
+                .unwrap(),
+        )),
+        "canonical README severity counts drifted from the pinned manifest"
+    );
+    assert!(
+        canonical_readme.contains(&format!(
+            "| Generated tree SHA-256 | `{}` |",
+            summary.tree_sha256
+        )),
+        "canonical README tree identity drifted from deterministic generation"
+    );
+    assert!(
+        canonical_readme.contains(&format!(
+            "| Filter level ERROR | Reports {} matching events |",
+            manifest["expected"]["severities"]["error"]
+                .as_u64()
+                .unwrap()
+        )),
+        "canonical README ERROR-filter proof drifted from the pinned manifest"
+    );
 
     let rows = parse_behavior_rows(&pinned_root);
     assert_eq!(rows.len(), 25_000);

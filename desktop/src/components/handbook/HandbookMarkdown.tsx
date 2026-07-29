@@ -64,7 +64,13 @@ function HandbookCodeBlock({
         <button
           type="button"
           className="handbook-code__copy"
-          aria-label={`Copy ${language || "text"} block`}
+          aria-label={
+            copyState === "copied"
+              ? `${language || "text"} block copied`
+              : copyState === "error"
+                ? `Copy ${language || "text"} block failed; retry`
+                : `Copy ${language || "text"} block`
+          }
           onClick={() => void copy()}
         >
           {copyState === "copied"
@@ -73,6 +79,13 @@ function HandbookCodeBlock({
               ? "Copy failed"
               : "Copy"}
         </button>
+        <span className="sr-only" role="status" aria-live="polite">
+          {copyState === "copied"
+            ? `${language || "text"} block copied to clipboard`
+            : copyState === "error"
+              ? `Could not copy ${language || "text"} block`
+              : ""}
+        </span>
       </div>
       <pre>
         <code className={language ? `language-${language}` : undefined}>
