@@ -77,6 +77,20 @@ function hostProgressToWizard(p: ProcessProgressDto): WizardProgressDto {
 
 type DetailTab = "overview" | "search" | "templates" | "analysis";
 
+type CorpusAnalysis = {
+  status: "idle" | "loading" | "ready" | "error";
+  clusters: LogClusterDto[];
+  templates: LogTemplateRowDto[];
+  error: string | null;
+};
+
+const EMPTY_ANALYSIS: CorpusAnalysis = {
+  status: "idle",
+  clusters: [],
+  templates: [],
+  error: null,
+};
+
 type Props = {
   pickDirectory?: () => Promise<string | null>;
   onOpenHelp?: (pageId: string) => void;
@@ -107,10 +121,11 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const [reanalyzing, setReanalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [clusters, setClusters] = useState<LogClusterDto[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<LogSearchHitDto[]>([]);
-  const [templates, setTemplates] = useState<LogTemplateRowDto[]>([]);
+  const [analysisByCorpus, setAnalysisByCorpus] = useState<
+    Record<string, CorpusAnalysis>
+  >({});
   const [exemplar, setExemplar] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProcessProgressDto | null>(null);
   const [failedIngestDiagnostic, setFailedIngestDiagnostic] =
@@ -131,11 +146,24 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
   const menuId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLElement>(null);
+  const analysisCacheRef = useRef(new Map<string, CorpusAnalysis>());
+  const analysisInFlightRef = useRef(new Map<string, Promise<void>>());
+  const analysisRequestTokenRef = useRef(new Map<string, symbol>());
+  const mountedRef = useRef(true);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const corpusButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const pendingDiscardFocusRef = useRef<string | null | undefined>(undefined);
   const failedDiagnosticTriggerRef = useRef<HTMLButtonElement>(null);
   const importLogsTriggerRef = useRef<HTMLButtonElement>(null);
+  const analysisStatusId = useId();
+  const analysisDescriptionId = useId();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -299,31 +327,75 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     }
   }, []);
 
-  // #521: do not eagerly query/render the non-interactive overview timeline.
-  // Volume-over-time navigation belongs in Log Explorer; overview only loads
-  // clusters + templates (no hostLogTimeline on corpus select).
-  const loadAnalysis = useCallback(async (id: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const [cl, tpls] = await Promise.all([
-        hostLogClusterProblems(id, 12),
-        hostListLogTemplates(id, 100),
-      ]);
-      setClusters(cl ?? []);
-      setTemplates(tpls ?? []);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+  const writeAnalysis = useCallback((id: string, value: CorpusAnalysis) => {
+    analysisCacheRef.current.set(id, value);
+    if (!mountedRef.current) return;
+    setAnalysisByCorpus((current) => ({ ...current, [id]: value }));
   }, []);
 
-  useEffect(() => {
-    if (activeId) void loadAnalysis(activeId);
-  }, [activeId, loadAnalysis]);
+  // #743: corpus activation must stay cheap. Cluster/template queries are
+  // bounded but can still be expensive for large corpora, so they run only
+  // after an explicit request. Results are cached by corpus and concurrent
+  // requests are coalesced; late results can update only their own corpus.
+  const loadAnalysis = useCallback(
+    (id: string, force = false) => {
+      const inFlight = analysisInFlightRef.current.get(id);
+      if (inFlight) return inFlight;
+
+      const cached = analysisCacheRef.current.get(id);
+      if (!force && cached?.status === "ready") {
+        return Promise.resolve();
+      }
+
+      writeAnalysis(id, {
+        status: "loading",
+        clusters: cached?.clusters ?? [],
+        templates: cached?.templates ?? [],
+        error: null,
+      });
+
+      const requestToken = Symbol(id);
+      analysisRequestTokenRef.current.set(id, requestToken);
+      const request = Promise.all([
+        hostLogClusterProblems(id, 12),
+        hostListLogTemplates(id, 100),
+      ])
+        .then(([clusters, templates]) => {
+          if (analysisRequestTokenRef.current.get(id) !== requestToken) return;
+          writeAnalysis(id, {
+            status: "ready",
+            clusters: clusters ?? [],
+            templates: templates ?? [],
+            error: null,
+          });
+        })
+        .catch((analysisError: unknown) => {
+          if (analysisRequestTokenRef.current.get(id) !== requestToken) return;
+          writeAnalysis(id, {
+            status: "error",
+            clusters: cached?.clusters ?? [],
+            templates: cached?.templates ?? [],
+            error: String(analysisError),
+          });
+        })
+        .finally(() => {
+          if (analysisInFlightRef.current.get(id) === request) {
+            analysisInFlightRef.current.delete(id);
+          }
+          if (analysisRequestTokenRef.current.get(id) === requestToken) {
+            analysisRequestTokenRef.current.delete(id);
+          }
+        });
+      analysisInFlightRef.current.set(id, request);
+      return request;
+    },
+    [writeAnalysis],
+  );
 
   const active = corpora.find((c) => c.id === activeId) ?? null;
+  const activeAnalysis = activeId
+    ? (analysisByCorpus[activeId] ?? EMPTY_ANALYSIS)
+    : EMPTY_ANALYSIS;
   const activeEmbedding = active?.embedding ?? {
     state:
       (active?.stats?.embedded ?? 0) > 0
@@ -499,11 +571,17 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setBusy(true);
     try {
       await hostDiscardLogCorpus(id);
+      analysisCacheRef.current.delete(id);
+      analysisInFlightRef.current.delete(id);
+      analysisRequestTokenRef.current.delete(id);
+      setAnalysisByCorpus((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       if (activeId === id) {
         setActiveId(null);
-        setClusters([]);
         setHits([]);
-        setTemplates([]);
       }
       await refresh();
     } catch (e) {
@@ -619,6 +697,65 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               : items[(current - 1 + items.length) % items.length];
       target?.focus();
     }
+  }
+
+  function renderAnalysisLoadControl() {
+    if (!activeId) return null;
+
+    const isLoading = activeAnalysis.status === "loading";
+    const actionLabel =
+      activeAnalysis.status === "ready"
+        ? "Refresh analysis"
+        : activeAnalysis.status === "error"
+          ? "Retry analysis"
+          : isLoading
+            ? "Loading analysis…"
+            : "Load analysis";
+    const statusMessage =
+      activeAnalysis.status === "ready"
+        ? `Loaded ${activeAnalysis.templates.length.toLocaleString()} templates and ${activeAnalysis.clusters.length.toLocaleString()} problem clusters.`
+        : activeAnalysis.status === "error"
+          ? "Analysis could not be loaded. The corpus and its menu remain available."
+          : isLoading
+            ? "Loading up to 100 templates and 12 problem clusters. You can keep selecting and managing corpora."
+            : "Analysis is not loaded automatically, keeping large-corpus selection responsive.";
+
+    return (
+      <section
+        className="log-analysis-load"
+        aria-busy={isLoading}
+        aria-labelledby={analysisStatusId}
+      >
+        <div className="log-analysis-load__copy">
+          <strong id={analysisStatusId}>On-demand analysis</strong>
+          <span
+            id={analysisDescriptionId}
+            className="muted"
+            role="status"
+            aria-live="polite"
+          >
+            {statusMessage}
+          </span>
+          {activeAnalysis.error ? (
+            <span className="error" role="alert">
+              {activeAnalysis.error}
+            </span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          aria-disabled={isLoading}
+          aria-describedby={analysisDescriptionId}
+          onClick={() => {
+            if (isLoading) return;
+            void loadAnalysis(activeId, activeAnalysis.status === "ready");
+          }}
+        >
+          {actionLabel}
+        </button>
+      </section>
+    );
   }
 
   if (inAppExplorerId) {
@@ -1108,59 +1245,81 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
               ) : null}
 
               {tab === "templates" ? (
-                <div className="log-detail__body" data-testid="log-templates">
-                  <table className="log-table">
-                    <thead>
-                      <tr>
-                        <th>ID</th>
-                        <th>Count</th>
-                        <th>Sev</th>
-                        <th>Pattern</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {templates.map((t) => (
-                        <tr key={t.id}>
-                          <td>{t.id}</td>
-                          <td>{t.count}</td>
-                          <td>{t.severity}</td>
-                          <td>
-                            <button
-                              type="button"
-                              onClick={() => setExemplar(t.pattern)}
-                            >
-                              {t.pattern}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div
+                  className="log-detail__body"
+                  data-testid="log-templates"
+                  aria-busy={activeAnalysis.status === "loading"}
+                >
+                  {renderAnalysisLoadControl()}
+                  {activeAnalysis.status === "ready" ||
+                  activeAnalysis.templates.length > 0 ? (
+                    activeAnalysis.templates.length > 0 ? (
+                      <table className="log-table">
+                        <thead>
+                          <tr>
+                            <th>ID</th>
+                            <th>Count</th>
+                            <th>Sev</th>
+                            <th>Pattern</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {activeAnalysis.templates.map((template) => (
+                            <tr key={template.id}>
+                              <td>{template.id}</td>
+                              <td>{template.count}</td>
+                              <td>{template.severity}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={() => setExemplar(template.pattern)}
+                                >
+                                  {template.pattern}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <p className="muted">No templates were returned.</p>
+                    )
+                  ) : null}
                 </div>
               ) : null}
 
               {tab === "analysis" ? (
-                <div className="log-detail__body" data-testid="log-analysis">
+                <div
+                  className="log-detail__body"
+                  data-testid="log-analysis"
+                  aria-busy={activeAnalysis.status === "loading"}
+                >
+                  {renderAnalysisLoadControl()}
                   <h4>Problem clusters</h4>
-                  {clusters.length === 0 ? (
-                    <p className="muted">No clusters.</p>
-                  ) : (
-                    <ul className="log-clusters">
-                      {clusters.map((cl) => (
-                        <li key={cl.clusterId}>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExemplar(cl.exemplars[0] ?? cl.label)
-                            }
-                          >
-                            sev={cl.severity} n={cl.count} score=
-                            {cl.score.toFixed(1)} — {cl.label}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  {activeAnalysis.status === "ready" ||
+                  activeAnalysis.clusters.length > 0 ? (
+                    activeAnalysis.clusters.length > 0 ? (
+                      <ul className="log-clusters">
+                        {activeAnalysis.clusters.map((cluster) => (
+                          <li key={cluster.clusterId}>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExemplar(
+                                  cluster.exemplars[0] ?? cluster.label,
+                                )
+                              }
+                            >
+                              sev={cluster.severity} n={cluster.count} score=
+                              {cluster.score.toFixed(1)} — {cluster.label}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="muted">No clusters.</p>
+                    )
+                  ) : null}
                   <p className="muted">
                     Deeper correlate / anomalies / trace are available via the
                     log-triage agent tools in chat.
