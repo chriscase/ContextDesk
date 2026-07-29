@@ -140,6 +140,8 @@ Per corpus under app cache:
 | API | Purpose |
 |-----|---------|
 | `log_query_events` | Paged/keyset events with filter + sort |
+| `log_query_event_rows` | Count-free paged/keyset rows for the first-evidence and pagination critical path |
+| `log_count_events` | Exact filtered count, requested independently after bounded rows paint |
 | `log_facets` | Sources, levels, services, hosts under filter |
 | `log_timeline_summary` | Hard-capped filtered count buckets (+ by level) for the integrated full-width Timeline; no event bodies |
 | `log_search_events` | Keyword/regex + template-semantic → bounded event-hit page; literal/regex Find continues with a composite time/sequence cursor and supports request-scoped cooperative cancellation |
@@ -148,6 +150,33 @@ Per corpus under app cache:
 | View context snapshot | Serialize filters/lanes/selection for agent |
 
 **Semantic search remains template-first** (see `LOG_ANALYSIS.md`). Do not embed every raw line in v1.
+
+### Startup and paging critical path
+
+Opening Explorer prioritizes bounded evidence rows over aggregate metadata:
+
+1. read the corpus summary and a count-free first page;
+2. paint the rows and clear the evidence-loading state;
+3. request exact filtered counts, facets, bookmarks, and Investigation metadata
+   independently after that paint; and
+4. load the source catalog only when the lane composer needs it.
+
+Pagination also uses the count-free row API and retains the last known exact
+count. Event-revision changes invalidate a bounded per-open-corpus count cache.
+Every asynchronous result is guarded by the current corpus/view lifecycle so a
+stale response cannot reactivate or overwrite a newer Explorer.
+
+The integrated Timeline is visible by default per the later owner design
+decision. It is not part of the first-evidence request and starts its bounded
+summary only after the initial rows paint. Collapsing it stops it from consuming
+viewport space; it never needs event bodies.
+
+A deterministic one-machine 250,000-event proof on 2026-07-29 observed: cold
+open 21 ms, first count-free page 51 ms, exact count 1 ms, facets 20 ms, source
+catalog 7 ms, shared timeline 74 ms, agent timeline 22 ms, and clustering
+130 ms. The one-time import was 548.361 seconds and is a separate optimization
+concern. These are measurements from one machine, not product-wide latency
+guarantees.
 
 ## 6. Chat + agent integration
 
