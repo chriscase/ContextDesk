@@ -208,6 +208,7 @@ fn bounded_sample_indices(total: usize, limit: usize) -> Vec<usize> {
         .collect()
 }
 
+const LOG_CLUSTER_TEMPLATE_ID_SAMPLE: usize = 16;
 const READ_SLICE_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const READ_SLICE_MAX_LINES: usize = 400;
 const READ_SLICE_MAX_LINE_BYTES: usize = 2_000;
@@ -2332,17 +2333,61 @@ impl ToolHost {
         let clusters = crate::log_analysis::cluster_problems(&corpus, max)?;
         let mut raw = String::new();
         for c in &clusters {
-            raw.push_str(&format!(
-                "- cluster={} score={:.2} sev={} n={} templates={:?}: {}\n",
-                c.cluster_id, c.score, c.severity, c.count, c.template_ids, c.label
-            ));
+            let template_id_sample = c
+                .template_ids
+                .iter()
+                .take(LOG_CLUSTER_TEMPLATE_ID_SAMPLE)
+                .copied()
+                .collect::<Vec<_>>();
+            if c.partial {
+                raw.push_str(&format!(
+                    "- cluster={} score={:.2} sev={} n_considered={} \
+                     templates_total={} templates_sample={:?}: {}\n",
+                    c.cluster_id,
+                    c.score,
+                    c.severity,
+                    c.count,
+                    c.template_ids.len(),
+                    template_id_sample,
+                    c.label
+                ));
+            } else {
+                raw.push_str(&format!(
+                    "- cluster={} score={:.2} sev={} n={} \
+                     templates_total={} templates_sample={:?}: {}\n",
+                    c.cluster_id,
+                    c.score,
+                    c.severity,
+                    c.count,
+                    c.template_ids.len(),
+                    template_id_sample,
+                    c.label
+                ));
+            }
         }
+        let partial = clusters.first().is_some_and(|cluster| cluster.partial);
+        let templates_considered = clusters
+            .first()
+            .map(|cluster| cluster.templates_considered)
+            .unwrap_or(0);
+        let templates_available = clusters
+            .first()
+            .map(|cluster| cluster.templates_available)
+            .unwrap_or(0);
         raw.insert_str(
             0,
             &format!(
-                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n---\n",
+                "source_kind: log_clusters\nresult_count: {}\nresult_cap: {}\n\
+                 partial: {partial}\ntemplates_considered: {templates_considered}\n\
+                 templates_available: {templates_available}\n\
+                 count_scope: {}\n---\n",
                 clusters.len(),
-                self.max_results_per_source
+                self.max_results_per_source,
+                if partial {
+                    "exact for considered templates; unassigned templates excluded"
+                } else {
+                    "exact for all available templates"
+                }
             ),
         );
         Ok((
@@ -2375,16 +2420,25 @@ impl ToolHost {
             .unwrap_or(60);
         let level = args.get("level").and_then(|v| v.as_str());
         let service = args.get("service").and_then(|v| v.as_str());
-        let buckets = crate::log_analysis::timeline(&corpus, width, level, service)?;
+        let timeline =
+            crate::log_analysis::analysis::timeline_summary(&corpus, width, level, service)?;
+        let buckets = &timeline.buckets;
         let total = buckets.len();
         let sample_indices = bounded_sample_indices(total, self.max_results_per_source);
         let sampled = total > sample_indices.len();
         let mut raw = String::new();
         raw.push_str(&format!(
             "source_kind: log_timeline\nresult_count: {}\nresult_cap: {}\n\
-             total_available: {total}\nsampled: {sampled}\n---\n",
+             total_available: {total}\nsampled: {sampled}\n\
+             requested_width: {}\neffective_width: {}\ncoarsened: {}\n\
+             total_events: {}\naxis_bucket_cap: {}\n---\n",
             sample_indices.len(),
-            self.max_results_per_source
+            self.max_results_per_source,
+            timeline.requested_width,
+            timeline.effective_width,
+            timeline.coarsened,
+            timeline.total_count,
+            crate::log_analysis::analysis::MAX_ANALYSIS_TIMELINE_BUCKETS
         ));
         for index in sample_indices {
             let b = &buckets[index];
@@ -2398,7 +2452,20 @@ impl ToolHost {
         }
         Ok((
             true,
-            if sampled {
+            if timeline.coarsened && sampled {
+                format!(
+                    "sampled {} of {total} timeline buckets (coarsened {}s→{}s, per-source cap={})",
+                    self.max_results_per_source,
+                    timeline.requested_width,
+                    timeline.effective_width,
+                    self.max_results_per_source
+                )
+            } else if timeline.coarsened {
+                format!(
+                    "{total} timeline buckets (coarsened {}s→{}s, per-source cap={})",
+                    timeline.requested_width, timeline.effective_width, self.max_results_per_source
+                )
+            } else if sampled {
                 format!(
                     "sampled {} of {total} timeline buckets (per-source cap={})",
                     self.max_results_per_source, self.max_results_per_source
@@ -6484,6 +6551,13 @@ mod tests {
             "{}",
             r.detail_raw
         );
+        assert!(r.detail_raw.contains("partial: false"), "{}", r.detail_raw);
+        assert!(
+            r.detail_raw
+                .contains("count_scope: exact for all available templates"),
+            "{}",
+            r.detail_raw
+        );
 
         let tl = host
             .execute(
@@ -6496,6 +6570,15 @@ mod tests {
         assert!(tl.ok, "{}", tl.summary);
         assert!(tl.summary.contains("sampled 3 of 40"), "{}", tl.summary);
         assert!(tl.detail_raw.contains("result_cap: 3"), "{}", tl.detail_raw);
+        assert!(
+            tl.detail_raw.contains("requested_width: 1")
+                && tl.detail_raw.contains("effective_width: 1")
+                && tl.detail_raw.contains("coarsened: false")
+                && tl.detail_raw.contains("total_events: 40")
+                && tl.detail_raw.contains("axis_bucket_cap: 512"),
+            "{}",
+            tl.detail_raw
+        );
         assert!(
             tl.detail_raw.contains("t=1700000000..1700000001")
                 && tl.detail_raw.contains("t=1700000039..1700000040"),
@@ -6521,6 +6604,100 @@ mod tests {
             trace.detail_raw.contains("result_cap: 3"),
             "{}",
             trace.detail_raw
+        );
+    }
+
+    #[tokio::test]
+    async fn log_analysis_tools_disclose_partial_clusters_and_timeline_coarsening() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = crate::log_analysis::LogCorpus::create(&cache, "bounded tool output").unwrap();
+        corpus
+            .upsert_templates((1..=700).map(|id| crate::log_analysis::TemplateRow {
+                info: crate::log_analysis::TemplateInfo {
+                    template_id: id,
+                    pattern: format!("uniquecomponent{id}"),
+                    token_count: 1,
+                    count: 1,
+                    first_seen: 0,
+                    last_seen: 599,
+                    severity: 3,
+                    example: format!("redacted example {id}"),
+                },
+                content_hash: format!("hash-{id}"),
+                vector: None,
+            }))
+            .unwrap();
+        corpus
+            .with_connection(|conn| {
+                conn.execute_batch(
+                    r#"
+                    INSERT INTO events (
+                        seq, ts, level, service, host, template_id, params,
+                        trace_id, message, source
+                    )
+                    SELECT i + 1, i, 'error', 'api', 'host-01',
+                           (i % 700) + 1, '[]', NULL,
+                           'bounded tool event', 'tool.log'
+                    FROM range(600) AS generated(i)
+                    "#,
+                )
+                .map_err(|error| CoreError::Message(format!("duckdb fixture: {error}")))?;
+                Ok(())
+            })
+            .unwrap();
+        corpus.flush().unwrap();
+        let corpus_id = corpus.id().to_string();
+        drop(corpus);
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("readme.md"), "bounded log tool test").unwrap();
+        let ws = Workspace::new("t", vec![workspace]);
+        let idx = KeywordIndex::build(&ws).unwrap();
+        let mut host = ToolHost::new(ws, idx, None);
+        host.set_log_analysis(true, Some(cache));
+        host.set_active_log_corpus(Some(corpus_id));
+        host.set_max_results_per_source(50);
+
+        let clusters = host
+            .execute(
+                crate::log_analysis::CLUSTER_PROBLEMS,
+                &json!({"max_clusters": 50}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(clusters.ok, "{}", clusters.summary);
+        assert!(
+            clusters.detail_raw.contains("partial: true")
+                && clusters.detail_raw.contains("templates_considered: 512")
+                && clusters.detail_raw.contains("templates_available: 700")
+                && clusters.detail_raw.contains("n_considered=")
+                && !clusters.detail_raw.contains(" n="),
+            "{}",
+            clusters.detail_raw
+        );
+
+        let timeline = host
+            .execute(
+                crate::log_analysis::TIMELINE,
+                &json!({"width_secs": 1}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(timeline.ok, "{}", timeline.summary);
+        assert!(
+            timeline.detail_raw.contains("requested_width: 1")
+                && timeline.detail_raw.contains("effective_width: 2")
+                && timeline.detail_raw.contains("coarsened: true")
+                && timeline.detail_raw.contains("total_events: 600")
+                && timeline.detail_raw.contains("total_available: 300")
+                && timeline.summary.contains("coarsened 1s→2s"),
+            "{}\n{}",
+            timeline.summary,
+            timeline.detail_raw
         );
     }
 }
