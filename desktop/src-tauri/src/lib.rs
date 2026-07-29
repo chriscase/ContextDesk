@@ -5685,17 +5685,67 @@ const DEMO_LOG_NAME: &str = "Demo · seven-day performance triage";
 const DEMO_LOG_RESOURCE_DIR: &str = "demo-log-corpus/seven-day-25k";
 const DEMO_LOG_MARKER_DIR: &str = ".contextdesk-demo-corpora";
 const DEMO_LOG_MARKER_FILE: &str = "seven-day-25k-behavior-scale.v1.json";
-const DEMO_LOG_REQUIRED_FILES: &[&str] = &[
-    "api/app.jsonl",
-    "auth/auth.jsonl",
-    "db/database.log",
-    "db/database.log.1",
-    "edge/access.jsonl",
-    "queue/events.jsonl",
-    "region-a/app.jsonl",
-    "region-b/app.jsonl",
-    "worker/worker.log",
-    "worker/worker.log.1",
+const DEMO_LOG_EXPECTED_EVENTS: u64 = 25_000;
+const DEMO_LOG_EXPECTED_SOURCES: u64 = 10;
+
+#[derive(Clone, Copy)]
+struct DemoLogResourceEntry {
+    path: &'static str,
+    bytes: u64,
+    sha256: &'static str,
+}
+
+const DEMO_LOG_RESOURCE_MANIFEST: &[DemoLogResourceEntry] = &[
+    DemoLogResourceEntry {
+        path: "api/app.jsonl",
+        bytes: 1_357_297,
+        sha256: "daa9983c529b24d8768bf19b97b9a5c27c9c81a7078ce467952c109ba3a0b730",
+    },
+    DemoLogResourceEntry {
+        path: "auth/auth.jsonl",
+        bytes: 66_853,
+        sha256: "f2ce52d81dcb90abf275548041be4ed9f3a607eba2a9c6ff1d9e4358473bdfa1",
+    },
+    DemoLogResourceEntry {
+        path: "db/database.log",
+        bytes: 313_382,
+        sha256: "9812816b6ad145c5a12058da23422148d96f840b868b5ab537f7063a333dc479",
+    },
+    DemoLogResourceEntry {
+        path: "db/database.log.1",
+        bytes: 49_681,
+        sha256: "84039ec216e0eb76eaaa8d6ac553f98ac453c61497b74f91877c04e2f6a6914d",
+    },
+    DemoLogResourceEntry {
+        path: "edge/access.jsonl",
+        bytes: 1_661_664,
+        sha256: "b239d6b28374e10a79063899f939e3ee62da3153c720cb638be9215148ca6322",
+    },
+    DemoLogResourceEntry {
+        path: "queue/events.jsonl",
+        bytes: 69_767,
+        sha256: "fd24ecdf65e0e4faf159f3b2dbf1d321487ff698068a35bb516f94f49dd6e35c",
+    },
+    DemoLogResourceEntry {
+        path: "region-a/app.jsonl",
+        bytes: 79_574,
+        sha256: "8f3b86f157b629e5fddf8c0c6a388a372187ead992f45596c940276f4d86263f",
+    },
+    DemoLogResourceEntry {
+        path: "region-b/app.jsonl",
+        bytes: 54_421,
+        sha256: "5e788d2d03c86f484f22ee4d3bd5cc6c4ddc63671c2e06a461d08b8e2c498800",
+    },
+    DemoLogResourceEntry {
+        path: "worker/worker.log",
+        bytes: 476_347,
+        sha256: "26bff700bf415f35d054270a0fc43785f476642bf4763bfa44069b5b0b5cf414",
+    },
+    DemoLogResourceEntry {
+        path: "worker/worker.log.1",
+        bytes: 72_295,
+        sha256: "94222d1ffa4ad30680762d910bf90fb72949c904e37bb55eb5f2cae74489fb93",
+    },
 ];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -5782,52 +5832,96 @@ fn demo_log_marker_path(cache: &std::path::Path) -> PathBuf {
     cache.join(DEMO_LOG_MARKER_DIR).join(DEMO_LOG_MARKER_FILE)
 }
 
-fn validate_demo_log_resource(path: &std::path::Path) -> bool {
-    const REQUIRED_DIRS: &[&str] = &[
-        "api", "auth", "db", "edge", "queue", "region-a", "region-b", "worker",
-    ];
-    const MAX_RESOURCE_ENTRIES: usize = REQUIRED_DIRS.len() + DEMO_LOG_REQUIRED_FILES.len();
-
-    fn visit(
-        root: &std::path::Path,
-        current: &std::path::Path,
-        depth: usize,
-        entry_count: &mut usize,
-        files: &mut std::collections::BTreeSet<String>,
-        directories: &mut std::collections::BTreeSet<String>,
-    ) -> Result<(), ()> {
-        let entries = std::fs::read_dir(current).map_err(|_| ())?;
-        for entry in entries {
-            let entry = entry.map_err(|_| ())?;
-            *entry_count = entry_count.checked_add(1).ok_or(())?;
-            if *entry_count > MAX_RESOURCE_ENTRIES {
-                return Err(());
-            }
-            let kind = entry.file_type().map_err(|_| ())?;
-            if kind.is_symlink() {
-                return Err(());
-            }
-            let path = entry.path();
-            let relative = path.strip_prefix(root).map_err(|_| ())?;
-            let relative = relative.to_str().ok_or(())?.replace('\\', "/");
-            if kind.is_dir() {
-                if depth != 0 || !REQUIRED_DIRS.contains(&relative.as_str()) {
-                    return Err(());
-                }
-                if !directories.insert(relative) {
-                    return Err(());
-                }
-                visit(root, &path, depth + 1, entry_count, files, directories)?;
-            } else if kind.is_file() {
-                if !DEMO_LOG_REQUIRED_FILES.contains(&relative.as_str()) || !files.insert(relative)
-                {
-                    return Err(());
-                }
-            } else {
-                return Err(());
-            }
+fn normalize_demo_resource_path(path: &std::path::Path) -> Option<String> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(component) = component else {
+            return None;
+        };
+        let component = component.to_str()?;
+        if component.is_empty() || component.contains('/') || component.contains('\\') {
+            return None;
         }
-        Ok(())
+        normalized.push(component);
+    }
+    (!normalized.is_empty()).then(|| normalized.join("/"))
+}
+
+fn validate_demo_log_resource_against_manifest(
+    path: &std::path::Path,
+    manifest: &[DemoLogResourceEntry],
+) -> bool {
+    struct ResourceWalk<'a> {
+        expected_files: &'a std::collections::BTreeMap<&'static str, DemoLogResourceEntry>,
+        expected_directories: &'a std::collections::BTreeSet<String>,
+        max_resource_entries: usize,
+        entry_count: usize,
+        files: std::collections::BTreeSet<String>,
+        directories: std::collections::BTreeSet<String>,
+    }
+
+    impl ResourceWalk<'_> {
+        fn visit(&mut self, root: &std::path::Path, current: &std::path::Path) -> Result<(), ()> {
+            use sha2::Digest;
+            use std::io::Read;
+
+            let entries = std::fs::read_dir(current).map_err(|_| ())?;
+            for entry in entries {
+                let entry = entry.map_err(|_| ())?;
+                self.entry_count = self.entry_count.checked_add(1).ok_or(())?;
+                if self.entry_count > self.max_resource_entries {
+                    return Err(());
+                }
+                let kind = entry.file_type().map_err(|_| ())?;
+                if kind.is_symlink() {
+                    return Err(());
+                }
+                let path = entry.path();
+                let relative = path.strip_prefix(root).map_err(|_| ())?;
+                let relative = normalize_demo_resource_path(relative).ok_or(())?;
+                if kind.is_dir() {
+                    if !self.expected_directories.contains(&relative) {
+                        return Err(());
+                    }
+                    if !self.directories.insert(relative) {
+                        return Err(());
+                    }
+                    self.visit(root, &path)?;
+                } else if kind.is_file() {
+                    let expected = self.expected_files.get(relative.as_str()).ok_or(())?;
+                    if !self.files.insert(relative) {
+                        return Err(());
+                    }
+                    let mut file = std::fs::File::open(&path).map_err(|_| ())?;
+                    let metadata = file.metadata().map_err(|_| ())?;
+                    if !metadata.is_file() || metadata.len() != expected.bytes {
+                        return Err(());
+                    }
+                    let mut hasher = sha2::Sha256::new();
+                    let mut buffer = [0_u8; 64 * 1024];
+                    let mut bytes_read = 0_u64;
+                    loop {
+                        let read = file.read(&mut buffer).map_err(|_| ())?;
+                        if read == 0 {
+                            break;
+                        }
+                        bytes_read = bytes_read.checked_add(read as u64).ok_or(())?;
+                        if bytes_read > expected.bytes {
+                            return Err(());
+                        }
+                        hasher.update(&buffer[..read]);
+                    }
+                    if bytes_read != expected.bytes
+                        || format!("{:x}", hasher.finalize()) != expected.sha256
+                    {
+                        return Err(());
+                    }
+                } else {
+                    return Err(());
+                }
+            }
+            Ok(())
+        }
     }
 
     let Ok(root_metadata) = std::fs::symlink_metadata(path) else {
@@ -5836,31 +5930,47 @@ fn validate_demo_log_resource(path: &std::path::Path) -> bool {
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return false;
     }
-    let mut files = std::collections::BTreeSet::new();
-    let mut directories = std::collections::BTreeSet::new();
-    let mut entry_count = 0;
-    if visit(
-        path,
-        path,
-        0,
-        &mut entry_count,
-        &mut files,
-        &mut directories,
-    )
-    .is_err()
-    {
+    if manifest.len() != DEMO_LOG_EXPECTED_SOURCES as usize {
         return false;
     }
-    files
-        == DEMO_LOG_REQUIRED_FILES
-            .iter()
+    let mut expected_files = std::collections::BTreeMap::new();
+    let mut expected_directories = std::collections::BTreeSet::new();
+    for entry in manifest {
+        let manifest_path = std::path::Path::new(entry.path);
+        if normalize_demo_resource_path(manifest_path).as_deref() != Some(entry.path)
+            || entry.sha256.len() != 64
+            || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || expected_files.insert(entry.path, *entry).is_some()
+        {
+            return false;
+        }
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        for depth in 1..components.len() {
+            expected_directories.insert(components[..depth].join("/"));
+        }
+    }
+    let max_resource_entries = expected_directories.len() + expected_files.len();
+    let mut walk = ResourceWalk {
+        expected_files: &expected_files,
+        expected_directories: &expected_directories,
+        max_resource_entries,
+        entry_count: 0,
+        files: std::collections::BTreeSet::new(),
+        directories: std::collections::BTreeSet::new(),
+    };
+    if walk.visit(path, path).is_err() {
+        return false;
+    }
+    walk.files
+        == expected_files
+            .keys()
             .map(|path| (*path).to_string())
             .collect()
-        && directories
-            == REQUIRED_DIRS
-                .iter()
-                .map(|path| (*path).to_string())
-                .collect()
+        && walk.directories == expected_directories
+}
+
+fn validate_demo_log_resource(path: &std::path::Path) -> bool {
+    validate_demo_log_resource_against_manifest(path, DEMO_LOG_RESOURCE_MANIFEST)
 }
 
 fn resolve_demo_log_resource_from_candidates(
@@ -5899,6 +6009,18 @@ enum DemoLogMarkerState {
     RepairRequired,
 }
 
+fn demo_log_corpus_matches_expected(corpus: &cd_core::log_analysis::LogCorpus) -> bool {
+    let Ok(meta) = corpus.meta() else {
+        return false;
+    };
+    meta.managed_identity.as_deref() == Some(DEMO_LOG_IDENTITY)
+        && meta.stats.as_ref().is_some_and(|stats| {
+            stats.lines == DEMO_LOG_EXPECTED_EVENTS
+                && stats.files == DEMO_LOG_EXPECTED_SOURCES
+                && !stats.partial
+        })
+}
+
 fn read_demo_log_marker(cache: &std::path::Path) -> Result<DemoLogMarkerState, String> {
     let marker_path = demo_log_marker_path(cache);
     let metadata = match std::fs::symlink_metadata(&marker_path) {
@@ -5924,14 +6046,7 @@ fn read_demo_log_marker(cache: &std::path::Path) -> Result<DemoLogMarkerState, S
         return Ok(DemoLogMarkerState::RepairRequired);
     }
     match cd_core::log_analysis::LogCorpus::open(cache, &marker.corpus_id) {
-        Ok(corpus)
-            if corpus
-                .meta()
-                .ok()
-                .and_then(|meta| meta.managed_identity)
-                .as_deref()
-                == Some(DEMO_LOG_IDENTITY) =>
-        {
+        Ok(corpus) if demo_log_corpus_matches_expected(&corpus) => {
             Ok(DemoLogMarkerState::Installed(Box::new(corpus)))
         }
         Ok(_) => Ok(DemoLogMarkerState::RepairRequired),
@@ -5956,13 +6071,7 @@ fn managed_demo_log_corpora(
         let Ok(corpus) = cd_core::log_analysis::LogCorpus::open(cache, &id) else {
             continue;
         };
-        if corpus
-            .meta()
-            .ok()
-            .and_then(|meta| meta.managed_identity)
-            .as_deref()
-            == Some(DEMO_LOG_IDENTITY)
-        {
+        if demo_log_corpus_matches_expected(&corpus) {
             managed.push(corpus);
         }
     }
@@ -6774,6 +6883,26 @@ async fn ingest_log_path(
 struct DemoLogIngestReceipt {
     corpus_id: String,
     events: u64,
+    sources: u64,
+}
+
+fn discard_managed_demo_corpus(cache: &std::path::Path, corpus_id: &str) -> Result<(), String> {
+    let corpus = cd_core::log_analysis::LogCorpus::open(cache, corpus_id)
+        .map_err(|error| format!("could not inspect the mismatched demo corpus: {error}"))?;
+    let is_managed = corpus
+        .meta()
+        .map_err(|error| format!("could not verify the mismatched demo corpus: {error}"))?
+        .managed_identity
+        .as_deref()
+        == Some(DEMO_LOG_IDENTITY);
+    if !is_managed {
+        return Err(
+            "refused to discard a corpus without the reserved packaged-demo identity".into(),
+        );
+    }
+    drop(corpus);
+    cd_core::log_analysis::LogCorpus::discard(cache, corpus_id)
+        .map_err(|error| format!("could not discard the mismatched demo corpus: {error}"))
 }
 
 #[async_trait::async_trait]
@@ -6782,6 +6911,11 @@ trait DemoLogInstallBackend: Send + Sync {
     fn resolve_resource(&self) -> Option<PathBuf>;
     fn active_corpus(&self) -> Option<String>;
     fn select_corpus(&self, corpus_id: Option<String>);
+    fn discard_ingested_corpus(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<(), String>;
     fn publish_marker(
         &self,
         cache: &std::path::Path,
@@ -6818,6 +6952,14 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
         set_active_log_corpus_state_nonblocking(self.state, corpus_id);
     }
 
+    fn discard_ingested_corpus(
+        &self,
+        cache: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<(), String> {
+        discard_managed_demo_corpus(cache, corpus_id)
+    }
+
     fn publish_marker(
         &self,
         cache: &std::path::Path,
@@ -6844,6 +6986,7 @@ impl DemoLogInstallBackend for TauriDemoLogInstallBackend<'_> {
         Ok(DemoLogIngestReceipt {
             corpus_id: report.corpus_id,
             events: report.lines,
+            sources: report.files,
         })
     }
 }
@@ -6976,6 +7119,22 @@ async fn install_demo_log_corpus_transaction<B: DemoLogInstallBackend>(
             return DemoLogInstallDto::failed(error, true);
         }
     };
+    if report.events != DEMO_LOG_EXPECTED_EVENTS || report.sources != DEMO_LOG_EXPECTED_SOURCES {
+        backend.select_corpus(prior_active_corpus);
+        let cleanup_detail = match backend.discard_ingested_corpus(&cache, &report.corpus_id) {
+            Ok(()) => " The mismatched demo corpus was discarded.".to_string(),
+            Err(error) => format!(
+                " Cleanup failed: {error}. The mismatched corpus remains unselected and cannot be activated as the packaged demo."
+            ),
+        };
+        return DemoLogInstallDto::failed(
+            format!(
+                "The packaged demo did not match its expected post-ingest identity (expected {DEMO_LOG_EXPECTED_SOURCES} sources and {DEMO_LOG_EXPECTED_EVENTS} events; imported {} sources and {} events). The demo was not activated.{cleanup_detail}",
+                report.sources, report.events,
+            ),
+            true,
+        );
+    }
     let publish = match backend.publish_marker(&cache, &report.corpus_id, cancel) {
         Ok(publish) => publish,
         Err(DemoTransactionError::Cancelled) => {
@@ -9495,6 +9654,7 @@ mod demo_log_host_tests {
     enum FakeIngestOutcome {
         Success,
         SuccessThenCancel,
+        CountMismatch { events: u64, sources: u64 },
         Cancelled,
         Failed,
     }
@@ -9505,6 +9665,7 @@ mod demo_log_host_tests {
         active: Mutex<Option<String>>,
         outcomes: Mutex<VecDeque<FakeIngestOutcome>>,
         ingest_calls: AtomicUsize,
+        fail_next_discard: AtomicBool,
         fail_next_marker: AtomicBool,
         warn_next_marker: Mutex<Option<String>>,
         cache_block: Mutex<Option<FakeCacheBlock>>,
@@ -9523,6 +9684,7 @@ mod demo_log_host_tests {
                 active: Mutex::new(None),
                 outcomes: Mutex::new(outcomes.into_iter().collect()),
                 ingest_calls: AtomicUsize::new(0),
+                fail_next_discard: AtomicBool::new(false),
                 fail_next_marker: AtomicBool::new(false),
                 warn_next_marker: Mutex::new(None),
                 cache_block: Mutex::new(None),
@@ -9535,11 +9697,35 @@ mod demo_log_host_tests {
         }
 
         fn create_managed_corpus(&self) -> cd_core::log_analysis::LogCorpus {
+            self.create_managed_corpus_with_counts(
+                DEMO_LOG_EXPECTED_EVENTS,
+                DEMO_LOG_EXPECTED_SOURCES,
+            )
+        }
+
+        fn create_managed_corpus_with_counts(
+            &self,
+            events: u64,
+            sources: u64,
+        ) -> cd_core::log_analysis::LogCorpus {
             let corpus = cd_core::log_analysis::LogCorpus::create(&self.cache, DEMO_LOG_NAME)
                 .expect("managed corpus");
             corpus
                 .write_managed_identity(DEMO_LOG_IDENTITY)
                 .expect("managed identity");
+            corpus
+                .write_ingest_summary(
+                    None,
+                    cd_core::log_analysis::CorpusStats {
+                        files: sources,
+                        discovered_files: sources,
+                        lines: events,
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                    cd_core::log_analysis::CorpusEmbeddingStatus::default(),
+                )
+                .expect("managed ingest summary");
             corpus
         }
 
@@ -9576,6 +9762,13 @@ mod demo_log_host_tests {
 
         fn select_corpus(&self, corpus_id: Option<String>) {
             *self.active.lock().expect("active") = corpus_id;
+        }
+
+        fn discard_ingested_corpus(&self, cache: &Path, corpus_id: &str) -> Result<(), String> {
+            if self.fail_next_discard.swap(false, Ordering::SeqCst) {
+                return Err("injected demo cleanup failure".into());
+            }
+            discard_managed_demo_corpus(cache, corpus_id)
         }
 
         fn publish_marker(
@@ -9616,14 +9809,21 @@ mod demo_log_host_tests {
                 .pop_front()
                 .unwrap_or(FakeIngestOutcome::Success);
             match outcome {
-                FakeIngestOutcome::Success | FakeIngestOutcome::SuccessThenCancel => {
-                    let corpus = self.create_managed_corpus();
+                FakeIngestOutcome::Success
+                | FakeIngestOutcome::SuccessThenCancel
+                | FakeIngestOutcome::CountMismatch { .. } => {
+                    let (events, sources) = match outcome {
+                        FakeIngestOutcome::CountMismatch { events, sources } => (events, sources),
+                        _ => (DEMO_LOG_EXPECTED_EVENTS, DEMO_LOG_EXPECTED_SOURCES),
+                    };
+                    let corpus = self.create_managed_corpus_with_counts(events, sources);
                     if matches!(outcome, FakeIngestOutcome::SuccessThenCancel) {
                         cancel.cancel();
                     }
                     Ok(DemoLogIngestReceipt {
                         corpus_id: corpus.id().into(),
-                        events: 25_000,
+                        events,
+                        sources,
                     })
                 }
                 FakeIngestOutcome::Cancelled => Err(LogIngestRunError::Cancelled),
@@ -9634,12 +9834,25 @@ mod demo_log_host_tests {
         }
     }
 
+    fn checked_in_demo_resource() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("fixtures")
+            .join("log-lab")
+            .join("acceptance")
+            .join("seven-day-25k")
+            .join("scenarios")
+            .join("behavior-scale")
+            .join("import")
+    }
+
     fn write_required_demo_files(root: &Path) {
-        for relative in DEMO_LOG_REQUIRED_FILES {
-            let path = root.join(relative);
+        let checked_in = checked_in_demo_resource();
+        for entry in DEMO_LOG_RESOURCE_MANIFEST {
+            let path = root.join(entry.path);
             std::fs::create_dir_all(path.parent().expect("fixture parent"))
                 .expect("fixture parent");
-            std::fs::write(path, b"2025-01-01T12:00:00Z INFO demo\n").expect("fixture file");
+            std::fs::copy(checked_in.join(entry.path), path).expect("copy authenticated fixture");
         }
     }
 
@@ -9678,6 +9891,122 @@ mod demo_log_host_tests {
         assert!(
             validate_demo_log_resource(&checked_in_import),
             "the exact mapped source tree must contain only the approved runtime files"
+        );
+    }
+
+    #[test]
+    fn packaged_demo_manifest_matches_every_checked_in_source() {
+        use sha2::Digest;
+
+        let checked_in = checked_in_demo_resource();
+        assert_eq!(
+            DEMO_LOG_RESOURCE_MANIFEST.len(),
+            DEMO_LOG_EXPECTED_SOURCES as usize
+        );
+        assert!(
+            validate_demo_log_resource(&checked_in),
+            "the checked-in fixture bytes must match the compiled manifest"
+        );
+        let unique_paths = DEMO_LOG_RESOURCE_MANIFEST
+            .iter()
+            .map(|entry| entry.path)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            unique_paths.len(),
+            DEMO_LOG_RESOURCE_MANIFEST.len(),
+            "the compiled manifest must not contain duplicate normalized paths"
+        );
+        for entry in DEMO_LOG_RESOURCE_MANIFEST {
+            let bytes = std::fs::read(checked_in.join(entry.path)).expect("manifest source");
+            assert_eq!(bytes.len() as u64, entry.bytes, "length: {}", entry.path);
+            assert_eq!(
+                format!("{:x}", sha2::Sha256::digest(&bytes)),
+                entry.sha256,
+                "digest: {}",
+                entry.path
+            );
+        }
+    }
+
+    #[test]
+    fn resource_validation_rejects_one_byte_mutation_and_same_name_replacement() {
+        let mutated = tempfile::tempdir().expect("mutated root");
+        let mutated_import = mutated.path().join("import");
+        write_required_demo_files(&mutated_import);
+        let mutated_file = mutated_import.join("queue/events.jsonl");
+        let mut bytes = std::fs::read(&mutated_file).expect("mutated source");
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 1;
+        std::fs::write(&mutated_file, bytes).expect("one-byte mutation");
+        assert!(
+            !validate_demo_log_resource(&mutated_import),
+            "a one-byte mutation must invalidate the packaged fixture"
+        );
+
+        let replaced = tempfile::tempdir().expect("replacement root");
+        let replaced_import = replaced.path().join("import");
+        write_required_demo_files(&replaced_import);
+        let replaced_file = replaced_import.join("auth/auth.jsonl");
+        let length = std::fs::metadata(&replaced_file)
+            .expect("replacement metadata")
+            .len();
+        std::fs::write(&replaced_file, vec![b'x'; length as usize])
+            .expect("same-name same-length replacement");
+        assert!(
+            !validate_demo_log_resource(&replaced_import),
+            "a same-name, same-length replacement must fail its digest"
+        );
+    }
+
+    #[test]
+    fn resource_validation_rejects_truncation_missing_extra_and_manifest_mismatch() {
+        let truncated = tempfile::tempdir().expect("truncated root");
+        let truncated_import = truncated.path().join("import");
+        write_required_demo_files(&truncated_import);
+        let truncated_file = truncated_import.join("worker/worker.log.1");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&truncated_file)
+            .expect("truncated source");
+        file.set_len(
+            std::fs::metadata(&truncated_file)
+                .expect("truncated metadata")
+                .len()
+                - 1,
+        )
+        .expect("truncate source");
+        assert!(!validate_demo_log_resource(&truncated_import));
+
+        let missing = tempfile::tempdir().expect("missing root");
+        let missing_import = missing.path().join("import");
+        write_required_demo_files(&missing_import);
+        std::fs::remove_file(missing_import.join("db/database.log.1"))
+            .expect("remove required source");
+        assert!(!validate_demo_log_resource(&missing_import));
+
+        let extra = tempfile::tempdir().expect("extra root");
+        let extra_import = extra.path().join("import");
+        write_required_demo_files(&extra_import);
+        std::fs::write(extra_import.join("unexpected.log"), b"not approved").expect("extra source");
+        assert!(!validate_demo_log_resource(&extra_import));
+
+        let mut mismatched = DEMO_LOG_RESOURCE_MANIFEST.to_vec();
+        mismatched[0].sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+        assert!(
+            !validate_demo_log_resource_against_manifest(
+                checked_in_demo_resource().as_path(),
+                &mismatched
+            ),
+            "a mismatched compiled digest must fail closed"
+        );
+        let mut duplicate = DEMO_LOG_RESOURCE_MANIFEST.to_vec();
+        duplicate.push(DEMO_LOG_RESOURCE_MANIFEST[0]);
+        assert!(
+            !validate_demo_log_resource_against_manifest(
+                checked_in_demo_resource().as_path(),
+                &duplicate
+            ),
+            "duplicate manifest paths must fail closed"
         );
     }
 
@@ -9740,6 +10069,21 @@ mod demo_log_host_tests {
             assert!(
                 !validate_demo_log_resource(&linked_import),
                 "the packaged resource root itself must not be a symlink"
+            );
+
+            let linked_entry = tempfile::tempdir().expect("linked entry root");
+            let linked_entry_import = linked_entry.path().join("import");
+            write_required_demo_files(&linked_entry_import);
+            let linked_path = linked_entry_import.join("api/app.jsonl");
+            std::fs::remove_file(&linked_path).expect("remove source before link");
+            symlink(
+                checked_in_demo_resource().join("api/app.jsonl"),
+                &linked_path,
+            )
+            .expect("resource entry symlink");
+            assert!(
+                !validate_demo_log_resource(&linked_entry_import),
+                "a symlinked packaged resource entry must fail closed"
             );
         }
 
@@ -9818,6 +10162,106 @@ mod demo_log_host_tests {
         assert!(result.retryable);
         assert_eq!(backend.active_corpus().as_deref(), Some("user"));
         assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn post_ingest_identity_mismatch_never_activates_demo_marker() {
+        for (events, sources) in [
+            (DEMO_LOG_EXPECTED_EVENTS - 1, DEMO_LOG_EXPECTED_SOURCES),
+            (DEMO_LOG_EXPECTED_EVENTS, DEMO_LOG_EXPECTED_SOURCES - 1),
+        ] {
+            let root = tempfile::tempdir().expect("cache root");
+            let cache = root.path().join("cache");
+            let backend = FakeDemoLogBackend::new(
+                cache.clone(),
+                [
+                    FakeIngestOutcome::CountMismatch { events, sources },
+                    FakeIngestOutcome::Success,
+                ],
+            )
+            .with_active("user");
+            let cancel = cd_core::process_progress::CancelFlag::new();
+
+            let failed = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+            assert_eq!(failed.status, DemoLogInstallStatus::Failed);
+            assert!(failed.retryable);
+            assert!(failed
+                .detail
+                .contains("expected 10 sources and 25000 events"));
+            assert!(failed.detail.contains("was not activated"));
+            assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+            assert!(!demo_log_marker_path(&cache).exists());
+            assert!(
+                managed_demo_log_corpora(&cache, &cancel)
+                    .expect("managed scan")
+                    .is_empty(),
+                "a count-mismatched managed corpus must not be recoverable as the demo"
+            );
+            assert!(
+                cd_core::log_analysis::LogCorpus::list_ids(&cache)
+                    .expect("corpus list")
+                    .is_empty(),
+                "the just-created mismatched managed corpus must be discarded"
+            );
+
+            let retry = install_demo_log_corpus_transaction(&backend, &cancel).await;
+            assert_eq!(retry.status, DemoLogInstallStatus::Installed);
+            assert_eq!(retry.events, Some(DEMO_LOG_EXPECTED_EVENTS));
+            assert_eq!(backend.ingest_calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn post_ingest_identity_mismatch_surfaces_scoped_cleanup_failure() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let backend = FakeDemoLogBackend::new(
+            cache.clone(),
+            [FakeIngestOutcome::CountMismatch {
+                events: DEMO_LOG_EXPECTED_EVENTS - 1,
+                sources: DEMO_LOG_EXPECTED_SOURCES,
+            }],
+        )
+        .with_active("user");
+        backend.fail_next_discard.store(true, Ordering::SeqCst);
+        let cancel = cd_core::process_progress::CancelFlag::new();
+
+        let result = install_demo_log_corpus_transaction(&backend, &cancel).await;
+
+        assert_eq!(result.status, DemoLogInstallStatus::Failed);
+        assert!(result.retryable);
+        assert!(result.detail.contains("Cleanup failed"));
+        assert!(result.detail.contains("injected demo cleanup failure"));
+        assert!(result.detail.contains("remains unselected"));
+        assert_eq!(backend.active_corpus().as_deref(), Some("user"));
+        assert!(!demo_log_marker_path(&cache).exists());
+        assert_eq!(
+            cd_core::log_analysis::LogCorpus::list_ids(&cache)
+                .expect("corpus list")
+                .len(),
+            1,
+            "truthful cleanup failure retains only the scoped managed corpus"
+        );
+    }
+
+    #[test]
+    fn scoped_demo_discard_refuses_to_touch_a_user_corpus() {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let user =
+            cd_core::log_analysis::LogCorpus::create(&cache, DEMO_LOG_NAME).expect("user corpus");
+        let user_id = user.id().to_string();
+        drop(user);
+
+        let error = discard_managed_demo_corpus(&cache, &user_id)
+            .expect_err("a user corpus must never be discarded by demo rollback");
+
+        assert!(error.contains("reserved packaged-demo identity"));
+        assert!(
+            cd_core::log_analysis::LogCorpus::open(&cache, &user_id).is_ok(),
+            "the refused user corpus must remain intact"
+        );
     }
 
     #[tokio::test]
