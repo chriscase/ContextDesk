@@ -61,6 +61,44 @@ describe("hostLogSharedTimelineSummary", () => {
       },
     });
   });
+
+  it("preserves explicit all-sources and large specific-source lane scopes", async () => {
+    invokeMock.mockResolvedValue({
+      timeQuality: "wall",
+      spanFrom: 1,
+      spanTo: 2,
+      bucketWidth: 1,
+      bucketCount: 1,
+      totalMatched: 1,
+      buckets: [{ index: 0, start: 1, end: 2 }],
+      counts: [1],
+      severitySeries: [],
+      lanes: [],
+    });
+    const sources = Array.from(
+      { length: 241 },
+      (_, index) => `region-${index + 1}/application.log`,
+    );
+
+    await hostLogSharedTimelineSummary(
+      "corpus-241",
+      { levels: ["error"] },
+      [{ sources: [], allSources: true }, { sources }],
+      96,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("log_shared_timeline_summary", {
+      corpusId: "corpus-241",
+      query: {
+        filter: { levels: ["error"] },
+        lanes: [{ sources: [], allSources: true }, { sources }],
+        maxBuckets: 96,
+      },
+    });
+    expect(
+      invokeMock.mock.calls[0]?.[1]?.query?.lanes?.[1]?.sources,
+    ).toHaveLength(241);
+  });
 });
 
 describe("hostLogSourceCatalog", () => {

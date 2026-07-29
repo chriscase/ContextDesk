@@ -2439,7 +2439,7 @@ export async function hostLogTimelineSummary(
 export async function hostLogSharedTimelineSummary(
   corpusId: string,
   filter: EventQueryDto = {},
-  lanes: { sources: string[] }[] = [],
+  lanes: { sources: string[]; allSources?: boolean }[] = [],
   maxBuckets = 96,
 ): Promise<SharedTimelineSummaryDto> {
   if (!isTauri()) {

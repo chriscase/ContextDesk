@@ -49,6 +49,8 @@ type Props = {
     id: string;
     label: string;
     sources: string[];
+    /** Explicitly include every source matching the global filter. */
+    allSources?: boolean;
     emptySourceScope?: boolean;
   }[];
   onSeekSeq: (seq: number, target?: ExplorerEventDto) => Promise<void> | void;
@@ -215,6 +217,7 @@ export function TimelineNavigator({
     lanes.map((lane) => ({
       id: lane.id,
       sources: lane.sources,
+      allSources: lane.allSources,
       emptySourceScope: lane.emptySourceScope,
     })),
   );
@@ -271,9 +274,13 @@ export function TimelineNavigator({
     setStatus("Loading bounded timeline summary…");
     const requestedLanes =
       lanes.length > 1
-        ? lanes.slice(0, 4).map((lane) => ({
-            sources: lane.emptySourceScope ? [] : lane.sources,
-          }))
+        ? lanes.slice(0, 4).map((lane) =>
+            lane.allSources
+              ? { sources: [], allSources: true }
+              : {
+                  sources: lane.emptySourceScope ? [] : lane.sources,
+                },
+          )
         : [];
     void hostLogSharedTimelineSummary(
       corpusId,
