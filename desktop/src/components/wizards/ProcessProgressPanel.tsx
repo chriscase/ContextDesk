@@ -40,17 +40,16 @@ export function ProcessProgressPanel({
 
   const active = progress?.phase ?? "starting";
   const activeIdx = pipeline.indexOf(active as ProcessProgressPhase);
-  const frac =
-    progress?.fraction != null
-      ? Math.max(0, Math.min(1, progress.fraction))
-      : active === "completed"
-        ? 1
-        : activeIdx >= 0
-          ? (activeIdx + 0.5) / pipeline.length
-          : 0;
-
   const terminal =
     active === "completed" || active === "failed" || active === "cancelled";
+  const running = !terminal && !error;
+  const reportedFraction =
+    progress?.fraction != null && Number.isFinite(progress.fraction)
+      ? Math.max(0, Math.min(1, progress.fraction))
+      : null;
+  const fraction = active === "completed" ? 1 : reportedFraction;
+  const fractionPercent = fraction == null ? null : Math.round(fraction * 100);
+  const indeterminate = running && fractionPercent == null;
 
   useEffect(() => {
     setCancelRequested(false);
@@ -99,15 +98,24 @@ export function ProcessProgressPanel({
         })}
       </ol>
 
-      <div className="process-progress__bar-track" aria-hidden>
+      <div
+        className="process-progress__bar-track"
+        role="progressbar"
+        aria-label="Process progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(fractionPercent == null
+          ? {}
+          : { "aria-valuenow": fractionPercent })}
+      >
         <div
           className="process-progress__bar-fill"
-          style={{ width: `${Math.round(frac * 100)}%` }}
-          data-indeterminate={
-            progress && progress.fraction == null && !terminal
-              ? "true"
-              : "false"
+          style={
+            fractionPercent == null
+              ? undefined
+              : { width: `${fractionPercent}%` }
           }
+          data-indeterminate={indeterminate ? "true" : "false"}
         />
       </div>
 

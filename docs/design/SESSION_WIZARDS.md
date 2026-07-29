@@ -67,6 +67,14 @@ Shared core type `ProcessProgress` (see `crates/cd-core/src/process_progress.rs`
 | `lines_processed` / `files_processed` / `bytes_processed` / `templates` | optional stats |
 | `cancellable` | honest: true only when host can still abort cleanly |
 
+`fraction` is the only source of in-flight percentage truth. When it is absent
+or invalid, the panel remains indeterminate and shows the active host-authored
+phase plus safe counters; it never estimates completion from phase position,
+elapsed time, animation, or historical duration. A host-reported `completed`
+terminal phase may render as complete even when the last event omits a
+fraction. Failed and cancelled phases stop activity without implying a
+percentage.
+
 ### Log corpus ingest phases
 
 `starting` → `scan` → `parse` → `template` → `redact` → `store` → `embed` → `completed` | `failed` | `cancelled`
