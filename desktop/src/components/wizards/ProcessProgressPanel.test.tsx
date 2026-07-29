@@ -41,6 +41,103 @@ describe("ProcessProgressPanel", () => {
     expect(phaseLabel("extract")).toBe("Extract");
   });
 
+  it("shows only a finite host-reported fraction as determinate progress", () => {
+    const { container, rerender } = render(
+      <ProcessProgressPanel progress={progress({ fraction: 0.354 })} />,
+    );
+    const bar = screen.getByRole("progressbar", {
+      name: "Process progress",
+    });
+    const fill = container.querySelector(".process-progress__bar-fill");
+
+    expect(bar.getAttribute("aria-valuenow")).toBe("35");
+    expect(fill?.getAttribute("style")).toBe("width: 35%;");
+    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+
+    rerender(
+      <ProcessProgressPanel progress={progress({ fraction: Number.NaN })} />,
+    );
+    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
+    expect(fill?.hasAttribute("style")).toBe(false);
+    expect(fill?.getAttribute("data-indeterminate")).toBe("true");
+  });
+
+  it("does not infer progress from phase position and clears stale width", () => {
+    const { container, rerender } = render(
+      <ProcessProgressPanel
+        progress={progress({ phase: "template", fraction: 0.8 })}
+      />,
+    );
+    const bar = screen.getByRole("progressbar", {
+      name: "Process progress",
+    });
+    const fill = container.querySelector(".process-progress__bar-fill");
+
+    expect(bar.getAttribute("aria-valuenow")).toBe("80");
+    expect(fill?.getAttribute("style")).toBe("width: 80%;");
+
+    rerender(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "store",
+          message: "Publishing corpus",
+          fraction: null,
+        })}
+      />,
+    );
+    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
+    expect(fill?.hasAttribute("style")).toBe(false);
+    expect(fill?.getAttribute("data-indeterminate")).toBe("true");
+  });
+
+  it("uses terminal host state without animating failed or completed work", () => {
+    const { container, rerender } = render(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "failed",
+          message: "Import failed",
+          fraction: null,
+        })}
+      />,
+    );
+    const bar = screen.getByRole("progressbar", {
+      name: "Process progress",
+    });
+    const fill = container.querySelector(".process-progress__bar-fill");
+
+    expect(bar.hasAttribute("aria-valuenow")).toBe(false);
+    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+
+    rerender(
+      <ProcessProgressPanel
+        progress={progress({
+          phase: "completed",
+          message: "Complete",
+          fraction: null,
+        })}
+      />,
+    );
+    expect(bar.getAttribute("aria-valuenow")).toBe("100");
+    expect(fill?.getAttribute("style")).toBe("width: 100%;");
+    expect(fill?.getAttribute("data-indeterminate")).toBe("false");
+  });
+
+  it("stops indeterminate activity when an error is displayed", () => {
+    const { container } = render(
+      <ProcessProgressPanel
+        progress={progress({ fraction: null })}
+        error="Import failed"
+      />,
+    );
+
+    expect(
+      container
+        .querySelector(".process-progress__bar-fill")
+        ?.getAttribute("data-indeterminate"),
+    ).toBe("false");
+    expect(screen.getByRole("status").getAttribute("aria-busy")).toBe("false");
+  });
+
   it("offers cancellation only while the host declares the phase cancellable", () => {
     const onCancel = vi.fn();
     const { rerender } = render(
