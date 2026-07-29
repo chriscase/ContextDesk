@@ -3742,7 +3742,14 @@ fn persist_host_terminal_turn_at(
         cd_core::events::StreamEvent::TurnCompleted { reason } => Some(reason.as_str()),
         _ => None,
     });
-    let content = if errors.is_empty() {
+    let streamed_text = events
+        .iter()
+        .filter_map(|event| match event {
+            cd_core::events::StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    let terminal_text = if errors.is_empty() {
         format!(
             "**Stopped:** This turn ended before provider work completed{}.",
             reason
@@ -3756,6 +3763,71 @@ fn persist_host_terminal_turn_at(
             .collect::<Vec<_>>()
             .join("\n\n")
     };
+    let content = if streamed_text.trim().is_empty() {
+        terminal_text
+    } else {
+        format!("{streamed_text}\n\n{terminal_text}")
+    };
+    let mut tools = Vec::<serde_json::Value>::new();
+    for event in events {
+        let cd_core::events::StreamEvent::Tool {
+            id,
+            name,
+            summary,
+            detail,
+            ok,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if let Some(existing) = tools
+            .iter_mut()
+            .find(|tool| tool["id"].as_str() == Some(id.as_str()))
+        {
+            existing["name"] = serde_json::Value::String(name.clone());
+            existing["summary"] = serde_json::Value::String(summary.clone());
+            existing["detail"] = serde_json::json!(detail);
+            existing["ok"] = serde_json::json!(ok);
+        } else {
+            tools.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "summary": summary,
+                "detail": detail,
+                "ok": ok
+            }));
+        }
+    }
+    let linked_corpus_id = session.linked_corpus_id.clone();
+    let mut citations = Vec::<serde_json::Value>::new();
+    for event in events {
+        let cd_core::events::StreamEvent::Citation {
+            source_id,
+            label,
+            locator,
+        } = event
+        else {
+            continue;
+        };
+        if citations
+            .iter()
+            .any(|citation| citation["id"].as_str() == Some(source_id.as_str()))
+        {
+            continue;
+        }
+        let mut citation = serde_json::json!({
+            "id": source_id,
+            "label": label,
+            "title": locator
+        });
+        if source_id.starts_with("log_template:") || source_id.starts_with("log_event:") {
+            if let Some(corpus_id) = linked_corpus_id.as_ref() {
+                citation["corpusId"] = serde_json::Value::String(corpus_id.clone());
+            }
+        }
+        citations.push(citation);
+    }
     let trail = events
         .iter()
         .filter_map(|event| match event {
@@ -3763,20 +3835,31 @@ fn persist_host_terminal_turn_at(
             _ => None,
         })
         .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
+        .fold(Vec::<String>::new(), |mut steps, step| {
+            if !steps.contains(step) {
+                steps.push(step.clone());
+            }
+            steps
+        });
     let error_codes = errors.iter().map(|(code, _)| *code).collect::<Vec<_>>();
+    if let Some(model_id) = model_id {
+        session.chat_model = Some(model_id.to_string());
+    }
+    if let Some(provider_profile_id) = provider_profile_id {
+        session.provider_profile_id = Some(provider_profile_id.to_string());
+    }
     session.messages.push(StoredMessage {
         id: assistant_id.clone(),
         role: "assistant".into(),
         content,
-        tools: None,
-        citations: None,
+        tools: (!tools.is_empty()).then_some(serde_json::Value::Array(tools)),
+        citations: (!citations.is_empty()).then_some(serde_json::Value::Array(citations)),
         trail: (!trail.is_empty()).then_some(trail),
         meta: Some(serde_json::json!({
             "model": model_id,
             "provider_label": provider_label,
             "provider_id": provider_profile_id,
+            "linked_corpus_id": linked_corpus_id,
             "host_confirmed": true,
             "host_persisted_terminal": true,
             "terminal": {
@@ -3790,6 +3873,60 @@ fn persist_host_terminal_turn_at(
     session.touch();
     store.save(&session).map_err(|error| error.to_string())?;
     Ok(session)
+}
+
+fn linked_provider_loop_terminal_failure(events: &[cd_core::events::StreamEvent]) -> bool {
+    let completed = events
+        .iter()
+        .any(|event| matches!(event, cd_core::events::StreamEvent::TurnCompleted { .. }));
+    let cancelled = events.iter().any(|event| {
+        matches!(
+            event,
+            cd_core::events::StreamEvent::TurnCompleted { reason } if reason == "cancel"
+        )
+    });
+    let terminal_error = events.iter().any(|event| {
+        matches!(
+            event,
+            cd_core::events::StreamEvent::Error { code, .. }
+                if !matches!(
+                    code.as_str(),
+                    "context_budget_learned" | "context_compacted" | "tools_unsupported"
+                )
+        )
+    });
+    completed && (cancelled || terminal_error)
+}
+
+#[allow(clippy::too_many_arguments)] // explicit provenance is the persistence boundary
+fn persist_linked_provider_loop_terminal_at(
+    store: &SessionStore,
+    session_id: &str,
+    user_text: &str,
+    client_user_message_id: Option<&str>,
+    client_assistant_message_id: Option<&str>,
+    events: &[cd_core::events::StreamEvent],
+    provider: (Option<&str>, Option<&str>, Option<&str>),
+) -> Result<bool, String> {
+    if !linked_provider_loop_terminal_failure(events) {
+        return Ok(false);
+    }
+    let session = store
+        .load(session_id)
+        .map_err(|error| format!("chat session is unavailable or corrupt: {error}"))?;
+    if session.linked_corpus_id.is_none() {
+        return Ok(false);
+    }
+    persist_host_terminal_turn_at(
+        store,
+        session_id,
+        user_text,
+        client_user_message_id,
+        client_assistant_message_id,
+        events,
+        provider,
+    )?;
+    Ok(true)
 }
 
 fn persist_host_terminal_turn(
@@ -4301,6 +4438,29 @@ async fn agent_turn(
         .await
         .map_err(|e| e.to_string())
     };
+    let linked_terminal_persistence = match (&linked_citation_corpus, &result) {
+        (Some(_), Ok(events)) => {
+            let _mutation = state
+                .chat_session_mutation
+                .lock()
+                .map_err(|_| "Chat storage is temporarily unavailable".to_string())?;
+            let store = session_store(&state)?;
+            persist_linked_provider_loop_terminal_at(
+                &store,
+                &req.session_id,
+                &req.text,
+                req.client_user_message_id.as_deref(),
+                req.client_assistant_message_id.as_deref(),
+                events,
+                (
+                    Some(&profile.id),
+                    Some(&profile.label),
+                    Some(&profile.chat_model),
+                ),
+            )
+        }
+        _ => Ok(false),
+    };
     let retry_available = {
         let mut checkpoints = state
             .linked_synthesis_checkpoints
@@ -4398,6 +4558,7 @@ async fn agent_turn(
         let mut histories = state.histories.lock().expect("hist");
         histories.insert(req.session_id.clone(), history);
     }
+    linked_terminal_persistence?;
     result.map(|_| ())
 }
 
@@ -10584,7 +10745,8 @@ mod startup_host_tests {
         event_to_dto_with_linked_corpus, finish_agent_turn, host_readiness_terminal_events,
         install_prepared_durable_memory, linked_log_fallback_notice,
         linked_log_host_terminal_events, linked_log_preflight_at, log_search_cancel_key,
-        normalize_log_corpus_id, persist_host_terminal_turn_at, prepare_linked_turn_with,
+        normalize_log_corpus_id, persist_host_terminal_turn_at,
+        persist_linked_provider_loop_terminal_at, prepare_linked_turn_with,
         provider_profile_for_turn, request_agent_turn_cancel, restore_host_if_generation_matches,
         save_chat_session_at, set_chat_linked_corpus_at, take_ready_linked_host,
         validate_linked_log_corpus_at, wait_for_host_readiness, BackgroundIndexBuild,
@@ -10772,6 +10934,222 @@ mod startup_host_tests {
                 "switching away and back must reveal one durable typed terminal turn"
             );
         }
+    }
+
+    #[test]
+    fn first_linked_provider_failure_survives_renderer_crash_before_save() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let session_id = {
+            let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+            let mut session = cd_core::sessions::Session::new("Linked");
+            session.set_linked_corpus_id(Some("corpus-a".into()));
+            let session_id = session.id.clone();
+            store.save(&session).expect("save empty linked session");
+
+            let scripted_first_provider_failure = vec![
+                StreamEvent::TurnStarted {
+                    session_id: session_id.clone(),
+                    model: Some("private-model".into()),
+                },
+                StreamEvent::Error {
+                    code: "linked_retrieval_provider_error".into(),
+                    message: "The provider failed before linked evidence was retrieved. No \
+                              log-grounded answer was produced."
+                        .into(),
+                },
+                StreamEvent::SearchTrail {
+                    steps: vec![
+                        "phase:choosing_evidence".into(),
+                        "linked_retrieval_provider_failure:missing=linked logs".into(),
+                    ],
+                },
+                StreamEvent::TurnCompleted {
+                    reason: "linked_retrieval_provider_error".into(),
+                },
+            ];
+            assert!(
+                persist_linked_provider_loop_terminal_at(
+                    &store,
+                    &session_id,
+                    "What caused the worker failure?",
+                    Some("linked-user-1"),
+                    Some("linked-assistant-1"),
+                    &scripted_first_provider_failure,
+                    (
+                        Some("private-profile"),
+                        Some("Private provider"),
+                        Some("private-model"),
+                    ),
+                )
+                .expect("persist before returning events"),
+                "the linked terminal provider outcome must cross the host durability boundary"
+            );
+
+            // Simulate the renderer process disappearing after IPC delivery but before
+            // its normal full-session save.
+            drop(scripted_first_provider_failure);
+            drop(store);
+            session_id
+        };
+
+        let reopened = cd_core::sessions::SessionStore::new(sessions_root.path())
+            .load(&session_id)
+            .expect("fresh host process reopens linked transcript");
+        assert_eq!(reopened.messages.len(), 2);
+        assert_eq!(reopened.messages[0].id, "linked-user-1");
+        assert_eq!(reopened.messages[0].role, "user");
+        assert_eq!(
+            reopened.messages[0].content,
+            "What caused the worker failure?"
+        );
+        assert_eq!(reopened.messages[1].id, "linked-assistant-1");
+        assert_eq!(reopened.messages[1].role, "assistant");
+        assert!(reopened.messages[1]
+            .content
+            .contains("No log-grounded answer was produced"));
+        assert_eq!(
+            reopened.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["terminal"]["reason"].as_str()),
+            Some("linked_retrieval_provider_error")
+        );
+        assert_eq!(
+            reopened.messages[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["linked_corpus_id"].as_str()),
+            Some("corpus-a")
+        );
+        assert_eq!(
+            reopened.provider_profile_id.as_deref(),
+            Some("private-profile")
+        );
+        assert_eq!(reopened.chat_model.as_deref(), Some("private-model"));
+    }
+
+    #[test]
+    fn evidence_preserving_linked_failure_persists_provenance_once() {
+        let sessions_root = tempfile::tempdir().expect("sessions");
+        let store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let mut session = cd_core::sessions::Session::new("Linked evidence");
+        session.set_linked_corpus_id(Some("corpus-evidence".into()));
+        let session_id = session.id.clone();
+        store.save(&session).expect("save empty linked session");
+        let terminal = vec![
+            StreamEvent::TurnStarted {
+                session_id: session_id.clone(),
+                model: Some("slow-model".into()),
+            },
+            StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "search_logs".into(),
+                phase: cd_core::events::ToolPhase::Started,
+                summary: "Searching linked logs".into(),
+                detail: None,
+                ok: None,
+            },
+            StreamEvent::Tool {
+                id: "tool-1".into(),
+                name: "search_logs".into(),
+                phase: cd_core::events::ToolPhase::Finished,
+                summary: "Found bounded evidence".into(),
+                detail: Some("seq=42 source=worker.log".into()),
+                ok: Some(true),
+            },
+            StreamEvent::Citation {
+                source_id: "log_event:42".into(),
+                label: "worker.log · seq 42".into(),
+                locator: Some("seq=42 source=worker.log".into()),
+            },
+            StreamEvent::SearchTrail {
+                steps: vec![
+                    "phase:retrieving_evidence".into(),
+                    "phase:synthesizing_answer".into(),
+                    "linked_evidence_preserved_for_synthesis_retry".into(),
+                ],
+            },
+            StreamEvent::Error {
+                code: "linked_synthesis_provider_error".into(),
+                message: "The provider failed after bounded evidence was retrieved.".into(),
+            },
+            StreamEvent::TurnCompleted {
+                reason: "linked_synthesis_provider_error".into(),
+            },
+        ];
+
+        for _ in 0..2 {
+            assert!(persist_linked_provider_loop_terminal_at(
+                &store,
+                &session_id,
+                "What evidence explains the incident?",
+                Some("evidence-user"),
+                Some("evidence-assistant"),
+                &terminal,
+                (
+                    Some("private-profile"),
+                    Some("Private provider"),
+                    Some("slow-model"),
+                ),
+            )
+            .expect("idempotent terminal persistence"));
+        }
+
+        let reopened_store = cd_core::sessions::SessionStore::new(sessions_root.path());
+        let reopened = reopened_store
+            .load(&session_id)
+            .expect("reopen evidence-preserving failure");
+        assert_eq!(reopened.messages.len(), 2);
+        let assistant = &reopened.messages[1];
+        let tools = assistant
+            .tools
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .expect("durable tool provenance");
+        assert_eq!(tools.len(), 1, "started/finished events fold by tool id");
+        assert_eq!(tools[0]["id"], "tool-1");
+        assert_eq!(tools[0]["ok"], true);
+        let citations = assistant
+            .citations
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .expect("durable citation provenance");
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0]["id"], "log_event:42");
+        assert_eq!(citations[0]["corpusId"], "corpus-evidence");
+        assert_eq!(
+            assistant.trail.as_deref(),
+            Some(
+                [
+                    "phase:retrieving_evidence".to_string(),
+                    "phase:synthesizing_answer".to_string(),
+                    "linked_evidence_preserved_for_synthesis_retry".to_string(),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["provider_id"].as_str()),
+            Some("private-profile")
+        );
+        assert_eq!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta["model"].as_str()),
+            Some("slow-model")
+        );
+        assert!(
+            assistant
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("linked_synthesis_retry"))
+                .is_none(),
+            "process-local synthesis checkpoints must not become durable state"
+        );
     }
 
     #[test]
