@@ -399,18 +399,22 @@ The user previews the exact Markdown or JSON before saving. Browser and host
 privacy checks cover secret tokens, ordinary private-suffix hosts such as
 `server.internal`, arbitrary absolute Unix/Windows paths, private/loopback IPv4,
 and loopback/unique-local/link-local IPv6. The native writer accepts only a
-bounded payload and a user-selected `.md` or `.json` destination and recomputes
-the privacy transform. If that result differs from the visible preview, save is
-rejected instead of silently changing the file.
+bounded format/content request and recomputes the privacy transform. The
+renderer cannot supply a destination, assert overwrite confirmation, or
+authorize itself through a separate IPC call. The invoking native window owns
+the Save panel and returns only typed `saved` or `cancelled` status. If the
+host privacy result differs from the visible preview, save is rejected instead
+of silently changing the file.
 
 For an accepted exact preview, the host writes and syncs a restricted,
 create-new sibling temporary file. A new destination is published with a
-no-clobber hard link; a confirmed existing destination is atomically replaced
-on platforms where that primitive is available, otherwise replacement is
-refused and the user chooses a new name. The parent directory is synced on
-Unix, temporary files are cleaned after error, and symlink destinations are
-refused. Cancel therefore creates no file. Diagnostics remain distinct from a
-`.cdlog.zip` package, which intentionally contains analyzed corpus data.
+no-clobber primitive. A native-panel-confirmed existing destination is
+atomically replaced with same-filesystem rename on Unix or write-through
+`MoveFileExW` on Windows. The parent directory is synced on Unix, temporary
+files are cleaned after error, and symlink or Windows reparse-point
+destinations are refused. Native-panel cancellation is a non-error and creates
+no file. Diagnostics remain distinct from a `.cdlog.zip` package, which
+intentionally contains analyzed corpus data.
 
 The report builder independently re-bounds and sanitizes the typed evidence,
 and the native save boundary redacts every Markdown line or JSON string again.

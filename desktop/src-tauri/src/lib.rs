@@ -5066,20 +5066,91 @@ fn export_log_corpus_package(
     Ok(man.format_version)
 }
 
-/// Write one bounded, redacted diagnostic to a path chosen by the native dialog.
-#[tauri::command]
-fn save_log_diagnostic_report(
-    path: String,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticExportRequest {
     format: String,
     content: String,
-    overwrite_confirmed: bool,
-) -> Result<(), String> {
-    log_diagnostics::save_log_diagnostic_report(
-        std::path::Path::new(&path),
-        &format,
-        &content,
-        overwrite_confirmed,
-    )
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum LogDiagnosticSaveStatus {
+    Saved,
+    Cancelled,
+}
+
+struct LogDiagnosticDialogSpec {
+    title: &'static str,
+    file_name: &'static str,
+    filter_name: &'static str,
+    extension: &'static str,
+}
+
+fn log_diagnostic_dialog_spec(format: &str) -> Result<LogDiagnosticDialogSpec, String> {
+    match format {
+        "markdown" => Ok(LogDiagnosticDialogSpec {
+            title: "Save log diagnostics as Markdown",
+            file_name: "contextdesk-log-diagnostics.md",
+            filter_name: "Markdown",
+            extension: "md",
+        }),
+        "json" => Ok(LogDiagnosticDialogSpec {
+            title: "Save log diagnostics as JSON",
+            file_name: "contextdesk-log-diagnostics.json",
+            filter_name: "JSON",
+            extension: "json",
+        }),
+        _ => Err("diagnostic format must be markdown or json".into()),
+    }
+}
+
+fn complete_log_diagnostic_export(
+    request: &LogDiagnosticExportRequest,
+    selected_path: Option<PathBuf>,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    log_diagnostics::validate_log_diagnostic_report(&request.format, &request.content)?;
+    let Some(path) = selected_path else {
+        return Ok(LogDiagnosticSaveStatus::Cancelled);
+    };
+    log_diagnostics::save_log_diagnostic_report_at_host_path(
+        &path,
+        &request.format,
+        &request.content,
+    )?;
+    Ok(LogDiagnosticSaveStatus::Saved)
+}
+
+/// Show the host-owned native Save panel and atomically write one bounded,
+/// privacy-reviewed diagnostic. The renderer has no destination or overwrite
+/// authority.
+#[tauri::command]
+async fn save_log_diagnostic_report(
+    window: tauri::WebviewWindow,
+    request: LogDiagnosticExportRequest,
+) -> Result<LogDiagnosticSaveStatus, String> {
+    log_diagnostics::validate_log_diagnostic_report(&request.format, &request.content)?;
+    let spec = log_diagnostic_dialog_spec(&request.format)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title(spec.title)
+        .set_file_name(spec.file_name)
+        .add_filter(spec.filter_name, &[spec.extension])
+        .save_file(move |selected| {
+            let _ = sender.send(selected);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "native diagnostic Save dialog ended unexpectedly".to_string())?
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "native diagnostic Save dialog returned an invalid path".to_string())
+        })
+        .transpose()?;
+    complete_log_diagnostic_export(&request, selected)
 }
 
 /// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
@@ -7362,6 +7433,78 @@ pub fn run() {
 
 #[cfg(test)]
 mod s3_backup_host_tests;
+
+#[cfg(test)]
+mod log_diagnostic_export_authority_tests {
+    use super::*;
+
+    fn safe_request() -> LogDiagnosticExportRequest {
+        LogDiagnosticExportRequest {
+            format: "markdown".into(),
+            content: "# Safe diagnostic\n\n- Status: no private data".into(),
+        }
+    }
+
+    #[test]
+    fn ipc_request_rejects_renderer_destination_and_overwrite_authority() {
+        for forbidden in [
+            serde_json::json!({
+                "format": "markdown",
+                "content": "# Safe diagnostic",
+                "path": "/tmp/renderer-selected.md"
+            }),
+            serde_json::json!({
+                "format": "markdown",
+                "content": "# Safe diagnostic",
+                "overwriteConfirmed": true
+            }),
+        ] {
+            let error = serde_json::from_value::<LogDiagnosticExportRequest>(forbidden)
+                .expect_err("unknown renderer authority must fail closed");
+            assert!(error.to_string().contains("unknown field"), "{error}");
+        }
+        serde_json::from_value::<LogDiagnosticExportRequest>(serde_json::json!({
+            "format": "markdown",
+            "content": "# Safe diagnostic"
+        }))
+        .expect("format and content are the complete renderer request");
+    }
+
+    #[test]
+    fn host_dialog_cancellation_is_typed_and_writes_nothing() {
+        let root = tempfile::tempdir().expect("temp root");
+        let status =
+            complete_log_diagnostic_export(&safe_request(), None).expect("cancel is not an error");
+        assert_eq!(status, LogDiagnosticSaveStatus::Cancelled);
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize status"),
+            serde_json::json!({ "status": "cancelled" })
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("read temp root")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn host_selected_path_returns_typed_saved_status() {
+        let root = tempfile::tempdir().expect("temp root");
+        let destination = root.path().join("diagnostic.md");
+        let status = complete_log_diagnostic_export(&safe_request(), Some(destination.clone()))
+            .expect("host-selected save");
+        assert_eq!(status, LogDiagnosticSaveStatus::Saved);
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize status"),
+            serde_json::json!({ "status": "saved" })
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination).expect("read saved report"),
+            safe_request().content
+        );
+    }
+}
 
 #[cfg(test)]
 mod log_ingest_cancel_registry_tests {

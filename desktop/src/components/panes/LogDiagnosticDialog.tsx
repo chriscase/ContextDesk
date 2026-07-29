@@ -1,6 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { saveFileDialog } from "../../lib/dialogs";
 import {
   buildLogDiagnosticReport,
   LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
@@ -65,7 +64,6 @@ export function LogDiagnosticDialog({
   );
   const failed = failedIngest != null;
   const subjectLabel = corpus?.name ?? "the latest failed import";
-  const subjectId = corpus?.id.slice(0, 8) ?? "failed-ingest";
 
   useEffect(() => {
     queueMicrotask(() => noteRef.current?.focus());
@@ -92,33 +90,17 @@ export function LogDiagnosticDialog({
 
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
-    const path = await saveFileDialog(
-      markdown
-        ? `Save ${failed ? "failed-ingest" : "corpus"} diagnostics`
-        : `Save ${failed ? "failed-ingest" : "corpus"} diagnostics as JSON`,
-      `contextdesk-${subjectId}-diagnostics.${markdown ? "md" : "json"}`,
-      [
-        markdown
-          ? { name: "Markdown", extensions: ["md"] }
-          : { name: "JSON", extensions: ["json"] },
-      ],
-    );
-    if (!path) {
-      setResult("Save cancelled. No file was written.");
-      return;
-    }
-
     setBusy(true);
     setResult(null);
     try {
-      await hostSaveLogDiagnosticReport(
-        path,
+      const outcome = await hostSaveLogDiagnosticReport(
         format,
         markdown ? report.markdown : report.json,
-        // The native save panel performs the overwrite confirmation before it
-        // returns an existing destination path.
-        true,
       );
+      if (outcome.status === "cancelled") {
+        setResult("Save cancelled. No file was written.");
+        return;
+      }
       setResult(
         `Saved redacted ${markdown ? "Markdown" : "JSON"} diagnostics. Review before sharing.`,
       );

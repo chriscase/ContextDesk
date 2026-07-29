@@ -140,7 +140,9 @@ oversized, read-failed, and parse-failed sources plus at most 20
 reason/basename examples. Additional examples are counted rather than retained.
 Archive ancestry, private source paths, raw parser/filesystem errors, and
 archive payloads are not included. The same evidence contract applies to a
-directory, a selected ZIP, and ZIPs nested inside that ZIP.
+directory, a selected ZIP, and ZIPs nested inside that ZIP. Saving this report
+uses a host-owned native panel; the renderer cannot choose the destination or
+assert overwrite approval, and cancellation writes nothing.
 
 ## Current limits
 

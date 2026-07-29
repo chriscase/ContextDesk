@@ -284,10 +284,12 @@ buttons announce which format is selected.
 
 The native host independently checks the exact visible preview before writing.
 If its privacy result would differ, save is refused rather than silently
-changing the export. Accepted reports use a restricted same-folder temporary
-file and atomic publication; replacing an existing file requires the native
-save panel's overwrite confirmation. You must still review the preview before
-sharing.
+changing the export. The renderer sends only the selected format and redacted
+content; the host-owned native Save panel alone selects the destination and
+confirms replacement. Accepted reports use a restricted same-folder temporary
+file and atomic publication, including write-through native replacement on
+Windows. Cancelling the panel is a normal no-write outcome. You must still
+review the preview before sharing.
 
 Do not confuse diagnostics with **Export package…**. A diagnostic is a small
 metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing

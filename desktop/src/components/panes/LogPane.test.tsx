@@ -131,7 +131,7 @@ describe("LogPane", () => {
       git_describe: null,
       identity_line: "v0.1.0 · channel=dev",
     });
-    hostMocks.saveDiagnostic.mockResolvedValue(undefined);
+    hostMocks.saveDiagnostic.mockResolvedValue({ status: "saved" });
     hostMocks.saveFile.mockResolvedValue(null);
     hostMocks.openFile.mockResolvedValue(null);
   });
@@ -355,10 +355,10 @@ describe("LogPane", () => {
       configurable: true,
       value: { writeText },
     });
-    hostMocks.saveFile
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce("/tmp/corpus-diagnostic.md")
-      .mockResolvedValueOnce("/tmp/corpus-diagnostic.json");
+    hostMocks.saveDiagnostic
+      .mockResolvedValueOnce({ status: "cancelled" })
+      .mockResolvedValueOnce({ status: "saved" })
+      .mockResolvedValueOnce({ status: "saved" });
 
     render(<LogPane />);
     const trigger = await screen.findByRole("button", {
@@ -425,19 +425,22 @@ describe("LogPane", () => {
         within(dialog).getByText("Save cancelled. No file was written."),
       ).toBeTruthy(),
     );
-    expect(hostMocks.saveDiagnostic).not.toHaveBeenCalled();
+    expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(1);
+    expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
+      "markdown",
+      expect.stringContaining("# ContextDesk corpus diagnostic"),
+    );
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Save Markdown…" }),
     );
     await waitFor(() =>
-      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
-        "/tmp/corpus-diagnostic.md",
+      expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
         "markdown",
         expect.stringContaining("# ContextDesk corpus diagnostic"),
-        true,
       ),
     );
+    expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(2);
 
     fireEvent.click(jsonToggle);
     expect(markdownToggle.getAttribute("aria-pressed")).toBe("false");
@@ -447,13 +450,12 @@ describe("LogPane", () => {
     ).toContain('"schemaVersion": 1');
     fireEvent.click(within(dialog).getByRole("button", { name: "Save JSON…" }));
     await waitFor(() =>
-      expect(hostMocks.saveDiagnostic).toHaveBeenCalledWith(
-        "/tmp/corpus-diagnostic.json",
+      expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
         "json",
         expect.stringContaining('"schemaVersion": 1'),
-        true,
       ),
     );
+    expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(3);
 
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());

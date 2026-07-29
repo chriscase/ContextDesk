@@ -36,13 +36,24 @@ impl DiagnosticFormat {
     }
 }
 
-pub fn save_log_diagnostic_report(
+pub fn validate_log_diagnostic_report(format: &str, content: &str) -> Result<(), String> {
+    let format = DiagnosticFormat::parse(format)?;
+    validate_content(format, content)
+}
+
+pub fn save_log_diagnostic_report_at_host_path(
     path: &Path,
     format: &str,
     content: &str,
-    overwrite_confirmed: bool,
 ) -> Result<(), String> {
     let format = DiagnosticFormat::parse(format)?;
+    validate_content(format, content)?;
+    validate_destination_path(path, format)?;
+    let destination_exists = inspect_destination(path)?;
+    atomic_publish(path, content, destination_exists)
+}
+
+fn validate_content(format: DiagnosticFormat, content: &str) -> Result<(), String> {
     if content.is_empty() {
         return Err("diagnostic content is empty".into());
     }
@@ -52,6 +63,16 @@ pub fn save_log_diagnostic_report(
             MAX_DIAGNOSTIC_BYTES
         ));
     }
+    let host_reviewed = redact_at_export_boundary(content, format)?;
+    if host_reviewed != content {
+        return Err(
+            "diagnostic preview failed host privacy validation; nothing was written".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_destination_path(path: &Path, format: DiagnosticFormat) -> Result<(), String> {
     if path.as_os_str().to_string_lossy().chars().count() > MAX_PATH_CHARS {
         return Err("diagnostic destination path is too long".into());
     }
@@ -71,28 +92,37 @@ pub fn save_log_diagnostic_report(
     if !parent.is_dir() {
         return Err("diagnostic destination parent does not exist".into());
     }
-    let destination_exists = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err("diagnostic destination cannot be a symbolic link".into())
+    Ok(())
+}
+
+fn inspect_destination(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if unsafe_destination_metadata(&metadata) => {
+            Err("diagnostic destination cannot be a symbolic link or reparse point".into())
         }
         Ok(metadata) if !metadata.is_file() => {
-            return Err("diagnostic destination must be a regular file".into())
+            Err("diagnostic destination must be a regular file".into())
         }
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(format!("inspect diagnostic destination: {error}")),
-    };
-    if destination_exists && !overwrite_confirmed {
-        return Err("replacing an existing diagnostic requires overwrite confirmation".into());
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("inspect diagnostic destination: {error}")),
     }
+}
 
-    let host_reviewed = redact_at_export_boundary(content, format)?;
-    if host_reviewed != content {
-        return Err(
-            "diagnostic preview failed host privacy validation; nothing was written".into(),
-        );
+fn unsafe_destination_metadata(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
     }
-    atomic_publish(path, content, destination_exists)
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 struct PendingDiagnosticTemp {
@@ -122,8 +152,8 @@ fn atomic_publish(path: &Path, content: &str, destination_exists: bool) -> Resul
 
     if destination_exists {
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err("diagnostic destination became a symbolic link".into())
+            Ok(metadata) if unsafe_destination_metadata(&metadata) => {
+                return Err("diagnostic destination became a symbolic link or reparse point".into())
             }
             Ok(metadata) if !metadata.is_file() => {
                 return Err("diagnostic destination is no longer a regular file".into())
@@ -138,20 +168,30 @@ fn atomic_publish(path: &Path, content: &str, destination_exists: bool) -> Resul
                 .map_err(|error| format!("atomically replace diagnostic destination: {error}"))?;
             pending.published = true;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            return Err(
-                "atomic replacement of an existing diagnostic is unavailable; choose a new filename"
-                    .into(),
-            );
+            windows_move_file(&pending.path, path, true)?;
+            pending.published = true;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            return Err("atomic diagnostic replacement is unavailable on this platform".into());
         }
     } else {
-        std::fs::hard_link(&pending.path, path).map_err(|error| {
-            format!("atomically publish new diagnostic without replacement: {error}")
-        })?;
-        std::fs::remove_file(&pending.path)
-            .map_err(|error| format!("remove diagnostic temporary link: {error}"))?;
-        pending.published = true;
+        #[cfg(windows)]
+        {
+            windows_move_file(&pending.path, path, false)?;
+            pending.published = true;
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::hard_link(&pending.path, path).map_err(|error| {
+                format!("atomically publish new diagnostic without replacement: {error}")
+            })?;
+            std::fs::remove_file(&pending.path)
+                .map_err(|error| format!("remove diagnostic temporary link: {error}"))?;
+            pending.published = true;
+        }
     }
 
     #[cfg(unix)]
@@ -159,6 +199,55 @@ fn atomic_publish(path: &Path, content: &str, destination_exists: bool) -> Resul
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| format!("flush diagnostic destination directory: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_move_file(
+    source: &Path,
+    destination: &Path,
+    replace_existing: bool,
+) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    fn nul_terminated(path: &Path) -> Result<Vec<u16>, String> {
+        let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if encoded.contains(&0) {
+            return Err("diagnostic destination contains an invalid NUL".into());
+        }
+        encoded.push(0);
+        Ok(encoded)
+    }
+
+    let source = nul_terminated(source)?;
+    let destination = nul_terminated(destination)?;
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if replace_existing {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers for the
+    // duration of the call; the remaining parameter is a documented flag mask.
+    let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) };
+    if moved == 0 {
+        return Err(format!(
+            "atomically publish diagnostic with MoveFileExW: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -377,7 +466,7 @@ mod tests {
         assert!(reviewed.contains("019fab76-18ff-7361-8dd8-e4ddc0f1bb6c"));
         assert!(reviewed.contains("de43caeba66df05068a50db9356efad3b64a4a45"));
 
-        let error = save_log_diagnostic_report(&destination, "markdown", content, true)
+        let error = save_log_diagnostic_report_at_host_path(&destination, "markdown", content)
             .expect_err("mutating preview must be refused");
         assert!(error.contains("privacy validation"), "{error}");
         assert_eq!(
@@ -409,7 +498,7 @@ mod tests {
         assert_eq!(parsed["corpus"]["name"], "[REDACTED_PRIVATE_HOST]");
         assert_eq!(parsed["corpus"]["note"], "[REDACTED_PATH]");
         assert_eq!(parsed["corpus"]["status"], "[REDACTED_PRIVATE_NETWORK]");
-        let error = save_log_diagnostic_report(&destination, "json", content, false)
+        let error = save_log_diagnostic_report_at_host_path(&destination, "json", content)
             .expect_err("unreviewed preview must be refused");
         assert!(error.contains("privacy validation"), "{error}");
         assert!(!destination.exists());
@@ -427,7 +516,8 @@ mod tests {
   }
 }"#;
 
-        save_log_diagnostic_report(&destination, "json", content, false).expect("save report");
+        save_log_diagnostic_report_at_host_path(&destination, "json", content)
+            .expect("save report");
         assert_eq!(
             std::fs::read_to_string(destination).expect("read report"),
             content
@@ -445,13 +535,13 @@ mod tests {
     }
 
     #[test]
-    fn atomic_publish_requires_confirmation_and_leaves_no_sibling_temp() {
+    fn host_selected_path_publishes_atomically_and_leaves_no_sibling_temp() {
         let root = tempfile::tempdir().expect("temp root");
         let destination = root.path().join("diagnostic.md");
         let first = "# Safe diagnostic\n\n- Status: none";
         let second = "# Safe diagnostic\n\n- Status: updated";
 
-        save_log_diagnostic_report(&destination, "markdown", first, false)
+        save_log_diagnostic_report_at_host_path(&destination, "markdown", first)
             .expect("publish new report");
         assert_eq!(
             std::fs::read_to_string(&destination).expect("read first"),
@@ -470,29 +560,12 @@ mod tests {
             );
         }
 
-        let error = save_log_diagnostic_report(&destination, "markdown", second, false)
-            .expect_err("overwrite confirmation required");
-        assert!(error.contains("overwrite confirmation"), "{error}");
+        save_log_diagnostic_report_at_host_path(&destination, "markdown", second)
+            .expect("atomically replace host-confirmed report");
         assert_eq!(
-            std::fs::read_to_string(&destination).expect("read unchanged"),
-            first
+            std::fs::read_to_string(&destination).expect("read replacement"),
+            second
         );
-
-        #[cfg(unix)]
-        {
-            save_log_diagnostic_report(&destination, "markdown", second, true)
-                .expect("atomically replace report");
-            assert_eq!(
-                std::fs::read_to_string(&destination).expect("read replacement"),
-                second
-            );
-        }
-        #[cfg(not(unix))]
-        {
-            let error = save_log_diagnostic_report(&destination, "markdown", second, true)
-                .expect_err("unsafe replacement must be refused");
-            assert!(error.contains("atomic replacement"), "{error}");
-        }
 
         let leftovers = std::fs::read_dir(root.path())
             .expect("read temp root")
@@ -567,7 +640,7 @@ mod tests {
         ] {
             assert!(!reviewed.contains(forbidden), "{reviewed}");
         }
-        let error = save_log_diagnostic_report(&destination, "json", content, false)
+        let error = save_log_diagnostic_report_at_host_path(&destination, "json", content)
             .expect_err("unreviewed preview must be refused");
         assert!(error.contains("privacy validation"), "{error}");
         assert!(!destination.exists());
@@ -577,25 +650,26 @@ mod tests {
     fn rejects_oversized_wrong_extension_and_missing_parent() {
         let root = tempfile::tempdir().expect("temp root");
         let oversized = "x".repeat(MAX_DIAGNOSTIC_BYTES + 1);
-        let error = save_log_diagnostic_report(
+        let error = save_log_diagnostic_report_at_host_path(
             &root.path().join("large.md"),
             "markdown",
             &oversized,
-            false,
         )
         .expect_err("oversized report");
         assert!(error.contains("exceeds"));
 
-        let error =
-            save_log_diagnostic_report(&root.path().join("wrong.txt"), "markdown", "safe", false)
-                .expect_err("wrong extension");
+        let error = save_log_diagnostic_report_at_host_path(
+            &root.path().join("wrong.txt"),
+            "markdown",
+            "safe",
+        )
+        .expect_err("wrong extension");
         assert!(error.contains(".md"));
 
-        let error = save_log_diagnostic_report(
+        let error = save_log_diagnostic_report_at_host_path(
             &root.path().join("missing").join("report.json"),
             "json",
             "{}",
-            false,
         )
         .expect_err("missing parent");
         assert!(error.contains("parent"));
@@ -612,12 +686,46 @@ mod tests {
         let link = root.path().join("diagnostic.md");
         symlink(&actual, &link).expect("create symlink");
 
-        let error = save_log_diagnostic_report(&link, "markdown", "replacement", true)
+        let error = save_log_diagnostic_report_at_host_path(&link, "markdown", "replacement")
             .expect_err("symlink refused");
         assert!(error.contains("symbolic link"));
         assert_eq!(
             std::fs::read_to_string(actual).expect("read actual"),
             "keep"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_file_is_write_through_no_clobber_then_atomic_replace() {
+        let root = tempfile::tempdir().expect("temp root");
+        let destination = root.path().join("diagnostic.md");
+        std::fs::write(&destination, "# Existing diagnostic").expect("seed destination");
+
+        let error = atomic_publish(&destination, "# Must not clobber", false)
+            .expect_err("new-file publication must stay no-clobber");
+        assert!(error.contains("MoveFileExW"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read unchanged destination"),
+            "# Existing diagnostic"
+        );
+
+        save_log_diagnostic_report_at_host_path(
+            &destination,
+            "markdown",
+            "# Host-confirmed replacement",
+        )
+        .expect("replace with MoveFileExW");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read replacement"),
+            "# Host-confirmed replacement"
+        );
+        let leftovers = std::fs::read_dir(root.path())
+            .expect("read temp root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".contextdesk-diagnostic-"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

@@ -60,22 +60,22 @@ describe("hostLogSharedTimelineSummary", () => {
 });
 
 describe("hostSaveLogDiagnosticReport", () => {
-  it("sends only the selected path, explicit format, and bounded report content", async () => {
-    invokeMock.mockResolvedValue(undefined);
+  it("sends only format and bounded content without destination or overwrite authority", async () => {
+    invokeMock.mockResolvedValue({ status: "saved" });
 
-    await hostSaveLogDiagnosticReport(
-      "/tmp/contextdesk-diagnostic.md",
-      "markdown",
-      "# redacted diagnostic",
-      true,
-    );
+    await expect(
+      hostSaveLogDiagnosticReport("markdown", "# redacted diagnostic"),
+    ).resolves.toEqual({ status: "saved" });
 
     expect(invokeMock).toHaveBeenCalledWith("save_log_diagnostic_report", {
-      path: "/tmp/contextdesk-diagnostic.md",
-      format: "markdown",
-      content: "# redacted diagnostic",
-      overwriteConfirmed: true,
+      request: {
+        format: "markdown",
+        content: "# redacted diagnostic",
+      },
     });
+    const ipcArgs = JSON.stringify(invokeMock.mock.calls[0]?.[1]);
+    expect(ipcArgs).not.toContain("path");
+    expect(ipcArgs).not.toContain("overwrite");
   });
 });
 

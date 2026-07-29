@@ -1955,19 +1955,21 @@ export async function hostExportLogCorpusPackage(
   return invoke<string>("export_log_corpus_package", { corpusId, path });
 }
 
-/** Write one bounded, privacy-reviewed corpus diagnostic to a user-selected path. */
+export type LogDiagnosticSaveStatus = {
+  status: "saved" | "cancelled";
+};
+
+/** Ask the trusted host to select and atomically write one reviewed diagnostic. */
 export async function hostSaveLogDiagnosticReport(
-  path: string,
   format: "markdown" | "json",
   content: string,
-  overwriteConfirmed: boolean,
-): Promise<void> {
+): Promise<LogDiagnosticSaveStatus> {
   if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
-  await invoke<void>("save_log_diagnostic_report", {
-    path,
-    format,
-    content,
-    overwriteConfirmed,
+  return invoke<LogDiagnosticSaveStatus>("save_log_diagnostic_report", {
+    request: {
+      format,
+      content,
+    },
   });
 }
 
