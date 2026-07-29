@@ -2386,9 +2386,15 @@
   min-width: 0;
 }
 
+.log-explorer__lane-source-more {
+  width: 100%;
+  margin-top: 0.45rem;
+}
+
 .log-explorer__lane-editor-content {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .log-explorer__lane-editor-row {

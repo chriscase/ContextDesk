@@ -67,6 +67,14 @@ vi.mock("../../lib/host", () => ({
     hosts: {},
     timeQuality: "wall",
   })),
+  hostLogSourceCatalog: vi.fn(async () => ({
+    sources: [
+      { source: "api.log", eventCount: 5 },
+      { source: "worker.log", eventCount: 5 },
+    ],
+    nextCursor: null,
+    totalMatched: 2,
+  })),
   hostLogQueryEvents: vi.fn(async () => ({
     events: [
       {
@@ -447,6 +455,14 @@ describe("LogExplorer shell", () => {
       services: { api: 5 },
       hosts: {},
       timeQuality: "wall",
+    });
+    vi.mocked(host.hostLogSourceCatalog).mockResolvedValue({
+      sources: [
+        { source: "api.log", eventCount: 5 },
+        { source: "worker.log", eventCount: 5 },
+      ],
+      nextCursor: null,
+      totalMatched: 2,
     });
     vi.mocked(host.hostLogQueryEvents).mockResolvedValue(defaultEventPage());
     vi.mocked(host.hostLogQueryEventOriginal).mockResolvedValue({
@@ -2892,12 +2908,12 @@ describe("LogExplorer shell", () => {
     const laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     expect(laneRows.length).toBe(2);
     fireEvent.click(
-      within(laneRows[0] as HTMLElement).getByRole("checkbox", {
+      await within(laneRows[0] as HTMLElement).findByRole("checkbox", {
         name: /api\.log/i,
       }),
     );
     fireEvent.click(
-      within(laneRows[1] as HTMLElement).getByRole("checkbox", {
+      await within(laneRows[1] as HTMLElement).findByRole("checkbox", {
         name: /worker\.log/i,
       }),
     );
@@ -3580,7 +3596,7 @@ describe("LogExplorer shell", () => {
     const editor = await screen.findByTestId("lane-editor");
     expect(editor.textContent).toMatch(/All sources/);
     // Compose lane-0 → api only, lane-1 → worker only.
-    const checks = within(editor).getAllByRole("checkbox");
+    const checks = await within(editor).findAllByRole("checkbox");
     // First source checkbox for lane-0
     fireEvent.click(checks[0]!);
     // Second lane's worker checkbox (after lane-0's sources)
@@ -3674,7 +3690,9 @@ describe("LogExplorer shell", () => {
     expect(editor.getAttribute("role")).toBe("dialog");
     expect(editor.getAttribute("data-lane-editor-mode")).toBe("popover");
     expect(editor.textContent).toContain("2 visible lanes");
-    expect(editor.textContent).toContain("2 available sources");
+    await waitFor(() =>
+      expect(editor.textContent).toContain("2 available sources"),
+    );
     expect(document.activeElement).toBe(
       screen.getByTestId("lane-editor-close"),
     );
@@ -3728,10 +3746,10 @@ describe("LogExplorer shell", () => {
     let editor = await screen.findByTestId("lane-editor");
     let laneRows = editor.querySelectorAll(".log-explorer__lane-editor-row");
     fireEvent.click(
-      within(laneRows[0] as HTMLElement).getAllByRole("checkbox")[0]!,
+      (await within(laneRows[0] as HTMLElement).findAllByRole("checkbox"))[0]!,
     );
     fireEvent.click(
-      within(laneRows[1] as HTMLElement).getAllByRole("checkbox")[1]!,
+      (await within(laneRows[1] as HTMLElement).findAllByRole("checkbox"))[1]!,
     );
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
@@ -3766,7 +3784,7 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     const editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /worker\.log/i }),
     );
     fireEvent.keyDown(screen.getByTestId("lane-editor-close"), {
       key: "Escape",
@@ -3813,10 +3831,10 @@ describe("LogExplorer shell", () => {
     fireEvent.click(toggle);
     let editor = await screen.findByTestId("lane-editor");
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /api\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /api\.log/i }),
     );
     fireEvent.click(
-      within(editor).getByRole("checkbox", { name: /worker\.log/i }),
+      await within(editor).findByRole("checkbox", { name: /worker\.log/i }),
     );
     fireEvent.click(screen.getByTestId("lane-editor-close"));
 
@@ -3854,27 +3872,58 @@ describe("LogExplorer shell", () => {
     ).toBeTruthy();
   });
 
-  it("exposes sources beyond the old forty-item cutoff and makes all-sources membership explicit", async () => {
+  it("pages and searches all 241 full source paths without losing lane membership", async () => {
     const sourcePaths = Array.from(
-      { length: 55 },
-      (_, index) => `region-${String(index).padStart(2, "0")}/service.log`,
+      { length: 241 },
+      (_, index) => `region-${String(index).padStart(3, "0")}/service.log`,
     );
-    vi.mocked(host.hostLogFacets).mockResolvedValue({
-      sources: Object.fromEntries(sourcePaths.map((source) => [source, 1])),
-      levels: { info: sourcePaths.length },
-      services: {},
-      hosts: {},
-      timeQuality: "wall",
-    });
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (_corpusId, query = {}) => {
+        const search = query.search?.toLocaleLowerCase() ?? "";
+        const matching = sourcePaths.filter((source) =>
+          source.toLocaleLowerCase().includes(search),
+        );
+        const start = query.cursor
+          ? Math.max(0, matching.indexOf(query.cursor) + 1)
+          : 0;
+        const limit = query.limit ?? 100;
+        const page = matching.slice(start, start + limit);
+        return {
+          sources: page.map((source) => ({ source, eventCount: 1 })),
+          nextCursor:
+            start + page.length < matching.length
+              ? (page[page.length - 1] ?? null)
+              : null,
+          totalMatched: matching.length,
+        };
+      },
+    );
 
     render(<LogExplorer corpusId="c1" />);
-    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    const toggle = await screen.findByTestId("lane-editor-toggle");
+    expect(host.hostLogSourceCatalog).not.toHaveBeenCalled();
+    fireEvent.click(toggle);
     const editor = await screen.findByTestId("lane-editor");
     const lane = editor.querySelector(
       ".log-explorer__lane-editor-row",
     ) as HTMLElement;
 
-    expect(within(lane).getAllByRole("checkbox")).toHaveLength(55);
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(200),
+    );
+    fireEvent.click(
+      within(editor).getByRole("button", {
+        name: "Load more sources (41 remaining)",
+      }),
+    );
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(241),
+    );
+    expect(
+      within(lane).getByRole("checkbox", {
+        name: "region-240/service.log",
+      }),
+    ).toBeTruthy();
     expect(
       within(lane)
         .getByRole("button", { name: "All sources active" })
@@ -3884,17 +3933,37 @@ describe("LogExplorer shell", () => {
     const sourceSearch = within(editor).getByRole("searchbox", {
       name: "Find source",
     });
-    fireEvent.change(sourceSearch, { target: { value: "region-54/" } });
-    expect(within(lane).getAllByRole("checkbox")).toHaveLength(1);
+    fireEvent.change(sourceSearch, { target: { value: "region-240/" } });
+    await waitFor(() =>
+      expect(within(lane).getAllByRole("checkbox")).toHaveLength(1),
+    );
 
     fireEvent.click(
       within(lane).getByRole("checkbox", {
-        name: "region-54/service.log",
+        name: "region-240/service.log",
       }),
     );
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
+
+    fireEvent.change(sourceSearch, { target: { value: "region-001/" } });
+    await waitFor(() =>
+      expect(
+        within(lane).getByRole("checkbox", {
+          name: "region-001/service.log",
+        }),
+      ).toBeTruthy(),
+    );
+    expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
+      "1 source",
+    );
+
+    fireEvent.change(sourceSearch, { target: { value: "region-240/" } });
+    const selectedSource = await within(lane).findByRole("checkbox", {
+      name: "region-240/service.log",
+    });
+    expect((selectedSource as HTMLInputElement).checked).toBe(true);
 
     fireEvent.click(
       within(lane).getByRole("button", { name: "Use all sources" }),
@@ -3915,13 +3984,74 @@ describe("LogExplorer shell", () => {
     expect(
       (
         within(lane).getByRole("checkbox", {
-          name: "region-54/service.log",
+          name: "region-240/service.log",
         }) as HTMLInputElement
       ).checked,
     ).toBe(true);
     expect(screen.getByTestId("lane-editor-summary-lane-0").textContent).toBe(
       "1 source",
     );
+  });
+
+  it("keeps all-sources lanes explicit in shared timeline requests", async () => {
+    render(<LogExplorer corpusId="c1" />);
+
+    chooseLaneCount(2);
+
+    await waitFor(() => {
+      expect(
+        vi
+          .mocked(host.hostLogSharedTimelineSummary)
+          .mock.calls.some(
+            ([, , lanes]) =>
+              lanes.length === 2 &&
+              lanes.every(
+                (lane) =>
+                  lane.allSources === true && lane.sources.length === 0,
+              ),
+          ),
+      ).toBe(true);
+    });
+  });
+
+  it("ignores a stale source-catalog response after the corpus changes", async () => {
+    const first = deferred<host.LogSourceCatalogPageDto>();
+    vi.mocked(host.hostLogSourceCatalog).mockImplementation(
+      async (requestedCorpusId) => {
+        if (requestedCorpusId === "c1") return first.promise;
+        return {
+          sources: [{ source: "new-corpus/app.log", eventCount: 1 }],
+          nextCursor: null,
+          totalMatched: 1,
+        };
+      },
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    fireEvent.click(await screen.findByTestId("lane-editor-toggle"));
+    await waitFor(() =>
+      expect(host.hostLogSourceCatalog).toHaveBeenCalledWith(
+        "c1",
+        expect.anything(),
+      ),
+    );
+
+    view.rerender(<LogExplorer corpusId="c2" />);
+    expect(
+      await screen.findByRole("checkbox", { name: "new-corpus/app.log" }),
+    ).toBeTruthy();
+
+    first.resolve({
+      sources: [{ source: "stale-corpus/app.log", eventCount: 1 }],
+      nextCursor: null,
+      totalMatched: 1,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      screen.queryByRole("checkbox", { name: "stale-corpus/app.log" }),
+    ).toBeNull();
   });
 
   it("uses a bounded sheet mode on narrow windows while keeping the same lane editor controls", async () => {

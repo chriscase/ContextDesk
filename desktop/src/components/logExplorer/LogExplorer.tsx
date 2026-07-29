@@ -34,6 +34,7 @@ import {
   hostLogQueryEventNeighborhood,
   hostLogQueryEvents,
   hostLogSearchEventsAdvanced,
+  hostLogSourceCatalog,
   hostSetActiveLogCorpus,
   type EventPageDto,
   type EventOriginalRepresentationDto,
@@ -156,6 +157,8 @@ type Props = {
 };
 
 const FIND_PAGE_SIZE = 50;
+const LANE_SOURCE_PAGE_SIZE = 200;
+const LANE_SOURCE_SEARCH_DEBOUNCE_MS = 160;
 // Time + level + source + a useful message excerpt fit without reducing a
 // lane to timestamp/severity slivers. Availability is based on the central
 // evidence grid, after the live Filters/Chat rail widths and splitters.
@@ -705,6 +708,13 @@ export function LogExplorer({ corpusId }: Props) {
   const [filters, setFilters] = useState<ExplorerFilters>(emptyFilters);
   const [facets, setFacets] = useState<LogFacetsDto | null>(null);
   const [laneSourceCatalog, setLaneSourceCatalog] = useState<string[]>([]);
+  const [laneSourceCatalogNextCursor, setLaneSourceCatalogNextCursor] =
+    useState<string | null>(null);
+  const [laneSourceCatalogTotal, setLaneSourceCatalogTotal] = useState<
+    number | null
+  >(null);
+  const [laneSourceCatalogLoading, setLaneSourceCatalogLoading] =
+    useState(false);
   const [laneSourceCatalogUnavailable, setLaneSourceCatalogUnavailable] =
     useState(false);
   const [laneSourceQuery, setLaneSourceQuery] = useState("");
@@ -987,6 +997,7 @@ export function LogExplorer({ corpusId }: Props) {
   const dragRef = useRef<"filters" | "chat" | null>(null);
   const facetRequestRef = useRef(0);
   const laneSourceRequestRef = useRef(0);
+  const laneSourceLoadingRef = useRef(false);
   const eventsRequestRef = useRef(0);
   const investigationLoadRequestRef = useRef(0);
   const findRequestRef = useRef(0);
@@ -1028,11 +1039,13 @@ export function LogExplorer({ corpusId }: Props) {
       [
         ...new Set([
           ...laneSourceCatalog,
-          ...Object.keys(facets?.sources ?? {}),
+          ...(laneSourceCatalogUnavailable
+            ? Object.keys(facets?.sources ?? {})
+            : []),
           ...lanes.flatMap((lane) => lane.sources),
         ]),
       ].sort(),
-    [facets, laneSourceCatalog, lanes],
+    [facets, laneSourceCatalog, laneSourceCatalogUnavailable, lanes],
   );
   const visibleLaneEditorSources = useMemo(() => {
     const query = laneSourceQuery.trim().toLocaleLowerCase();
@@ -1381,22 +1394,61 @@ export function LogExplorer({ corpusId }: Props) {
     }
   }, [corpusId, filters]);
 
-  const loadLaneSourceCatalog = useCallback(async () => {
-    const requestId = ++laneSourceRequestRef.current;
-    setLaneSourceCatalog([]);
-    setLaneSourceCatalogUnavailable(false);
-    try {
-      const sourceFacets = await hostLogFacets(
-        corpusId,
-        filtersToQuery(emptyFilters(), { keyword: null }),
-      );
-      if (requestId !== laneSourceRequestRef.current) return;
-      setLaneSourceCatalog(Object.keys(sourceFacets.sources ?? {}).sort());
-    } catch {
-      if (requestId !== laneSourceRequestRef.current) return;
-      setLaneSourceCatalogUnavailable(true);
+  const loadLaneSourceCatalog = useCallback(
+    async ({
+      append = false,
+      cursor = null,
+    }: {
+      append?: boolean;
+      cursor?: string | null;
+    } = {}) => {
+      const requestId = ++laneSourceRequestRef.current;
+      laneSourceLoadingRef.current = true;
+      setLaneSourceCatalogLoading(true);
+      if (!append) {
+        setLaneSourceCatalog([]);
+        setLaneSourceCatalogNextCursor(null);
+        setLaneSourceCatalogTotal(null);
+      }
+      setLaneSourceCatalogUnavailable(false);
+      try {
+        const page = await hostLogSourceCatalog(corpusId, {
+          search: laneSourceQuery.trim() || null,
+          cursor,
+          limit: LANE_SOURCE_PAGE_SIZE,
+        });
+        if (requestId !== laneSourceRequestRef.current) return;
+        const sources = page.sources.map((entry) => entry.source);
+        setLaneSourceCatalog((current) =>
+          append
+            ? [...new Set([...current, ...sources])].sort()
+            : [...new Set(sources)].sort(),
+        );
+        setLaneSourceCatalogNextCursor(page.nextCursor);
+        setLaneSourceCatalogTotal(page.totalMatched);
+      } catch {
+        if (requestId !== laneSourceRequestRef.current) return;
+        setLaneSourceCatalogUnavailable(true);
+        setLaneSourceCatalogNextCursor(null);
+      } finally {
+        if (requestId === laneSourceRequestRef.current) {
+          laneSourceLoadingRef.current = false;
+          setLaneSourceCatalogLoading(false);
+        }
+      }
+    },
+    [corpusId, laneSourceQuery],
+  );
+
+  const loadMoreLaneSources = useCallback(() => {
+    if (laneSourceLoadingRef.current || laneSourceCatalogNextCursor == null) {
+      return;
     }
-  }, [corpusId]);
+    void loadLaneSourceCatalog({
+      append: true,
+      cursor: laneSourceCatalogNextCursor,
+    });
+  }, [laneSourceCatalogNextCursor, loadLaneSourceCatalog]);
 
   const loadEvents = useCallback(async () => {
     const requestId = ++eventsRequestRef.current;
@@ -1562,11 +1614,21 @@ export function LogExplorer({ corpusId }: Props) {
   }, [loadFacets]);
 
   useEffect(() => {
-    void loadLaneSourceCatalog();
+    if (!laneEditorOpen) {
+      laneSourceRequestRef.current += 1;
+      laneSourceLoadingRef.current = false;
+      setLaneSourceCatalogLoading(false);
+      return;
+    }
+    const timeout = window.setTimeout(
+      () => void loadLaneSourceCatalog(),
+      laneSourceQuery ? LANE_SOURCE_SEARCH_DEBOUNCE_MS : 0,
+    );
     return () => {
+      window.clearTimeout(timeout);
       laneSourceRequestRef.current += 1;
     };
-  }, [loadLaneSourceCatalog]);
+  }, [laneEditorOpen, laneSourceQuery, loadLaneSourceCatalog]);
 
   useEffect(() => {
     void loadEvents();
@@ -4293,10 +4355,20 @@ export function LogExplorer({ corpusId }: Props) {
               <div className="log-explorer__lane-editor-summary">
                 {laneCount} visible lane{laneCount === 1 ? "" : "s"} ·{" "}
                 {laneSourceQuery
-                  ? `${visibleLaneEditorSources.length} of `
+                  ? `${laneSourceCatalogTotal ?? visibleLaneEditorSources.length} matching source${
+                      (laneSourceCatalogTotal ??
+                        visibleLaneEditorSources.length) === 1
+                        ? ""
+                        : "s"
+                    }`
+                  : `${laneSourceCatalogTotal ?? laneEditorSources.length} available source${
+                      (laneSourceCatalogTotal ?? laneEditorSources.length) === 1
+                        ? ""
+                        : "s"
+                    }`}
+                {laneSourceCatalogNextCursor
+                  ? ` · ${laneSourceCatalog.length} loaded`
                   : ""}
-                {laneEditorSources.length} available source
-                {laneEditorSources.length === 1 ? "" : "s"}
               </div>
             </div>
             <div className="log-explorer__lane-editor-actions">
@@ -4321,6 +4393,15 @@ export function LogExplorer({ corpusId }: Props) {
               paddingInlineEnd: "0.25rem",
               scrollbarGutter: "stable",
             }}
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              if (
+                target.scrollHeight - target.scrollTop - target.clientHeight <
+                96
+              ) {
+                loadMoreLaneSources();
+              }
+            }}
           >
             <p className="log-explorer__lane-editor-help">
               Choose specific source paths or use the explicit All sources
@@ -4342,6 +4423,11 @@ export function LogExplorer({ corpusId }: Props) {
                 sources.
               </p>
             )}
+            {laneSourceCatalogLoading && laneSourceCatalog.length === 0 ? (
+              <p className="log-explorer__lane-editor-help" role="status">
+                Loading source paths…
+              </p>
+            ) : null}
             {lanes.slice(0, laneCount).map((lane) => (
               <fieldset
                 key={lane.id}
@@ -4402,6 +4488,26 @@ export function LogExplorer({ corpusId }: Props) {
                 </div>
               </fieldset>
             ))}
+            {laneSourceCatalogNextCursor ? (
+              <button
+                type="button"
+                className="log-explorer__btn log-explorer__lane-source-more"
+                disabled={laneSourceCatalogLoading}
+                onClick={loadMoreLaneSources}
+              >
+                {laneSourceCatalogLoading
+                  ? "Loading more sources…"
+                  : `Load more sources${
+                      laneSourceCatalogTotal == null
+                        ? ""
+                        : ` (${Math.max(
+                            0,
+                            laneSourceCatalogTotal -
+                              laneSourceCatalog.length,
+                          )} remaining)`
+                    }`}
+              </button>
+            ) : null}
           </div>
         </div>
       )}
@@ -5237,6 +5343,7 @@ export function LogExplorer({ corpusId }: Props) {
                   id: lane.id,
                   label: lane.label,
                   sources: sources ?? [],
+                  allSources: sources == null,
                   emptySourceScope: sources?.length === 0,
                 };
               })}

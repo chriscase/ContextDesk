@@ -37,8 +37,13 @@ pub const MAX_TIMELINE_BUCKETS: usize = 256;
 /// Hard cap on source-scoped lanes in one shared-axis timeline response.
 pub const MAX_SHARED_TIMELINE_LANES: usize = 4;
 
-/// Hard cap on source names accepted for one shared-axis lane.
-pub const MAX_SHARED_TIMELINE_LANE_SOURCES: usize = 64;
+/// Defensive request-size cap for an explicitly enumerated source lane.
+///
+/// Ordinary "All sources" lanes use [`SharedTimelineLaneScope::all_sources`]
+/// and therefore never expand the corpus catalog into this request. The higher
+/// bound keeps large, intentionally composed lanes useful without accepting an
+/// unbounded IPC payload.
+const MAX_SHARED_TIMELINE_SPECIFIC_SOURCES: usize = 4_096;
 
 /// The shared-axis contract always returns these five canonical severity series.
 pub const SHARED_TIMELINE_SEVERITY_SERIES: usize = 5;
@@ -278,12 +283,15 @@ pub struct TimelineSummary {
 
 /// One source-scoped lane requested on the global shared timeline axis.
 ///
-/// An empty source list deliberately describes an empty lane; it never widens
-/// to all sources. Source scopes are intersected with `filter.sources` when the
-/// global filter already restricts sources.
+/// Source scopes are intersected with `filter.sources` when the global filter
+/// already restricts sources. All-sources scope is explicit so an empty
+/// specific list can continue to mean a deliberately empty lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedTimelineLaneScope {
+    /// Use every source allowed by the global filter.
+    #[serde(default)]
+    pub all_sources: bool,
     /// Exact source names (OR) for this lane.
     #[serde(default)]
     pub sources: Vec<String>,
@@ -862,10 +870,35 @@ pub fn query_shared_timeline_summary(
 ) -> CoreResult<SharedTimelineSummary> {
     validate_shared_timeline_query(q)?;
     let max_buckets = q.max_buckets.clamp(1, MAX_TIMELINE_BUCKETS);
-    let lane_sources = q
+    let all_sources_source_count = if q.lanes.iter().any(|lane| lane.all_sources) {
+        Some(if q.filter.sources.is_empty() {
+            query_corpus_source_count(corpus)?
+        } else {
+            deduplicated_sources(&q.filter.sources).len()
+        })
+    } else {
+        None
+    };
+    let lane_scopes = q
         .lanes
         .iter()
-        .map(|lane| intersect_lane_sources(&q.filter.sources, &lane.sources))
+        .map(|lane| {
+            if lane.all_sources {
+                ResolvedSharedTimelineLane {
+                    all_sources: true,
+                    sources: Vec::new(),
+                    source_count: all_sources_source_count.unwrap_or_default(),
+                }
+            } else {
+                let sources = intersect_lane_sources(&q.filter.sources, &lane.sources);
+                let source_count = sources.len();
+                ResolvedSharedTimelineLane {
+                    all_sources: false,
+                    sources,
+                    source_count,
+                }
+            }
+        })
         .collect::<Vec<_>>();
     let (where_sql, binds) = build_where(&q.filter);
     let bounds_sql = format!("SELECT MIN(ts), MAX(ts), COUNT(*) FROM events WHERE {where_sql}");
@@ -882,7 +915,7 @@ pub fn query_shared_timeline_summary(
     })?;
 
     let (Some(min_ts), Some(max_ts)) = (min_ts, max_ts) else {
-        return Ok(empty_shared_timeline(lane_sources));
+        return Ok(empty_shared_timeline(&lane_scopes));
     };
     let (span_to, bucket_width, bucket_count) = shared_timeline_axis(min_ts, max_ts, max_buckets)?;
     let buckets = (0..bucket_count)
@@ -944,24 +977,33 @@ pub fn query_shared_timeline_summary(
             severity_counts[severity.index()][index].saturating_add(count);
     }
 
-    let mut lanes = Vec::with_capacity(lane_sources.len());
-    for (lane_index, sources) in lane_sources.iter().enumerate() {
-        lanes.push(query_shared_timeline_lane(
-            corpus,
-            &q.filter,
-            sources,
-            lane_index,
-            min_ts,
-            bucket_width,
-            bucket_count,
-        )?);
-    }
-
     let time_quality = match (classify_ts(min_ts), classify_ts(max_ts)) {
         (TimeQuality::Wall, TimeQuality::Wall) => TimeQuality::Wall,
         (TimeQuality::OrderOnly, TimeQuality::OrderOnly) => TimeQuality::OrderOnly,
         _ => TimeQuality::Mixed,
     };
+    let mut lanes = Vec::with_capacity(lane_scopes.len());
+    for (lane_index, scope) in lane_scopes.iter().enumerate() {
+        if scope.all_sources {
+            lanes.push(SharedTimelineLaneSummary {
+                lane_index: lane_index as u8,
+                source_count: scope.source_count,
+                time_quality,
+                total_matched: total_matched.max(0) as u64,
+                counts: counts.clone(),
+            });
+        } else {
+            lanes.push(query_shared_timeline_lane(
+                corpus,
+                &q.filter,
+                &scope.sources,
+                lane_index,
+                min_ts,
+                bucket_width,
+                bucket_count,
+            )?);
+        }
+    }
     let severity_series = SharedTimelineSeverity::ALL
         .into_iter()
         .map(|severity| SharedTimelineSeveritySeries {
@@ -993,28 +1035,55 @@ fn validate_shared_timeline_query(q: &SharedTimelineSummaryQuery) -> CoreResult<
         )));
     }
     for (index, lane) in q.lanes.iter().enumerate() {
-        if lane.sources.len() > MAX_SHARED_TIMELINE_LANE_SOURCES {
+        if lane.all_sources && !lane.sources.is_empty() {
+            return Err(CoreError::Message(format!(
+                "shared timeline lane {index} cannot combine allSources with explicit sources"
+            )));
+        }
+        if lane.sources.len() > MAX_SHARED_TIMELINE_SPECIFIC_SOURCES {
             return Err(CoreError::Message(format!(
                 "shared timeline lane {index} source cap exceeded: {} requested, maximum is {}",
                 lane.sources.len(),
-                MAX_SHARED_TIMELINE_LANE_SOURCES
+                MAX_SHARED_TIMELINE_SPECIFIC_SOURCES
             )));
         }
     }
     Ok(())
 }
 
-fn intersect_lane_sources(global: &[String], requested: &[String]) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedSharedTimelineLane {
+    all_sources: bool,
+    sources: Vec<String>,
+    source_count: usize,
+}
+
+fn deduplicated_sources(requested: &[String]) -> Vec<String> {
     let mut sources = Vec::with_capacity(requested.len());
     for source in requested {
-        if sources.contains(source) {
-            continue;
-        }
-        if global.is_empty() || global.contains(source) {
+        if !sources.contains(source) {
             sources.push(source.clone());
         }
     }
     sources
+}
+
+fn intersect_lane_sources(global: &[String], requested: &[String]) -> Vec<String> {
+    deduplicated_sources(requested)
+        .into_iter()
+        .filter(|source| global.is_empty() || global.contains(source))
+        .collect()
+}
+
+fn query_corpus_source_count(corpus: &LogCorpus) -> CoreResult<usize> {
+    let count = corpus.with_connection(|conn| {
+        conn.query_row("SELECT COUNT(DISTINCT source) FROM events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(duck_err)
+    })?;
+    usize::try_from(count.max(0))
+        .map_err(|_| CoreError::Message("source count exceeds this platform's limits".into()))
 }
 
 fn shared_timeline_axis(
@@ -1127,7 +1196,7 @@ fn query_shared_timeline_lane(
     })
 }
 
-fn empty_shared_timeline(lane_sources: Vec<Vec<String>>) -> SharedTimelineSummary {
+fn empty_shared_timeline(lane_scopes: &[ResolvedSharedTimelineLane]) -> SharedTimelineSummary {
     SharedTimelineSummary {
         time_quality: TimeQuality::OrderOnly,
         span_from: None,
@@ -1144,12 +1213,12 @@ fn empty_shared_timeline(lane_sources: Vec<Vec<String>>) -> SharedTimelineSummar
                 counts: Vec::new(),
             })
             .collect(),
-        lanes: lane_sources
-            .into_iter()
+        lanes: lane_scopes
+            .iter()
             .enumerate()
-            .map(|(lane_index, sources)| SharedTimelineLaneSummary {
+            .map(|(lane_index, scope)| SharedTimelineLaneSummary {
                 lane_index: lane_index as u8,
-                source_count: sources.len(),
+                source_count: scope.source_count,
                 time_quality: TimeQuality::OrderOnly,
                 total_matched: 0,
                 counts: Vec::new(),
@@ -2777,15 +2846,19 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into(), "worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["missing.log".into()],
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -2898,11 +2971,13 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into(), "worker.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["worker.log".into()],
+                        ..Default::default()
                     },
-                    SharedTimelineLaneScope { sources: vec![] },
+                    SharedTimelineLaneScope::default(),
                 ],
             },
         )
@@ -2917,6 +2992,81 @@ mod tests {
         assert!(summary.lanes[1].counts.iter().all(|count| *count == 0));
         assert_eq!(summary.lanes[2].source_count, 0);
         assert_eq!(summary.lanes[2].total_matched, 0);
+    }
+
+    #[test]
+    fn shared_timeline_all_sources_is_explicit_and_reuses_the_global_axis() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 5,
+                lanes: vec![
+                    SharedTimelineLaneScope {
+                        all_sources: true,
+                        sources: Vec::new(),
+                    },
+                    SharedTimelineLaneScope::default(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.lanes[0].source_count, 2);
+        assert_eq!(summary.lanes[0].total_matched, summary.total_matched);
+        assert_eq!(summary.lanes[0].counts, summary.counts);
+        assert_eq!(summary.lanes[0].time_quality, summary.time_quality);
+        assert_eq!(summary.lanes[1].source_count, 0);
+        assert_eq!(summary.lanes[1].total_matched, 0);
+        assert!(summary.lanes[1].counts.iter().all(|count| *count == 0));
+
+        let filtered = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                filter: EventQuery {
+                    sources: vec!["api.log".into()],
+                    ..Default::default()
+                },
+                max_buckets: 5,
+                lanes: vec![SharedTimelineLaneScope {
+                    all_sources: true,
+                    sources: Vec::new(),
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.lanes[0].source_count, 1);
+        assert_eq!(filtered.lanes[0].total_matched, filtered.total_matched);
+        assert_eq!(filtered.lanes[0].counts, filtered.counts);
+    }
+
+    #[test]
+    fn shared_timeline_accepts_a_241_source_specific_lane() {
+        let (dir, id) = shared_timeline_fixture();
+        let corpus = LogCorpus::open(&dir.path().join("cache"), &id).unwrap();
+        let mut sources = (0..240)
+            .map(|index| format!("missing-{index}.log"))
+            .collect::<Vec<_>>();
+        sources.push("api.log".into());
+
+        let summary = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                max_buckets: 5,
+                lanes: vec![SharedTimelineLaneScope {
+                    sources,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.lanes[0].source_count, 241);
+        assert_eq!(summary.lanes[0].total_matched, 2);
+        assert_eq!(summary.lanes[0].counts, vec![1, 0, 1, 0, 0]);
     }
 
     #[test]
@@ -2988,9 +3138,11 @@ mod tests {
                 lanes: vec![
                     SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     },
                     SharedTimelineLaneScope {
                         sources: vec!["plain.log".into()],
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -3029,6 +3181,7 @@ mod tests {
                 lanes: (0..MAX_SHARED_TIMELINE_LANES)
                     .map(|_| SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
@@ -3042,6 +3195,7 @@ mod tests {
                 lanes: (0..MAX_SHARED_TIMELINE_LANES)
                     .map(|_| SharedTimelineLaneScope {
                         sources: vec!["api.log".into()],
+                        ..Default::default()
                     })
                     .collect(),
                 ..Default::default()
@@ -3084,15 +3238,31 @@ mod tests {
             &corpus,
             &SharedTimelineSummaryQuery {
                 lanes: vec![SharedTimelineLaneScope {
-                    sources: (0..=MAX_SHARED_TIMELINE_LANE_SOURCES)
+                    sources: (0..=MAX_SHARED_TIMELINE_SPECIFIC_SOURCES)
                         .map(|index| format!("source-{index}.log"))
                         .collect(),
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
         )
         .unwrap_err();
         assert!(too_many_sources.to_string().contains("source cap exceeded"));
+
+        let ambiguous_all_sources = query_shared_timeline_summary(
+            &corpus,
+            &SharedTimelineSummaryQuery {
+                lanes: vec![SharedTimelineLaneScope {
+                    all_sources: true,
+                    sources: vec!["api.log".into()],
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(ambiguous_all_sources
+            .to_string()
+            .contains("cannot combine allSources"));
     }
 
     #[test]
@@ -3108,6 +3278,7 @@ mod tests {
                 },
                 lanes: vec![SharedTimelineLaneScope {
                     sources: vec!["api.log".into()],
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
