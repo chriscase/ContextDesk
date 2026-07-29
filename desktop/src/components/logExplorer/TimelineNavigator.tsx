@@ -43,6 +43,8 @@ type Props = {
   filter: EventQueryDto;
   emptySourceScope?: boolean;
   residentEvents: ExplorerEventDto[];
+  /** First visible authoritative event in the lane most recently scrolled. */
+  viewportTimestamp?: number | null;
   lanes?: {
     id: string;
     label: string;
@@ -153,6 +155,7 @@ export function TimelineNavigator({
   filter,
   emptySourceScope = false,
   residentEvents,
+  viewportTimestamp = null,
   lanes = [],
   onSeekSeq,
 }: Props) {
@@ -357,6 +360,30 @@ export function TimelineNavigator({
   }, [metricSelection, summary]);
   const visibleDetailIndex =
     detailIndex ?? (cursorReadingsVisible ? previewIndex : null);
+
+  useEffect(() => {
+    if (
+      viewportTimestamp == null ||
+      summary?.spanFrom == null ||
+      summary.spanTo == null ||
+      summary.bucketCount === 0
+    ) {
+      return;
+    }
+    const timestamp = Math.max(
+      summary.spanFrom,
+      Math.min(summary.spanTo, viewportTimestamp),
+    );
+    const index = Math.max(
+      0,
+      Math.min(
+        summary.bucketCount - 1,
+        Math.floor((timestamp - summary.spanFrom) / summary.bucketWidth),
+      ),
+    );
+    setSharedCursorTimestamp(timestamp);
+    setPreviewIndex(index);
+  }, [summary, viewportTimestamp]);
 
   const residentIndexes = useMemo(() => {
     if (!summary || summary.spanFrom == null || summary.bucketCount === 0) {

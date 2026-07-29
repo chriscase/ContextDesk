@@ -470,6 +470,49 @@ describe("TimelineNavigator", () => {
     expect(screen.getByTestId("timeline-session-metrics")).toBeTruthy();
   });
 
+  it("tracks the visible log viewport without querying or recomputing the timeline", async () => {
+    const { rerender } = render(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        viewportTimestamp={1_700_000_005}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+    const bars = await screen.findByTestId("timeline-navigator-bars");
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("12.5%"),
+    );
+
+    rerender(
+      <TimelineNavigator
+        corpusId="c1"
+        filter={{}}
+        residentEvents={[]}
+        viewportTimestamp={1_700_000_035}
+        onSeekSeq={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        bars.querySelector<HTMLElement>(
+          ".timeline-navigator__preview-marker",
+        )?.style.left,
+      ).toBe("87.5%"),
+    );
+    expect(
+      (screen.getByLabelText("Timeline position") as HTMLInputElement).value,
+    ).toBe("3");
+    expect(host.hostLogSharedTimelineSummary).toHaveBeenCalledTimes(1);
+    expect(host.hostLogQueryEvents).not.toHaveBeenCalled();
+  });
+
   it("shares log-histogram hover with every metric readout without seeking", async () => {
     render(
       <TimelineNavigator

@@ -124,6 +124,11 @@ named for assistive technology, so wheel, trackpad, Page Up, and Page Down
 navigation do not depend on an individual SVG plot receiving focus. A brush
 gesture suppresses native WebView text/SVG selection; only the shared,
 explicitly outlined time range may appear selected.
+Ordinary resident-row scrolling reports only the first visible authoritative
+event to the already-mounted Timeline. That presentation-only signal moves the
+shared cursor and active bucket without recomputing the timeline, querying the
+backend, or performing an implicit seek; in multi-lane views, the lane most
+recently scrolled owns the cursor.
 
 ### 1. Separately imported metric bundle
 
