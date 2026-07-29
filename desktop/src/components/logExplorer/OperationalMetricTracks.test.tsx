@@ -139,6 +139,31 @@ describe("OperationalMetricTracks", () => {
     ).toHaveLength(0);
   });
 
+  it("keeps shared readings visible while any other track remains active", () => {
+    render(<OperationalMetricTracks document={coherentFixture} />);
+    const cpuPlot = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    const heapPlot = screen.getByRole("slider", {
+      name: "Heap used shared time cursor",
+    });
+    setPlotBounds(cpuPlot);
+    setPlotBounds(heapPlot);
+
+    fireEvent.focus(cpuPlot);
+    fireEvent.pointerEnter(heapPlot);
+    fireEvent.pointerMove(heapPlot, { clientX: 40, pointerId: 4 });
+    fireEvent.pointerLeave(heapPlot);
+
+    expect(
+      screen.getAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(3);
+    fireEvent.blur(cpuPlot);
+    expect(
+      screen.queryAllByTestId(/operational-metric-hover-reading-/),
+    ).toHaveLength(0);
+  });
+
   it("uses one shared renderer and interaction model in compact side presentation", () => {
     const { container } = render(
       <OperationalMetricTracks
@@ -242,9 +267,7 @@ describe("OperationalMetricTracks", () => {
     const finalRange = onRangeSelect.mock.calls.at(-1)?.[0];
     expect(finalRange.from).toBeGreaterThanOrEqual(1736078400);
     expect(finalRange.to).toBeLessThanOrEqual(1736100000);
-    const selections = screen.getAllByTestId(
-      /operational-metric-selection-/,
-    );
+    const selections = screen.getAllByTestId(/operational-metric-selection-/);
     expect(selections).toHaveLength(3);
     expect(
       new Set(
@@ -254,6 +277,39 @@ describe("OperationalMetricTracks", () => {
         ),
       ).size,
     ).toBe(1);
+  });
+
+  it("cancels a captured drag without retaining a phantom range anchor", () => {
+    const onRangeSelect = vi.fn();
+    const onSeekTimestamp = vi.fn();
+    render(
+      <OperationalMetricTracks
+        document={coherentFixture}
+        onRangeSelect={onRangeSelect}
+        onSeekTimestamp={onSeekTimestamp}
+      />,
+    );
+    const plot = screen.getByRole("slider", {
+      name: "CPU shared time cursor",
+    });
+    setPlotBounds(plot);
+
+    fireEvent.pointerDown(plot, { clientX: 20, pointerId: 8 });
+    fireEvent.pointerMove(plot, {
+      buttons: 1,
+      clientX: 70,
+      pointerId: 8,
+    });
+    expect(onRangeSelect.mock.calls.at(-1)?.[0]).not.toBeNull();
+
+    fireEvent.pointerCancel(plot, { pointerId: 8 });
+    expect(onRangeSelect).toHaveBeenLastCalledWith(null);
+    fireEvent.pointerUp(plot, { clientX: 90, pointerId: 8 });
+
+    expect(onSeekTimestamp).not.toHaveBeenCalled();
+    expect(
+      screen.queryAllByTestId(/operational-metric-selection-/),
+    ).toHaveLength(0);
   });
 
   it("commits the one shared keyboard cursor with Enter or Space", () => {

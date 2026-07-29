@@ -6,11 +6,7 @@
   --metric-muted: var(--fg-muted, var(--text-muted, #aab4c3));
   --metric-line: var(--accent, #64a8ff);
   --metric-cursor: var(--fg-primary, var(--text, #ffffff));
-  --metric-selection: color-mix(
-    in srgb,
-    var(--fg-muted, #aab4c3) 12%,
-    transparent
-  );
+  --metric-selection: transparent;
   --metric-gap: color-mix(in srgb, var(--text-muted, #aab4c3) 20%, transparent);
   --metric-warning: var(--warning, #e7b341);
   --metric-critical: var(--danger, #f36b7a);
