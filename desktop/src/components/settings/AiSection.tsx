@@ -142,6 +142,30 @@ export function AiSection({
     : discoveredModels.length > 0
       ? "__other__"
       : "";
+  const modelSelectId = `${baseId}-model-select`;
+  const modelRoleHintId = `${baseId}-model-role-hint`;
+  const customModelId = `${baseId}-model`;
+  const customModelRoleHintId = `${baseId}-model-role-hint-custom`;
+  const customModelError = !draft.chatModel.trim()
+    ? "Model id is required."
+    : null;
+  const customModelOk = modelsLoading
+    ? "Looking up models…"
+    : discoveredModels.length === 0
+      ? modelsNote
+      : null;
+  const customModelPending =
+    modelsLoading && discoveredModels.length === 0
+      ? "Listing models…"
+      : null;
+  const customModelDescribedBy = [
+    customModelPending ? `${customModelId}-pending` : null,
+    customModelError ? `${customModelId}-error` : null,
+    customModelOk && !customModelError ? `${customModelId}-ok` : null,
+    draft.chatModel.trim() ? customModelRoleHintId : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   if (mode === "wizard") {
     return (
@@ -577,7 +601,7 @@ export function AiSection({
       {discoveredModels.length > 0 ? (
         <>
           <SelectField
-            id={`${baseId}-model-select`}
+            id={modelSelectId}
             label="Chat model"
             hint={
               modelsLoading
@@ -585,6 +609,7 @@ export function AiSection({
                 : modelsNote ??
                   "Listed from the provider when reachable. Role lines are name hints only."
             }
+            aria-describedby={modelInList ? modelRoleHintId : undefined}
             value={selectValue || discoveredModels[0]}
             onChange={(e) => {
               const v = e.target.value;
@@ -619,7 +644,7 @@ export function AiSection({
           </SelectField>
           {modelInList ? (
             <ModelRoleHintLine
-              id={`${baseId}-model-role-hint`}
+              id={modelRoleHintId}
               modelId={draft.chatModel}
             />
           ) : null}
@@ -628,22 +653,13 @@ export function AiSection({
       {discoveredModels.length === 0 || selectValue === "__other__" || !modelInList ? (
         <>
           <TextField
-            id={`${baseId}-model`}
+            id={customModelId}
             label={discoveredModels.length > 0 ? "Custom model id" : "Chat model"}
             value={draft.chatModel}
-            error={!draft.chatModel.trim() ? "Model id is required." : null}
-            ok={
-              modelsLoading
-                ? "Looking up models…"
-                : discoveredModels.length === 0
-                  ? modelsNote
-                  : null
-            }
-            pending={
-              modelsLoading && discoveredModels.length === 0
-                ? "Listing models…"
-                : null
-            }
+            error={customModelError}
+            ok={customModelOk}
+            pending={customModelPending}
+            aria-describedby={customModelDescribedBy || undefined}
             onChange={(e) =>
               setDraft((d) => ({ ...d, chatModel: e.target.value }))
             }
@@ -664,7 +680,7 @@ export function AiSection({
           />
           {draft.chatModel.trim() ? (
             <ModelRoleHintLine
-              id={`${baseId}-model-role-hint-custom`}
+              id={customModelRoleHintId}
               modelId={draft.chatModel}
             />
           ) : null}

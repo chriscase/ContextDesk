@@ -125,6 +125,11 @@ describe("AiSection role-hint defaults (#723)", () => {
     expect(screen.getByTestId("model-role-hint").textContent).toMatch(
       /Basis: Name hint/,
     );
+    expect(
+      screen
+        .getByRole("combobox", { name: "Chat model" })
+        .getAttribute("aria-describedby"),
+    ).toBe("test-ai-model-select-hint test-ai-model-role-hint");
   });
 
   it("shows exactly one role hint for a custom model id", async () => {
@@ -140,5 +145,31 @@ describe("AiSection role-hint defaults (#723)", () => {
     const hints = screen.getAllByTestId("model-role-hint");
     expect(hints).toHaveLength(1);
     expect(hints[0]?.textContent).toContain("Unqualified");
+    expect(
+      screen.getByLabelText("Custom model id").getAttribute("aria-describedby"),
+    ).toBe("test-ai-model-role-hint-custom");
+  });
+
+  it("keeps provider status and role-hint descriptions on a custom model input", async () => {
+    listModels.mockResolvedValue([]);
+    render(
+      <Harness initial={baseDraft({ chatModel: "corp-private-deployment" })} />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await waitFor(() =>
+      expect(document.getElementById("test-ai-model-ok")?.textContent).toMatch(
+        /No models listed/,
+      ),
+    );
+
+    const input = screen.getByLabelText("Chat model");
+    expect(input.getAttribute("aria-describedby")).toBe(
+      "test-ai-model-ok test-ai-model-role-hint-custom",
+    );
+    expect(
+      document.getElementById("test-ai-model-role-hint-custom")?.textContent,
+    ).toMatch(/Confidence: low/);
   });
 });
