@@ -5895,7 +5895,7 @@ fn resolve_demo_log_resource(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 enum DemoLogMarkerState {
     Missing,
-    Installed(cd_core::log_analysis::LogCorpus),
+    Installed(Box<cd_core::log_analysis::LogCorpus>),
     RepairRequired,
 }
 
@@ -5932,7 +5932,7 @@ fn read_demo_log_marker(cache: &std::path::Path) -> Result<DemoLogMarkerState, S
                 .as_deref()
                 == Some(DEMO_LOG_IDENTITY) =>
         {
-            Ok(DemoLogMarkerState::Installed(corpus))
+            Ok(DemoLogMarkerState::Installed(Box::new(corpus)))
         }
         Ok(_) => Ok(DemoLogMarkerState::RepairRequired),
         Err(_) => Ok(DemoLogMarkerState::RepairRequired),
@@ -6870,7 +6870,7 @@ fn reconcile_demo_log_corpus<B: DemoLogInstallBackend>(
                     return Err(DemoTransactionError::Cancelled);
                 }
                 return Ok(Some(ReconciledDemoLog {
-                    corpus,
+                    corpus: *corpus,
                     recovered: false,
                     managed_copies: 1,
                     warning: None,
