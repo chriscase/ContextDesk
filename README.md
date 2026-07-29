@@ -17,13 +17,14 @@ profile cannot use tools, the application says so instead of treating model
 prose as retrieved evidence. Every write still requires the appropriate
 confirmation.
 
-Run it **fully local** with [Ollama](https://ollama.com) (no product account or
-API key), or connect an optional **Grok Build** session already authorized on
-the machine (Settings → AI, explicit opt-in; credentials remain in the OS host,
-never the webview). ContextDesk is a research, synthesis, and investigation
-tool—not a code-editing agent—so pair it with your coding agent when you need
-source changes. The name is a working title; the product remains rename-friendly
-through [`branding.toml`](branding.toml).
+Run it **fully local** with [Ollama](https://ollama.com), connect a
+self-hosted/company or hosted **OpenAI-compatible gateway**, use the
+**Anthropic Messages API**, or explicitly opt in to reuse a **Grok Build**
+session already authorized on the machine. Remote credentials remain in the
+trusted OS host and keychain, never the webview. ContextDesk is a research,
+synthesis, and investigation tool—not a code-editing agent—so pair it with
+your coding agent when you need source changes. The name is a working title;
+the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 |                 |                                                                                                                                                             |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -187,7 +188,37 @@ Prerequisites: **Rust (stable)**, **Node 20+**, and [Tauri 2 platform deps](http
    - Provider **Ollama (local)**, base `http://127.0.0.1:11434`, model `mistral` → Save.
 4. **Ask a question** grounded in that folder, e.g. _"How does authentication work in this codebase?"_ Expect streaming markdown, a **search trail** showing where it looked, and **citations** back to `fixtures/kb/auth.md` / `auth_gateway.md` when retrieval hits.
 
-### Option B — Grok Build session (opt-in)
+### Option B — internal or hosted OpenAI-compatible gateway
+
+Use this route for a company AI gateway, a self-hosted compatible server, or a
+hosted provider that exposes OpenAI-compatible chat endpoints.
+
+1. Launch ContextDesk as in Option A.
+2. **Settings → AI** → provider **OpenAI-compatible**.
+3. Enter the gateway's HTTPS base URL, API key, and model id, then **Save**.
+   The key is stored by the Rust host in the OS keychain and is never returned
+   to the webview.
+4. Use model discovery when the gateway supports it. If it does not expose a
+   compatible model-list endpoint, use Advanced setup with a model id supplied
+   by the gateway administrator.
+5. Review preflight before sending organizational data. ContextDesk records
+   detected tool capability; it does not assume that every compatible gateway
+   or model supports native tool calls.
+
+A loopback-only profile refuses remote bases. Remote endpoints remain subject
+to ContextDesk's outbound URL and SSRF policy. Keychain storage protects the
+credential, but prompts and bounded context sent to a remote endpoint still
+leave the machine. See
+[AI providers and model selection](docs/help/providers/provider-setup.md).
+
+### Option C — Anthropic Messages API
+
+Choose **Anthropic** in Settings → AI, use the default Anthropic API base (or
+an approved compatible base), store the key when prompted, select a model, and
+run preflight. This route uses Anthropic's message and tool-call shapes rather
+than treating them as OpenAI-compatible responses.
+
+### Option D — Grok Build session reuse (opt-in)
 
 If you already use **Grok Build** / the Grok CLI on this machine, ContextDesk can talk to xAI models using that session — **without pasting an API key into the UI**.
 
@@ -197,8 +228,6 @@ If you already use **Grok Build** / the Grok CLI on this machine, ContextDesk ca
 4. Allowlist a workspace folder and ask a grounded question the same way as Option A.
 
 **How it stays safe:** the host loads `~/.grok/auth.json` **in Rust only** after explicit opt-in; the webview never sees tokens; outbound chat is pinned to `api.x.ai`. Details and ToS note: [`docs/DEV.md`](docs/DEV.md#grok-build-session-opt-in).
-
-You can also add **OpenAI-compatible** or **Anthropic** providers in Settings → AI. API keys go to the OS keychain — never into the repo or the webview.
 
 ---
 
