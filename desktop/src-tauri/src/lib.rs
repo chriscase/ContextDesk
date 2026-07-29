@@ -679,7 +679,7 @@ enum LinkedTurnPreparation<T> {
     Terminal(Vec<cd_core::events::StreamEvent>),
 }
 
-async fn prepare_linked_turn_with<V, C, H, T>(
+async fn prepare_linked_turn_with<V, C, H, P, T>(
     started: tokio::time::Instant,
     plan: cd_core::router::TurnDeadlinePlan,
     cancel: &std::sync::atomic::AtomicBool,
@@ -688,24 +688,25 @@ async fn prepare_linked_turn_with<V, C, H, T>(
     construct_host: H,
 ) -> Result<LinkedTurnPreparation<T>, HostReadinessFailure>
 where
-    V: FnOnce() -> Result<(), String> + Send + 'static,
+    V: FnOnce() -> Result<P, String> + Send + 'static,
     C: FnOnce() -> Option<Vec<cd_core::events::StreamEvent>>,
-    H: FnOnce() -> Result<T, String> + Send + 'static,
+    H: FnOnce(P) -> Result<T, String> + Send + 'static,
+    P: Send + 'static,
     T: Send + 'static,
 {
-    match run_blocking_for_turn(started, plan, cancel, validate_corpus).await? {
-        Ok(()) => {}
+    let validated = match run_blocking_for_turn(started, plan, cancel, validate_corpus).await? {
+        Ok(validated) => validated,
         Err(error) => {
             tracing::warn!(error = %error, "linked corpus validation failed");
             return Ok(LinkedTurnPreparation::Terminal(
                 linked_log_host_terminal_events().into(),
             ));
         }
-    }
+    };
     if let Some(events) = capability_refusal() {
         return Ok(LinkedTurnPreparation::Terminal(events));
     }
-    match run_blocking_for_turn(started, plan, cancel, construct_host).await? {
+    match run_blocking_for_turn(started, plan, cancel, move || construct_host(validated)).await? {
         Ok(host) => Ok(LinkedTurnPreparation::Ready(host)),
         Err(error) => {
             tracing::warn!(error = %error, "linked host construction failed");
@@ -4302,7 +4303,7 @@ async fn agent_turn(
     // They take an already-published full host when immediately available and
     // otherwise use an independent turn-local read-only log host.
     let mut turn_prelude_emitted = false;
-    let (mut host, using_fallback_host, borrowed_host_generation) =
+    let (mut host, using_fallback_host, borrowed_host_generation, validated_log_corpus) =
         if let Some(context) = log_explorer_context.as_ref() {
             let cache = match log_cache_dir(&state) {
                 Ok(cache) => cache,
@@ -4332,7 +4333,7 @@ async fn agent_turn(
                 turn_started_at,
                 deadline_plan,
                 cancel.as_ref(),
-                move || log_corpus_handles.open(&cache, &corpus_id).map(|_| ()),
+                move || log_corpus_handles.open(&cache, &corpus_id),
                 move || {
                     capability_profile.as_ref().and_then(|profile| {
                         cd_core::research::linked_tools_unavailable_events(
@@ -4341,21 +4342,38 @@ async fn agent_turn(
                         )
                     })
                 },
-                move || {
+                move |validated_corpus| {
                     let state = app_for_host.state::<AppState>();
-                    take_ready_linked_host(&state.host, &state.host_generation, || {
-                        build_linked_log_fallback_host(&state, &fallback_context)
-                    })
+                    let (host, using_fallback, borrowed_generation) =
+                        take_ready_linked_host(&state.host, &state.host_generation, || {
+                            build_linked_log_fallback_host(&state, &fallback_context)
+                        })?;
+                    Ok((
+                        host,
+                        using_fallback,
+                        borrowed_generation,
+                        Some(validated_corpus),
+                    ))
                 },
             )
             .await
             {
-                Ok(LinkedTurnPreparation::Ready((host, using_fallback, borrowed_generation))) => {
+                Ok(LinkedTurnPreparation::Ready((
+                    host,
+                    using_fallback,
+                    borrowed_generation,
+                    validated_corpus,
+                ))) => {
                     if using_fallback {
                         let notice = linked_log_fallback_notice();
                         let _ = on_event.send(cd_core::research::event_to_dto(&notice));
                     }
-                    (host, using_fallback, borrowed_generation)
+                    (
+                        host,
+                        using_fallback,
+                        borrowed_generation,
+                        validated_corpus,
+                    )
                 }
                 Ok(LinkedTurnPreparation::Terminal(events)) => {
                     persist_and_emit_host_terminal(
@@ -4422,6 +4440,7 @@ async fn agent_turn(
                 host_guard.take().ok_or("host missing")?,
                 false,
                 Some(borrowed_generation),
+                None,
             )
         };
 
@@ -4430,7 +4449,7 @@ async fn agent_turn(
         histories.entry(req.session_id.clone()).or_default().clone()
     };
 
-    let channel = on_event;
+    let channel = on_event.clone();
     let linked_citation_corpus = log_explorer_context
         .as_ref()
         .map(|context| context.corpus_id.clone());
@@ -4454,6 +4473,32 @@ async fn agent_turn(
     if let Some(context) = log_explorer_context.as_ref() {
         host.set_log_corpus_scope(Some(context.corpus_id.clone()));
         host.set_active_log_corpus(Some(context.corpus_id.clone()));
+        if let Some(corpus) = validated_log_corpus {
+            if let Err(error) = host.seed_log_corpus_handle(&context.corpus_id, corpus) {
+                tracing::warn!(error = %error, "linked corpus preflight handoff failed");
+                host.set_log_corpus_scope(previous_log_scope.clone());
+                host.set_active_log_corpus(previous_log_corpus.clone());
+                if !using_fallback_host {
+                    let _ = restore_host_if_generation_matches(
+                        &state.host,
+                        &state.host_generation,
+                        borrowed_host_generation.expect("shared host generation"),
+                        host,
+                    );
+                }
+                let events = linked_log_host_terminal_events().to_vec();
+                persist_and_emit_host_terminal(
+                    &state,
+                    &req,
+                    &events,
+                    Some(&profile.id),
+                    Some(&profile.label),
+                    Some(&profile.chat_model),
+                    &on_event,
+                )?;
+                return Ok(());
+            }
+        }
     } else {
         host.set_log_corpus_scope(None);
         host.set_active_log_corpus(None);
@@ -12041,7 +12086,7 @@ mod startup_host_tests {
                     .push(SetupStep::CheckToolCapability);
                 None
             },
-            move || {
+            move |_: ()| {
                 host_order
                     .lock()
                     .unwrap()
@@ -12081,7 +12126,7 @@ mod startup_host_tests {
                     "linked-session",
                 )
             },
-            move || {
+            move |_: ()| {
                 host_order
                     .lock()
                     .unwrap()
@@ -12125,7 +12170,7 @@ mod startup_host_tests {
                     .push(SetupStep::CheckToolCapability);
                 None
             },
-            move || {
+            move |_: ()| {
                 host_order
                     .lock()
                     .unwrap()
@@ -12168,7 +12213,7 @@ mod startup_host_tests {
                 Ok(())
             },
             || None,
-            || Ok(7),
+            |_| Ok(7),
         )
         .await;
         assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
@@ -12188,7 +12233,7 @@ mod startup_host_tests {
                 Ok(())
             },
             || None,
-            || Ok(7),
+            |_| Ok(7),
         )
         .await;
         assert_eq!(result.unwrap_err(), HostReadinessFailure::Cancelled);
@@ -12209,7 +12254,7 @@ mod startup_host_tests {
                 Ok(())
             },
             || None,
-            || Ok(7),
+            |_| Ok(7),
         )
         .await;
         assert_eq!(result.unwrap_err(), HostReadinessFailure::TurnDeadline);
@@ -12235,7 +12280,7 @@ mod startup_host_tests {
                 Ok(())
             },
             || None,
-            move || {
+            move |_: ()| {
                 host_worker_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(7)
             },

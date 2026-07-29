@@ -924,7 +924,7 @@ impl ToolHost {
 
     /// Set the default log corpus for tools that omit `corpus` (wizard / UI handoff).
     pub fn set_active_log_corpus(&mut self, corpus_id: Option<String>) {
-        self.active_log_corpus = corpus_id.and_then(|s| {
+        let next = corpus_id.and_then(|s| {
             let t = s.trim().to_string();
             if t.is_empty() {
                 None
@@ -932,6 +932,13 @@ impl ToolHost {
                 Some(t)
             }
         });
+        if self.active_log_corpus != next {
+            *self
+                .log_corpus_handle
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+        self.active_log_corpus = next;
     }
 
     /// Active / default log corpus id, if any.
@@ -953,6 +960,41 @@ impl ToolHost {
                 Some(t)
             }
         });
+    }
+
+    /// Seed a corpus handle already validated by the host application.
+    ///
+    /// Identity and canonical cache-root containment are checked before the
+    /// handle becomes tool-visible. This lets a linked-turn preflight open the
+    /// expensive corpus exactly once and hand that same initialized snapshot to
+    /// every deterministic log tool in the turn.
+    pub fn seed_log_corpus_handle(
+        &mut self,
+        corpus_id: &str,
+        corpus: Arc<crate::log_analysis::LogCorpus>,
+    ) -> CoreResult<()> {
+        if corpus.id() != corpus_id {
+            return Err(CoreError::Policy(format!(
+                "validated log corpus identity mismatch: expected {corpus_id}"
+            )));
+        }
+        let cache = self
+            .log_cache_dir
+            .as_ref()
+            .ok_or_else(|| CoreError::Policy("log cache dir not configured".into()))?;
+        let expected_root = std::fs::canonicalize(cache.join("log_corpora").join(corpus_id))?;
+        let actual_root = std::fs::canonicalize(corpus.root())?;
+        if actual_root != expected_root {
+            return Err(CoreError::Policy(
+                "validated log corpus belongs to a different cache root".into(),
+            ));
+        }
+        *self
+            .log_corpus_handle
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((corpus_id.to_string(), corpus));
+        Ok(())
     }
 
     /// Current turn-scoped log corpus, when a linked Explorer turn is active.
@@ -6346,6 +6388,49 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&first, &reopened),
             "the next turn must reopen so re-analysis cannot leave stale state"
+        );
+
+        host.set_active_log_corpus(None);
+        assert!(
+            host.log_corpus_handle.lock().unwrap().is_none(),
+            "changing an unscoped active corpus must invalidate the prior turn handle"
+        );
+    }
+
+    #[test]
+    fn validated_log_corpus_handle_can_seed_one_turn_without_reopening() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let corpus = Arc::new(crate::log_analysis::LogCorpus::create(&cache, "seeded").unwrap());
+        let corpus_id = corpus.id().to_string();
+
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut host = ToolHost::new(
+            Workspace::new("seeded-handle", vec![workspace]),
+            KeywordIndex::new(),
+            None,
+        );
+        host.set_log_analysis(true, Some(cache));
+        host.set_log_corpus_scope(Some(corpus_id.clone()));
+        host.set_active_log_corpus(Some(corpus_id.clone()));
+        host.seed_log_corpus_handle(&corpus_id, Arc::clone(&corpus))
+            .unwrap();
+
+        let opened = host.open_log_corpus(&corpus_id).unwrap();
+        assert!(
+            Arc::ptr_eq(&corpus, &opened),
+            "the first tool must receive the exact preflight-initialized handle"
+        );
+
+        let other = Arc::new(
+            crate::log_analysis::LogCorpus::create(&dir.path().join("other-cache"), "other")
+                .unwrap(),
+        );
+        let error = host.seed_log_corpus_handle(&corpus_id, other).unwrap_err();
+        assert!(
+            error.to_string().contains("identity mismatch"),
+            "a different corpus identity must not enter the turn cache: {error}"
         );
     }
 
