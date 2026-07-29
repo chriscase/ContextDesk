@@ -16,6 +16,7 @@ const CHAPTERS = [
   "docs/design/proven-methods/DETERMINISTIC_CONTEXT_ASSEMBLY.md",
   "docs/design/proven-methods/LOG_EVIDENCE_PIPELINE.md",
   "docs/design/proven-methods/INVESTIGATION_LOOP.md",
+  "docs/design/proven-methods/DEMO_EVALUATION_LAB.md",
 ];
 const TEMPLATE = "docs/design/proven-methods/METHOD_TEMPLATE.md";
 const INDEX = "docs/design/PROVEN_METHODS.md";
