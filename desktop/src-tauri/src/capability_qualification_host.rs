@@ -6,14 +6,14 @@
 
 #[cfg(test)]
 use cd_core::capability_qualification::run_qualification;
+#[cfg(test)]
+use cd_core::capability_qualification::QUALIFICATION_SCHEMA_VERSION;
 use cd_core::capability_qualification::{
     execute_inert_probe_tool, inert_probe_tools, CapabilityStatus, ProfileCapabilityGate,
     QualificationKey, QualificationReport, QualificationStore, QualificationTransport,
     SyntheticChatRequest, SyntheticChatResponse, SyntheticEmbeddingResponse, SyntheticMessage,
     SyntheticRerankResponse, SyntheticToolCall, TransportError, INERT_PROBE_TOOL_NAME,
 };
-#[cfg(test)]
-use cd_core::capability_qualification::QUALIFICATION_SCHEMA_VERSION;
 use cd_core::chat::{
     ChatMessage, FunctionCall, OllamaClient, OpenAiCompatibleClient, Role as ChatRole, ToolCallMsg,
 };
