@@ -5145,17 +5145,16 @@ async fn list_models_for_draft(
             || req.base_url.to_lowercase().contains("localhost");
         let result =
             cd_core::ai_probe::probe_ai_gateway(&req.base_url, key.as_deref(), probe_local).await;
-        // Prefer chat candidates; fall back to full model list.
-        let mut ids: Vec<String> = if !result.chat_candidates.is_empty() {
-            result.chat_candidates.into_iter().map(|m| m.id).collect()
-        } else {
-            result
-                .models
+        // Full inventory for the picker: specialty ids remain selectable but are
+        // ranked last by the role-hint catalog (#723). Never drop embed/rerank.
+        let mut ids: Vec<String> = result.models.into_iter().map(|m| m.id).collect();
+        if ids.is_empty() {
+            ids = result
+                .chat_candidates
                 .into_iter()
-                .filter(|m| m.kind != "embedding")
                 .map(|m| m.id)
-                .collect()
-        };
+                .collect();
+        }
         // If user forced a flavor that didn't match probe, still return what we got.
         if matches!(kind, ProviderKind::Ollama) && result.flavor.as_deref() != Some("ollama") {
             // Probe may have hit remote — still return ids if any.
@@ -5167,10 +5166,10 @@ async fn list_models_for_draft(
             .filter(|s| !s.is_empty())
         {
             if !ids.iter().any(|x| x == cm) {
-                ids.insert(0, cm.to_string());
+                ids.push(cm.to_string());
             }
         }
-        ids.sort();
+        ids = cd_core::model_role_hints::sort_ids_for_chat_picker(&ids);
         ids.dedup();
         return Ok(ids);
     }

@@ -300,11 +300,16 @@ pub fn run_preflight(input: PreflightInput<'_>) -> PreflightReport {
                     category: PreflightCategory::Launch,
                 });
             } else {
+                // Name-hint role line only (#723) — never claims measured capability.
+                let hint = crate::model_role_hints::classify_model_role(&p.chat_model);
                 items.push(PreflightItem {
                     id: "provider.model".into(),
                     title: "Chat model".into(),
                     level: PreflightLevel::Pass,
-                    detail: format!("Model: {}", p.chat_model),
+                    detail: format!(
+                        "Model: {} · {} · Basis: {} (not measured capability)",
+                        p.chat_model, hint.suggested_for, hint.basis_label
+                    ),
                     fix_action: Some("ai".into()),
                     category: PreflightCategory::Launch,
                 });
@@ -856,6 +861,26 @@ mod tests {
             .items
             .iter()
             .any(|i| i.id == "provider.grok_session" && i.level == PreflightLevel::Warn));
+        let model = report
+            .items
+            .iter()
+            .find(|i| i.id == "provider.model")
+            .expect("provider.model item");
+        assert!(
+            model.detail.contains("Suggested for:"),
+            "host preflight must surface Suggested-for: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("Basis: Name hint"),
+            "host preflight must surface Basis: {}",
+            model.detail
+        );
+        assert!(
+            model.detail.contains("not measured capability"),
+            "host preflight must disclaim measurement: {}",
+            model.detail
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ Security model, non-goals, and migration path: **[ADR 0001](adr/0001-external-mo
 | `branding` | Load `branding.toml`; display name/slug |
 | `providers` | Chat/embed clients; capability matrix |
 | `probe` | URL expansion, model list, local discovery |
+| `model_role_hints` | Versioned **name-only** role suggestions (investigator / embedding / reranker / unknown); never proof of capability (#723) |
 | `auth_resolve` | Env, keychain, optional Grok Build session (opt-in) |
 | `tools` | Registry, side effects, policy gate, audit |
 | `agent` | Plan → tool → observe → answer loop; streaming events |

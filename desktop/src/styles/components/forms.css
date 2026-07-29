@@ -38,6 +38,25 @@
   line-height: 1.4;
 }
 
+/* Model role name-hint line (#723) — works on light/dark themes via tokens. */
+.model-role-hint {
+  margin: 0.15rem 0 0.35rem;
+}
+
+.model-role-hint__suggested {
+  color: var(--text-muted, var(--text-faint));
+}
+
+.model-role-hint__basis {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.model-role-hint[data-role="embedding"] .model-role-hint__suggested,
+.model-role-hint[data-role="reranker"] .model-role-hint__suggested {
+  color: var(--warning, var(--text-muted, var(--text-faint)));
+}
+
 .field__control {
   width: 100%;
   padding: 7px 10px;

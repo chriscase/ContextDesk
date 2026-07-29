@@ -6,46 +6,32 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Classification of a discovered model id.
+///
+/// Prefer [`crate::model_role_hints::classify_model_role`] for confidence,
+/// basis labels, and chat-default ranking (#723). This enum remains for
+/// legacy call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelKind {
-    /// Chat / completion models.
+    /// Chat / completion / investigator models.
     Chat,
     /// Embedding models.
     Embedding,
-    /// Unknown / dual-use.
+    /// Reranking models (#723).
+    Reranker,
+    /// Unknown / dual-use / private alias.
     Unknown,
 }
 
-/// Heuristic model kind from id string.
+/// Heuristic model kind from id string (delegates to the versioned role catalog).
 pub fn classify_model_id(id: &str) -> ModelKind {
-    let s = id.to_lowercase();
-    if s.contains("embed")
-        || s.contains("nomic")
-        || s.contains("e5-")
-        || s.contains("bge-")
-        || s.contains("gte-")
-        || s.contains("text-embedding")
-        || s.contains("voyage")
-    {
-        return ModelKind::Embedding;
+    use crate::model_role_hints::{classify_model_role, ModelRoleHint};
+    match classify_model_role(id).role {
+        ModelRoleHint::Investigator => ModelKind::Chat,
+        ModelRoleHint::Embedding => ModelKind::Embedding,
+        ModelRoleHint::Reranker => ModelKind::Reranker,
+        ModelRoleHint::Unknown => ModelKind::Unknown,
     }
-    if s.contains("gpt")
-        || s.contains("claude")
-        || s.contains("mistral")
-        || s.contains("llama")
-        || s.contains("grok")
-        || s.contains("sonnet")
-        || s.contains("opus")
-        || s.contains("haiku")
-        || s.contains("gemini")
-        || s.contains("qwen")
-        || s.contains("deepseek")
-        || s.contains("chat")
-    {
-        return ModelKind::Chat;
-    }
-    ModelKind::Unknown
 }
 
 fn strip_slash(u: &str) -> String {
@@ -151,9 +137,13 @@ mod tests {
     }
 
     #[test]
-    fn classifies_embed_and_chat() {
+    fn classifies_embed_chat_and_rerank() {
         assert_eq!(classify_model_id("nomic-embed-text"), ModelKind::Embedding);
         assert_eq!(classify_model_id("grok-3"), ModelKind::Chat);
+        assert_eq!(
+            classify_model_id("qwen3-reranker-0.6b"),
+            ModelKind::Reranker
+        );
     }
 
     #[test]
