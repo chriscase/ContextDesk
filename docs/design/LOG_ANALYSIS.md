@@ -72,6 +72,28 @@ Two stores (event-store engine **decided 2026-07-18: DuckDB**):
 
 Corpora are **per‑analysis, disposable** (an incident dump), stored under the app cache dir keyed by a corpus id — not mixed into durable memory. A corpus can be pinned/kept or discarded.
 
+### Logs-library activation contract
+
+Listing corpora and selecting one must not eagerly run template listing or
+problem clustering. Selection updates the visible Overview immediately and
+serializes the trusted host activation so rapid A → B choices leave both the UI
+and host on B. Optional Analysis and Templates work begins only after the user
+chooses **Load analysis**; one in-flight request per corpus is coalesced and its
+result is cached until corpus-analysis metadata changes, local re-analysis
+succeeds, or the corpus is discarded.
+
+Corpus-list refreshes and analysis requests carry lifecycle generations. An
+older list response cannot replace a newer import refresh, a stale analysis
+response cannot populate another corpus, and a late discard cannot clear a
+newer selection. Partial cluster/template failures settle together and remain
+visible with a retry action; the corpus list, privacy-safe diagnostics, and
+selection controls remain available.
+
+Component timing uses deferred host mocks only to prove these ordering
+boundaries; it is not a DuckDB or packaged-app latency claim. Literal
+250,000-event timing is captured separately with the deterministic
+`triage-stress` dataset and labeled as one-machine evidence.
+
 ## 5. The shared `VectorIndex` abstraction (unifies memory + logs)
 
 Memory recall (#346) currently cosines over SQLite BLOBs — fine for thousands, wrong for logs. Introduce one abstraction both use:
