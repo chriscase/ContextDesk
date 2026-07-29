@@ -10,6 +10,7 @@ tags:
   - troubleshooting
 order: 20
 related:
+  - demo-log-datasets
   - log-analysis-pipeline
   - log-portable-package
 ---

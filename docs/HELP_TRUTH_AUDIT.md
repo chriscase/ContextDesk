@@ -44,6 +44,7 @@ blanket claim that every future product change is automatically documented.
 | `permission-tiers` | Read / SoftWrite / HardWrite and audit | Aligned; confirmation labels repaired |
 | `memory-overview` | candidate review, durable store, bounded recall | Aligned; no automatic-durable-capture claim |
 | `log-analysis-pipeline` | ingest, redact, templates, DuckDB, local embedding, tools | Aligned; live tail remains explicitly unshipped |
+| `demo-log-datasets` | checked-in input roots, manifest-backed counts, pinned scale corpus, optional session metrics | Aligned; truth/evaluator paths are explicitly excluded from ingest and chat |
 | `log-explorer` | search/filter, lanes, paging, navigator, chat, long lines | Aligned to this branch; packaged visual proof remains #525 |
 | `portable-package` | package validation/import/export boundaries | Aligned; no restore/sync claim |
 | `connectors-and-confluence` | config/keychain, host policy, confirmed writes | Aligned |
