@@ -239,6 +239,58 @@ impl HostInitFlight {
     }
 }
 
+const LOG_CORPUS_HANDLE_CACHE_CAP: usize = 4;
+
+#[derive(Default)]
+struct LogCorpusHandleCacheState {
+    entries: HashMap<String, Arc<cd_core::log_analysis::LogCorpus>>,
+    order: std::collections::VecDeque<String>,
+}
+
+#[derive(Default)]
+struct LogCorpusHandleCache {
+    state: Mutex<LogCorpusHandleCacheState>,
+}
+
+impl LogCorpusHandleCache {
+    fn open(
+        &self,
+        cache_root: &std::path::Path,
+        corpus_id: &str,
+    ) -> Result<Arc<cd_core::log_analysis::LogCorpus>, String> {
+        let mut state = self.state.lock().expect("log corpus handle cache");
+        if let Some(corpus) = state.entries.get(corpus_id).cloned() {
+            state.order.retain(|id| id != corpus_id);
+            state.order.push_back(corpus_id.to_string());
+            return Ok(corpus);
+        }
+
+        // Hold the small cache lock during open so simultaneous startup reads
+        // coalesce into one schema/template/vector initialization.
+        let corpus = Arc::new(
+            cd_core::log_analysis::LogCorpus::open(cache_root, corpus_id)
+                .map_err(|error| error.to_string())?,
+        );
+        while state.entries.len() >= LOG_CORPUS_HANDLE_CACHE_CAP {
+            let Some(evicted) = state.order.pop_front() else {
+                break;
+            };
+            state.entries.remove(&evicted);
+        }
+        state
+            .entries
+            .insert(corpus_id.to_string(), Arc::clone(&corpus));
+        state.order.push_back(corpus_id.to_string());
+        Ok(corpus)
+    }
+
+    fn remove(&self, corpus_id: &str) {
+        let mut state = self.state.lock().expect("log corpus handle cache");
+        state.entries.remove(corpus_id);
+        state.order.retain(|id| id != corpus_id);
+    }
+}
+
 struct AppState {
     branding: Branding,
     config: Mutex<AppConfig>,
@@ -258,6 +310,9 @@ struct AppState {
     /// UI-selected default corpus for log tools. This must be updateable without
     /// forcing host construction; the host picks it up when ready.
     active_log_corpus: Mutex<Option<String>>,
+    /// Bounded reusable corpus handles for Explorer/library read commands.
+    /// Coalesces repeated schema/template/vector initialization at startup.
+    log_corpus_handles: Arc<LogCorpusHandleCache>,
     /// One payload-free failed-ingest diagnostic. Memory-only: replaced when a
     /// later ingest starts, explicitly clearable, and absent after restart.
     failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
@@ -6497,11 +6552,35 @@ fn summary_dto(c: &cd_core::log_analysis::LogCorpus) -> LogCorpusSummaryDto {
 fn list_log_corpora_at(cache: &std::path::Path) -> Result<Vec<LogCorpusSummaryDto>, String> {
     let summaries =
         cd_core::log_analysis::LogCorpus::list_summaries(cache).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(summaries.len());
     for summary in summaries {
-        if let Ok(corpus) = cd_core::log_analysis::LogCorpus::open(cache, &summary.id) {
-            out.push(summary_dto(&corpus));
-        }
+        let top_templates = cd_core::log_analysis::store::read_meta_file(
+            &cache.join("log_corpora").join(&summary.id),
+        )
+        .map(|meta| {
+            meta.top_templates
+                .into_iter()
+                .map(|template| LogTopTemplateDto {
+                    id: template.id,
+                    pattern: template.pattern,
+                    count: template.count,
+                    severity: template.severity,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+        out.push(LogCorpusSummaryDto {
+            id: summary.id,
+            name: summary.name,
+            event_count: summary.event_count,
+            template_count: summary.template_count,
+            engine: summary.engine,
+            created_at: summary.created_at,
+            source_label: summary.source_label,
+            stats: summary.stats.as_ref().map(stats_dto),
+            top_templates,
+            embedding: summary.embedding,
+        });
     }
     Ok(out)
 }
@@ -6516,11 +6595,11 @@ async fn list_log_corpora(state: State<'_, AppState>) -> Result<Vec<LogCorpusSum
 
 /// Full summary for one corpus (detail header).
 fn get_log_corpus_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
 ) -> Result<LogCorpusSummaryDto, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     Ok(summary_dto(&corpus))
 }
 
@@ -6530,19 +6609,20 @@ async fn get_log_corpus(
     corpus_id: String,
 ) -> Result<LogCorpusSummaryDto, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || get_log_corpus_at(&cache, &corpus_id))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || get_log_corpus_at(&handles, &cache, &corpus_id))
         .await
         .map_err(|error| format!("log corpus metadata task join: {error}"))?
 }
 
 /// List templates for a corpus (UI table).
 fn list_log_templates_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     limit: Option<u32>,
 ) -> Result<Vec<LogTemplateRowDto>, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     let lim = limit.unwrap_or(200) as usize;
     let mut rows = corpus.list_templates();
     rows.sort_by_key(|row| std::cmp::Reverse(row.info.count));
@@ -6565,7 +6645,8 @@ async fn list_log_templates(
     limit: Option<u32>,
 ) -> Result<Vec<LogTemplateRowDto>, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || list_log_templates_at(&cache, &corpus_id, limit))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || list_log_templates_at(&handles, &cache, &corpus_id, limit))
         .await
         .map_err(|error| format!("log template list task join: {error}"))?
 }
@@ -7424,6 +7505,7 @@ async fn reanalyze_log_corpus(
         cancels.insert(LOG_REANALYZE_CANCEL_KEY.into(), cancel.inner_arc());
     }
     let cancel_for_job = cancel.clone();
+    let reanalyzed_corpus_id = corpus_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::reanalyze_corpus_embeddings(
             &cache,
@@ -7442,6 +7524,9 @@ async fn reanalyze_log_corpus(
         .lock()
         .expect("cancels")
         .remove(LOG_REANALYZE_CANCEL_KEY);
+    if matches!(&result, Ok(Ok(_))) {
+        state.log_corpus_handles.remove(&reanalyzed_corpus_id);
+    }
     result?
 }
 
@@ -7469,12 +7554,12 @@ fn cancel_log_ingest(state: State<'_, AppState>) -> Result<bool, String> {
 
 /// Problem clusters for a corpus.
 fn log_cluster_problems_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     max_clusters: Option<u32>,
 ) -> Result<Vec<LogClusterDto>, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     let clusters =
         cd_core::log_analysis::cluster_problems(&corpus, max_clusters.unwrap_or(10) as usize)
             .map_err(|e| e.to_string())?;
@@ -7499,19 +7584,22 @@ async fn log_cluster_problems(
     max_clusters: Option<u32>,
 ) -> Result<Vec<LogClusterDto>, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || log_cluster_problems_at(&cache, &corpus_id, max_clusters))
-        .await
-        .map_err(|error| format!("log problem cluster task join: {error}"))?
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        log_cluster_problems_at(&handles, &cache, &corpus_id, max_clusters)
+    })
+    .await
+    .map_err(|error| format!("log problem cluster task join: {error}"))?
 }
 
 /// Timeline buckets for a corpus.
 fn log_timeline_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     width_secs: Option<i64>,
 ) -> Result<Vec<LogTimelineBucketDto>, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     let buckets = cd_core::log_analysis::timeline(&corpus, width_secs.unwrap_or(60), None, None)
         .map_err(|e| e.to_string())?;
     Ok(buckets
@@ -7531,21 +7619,22 @@ async fn log_timeline(
     width_secs: Option<i64>,
 ) -> Result<Vec<LogTimelineBucketDto>, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || log_timeline_at(&cache, &corpus_id, width_secs))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || log_timeline_at(&handles, &cache, &corpus_id, width_secs))
         .await
         .map_err(|error| format!("log analysis timeline task join: {error}"))?
 }
 
 /// Hybrid log search (paraphrase-capable when embed backend present).
 fn log_search_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: String,
     k: Option<u32>,
     embed_backend: Option<Arc<dyn cd_core::embed::EmbedBackend>>,
 ) -> Result<Vec<LogSearchHitDto>, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     let request = cd_core::log_analysis::SearchLogsQuery {
         query: Some(query),
         semantic: true,
@@ -7576,16 +7665,20 @@ async fn log_search(
     k: Option<u32>,
 ) -> Result<Vec<LogSearchHitDto>, String> {
     let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
     let embed_backend = log_embed_backend_snapshot_nonblocking(&state);
-    tokio::task::spawn_blocking(move || log_search_at(&cache, &corpus_id, query, k, embed_backend))
-        .await
-        .map_err(|error| format!("log analysis search task join: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        log_search_at(&handles, &cache, &corpus_id, query, k, embed_backend)
+    })
+    .await
+    .map_err(|error| format!("log analysis search task join: {error}"))?
 }
 
 /// Discard a disposable corpus.
 #[tauri::command]
 fn discard_log_corpus(state: State<'_, AppState>, corpus_id: String) -> Result<(), String> {
     let cache = log_cache_dir(&state)?;
+    state.log_corpus_handles.remove(&corpus_id);
     cd_core::log_analysis::LogCorpus::discard(&cache, &corpus_id).map_err(|e| e.to_string())?;
     if active_log_corpus_snapshot(&state).as_deref() == Some(corpus_id.as_str()) {
         set_active_log_corpus_state_nonblocking(&state, None);
@@ -7612,12 +7705,12 @@ fn get_active_log_corpus(state: State<'_, AppState>) -> Result<Option<String>, S
 
 /// Paged/keyset event query for the Log Explorer.
 fn query_log_events_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventPage, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query_events(&corpus, query).map_err(|e| e.to_string())
 }
 
@@ -7628,7 +7721,8 @@ async fn log_query_events(
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::EventPage, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || query_log_events_at(&cache, &corpus_id, &query))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_events_at(&handles, &cache, &corpus_id, &query))
         .await
         .map_err(|error| format!("log event query task join: {error}"))?
 }
@@ -7685,12 +7779,12 @@ impl From<cd_core::log_analysis::query::EventOriginalRepresentation> for LogEven
 }
 
 fn query_log_event_original_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     seq: u64,
 ) -> Result<LogEventOriginalDto, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query::query_event_original(&corpus, seq)
         .map(LogEventOriginalDto::from)
         .map_err(|e| e.to_string())
@@ -7701,23 +7795,28 @@ fn query_log_event_original_at(
 /// This remains separate from ordinary Explorer pages, search, evidence, and
 /// linked-chat DTOs so source records never enter those paths automatically.
 #[tauri::command]
-fn log_query_event_original(
+async fn log_query_event_original(
     state: State<'_, AppState>,
     corpus_id: String,
     seq: u64,
 ) -> Result<LogEventOriginalDto, String> {
     let cache = log_cache_dir(&state)?;
-    query_log_event_original_at(&cache, &corpus_id, seq)
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_original_at(&handles, &cache, &corpus_id, seq)
+    })
+    .await
+    .map_err(|error| format!("log original event task join: {error}"))?
 }
 
 /// Fixed-size, filter-aware timeline summary for the lazy Explorer navigator.
 fn query_log_timeline_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: &cd_core::log_analysis::TimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::TimelineSummary, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query_timeline_summary(&corpus, query).map_err(|e| e.to_string())
 }
 
@@ -7728,19 +7827,20 @@ async fn log_timeline_summary(
     query: cd_core::log_analysis::TimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::TimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || query_log_timeline_at(&cache, &corpus_id, &query))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_timeline_at(&handles, &cache, &corpus_id, &query))
         .await
         .map_err(|error| format!("log timeline task join: {error}"))?
 }
 
 /// One bounded global timeline axis with canonical severity and lane tracks.
 fn query_log_shared_timeline_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: &cd_core::log_analysis::SharedTimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query_shared_timeline_summary(&corpus, query).map_err(|e| e.to_string())
 }
 
@@ -7751,32 +7851,48 @@ async fn log_shared_timeline_summary(
     query: cd_core::log_analysis::SharedTimelineSummaryQuery,
 ) -> Result<cd_core::log_analysis::SharedTimelineSummary, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || query_log_shared_timeline_at(&cache, &corpus_id, &query))
-        .await
-        .map_err(|error| format!("shared log timeline task join: {error}"))?
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_shared_timeline_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("shared log timeline task join: {error}"))?
 }
 
 /// Bounded neighborhood around a stable event identity (Find / bookmark seek).
+fn query_log_event_neighborhood_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventNeighborhoodQuery,
+) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_neighborhood(&corpus, query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
-fn log_query_event_neighborhood(
+async fn log_query_event_neighborhood(
     state: State<'_, AppState>,
     corpus_id: String,
     query: cd_core::log_analysis::EventNeighborhoodQuery,
 ) -> Result<cd_core::log_analysis::EventNeighborhood, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    cd_core::log_analysis::query_event_neighborhood(&c, &query).map_err(|e| e.to_string())
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_neighborhood_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log event neighborhood task join: {error}"))?
 }
 
 /// Facets under filters for explorer filter rail.
 fn query_log_facets_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: &cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::LogFacets, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query_facets(&corpus, query).map_err(|e| e.to_string())
 }
 
@@ -7787,18 +7903,19 @@ async fn log_facets(
     query: cd_core::log_analysis::EventQuery,
 ) -> Result<cd_core::log_analysis::LogFacets, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || query_log_facets_at(&cache, &corpus_id, &query))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || query_log_facets_at(&handles, &cache, &corpus_id, &query))
         .await
         .map_err(|error| format!("log facets task join: {error}"))?
 }
 
 fn query_log_source_catalog_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
     query: &cd_core::log_analysis::LogSourceCatalogQuery,
 ) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::query_source_catalog(&corpus, query).map_err(|e| e.to_string())
 }
 
@@ -7810,9 +7927,12 @@ async fn log_source_catalog(
     query: cd_core::log_analysis::LogSourceCatalogQuery,
 ) -> Result<cd_core::log_analysis::LogSourceCatalogPage, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || query_log_source_catalog_at(&cache, &corpus_id, &query))
-        .await
-        .map_err(|error| format!("log source catalog task join: {error}"))?
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_source_catalog_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log source catalog task join: {error}"))?
 }
 
 /// IPC args for advanced log search (#523).
@@ -7880,9 +8000,9 @@ async fn log_search_events(
     };
     let corpus_id = args.corpus_id;
     let cancel_for_job = cancel.clone();
+    let handles = Arc::clone(&state.log_corpus_handles);
     let result = tokio::task::spawn_blocking(move || {
-        let corpus = cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id)
-            .map_err(|error| error.to_string())?;
+        let corpus = handles.open(&cache, &corpus_id)?;
         let is_cancelled = || cancel_for_job.load(std::sync::atomic::Ordering::SeqCst);
         cd_core::log_analysis::search_events_advanced_with_cancel(
             &corpus,
@@ -7912,11 +8032,11 @@ fn cancel_log_search(state: State<'_, AppState>, request_id: String) -> Result<b
 
 /// List bookmarks for a corpus.
 fn list_log_bookmarks_at(
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
 ) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     cd_core::log_analysis::list_resolved_bookmarks(&corpus).map_err(|e| e.to_string())
 }
 
@@ -7926,7 +8046,8 @@ async fn log_list_bookmarks(
     corpus_id: String,
 ) -> Result<Vec<cd_core::log_analysis::ResolvedBookmark>, String> {
     let cache = log_cache_dir(&state)?;
-    tokio::task::spawn_blocking(move || list_log_bookmarks_at(&cache, &corpus_id))
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || list_log_bookmarks_at(&handles, &cache, &corpus_id))
         .await
         .map_err(|error| format!("log bookmarks task join: {error}"))?
 }
@@ -8014,14 +8135,14 @@ fn active_investigation_for_corpus(
 /// Load the newest active durable Investigation linked to a corpus.
 fn load_active_log_investigation_at(
     store: &cd_core::investigations::InvestigationStore,
+    handles: &LogCorpusHandleCache,
     cache: &std::path::Path,
     corpus_id: &str,
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
     let Some(summary) = active_investigation_for_corpus(store, corpus_id)? else {
         return Ok(None);
     };
-    let corpus =
-        cd_core::log_analysis::LogCorpus::open(cache, corpus_id).map_err(|e| e.to_string())?;
+    let corpus = handles.open(cache, corpus_id)?;
     store
         .load(&summary.id, &corpus)
         .map(Some)
@@ -8035,8 +8156,9 @@ async fn log_load_active_investigation(
 ) -> Result<Option<cd_core::investigations::ResolvedInvestigationDocument>, String> {
     let store = investigation_store(&state)?;
     let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
     tokio::task::spawn_blocking(move || {
-        load_active_log_investigation_at(&store, &cache, &corpus_id)
+        load_active_log_investigation_at(&store, &handles, &cache, &corpus_id)
     })
     .await
     .map_err(|error| format!("log investigation task join: {error}"))?
@@ -8479,9 +8601,14 @@ async fn open_log_explorer(
     corpus_id: String,
 ) -> Result<String, String> {
     let cache = log_cache_dir(&state)?;
-    let c =
-        cd_core::log_analysis::LogCorpus::open(&cache, &corpus_id).map_err(|e| e.to_string())?;
-    let title = format!("Log Explorer · {}", c.name());
+    let handles = Arc::clone(&state.log_corpus_handles);
+    let open_corpus_id = corpus_id.clone();
+    let corpus_name = tokio::task::spawn_blocking(move || handles.open(&cache, &open_corpus_id))
+        .await
+        .map_err(|error| format!("open log explorer corpus task join: {error}"))??
+        .name()
+        .to_string();
+    let title = format!("Log Explorer · {corpus_name}");
     // Set active corpus so agent tools resolve without id.
     set_active_log_corpus_state_nonblocking(&state, Some(corpus_id.clone()));
     // Window labels: alphanumeric + `-` only (Tauri constraint). Keep short.
@@ -9302,6 +9429,7 @@ pub fn run() {
         host_init: HostInitFlight::default(),
         host_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         active_log_corpus: Mutex::new(None),
+        log_corpus_handles: Arc::new(LogCorpusHandleCache::default()),
         failed_log_ingest_diagnostic: Mutex::new(
             cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
         ),
@@ -9835,6 +9963,11 @@ mod log_explorer_async_query_host_tests {
                 "query_log_events_at",
             ),
             (
+                "async fn log_query_event_original(",
+                "/// Fixed-size, filter-aware timeline summary",
+                "query_log_event_original_at",
+            ),
+            (
                 "async fn log_timeline_summary(",
                 "/// One bounded global timeline axis",
                 "query_log_timeline_at",
@@ -9843,6 +9976,11 @@ mod log_explorer_async_query_host_tests {
                 "async fn log_shared_timeline_summary(",
                 "/// Bounded neighborhood around a stable event identity",
                 "query_log_shared_timeline_at",
+            ),
+            (
+                "async fn log_query_event_neighborhood(",
+                "/// Facets under filters for explorer filter rail",
+                "query_log_event_neighborhood_at",
             ),
             (
                 "async fn log_facets(",
@@ -9887,33 +10025,38 @@ mod log_explorer_async_query_host_tests {
         let cache = root.path().join("cache");
         let report = cd_core::log_analysis::ingest_path(&cache, &logs, "async-query", None, "none")
             .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
         let query = cd_core::log_analysis::EventQuery {
             limit: 10,
             ..Default::default()
         };
 
-        let summary = get_log_corpus_at(&cache, &report.corpus_id).expect("corpus summary");
+        let summary =
+            get_log_corpus_at(&handles, &cache, &report.corpus_id).expect("corpus summary");
         assert_eq!(summary.event_count, 2);
 
         let corpora = list_log_corpora_at(&cache).expect("corpus list");
         assert_eq!(corpora.len(), 1);
         assert_eq!(corpora[0].id, report.corpus_id);
 
-        let templates =
-            list_log_templates_at(&cache, &report.corpus_id, Some(1)).expect("template list");
+        let templates = list_log_templates_at(&handles, &cache, &report.corpus_id, Some(1))
+            .expect("template list");
         assert_eq!(templates.len(), 1);
 
-        let page = query_log_events_at(&cache, &report.corpus_id, &query).expect("event page");
+        let page =
+            query_log_events_at(&handles, &cache, &report.corpus_id, &query).expect("event page");
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.total_matched, 2);
 
-        let facets = query_log_facets_at(&cache, &report.corpus_id, &query).expect("facets");
+        let facets =
+            query_log_facets_at(&handles, &cache, &report.corpus_id, &query).expect("facets");
         assert_eq!(facets.levels.values().sum::<u64>(), 2);
         assert_eq!(facets.services.values().sum::<u64>(), 2);
         assert_eq!(facets.hosts.values().sum::<u64>(), 2);
         assert_eq!(facets.sources.get("events.jsonl"), Some(&2));
 
         let timeline = query_log_timeline_at(
+            &handles,
             &cache,
             &report.corpus_id,
             &cd_core::log_analysis::TimelineSummaryQuery::default(),
@@ -9922,6 +10065,7 @@ mod log_explorer_async_query_host_tests {
         assert_eq!(timeline.total_matched, 2);
 
         let shared_timeline = query_log_shared_timeline_at(
+            &handles,
             &cache,
             &report.corpus_id,
             &cd_core::log_analysis::SharedTimelineSummaryQuery::default(),
@@ -9929,12 +10073,12 @@ mod log_explorer_async_query_host_tests {
         .expect("shared timeline");
         assert_eq!(shared_timeline.total_matched, 2);
 
-        let clusters =
-            log_cluster_problems_at(&cache, &report.corpus_id, Some(10)).expect("clusters");
+        let clusters = log_cluster_problems_at(&handles, &cache, &report.corpus_id, Some(10))
+            .expect("clusters");
         assert!(!clusters.is_empty());
 
-        let analysis_timeline =
-            log_timeline_at(&cache, &report.corpus_id, Some(60)).expect("analysis timeline");
+        let analysis_timeline = log_timeline_at(&handles, &cache, &report.corpus_id, Some(60))
+            .expect("analysis timeline");
         assert_eq!(
             analysis_timeline
                 .iter()
@@ -9943,31 +10087,64 @@ mod log_explorer_async_query_host_tests {
             2
         );
 
-        let search = log_search_at(&cache, &report.corpus_id, "failed".into(), Some(8), None)
-            .expect("analysis search");
+        let search = log_search_at(
+            &handles,
+            &cache,
+            &report.corpus_id,
+            "failed".into(),
+            Some(8),
+            None,
+        )
+        .expect("analysis search");
         assert!(!search.is_empty());
 
         let bookmarks =
-            list_log_bookmarks_at(&cache, &report.corpus_id).expect("resolved bookmarks");
+            list_log_bookmarks_at(&handles, &cache, &report.corpus_id).expect("resolved bookmarks");
         assert!(bookmarks.is_empty());
 
         let investigation_store =
             cd_core::investigations::InvestigationStore::new(root.path().join("investigations"));
-        assert!(
-            load_active_log_investigation_at(&investigation_store, &cache, &report.corpus_id)
-                .expect("no investigation")
-                .is_none()
-        );
+        assert!(load_active_log_investigation_at(
+            &investigation_store,
+            &handles,
+            &cache,
+            &report.corpus_id,
+        )
+        .expect("no investigation")
+        .is_none());
         let corpus =
             cd_core::log_analysis::LogCorpus::open(&cache, &report.corpus_id).expect("open corpus");
         investigation_store
             .create("Async startup proof", &corpus)
             .expect("create investigation");
-        let investigation =
-            load_active_log_investigation_at(&investigation_store, &cache, &report.corpus_id)
-                .expect("load investigation")
-                .expect("active investigation");
+        let investigation = load_active_log_investigation_at(
+            &investigation_store,
+            &handles,
+            &cache,
+            &report.corpus_id,
+        )
+        .expect("load investigation")
+        .expect("active investigation");
         assert_eq!(investigation.document.title, "Async startup proof");
+
+        let first = handles
+            .open(&cache, &report.corpus_id)
+            .expect("first handle");
+        let second = handles
+            .open(&cache, &report.corpus_id)
+            .expect("second handle");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "startup reads must reuse one initialized corpus handle"
+        );
+        handles.remove(&report.corpus_id);
+        let reopened = handles
+            .open(&cache, &report.corpus_id)
+            .expect("reopened handle");
+        assert!(
+            !Arc::ptr_eq(&first, &reopened),
+            "explicit invalidation must discard the initialized handle"
+        );
     }
 }
 
@@ -9989,8 +10166,10 @@ mod log_original_host_tests {
         let cache = root.path().join("cache");
         let report = cd_core::log_analysis::ingest_path(&cache, &logs, "original", None, "none")
             .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
 
-        let original = query_log_event_original_at(&cache, &report.corpus_id, 0).expect("original");
+        let original =
+            query_log_event_original_at(&handles, &cache, &report.corpus_id, 0).expect("original");
         let LogEventOriginalDto::Available {
             label,
             text,
@@ -10014,8 +10193,8 @@ mod log_original_host_tests {
         assert!(!encoding_normalized);
         assert!(redaction_applied);
 
-        let error =
-            query_log_event_original_at(&cache, &report.corpus_id, 99).expect_err("missing event");
+        let error = query_log_event_original_at(&handles, &cache, &report.corpus_id, 99)
+            .expect_err("missing event");
         assert!(error.contains("event seq 99 not found"), "{error}");
     }
 
@@ -10062,7 +10241,11 @@ mod log_original_host_tests {
             .map(|offset| shared_start + offset)
             .expect("shared timeline command boundary");
         let shared_command = &src[shared_start..neighborhood_start];
-        assert!(shared_command.contains("query_shared_timeline_summary"));
+        assert!(shared_command.contains("query_log_shared_timeline_at"));
+        assert!(
+            shared_command.contains("tokio::task::spawn_blocking"),
+            "shared timeline must keep DuckDB reads off the app event loop"
+        );
         assert!(
             !shared_command.contains("ensure_host("),
             "local bounded summary must not construct the agent host"
@@ -10091,8 +10274,10 @@ mod log_source_catalog_host_tests {
         let report =
             cd_core::log_analysis::ingest_path(&cache, &logs, "source-catalog-host", None, "none")
                 .expect("ingest");
+        let handles = LogCorpusHandleCache::default();
 
         let first = query_log_source_catalog_at(
+            &handles,
             &cache,
             &report.corpus_id,
             &cd_core::log_analysis::LogSourceCatalogQuery {
@@ -10112,6 +10297,7 @@ mod log_source_catalog_host_tests {
         );
 
         let second = query_log_source_catalog_at(
+            &handles,
             &cache,
             &report.corpus_id,
             &cd_core::log_analysis::LogSourceCatalogQuery {
