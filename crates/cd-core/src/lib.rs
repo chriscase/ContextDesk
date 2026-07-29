@@ -14,6 +14,7 @@ pub mod ai_probe;
 pub mod audit;
 pub mod branding;
 pub mod build_identity;
+pub mod capability_qualification;
 pub mod chat;
 pub mod config;
 pub mod confluence_ro;

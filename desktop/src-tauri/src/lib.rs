@@ -1,5 +1,6 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
+mod capability_qualification_host;
 mod handbook;
 mod log_diagnostic_report;
 mod log_diagnostics;
@@ -345,6 +346,9 @@ struct AppState {
     help: Mutex<Option<Arc<HelpIndex>>>,
     /// Read-only engineering docs. Deliberately separate from Help and ToolHost.
     handbook: Mutex<Option<Arc<HandbookIndex>>>,
+    /// In-process capability qualification cache (#724). Memory-only; absent after restart.
+    /// Keyed by profile + endpoint fingerprint + exact model + schema version (#650 isolation).
+    qualification_store: Mutex<cd_core::capability_qualification::QualificationStore>,
 }
 
 fn workspace_from_cfg(cfg: &AppConfig) -> Option<Workspace> {
@@ -5342,6 +5346,226 @@ fn set_model_tools_enabled(
     Ok(tools_enabled)
 }
 
+// ---------------------------------------------------------------------------
+// Capability qualification (#724) — user-triggered only; never auto-run
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct QualificationSelectReq {
+    /// Optional profile id; defaults to active provider.
+    #[serde(default)]
+    profile_id: Option<String>,
+    /// Exact model id to qualify; defaults to profile chat_model or draft.
+    #[serde(default)]
+    model_id: Option<String>,
+    /// Optional draft base URL (unsaved Advanced settings).
+    #[serde(default)]
+    base_url: Option<String>,
+    /// Optional draft API key paste (never logged).
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+fn resolve_qualification_target(
+    state: &AppState,
+    req: &QualificationSelectReq,
+) -> Result<(ProviderProfile, String, Option<String>), String> {
+    let cfg = state.config.lock().expect("config").clone();
+    let profile = if let Some(pid) = req
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cfg.providers
+            .profiles
+            .iter()
+            .find(|p| p.id == pid)
+            .cloned()
+            .ok_or_else(|| format!("unknown provider profile: {pid}"))?
+    } else {
+        cfg.providers
+            .active()
+            .cloned()
+            .ok_or_else(|| "no active provider".to_string())?
+    };
+    let mut profile = profile;
+    if let Some(url) = req
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        profile.base_url = url.to_string();
+    }
+    let model = req
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let m = profile.chat_model.trim();
+            if m.is_empty() {
+                None
+            } else {
+                Some(m.to_string())
+            }
+        })
+        .ok_or_else(|| "model id is required".to_string())?;
+    if profile.base_url.trim().is_empty() && !matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        return Err("base URL is required".into());
+    }
+    if matches!(profile.kind, ProviderKind::XaiGrokBuild) && profile.base_url.trim().is_empty() {
+        profile.base_url = "https://api.x.ai/v1".into();
+    }
+    let api_key = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        None
+    } else {
+        resolve_draft_api_key(state, profile.kind, req.api_key.as_deref()).or_else(|| {
+            profile
+                .api_key_ref
+                .as_ref()
+                .and_then(|r| state.secrets.get(r).ok().flatten())
+                .or_else(|| {
+                    state
+                        .secrets
+                        .get(&key_ref_for_profile(&profile.id))
+                        .ok()
+                        .flatten()
+                })
+        })
+    };
+    Ok((profile, model, api_key))
+}
+
+/// Cached report for the selected profile/endpoint/model (no network).
+#[tauri::command]
+fn get_capability_qualification(
+    state: State<'_, AppState>,
+    req: QualificationSelectReq,
+) -> Result<Option<capability_qualification_host::QualificationReportDto>, String> {
+    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
+    let key =
+        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let mut store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    Ok(capability_qualification_host::get_cached_report(
+        &mut store, &key,
+    ))
+}
+
+/// Explicit user-triggered synthetic qualification. Never called on Settings open.
+#[tauri::command]
+async fn start_capability_qualification(
+    state: State<'_, AppState>,
+    req: QualificationSelectReq,
+) -> Result<capability_qualification_host::QualificationReportDto, String> {
+    let (profile, model, api_key) = resolve_qualification_target(&state, &req)?;
+    let cfg = state.config.lock().expect("config").clone();
+    let tools_for_model = model_tools_enabled(&cfg, &profile, &model);
+    let gate = capability_qualification_host::gate_from_profile(&profile, tools_for_model);
+    let key =
+        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+
+    // Single-flight cancel flag (one qualification at a time).
+    let cancel = {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        if cancels.contains_key(capability_qualification_host::QUALIFICATION_CANCEL_KEY) {
+            return Err("qualification already running".into());
+        }
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.insert(
+            capability_qualification_host::QUALIFICATION_CANCEL_KEY.to_string(),
+            flag.clone(),
+        );
+        flag
+    };
+
+    if !capability_qualification_host::preflight_inert_and_export_guard(None) {
+        return Err("inert probe tool set invalid".into());
+    }
+
+    let backend = capability_qualification_host::backend_for_provider(profile.kind);
+    let base_url = profile.base_url.clone();
+    let local_only = profile.local_only;
+    let extra_headers = if matches!(profile.kind, ProviderKind::XaiGrokBuild) {
+        cd_core::grok_auth::assert_grok_base_allowed(&base_url).map_err(|e| e.to_string())?;
+        match cd_core::grok_auth::load_grok_session_credentials() {
+            Ok(c) => c.request_headers(),
+            Err(e) => {
+                let mut cancels = state.cancels.lock().expect("cancels");
+                cancels.remove(capability_qualification_host::QUALIFICATION_CANCEL_KEY);
+                return Err(format!("Grok session required: {e}"));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let report = tokio::task::spawn_blocking(move || {
+        let mut transport = capability_qualification_host::LiveQualificationTransport::new(
+            backend, base_url, api_key, local_only,
+        )
+        .with_extra_headers(extra_headers);
+        cd_core::capability_qualification::run_qualification(
+            key.clone(),
+            gate,
+            &mut transport,
+            &cancel,
+        )
+    })
+    .await;
+
+    // Clear cancel flag after finish (success or join failure).
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        cancels.remove(capability_qualification_host::QUALIFICATION_CANCEL_KEY);
+    }
+
+    let report = report.map_err(|e| format!("qualification join: {e}"))?;
+    let mut store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    Ok(capability_qualification_host::put_report(
+        &mut store, report,
+    ))
+}
+
+/// Cooperative cancel for the in-flight qualification run.
+#[tauri::command]
+fn cancel_capability_qualification(state: State<'_, AppState>) -> bool {
+    let cancels = state.cancels.lock().expect("cancels");
+    if let Some(flag) = cancels.get(capability_qualification_host::QUALIFICATION_CANCEL_KEY) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+/// Drop cached result for the exact selected model only (#650).
+#[tauri::command]
+fn clear_capability_qualification(
+    state: State<'_, AppState>,
+    req: QualificationSelectReq,
+) -> Result<bool, String> {
+    let (profile, model, _) = resolve_qualification_target(&state, &req)?;
+    let key =
+        capability_qualification_host::qualification_key(&profile.id, &profile.base_url, &model);
+    let mut store = state
+        .qualification_store
+        .lock()
+        .expect("qualification_store");
+    Ok(capability_qualification_host::clear_report(
+        &mut store, &key,
+    ))
+}
+
 /// Like `models_for_profile` but accepts an already-resolved API key (draft paste).
 ///
 /// For remote gateways, walks `expand_base_candidates` (TriageTool parity) and
@@ -9956,6 +10180,9 @@ pub fn run() {
         })),
         help: Mutex::new(None),
         handbook: Mutex::new(None),
+        qualification_store: Mutex::new(
+            cd_core::capability_qualification::QualificationStore::default(),
+        ),
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -10041,6 +10268,10 @@ pub fn run() {
             list_chat_models,
             list_models_for_draft,
             probe_ai_gateway_cmd,
+            get_capability_qualification,
+            start_capability_qualification,
+            cancel_capability_qualification,
+            clear_capability_qualification,
             get_active_provider,
             set_provider_tools_enabled,
             set_model_tools_enabled,

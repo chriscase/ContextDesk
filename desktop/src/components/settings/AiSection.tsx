@@ -25,6 +25,7 @@ import {
   AiSetupWizard,
   type WizardApplyPayload,
 } from "./AiSetupWizard";
+import { CapabilityQualificationPanel } from "./CapabilityQualificationPanel";
 import { ModelRoleHintLine } from "./ModelRoleHintLine";
 
 export type AiSectionProps = {
@@ -740,6 +741,15 @@ export function AiSection({
     <p className="field__hint" role="status">
       {modelsNote}
     </p>
+  ) : null}
+  {draft.providerKind !== "none" && draft.chatModel.trim() ? (
+    <CapabilityQualificationPanel
+      baseId={`${baseId}-cap-qual`}
+      modelId={draft.chatModel}
+      baseUrl={draft.baseUrl}
+      apiKeyDraft={apiKeyDraft}
+      enabled
+    />
   ) : null}
 </div>
 

@@ -49,7 +49,8 @@ reranking, or unqualified) based on the **name** alone.
 - A familiar id does **not** prove tool support, quality, context length,
   structured output, embeddings, or reranking.
 - Exact behavior requires a separate **capability qualification** path (user-
-  triggered probes), not automatic inference from the name.
+  triggered probes under Settings → AI / Models → **Qualify selected model…**),
+  not automatic inference from the name. See help://capability-qualification.
 - Embedding and reranker-looking ids are sorted away from ordinary chat
   defaults but remain **selectable**; private aliases stay selectable and are
   labeled unqualified until you confirm them.

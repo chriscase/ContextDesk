@@ -1137,6 +1137,97 @@ export async function hostSetProviderToolsEnabled(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Capability qualification (#724) — user-triggered; never auto-run
+// ---------------------------------------------------------------------------
+
+export type CapabilityCheckDto = {
+  kind: string;
+  status: "pass" | "degraded" | "fail" | "untested" | string;
+  elapsed_ms: number;
+  tested_at: number;
+  reason: string;
+};
+
+export type QualificationReportDto = {
+  profile_id: string;
+  endpoint_fingerprint: string;
+  model_id: string;
+  schema_version: string;
+  role_hint: string;
+  cancelled: boolean;
+  stale: boolean;
+  finished_at: number;
+  checks: CapabilityCheckDto[];
+};
+
+export type QualificationSelectArgs = {
+  profileId?: string | null;
+  modelId?: string | null;
+  baseUrl?: string | null;
+  apiKey?: string | null;
+};
+
+function qualificationReq(args: QualificationSelectArgs = {}) {
+  return {
+    profile_id: args.profileId ?? null,
+    model_id: args.modelId ?? null,
+    base_url: args.baseUrl ?? null,
+    api_key: args.apiKey ?? null,
+  };
+}
+
+/** Cached report only (no network / no probes). */
+export async function hostGetCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<QualificationReportDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<QualificationReportDto | null>(
+      "get_capability_qualification",
+      { req: qualificationReq(args) },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Explicit start of synthetic probes against the configured provider. */
+export async function hostStartCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<QualificationReportDto> {
+  if (!isTauri()) {
+    throw new Error("Capability qualification requires the desktop host");
+  }
+  return invoke<QualificationReportDto>("start_capability_qualification", {
+    req: qualificationReq(args),
+  });
+}
+
+/** Cooperative cancel for an in-flight qualification run. */
+export async function hostCancelCapabilityQualification(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("cancel_capability_qualification");
+  } catch {
+    return false;
+  }
+}
+
+/** Clear cached result for the exact selected model only. */
+export async function hostClearCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("clear_capability_qualification", {
+      req: qualificationReq(args),
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");
