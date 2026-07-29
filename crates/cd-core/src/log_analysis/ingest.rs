@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
 /// Stats from one ingest run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,6 +306,16 @@ pub const MAX_RAW_LOG_COMPRESSION_RATIO: u64 = 2_048;
 /// without permitting one record to grow without limit.
 pub const MAX_RAW_LOG_LINE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Startup orphan cleanup inspects at most this many staging children.
+const MAX_ABANDONED_STAGING_SCAN: usize = 64;
+
+/// Startup orphan cleanup removes at most this many staging children per run.
+const MAX_ABANDONED_STAGING_REMOVALS: usize = 8;
+
+/// UUIDv7 staging directories older than this are eligible for best-effort
+/// startup cleanup. A long grace period avoids disturbing a live ingest.
+const ABANDONED_STAGING_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Copy)]
 struct RawIngestLimits {
     max_entries: u64,
@@ -453,17 +466,21 @@ impl<R: Read> Read for BoundedSourceReader<'_, R> {
 /// Hidden, same-filesystem cache used until a new corpus is fully validated.
 ///
 /// The final `log_corpora/{id}` path does not exist until [`Self::publish`].
-/// Dropping this guard after any error or cancellation removes the complete
-/// per-run staging tree.
+/// Normal success, error, and cancellation paths call checked cleanup. Drop
+/// retries best-effort for unwinding/process teardown; a process crash or an
+/// uncooperative filesystem can still leave an orphan for bounded cleanup on
+/// a later ingest.
 struct IngestStaging {
     parent: PathBuf,
     root: PathBuf,
+    cleaned: bool,
 }
 
 impl IngestStaging {
     fn new(cache_root: &Path) -> CoreResult<Self> {
         let parent = cache_root.join(".log_ingest_staging");
         std::fs::create_dir_all(&parent)?;
+        cleanup_abandoned_staging(&parent);
         let root = parent.join(Uuid::now_v7().to_string());
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -472,7 +489,11 @@ impl IngestStaging {
             builder.mode(0o700);
         }
         builder.create(&root)?;
-        Ok(Self { parent, root })
+        Ok(Self {
+            parent,
+            root,
+            cleaned: false,
+        })
     }
 
     fn cache_root(&self) -> &Path {
@@ -491,21 +512,101 @@ impl IngestStaging {
         std::fs::create_dir_all(&corpora_root)?;
         std::fs::rename(&source, &destination)
             .map_err(|e| CoreError::Message(format!("publish log corpus: {e}")))?;
-        self.cleanup();
         Ok(())
     }
 
-    fn cleanup(&self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-        // Concurrent ingests may still own sibling directories.
-        let _ = std::fs::remove_dir(&self.parent);
+    fn cleanup_checked(&mut self) -> CoreResult<()> {
+        if self.cleaned {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CoreError::Policy(
+                    "private ingest staging root changed to a symlink or non-directory".into(),
+                ));
+            }
+            Ok(_) => std::fs::remove_dir_all(&self.root)
+                .map_err(|error| CoreError::Message(format!("remove ingest staging: {error}")))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CoreError::Message(format!(
+                    "inspect ingest staging before cleanup: {error}"
+                )))
+            }
+        }
+        // Concurrent ingests may still own sibling directories. A non-empty
+        // parent is expected and must not make this ingest fail.
+        match std::fs::remove_dir(&self.parent) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => {
+                return Err(CoreError::Message(format!(
+                    "remove empty ingest staging parent: {error}"
+                )))
+            }
+        }
+        self.cleaned = true;
+        Ok(())
+    }
+
+    fn cleanup_best_effort(&mut self) {
+        let _ = self.cleanup_checked();
     }
 }
 
 impl Drop for IngestStaging {
     fn drop(&mut self) {
-        self.cleanup();
+        self.cleanup_best_effort();
     }
+}
+
+fn cleanup_abandoned_staging(parent: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    cleanup_abandoned_staging_at(parent, now);
+}
+
+fn cleanup_abandoned_staging_at(parent: &Path, now_unix_secs: u64) -> usize {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.take(MAX_ABANDONED_STAGING_SCAN).flatten() {
+        if removed >= MAX_ABANDONED_STAGING_REMOVALS {
+            break;
+        }
+        let path = entry.path();
+        let Some(created_secs) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| Uuid::parse_str(name).ok())
+            .and_then(|id| id.get_timestamp())
+            .map(|timestamp| timestamp.to_unix().0)
+        else {
+            continue;
+        };
+        if now_unix_secs.saturating_sub(created_secs) < ABANDONED_STAGING_AGE_SECS {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        // Startup cleanup is deliberately bounded and best-effort. Normal
+        // in-process cleanup is checked; this path handles only crash or
+        // forced-termination remnants without blocking a new import.
+        if std::fs::remove_dir_all(path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,6 +639,134 @@ fn is_zip_file(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowsFileIdentity {
+    volume_serial: u32,
+    file_index: u64,
+}
+
+#[cfg(windows)]
+fn windows_open_no_follow(path: &Path, context: &str) -> CoreResult<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options
+        .open(path)
+        .map_err(|error| CoreError::Message(format!("{context}: {error}")))
+}
+
+#[cfg(windows)]
+fn windows_opened_file_details(
+    file: &std::fs::File,
+) -> CoreResult<(WindowsFileIdentity, u32, PathBuf)> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, GetFinalPathNameByHandleW, BY_HANDLE_FILE_INFORMATION,
+        FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+    };
+
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is owned by the live `File`, and `information` points to
+    // valid writable storage for the duration of the call.
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return Err(CoreError::Message(format!(
+            "read opened Windows file identity: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let identity = WindowsFileIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64,
+    };
+
+    let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    // SAFETY: a null, zero-length first call requests the required UTF-16
+    // buffer length for this live handle.
+    let required = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, flags) };
+    if required == 0 {
+        return Err(CoreError::Message(format!(
+            "read opened Windows final path length: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut buffer = vec![0u16; required as usize + 1];
+    // SAFETY: `buffer` is writable for the supplied capacity and the handle
+    // remains live for the entire call.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
+    };
+    if written == 0 || written as usize >= buffer.len() {
+        return Err(CoreError::Message(format!(
+            "read opened Windows final path: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    buffer.truncate(written as usize);
+    let final_path = PathBuf::from(std::ffi::OsString::from_wide(&buffer));
+    Ok((identity, information.dwFileAttributes, final_path))
+}
+
+#[cfg(windows)]
+fn windows_validate_regular_handle(
+    file: &std::fs::File,
+    expected_final_path: &Path,
+    allowed_root: Option<&Path>,
+    changed_message: &str,
+) -> CoreResult<(WindowsFileIdentity, PathBuf)> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let (identity, attributes, final_path) = windows_opened_file_details(file)?;
+    let opened = file
+        .metadata()
+        .map_err(|error| CoreError::Message(format!("read opened source metadata: {error}")))?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !opened.is_file() {
+        return Err(CoreError::Policy(
+            "opened log source is a reparse point or non-regular file".into(),
+        ));
+    }
+    if final_path != expected_final_path
+        || allowed_root.is_some_and(|root| !final_path.starts_with(root))
+    {
+        return Err(CoreError::Policy(changed_message.into()));
+    }
+    Ok((identity, final_path))
+}
+
+#[cfg(windows)]
+fn windows_secure_open_regular_file(
+    path: &Path,
+    expected_final_path: &Path,
+    allowed_root: Option<&Path>,
+    open_context: &str,
+    changed_message: &str,
+) -> CoreResult<std::fs::File> {
+    let file = windows_open_no_follow(path, open_context)?;
+    let (identity, final_path) =
+        windows_validate_regular_handle(&file, expected_final_path, allowed_root, changed_message)?;
+
+    // Reopen with the same no-follow policy and compare stable handle identity.
+    // The returned first handle remains safe even if the pathname changes
+    // after validation; a replacement during validation is rejected.
+    let verification = windows_open_no_follow(path, open_context)?;
+    let (verification_identity, verification_final_path) = windows_validate_regular_handle(
+        &verification,
+        expected_final_path,
+        allowed_root,
+        changed_message,
+    )?;
+    if identity != verification_identity || final_path != verification_final_path {
+        return Err(CoreError::Policy(changed_message.into()));
+    }
+    Ok(file)
+}
+
 fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
     let before = std::fs::symlink_metadata(path)
         .map_err(|e| CoreError::Message(format!("read source metadata: {e}")))?;
@@ -546,11 +775,34 @@ fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
             "selected log source is a symlink or non-regular file".into(),
         ));
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        if before.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(CoreError::Policy(
+                "selected log source is a reparse point".into(),
+            ));
+        }
+        let expected = std::fs::canonicalize(path)
+            .map_err(|error| CoreError::Message(format!("resolve selected source: {error}")))?;
+        return windows_secure_open_regular_file(
+            path,
+            &expected,
+            None,
+            "open source",
+            "selected log source changed during secure open",
+        );
+    }
+    #[cfg(not(windows))]
     let file =
         std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open source: {e}")))?;
+    #[cfg(not(windows))]
     let opened = file
         .metadata()
         .map_err(|e| CoreError::Message(format!("read opened source metadata: {e}")))?;
+    #[cfg(not(windows))]
     if !opened.is_file() {
         return Err(CoreError::Policy(
             "opened log source is not a regular file".into(),
@@ -565,6 +817,7 @@ fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
             ));
         }
     }
+    #[cfg(not(windows))]
     Ok(file)
 }
 
@@ -627,11 +880,15 @@ fn validate_raw_log_zip_entry(name: &str) -> CoreResult<(String, bool)> {
 
 fn portable_source_identity(path: &Path) -> CoreResult<String> {
     let mut components = Vec::new();
-    for component in path.components() {
+    let mut path_components = path.components().peekable();
+    while let Some(component) = path_components.next() {
         match component {
             std::path::Component::Normal(value) => {
                 let value = value.to_string_lossy();
-                if value.ends_with('!') {
+                // A leaf ending in `!` is unambiguous and remains a faithful
+                // source label. Only a non-leaf `name!/child` collides with
+                // the virtual archive-boundary syntax.
+                if value.ends_with('!') && path_components.peek().is_some() {
                     return Err(CoreError::Policy(
                         "log source identity conflicts with archive boundary syntax".into(),
                     ));
@@ -1219,8 +1476,9 @@ fn ingest_lines_from_reader(
 
 /// One nested archive copied into the hidden per-ingest tree.
 ///
-/// The file is removed as soon as recursion returns. The enclosing
-/// [`IngestStaging`] guard also removes it after every error or cancellation.
+/// Drop attempts to remove the file as soon as recursion returns. Normal
+/// success/error/cancellation then checks removal of the enclosing
+/// [`IngestStaging`] tree; crash remnants are only best-effort recoverable.
 struct PrivateStagedArchive {
     path: PathBuf,
 }
@@ -1809,45 +2067,59 @@ fn ingest_path_inner_with_limits_and_fault(
     );
 
     let mut staging = IngestStaging::new(cache_root)?;
-    let report = match ingest_path_into_cache(
-        staging.cache_root(),
-        path,
-        name,
-        embed,
-        embed_model,
-        embed_mode,
-        defer_above_source_bytes,
-        progress,
-        cancel,
-        limits,
-        fault,
-    ) {
-        Ok(report) => report,
-        Err(error) if cancelled(cancel) => {
-            // Lower phases that already emitted Cancelled return this exact
-            // canonical message. Scan/preflight/read cancellation carries a
-            // more specific error and is translated here with one terminal
-            // progress event so hosts never present it as an ordinary failure.
-            if error.to_string() != "ingest cancelled" {
-                emit(
-                    progress,
-                    ProcessProgress::phase(
-                        kind,
-                        ProcessProgressPhase::Cancelled,
-                        "ingest cancelled",
-                        false,
-                    ),
-                );
+    let ingest_result = (|| {
+        let report = match ingest_path_into_cache(
+            staging.cache_root(),
+            path,
+            name,
+            embed,
+            embed_model,
+            embed_mode,
+            defer_above_source_bytes,
+            progress,
+            cancel,
+            limits,
+            fault,
+        ) {
+            Ok(report) => report,
+            Err(error) if cancelled(cancel) => {
+                // Lower phases that already emitted Cancelled return this exact
+                // canonical message. Scan/preflight/read cancellation carries a
+                // more specific error and is translated here with one terminal
+                // progress event so hosts never present it as an ordinary failure.
+                if error.to_string() != "ingest cancelled" {
+                    emit(
+                        progress,
+                        ProcessProgress::phase(
+                            kind,
+                            ProcessProgressPhase::Cancelled,
+                            "ingest cancelled",
+                            false,
+                        ),
+                    );
+                }
+                return Err(CoreError::Message("ingest cancelled".into()));
             }
-            return Err(CoreError::Message("ingest cancelled".into()));
-        }
-        Err(error) => return Err(error),
-    };
+            Err(error) => return Err(error),
+        };
 
-    check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
-    validate_staged_ingest(staging.cache_root(), &report)?;
-    check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
-    staging.publish(cache_root, &report.corpus_id)?;
+        check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
+        validate_staged_ingest(staging.cache_root(), &report)?;
+        check_ingest_fault(fault, IngestCheckpoint::BeforePublish)?;
+        staging.publish(cache_root, &report.corpus_id)?;
+        Ok(report)
+    })();
+    let cleanup_result = staging.cleanup_checked();
+    let report = match (ingest_result, cleanup_result) {
+        (Ok(report), Ok(())) => report,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(cleanup_error)) => return Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => {
+            return Err(CoreError::Message(format!(
+                "{error}; private ingest staging cleanup also failed: {cleanup_error}"
+            )))
+        }
+    };
 
     emit(
         progress,
@@ -2530,11 +2802,32 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
     if !canonical.starts_with(&inventory.canonical_root) {
         return Err(CoreError::Policy("log source escaped selected root".into()));
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        if before.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(CoreError::Policy(
+                "log source changed to a reparse point".into(),
+            ));
+        }
+        return windows_secure_open_regular_file(
+            path,
+            &canonical,
+            Some(&inventory.canonical_root),
+            "open log",
+            "log source changed during secure open",
+        );
+    }
+    #[cfg(not(windows))]
     let file =
         std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open log: {e}")))?;
+    #[cfg(not(windows))]
     let opened = file
         .metadata()
         .map_err(|e| CoreError::Message(format!("read opened log metadata: {e}")))?;
+    #[cfg(not(windows))]
     if !opened.is_file() {
         return Err(CoreError::Policy(
             "opened log source is not a regular file".into(),
@@ -2549,6 +2842,7 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
             ));
         }
     }
+    #[cfg(not(windows))]
     Ok(file)
 }
 
@@ -3217,6 +3511,55 @@ mod tests {
     }
 
     #[test]
+    fn direct_and_directory_leaf_names_ending_in_bang_remain_importable() {
+        let dir = tempfile::tempdir().unwrap();
+        let direct_cache = dir.path().join("direct-cache");
+        let direct = dir.path().join("important!");
+        std::fs::write(&direct, "level=error msg=direct-visible\n").unwrap();
+
+        let direct_report =
+            ingest_path(&direct_cache, &direct, "direct-bang", None, "none").unwrap();
+        let direct_corpus = LogCorpus::open(&direct_cache, &direct_report.corpus_id).unwrap();
+        assert_eq!(
+            direct_corpus.with_events(|events| events[0].source.clone()),
+            "important!"
+        );
+
+        let directory_cache = dir.path().join("directory-cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("directory-leaf!"),
+            "level=info msg=directory-visible\n",
+        )
+        .unwrap();
+        let directory_report =
+            ingest_path(&directory_cache, &logs, "directory-bang", None, "none").unwrap();
+        let directory_corpus =
+            LogCorpus::open(&directory_cache, &directory_report.corpus_id).unwrap();
+        assert_eq!(
+            directory_corpus.with_events(|events| events[0].source.clone()),
+            "directory-leaf!"
+        );
+    }
+
+    #[test]
+    fn non_leaf_bang_identity_that_mimics_archive_boundary_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(logs.join("ambiguous!")).unwrap();
+        std::fs::write(
+            logs.join("ambiguous!/app.log"),
+            "level=error msg=must-not-publish\n",
+        )
+        .unwrap();
+
+        let error = ingest_path(&cache, &logs, "ambiguous-bang", None, "none").unwrap_err();
+        assert_atomic_failure(&cache, &error, "archive boundary syntax");
+    }
+
+    #[test]
     fn nested_zip_same_basenames_in_distinct_archives_keep_distinct_identities() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -3309,6 +3652,54 @@ mod tests {
         let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
         let error = ingest_path(&socket_cache, &socket_path, "socket", None, "none").unwrap_err();
         assert_atomic_failure(&socket_cache, &error, "non-regular");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_secure_open_reports_stable_identity_and_final_path_for_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("regular.log");
+        std::fs::write(&path, "level=info msg=safe\n").unwrap();
+        let expected = std::fs::canonicalize(&path).unwrap();
+        let allowed_root = std::fs::canonicalize(dir.path()).unwrap();
+
+        let file = windows_secure_open_regular_file(
+            &path,
+            &expected,
+            Some(&allowed_root),
+            "open test log",
+            "test log changed during secure open",
+        )
+        .unwrap();
+        let (_, _, final_path) = windows_opened_file_details(&file).unwrap();
+        assert_eq!(final_path, expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_direct_reparse_point_is_rejected_when_symlink_creation_is_available() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let target = dir.path().join("target.log");
+        let selected = dir.path().join("selected.log");
+        std::fs::write(&target, "level=error msg=outside\n").unwrap();
+        if let Err(error) = symlink_file(&target, &selected) {
+            // Unprivileged Windows environments may disable symlink creation;
+            // the regular-handle test above still exercises handle identity
+            // and final-path validation.
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+            ) {
+                return;
+            }
+            panic!("create Windows test symlink: {error}");
+        }
+
+        let error = ingest_path(&cache, &selected, "windows-reparse", None, "none").unwrap_err();
+        assert_atomic_failure(&cache, &error, "symlink");
     }
 
     #[test]
@@ -4360,6 +4751,73 @@ mod tests {
         assert_eq!(reopened.event_count() as u64, report.stats.lines);
         assert_eq!(reopened.template_count(), report.stats.templates);
         assert_no_ingest_staging(&cache);
+    }
+
+    #[test]
+    fn checked_staging_cleanup_removes_own_tree_and_preserves_concurrent_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let mut staging = IngestStaging::new(&cache).unwrap();
+        std::fs::create_dir_all(staging.root.join("nested")).unwrap();
+        std::fs::write(staging.root.join("nested/private.bin"), b"private").unwrap();
+        let sibling = staging.parent.join(Uuid::now_v7().to_string());
+        std::fs::create_dir(&sibling).unwrap();
+
+        staging.cleanup_checked().unwrap();
+
+        assert!(!staging.root.exists());
+        assert!(sibling.is_dir());
+        assert!(staging.parent.is_dir());
+        std::fs::remove_dir(&sibling).unwrap();
+        std::fs::remove_dir(&staging.parent).unwrap();
+    }
+
+    #[test]
+    fn abandoned_staging_cleanup_is_age_gated_owned_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join(".log_ingest_staging");
+        std::fs::create_dir(&parent).unwrap();
+        let now = 2_000_000_000u64;
+        let old_seconds = now - ABANDONED_STAGING_AGE_SECS - 1;
+        let fresh_seconds = now - ABANDONED_STAGING_AGE_SECS + 1;
+        let old =
+            uuid::Builder::from_unix_timestamp_millis(old_seconds * 1_000, &[1u8; 10]).into_uuid();
+        let fresh = uuid::Builder::from_unix_timestamp_millis(fresh_seconds * 1_000, &[2u8; 10])
+            .into_uuid();
+        let old_path = parent.join(old.to_string());
+        let fresh_path = parent.join(fresh.to_string());
+        let unrelated = parent.join("not-owned-by-ingest");
+        std::fs::create_dir(&old_path).unwrap();
+        std::fs::write(old_path.join("private.bin"), b"private").unwrap();
+        std::fs::create_dir(&fresh_path).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+
+        assert_eq!(cleanup_abandoned_staging_at(&parent, now), 1);
+        assert!(!old_path.exists());
+        assert!(fresh_path.is_dir());
+        assert!(unrelated.is_dir());
+
+        for salt in 10..10 + MAX_ABANDONED_STAGING_REMOVALS + 3 {
+            let id =
+                uuid::Builder::from_unix_timestamp_millis(old_seconds * 1_000, &[salt as u8; 10])
+                    .into_uuid();
+            std::fs::create_dir(parent.join(id.to_string())).unwrap();
+        }
+        assert_eq!(
+            cleanup_abandoned_staging_at(&parent, now),
+            MAX_ABANDONED_STAGING_REMOVALS
+        );
+        let remaining_owned = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
+            })
+            .count();
+        assert!(remaining_owned >= 4);
     }
 
     #[test]
