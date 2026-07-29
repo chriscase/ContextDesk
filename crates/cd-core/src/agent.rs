@@ -1196,9 +1196,9 @@ fn terminal_linked_provider_failure(
         (
             "linked_retrieval_provider_error",
             format!(
-                "The provider failed after linked retrieval began, before every explicitly \
-                 requested source was retrieved (missing: {}). The turn was preserved, but no \
-                 synthesis-only retry is available; retry the investigation.",
+                "The provider failed before every required bounded source was retrieved \
+                 (missing: {}). No log-grounded answer was produced. The turn was preserved, but \
+                 no synthesis-only retry is available; retry the investigation.",
                 missing_sources.join(", ")
             ),
         )
@@ -2088,7 +2088,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     return Ok(out.into_events());
                 }
                 Err(e) => {
-                    if linked_turn && successful_log_tools > 0 {
+                    if linked_turn {
                         let retry_available = checkpoint_out
                             .as_ref()
                             .is_some_and(|checkpoint| checkpoint.is_some());
@@ -4809,6 +4809,21 @@ mod tests {
         }
     }
 
+    struct FirstCallProviderFailureBackend;
+
+    #[async_trait]
+    impl ChatBackend for FirstCallProviderFailureBackend {
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSpec],
+        ) -> CoreResult<ChatCompletion> {
+            Err(CoreError::Message(
+                "provider connection closed before first completion".into(),
+            ))
+        }
+    }
+
     struct RejectLinkedToolsBackend;
 
     #[async_trait]
@@ -4865,6 +4880,96 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, StreamEvent::TextDelta { .. })));
+    }
+
+    #[tokio::test]
+    async fn first_call_linked_provider_failure_preserves_turn_without_grounding_or_retry() {
+        let (_dir, mut host, context) = linked_timeout_fixture();
+        let question = "What caused the worker failure?";
+        let mut history = Vec::new();
+        let mut checkpoint = None;
+
+        let events = run_agent_turn_with_sink_and_checkpoint(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            question,
+            &mut history,
+            &AgentOptions {
+                session_id: "first-call-provider-failure".into(),
+                provider_profile_id: Some("private-profile".into()),
+                model: Some("private-model".into()),
+                log_explorer_context: Some(context),
+                max_rounds: 4,
+                ..Default::default()
+            },
+            None,
+            Some(&mut checkpoint),
+        )
+        .await
+        .expect("a first-call linked provider failure must be a typed terminal turn");
+
+        let terminal_message = events.iter().find_map(|event| match event {
+            StreamEvent::Error { code, message } if code == "linked_retrieval_provider_error" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        });
+        assert!(
+            terminal_message.is_some_and(|message| {
+                message.contains("missing: linked logs")
+                    && message.contains("No log-grounded answer was produced")
+                    && message.contains("no synthesis-only retry is available")
+            }),
+            "the terminal error must disclose missing log evidence and unavailable retry"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TurnCompleted { reason } if reason == "linked_retrieval_provider_error")
+        ));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::SearchTrail { steps }
+                    if steps.iter().any(|step| step == "linked_retrieval_provider_failure:missing=linked logs")
+            )
+        }));
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                StreamEvent::Tool { .. }
+                    | StreamEvent::TextDelta { .. }
+                    | StreamEvent::Citation { .. }
+            )),
+            "a first-call failure must not fabricate grounding or an answer"
+        );
+        assert!(checkpoint.is_none());
+        assert!(
+            history
+                .iter()
+                .any(|message| message.role == Role::User && message.content == question),
+            "the original question must remain in turn history for durable transcript folding"
+        );
+
+        let mut ordinary_history = Vec::new();
+        let ordinary = run_agent_turn_with_sink_and_checkpoint(
+            &FirstCallProviderFailureBackend,
+            &mut host,
+            "ordinary question",
+            &mut ordinary_history,
+            &AgentOptions {
+                session_id: "ordinary-first-call-provider-failure".into(),
+                provider_profile_id: Some("private-profile".into()),
+                model: Some("private-model".into()),
+                max_rounds: 4,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            ordinary.is_err(),
+            "ordinary-chat provider failure behavior must remain unchanged"
+        );
     }
 
     #[tokio::test(start_paused = true)]
