@@ -377,8 +377,10 @@ impl LogExplorerTurnContext {
              incident evidence unless a fact is separately retrieved from an eligible source. \
              Cite each event with an exact seq=… plus source=\"…\" pair from the tool result; a \
              template_id=… may supplement that pair. Payload fields such as event_id are useful \
-             observations but are not trusted citations. Distinguish observation from inference, and disclose failed or \
-             incomplete retrieval. Planning-only prose without tool results is not a completed answer. \
+             observations but are not trusted citations. ContextDesk verifies only that cited \
+             event/source references exist in the bounded results; it does not verify your \
+             interpretation or conclusion. Distinguish observation from inference, and disclose \
+             failed or incomplete retrieval. Planning-only prose without tool results is not a completed answer. \
              You may propose opt-in navigation as JSON: \
              {{\"type\":\"log_nav\",\"corpusId\":\"{}\",\"sources\":[…],\"tsFrom\":…,\"tsTo\":…,\"highlightSeq\":[…],\"label\":\"…\"}}. \
              The user must click to apply.\n",
@@ -424,8 +426,10 @@ impl LogExplorerTurnContext {
              Analyze only the data rows between wrapper separators. Preserve exact marker=value \
              pairs. Cite each event with its exact seq=… plus source=\"…\" pair from the tool result; \
              template_id=… may supplement it. Payload fields such as event_id are observations, \
-             not trusted citations. Distinguish observation from inference and disclose missing or failed \
-             evidence. Never fabricate a result, path, or citation.",
+             not trusted citations. ContextDesk verifies only that cited event/source references \
+             exist in the bounded results; it does not verify your interpretation or conclusion. \
+             Distinguish observation from inference and disclose missing or failed evidence. Never \
+             fabricate a result, path, or citation.",
             self.corpus_id
         )
     }
@@ -776,7 +780,7 @@ fn linked_source_values(text: &str) -> Option<Vec<String>> {
     Some(values)
 }
 
-fn linked_answer_cites_concrete_evidence(
+fn linked_answer_references_available_event_identities(
     text: &str,
     available_evidence: &HashSet<crate::log_analysis::SearchEvidenceIdentity>,
 ) -> bool {
@@ -1348,13 +1352,14 @@ async fn run_linked_synthesis_retry(
     };
     let invalid = content.trim().is_empty()
         || linked_answer_mistakes_wrapper_for_evidence(&content)
-        || !linked_answer_cites_concrete_evidence(&content, &checkpoint.identities);
+        || !linked_answer_references_available_event_identities(&content, &checkpoint.identities);
     if invalid {
         trail.push("linked_synthesis_retry_invalid_answer_withheld".into());
         out.push(StreamEvent::Error {
             code: "linked_invalid_grounded_answer".into(),
-            message: "The synthesis retry did not cite the preserved host evidence correctly. \
-                      ContextDesk withheld it; the evidence remains available for another retry."
+            message: "The synthesis retry did not reference the preserved event/source identities \
+                      as required. ContextDesk withheld it; the bounded evidence remains available \
+                      for another retry."
                 .into(),
         });
         out.push(StreamEvent::SearchTrail { steps: trail });
@@ -1725,9 +1730,10 @@ pub async fn run_agent_turn_with_sink_and_checkpoint(
                 AgentPhase::ChoosingEvidence
             },
         );
-        // Linked prose is provisional until its final evidence/citation check.
+        // Linked prose is provisional until its final event/source-reference check.
         // Hold it out of the UI so a small model cannot briefly present a
-        // fabricated or wrapper-derived conclusion before host validation.
+        // fabricated or wrapper-derived conclusion before the host verifies
+        // the cited identities. Interpretation remains model inference.
         let withhold_ungrounded_text = linked_turn;
         let mut withheld_text = String::new();
         let char_budget = opts.effective_context_char_budget();
@@ -2195,7 +2201,7 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
             }
             if linked_turn && linked_required_evidence_satisfied {
                 let wrapper_error = linked_answer_mistakes_wrapper_for_evidence(&final_content);
-                let missing_identity = !linked_answer_cites_concrete_evidence(
+                let missing_identity = !linked_answer_references_available_event_identities(
                     &final_content,
                     &linked_log_evidence_identities,
                 );
@@ -2218,9 +2224,9 @@ tool-capable endpoint or vLLM flags --enable-auto-tool-choice + --tool-call-pars
                     trail.push("linked_invalid_grounded_answer_withheld".into());
                     out.push(StreamEvent::Error {
                         code: "linked_invalid_grounded_answer".into(),
-                        message: "The model did not produce a trustworthy evidence-cited answer. \
-                                  ContextDesk withheld it; inspect the successful tool result or \
-                                  retry with a narrower question."
+                        message: "The model answer did not reference the retrieved event/source \
+                                  identities as required. ContextDesk withheld it; inspect the \
+                                  successful tool result or retry with a narrower question."
                             .into(),
                     });
                     out.push(StreamEvent::SearchTrail {
@@ -2735,7 +2741,7 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
             if linked_turn {
                 let wrapper_error = linked_answer_mistakes_wrapper_for_evidence(&content);
                 let missing_identity = successful_log_tools > 0
-                    && !linked_answer_cites_concrete_evidence(
+                    && !linked_answer_references_available_event_identities(
                         &content,
                         &linked_log_evidence_identities,
                     );
@@ -2744,9 +2750,9 @@ The answer is not log-grounded — retry the corpus search or inspect the visibl
                     trail.push("linked_budget_synthesis_withheld".into());
                     out.push(StreamEvent::Error {
                         code: "linked_invalid_grounded_answer".into(),
-                        message: "The model's final budget-limited synthesis did not satisfy linked \
-                                  log grounding against the actual retrieved evidence. ContextDesk \
-                                  withheld it; inspect the tool result or retry with a narrower question."
+                        message: "The model's final budget-limited synthesis did not reference the \
+                                  retrieved event/source identities as required. ContextDesk withheld \
+                                  it; inspect the tool result or retry with a narrower question."
                             .into(),
                     });
                     out.push(StreamEvent::SearchTrail {
@@ -2935,6 +2941,23 @@ mod tests {
         );
         assert!(hint.contains("other read-only tools"), "{hint}");
         assert!(hint.contains("Skills direct process"), "{hint}");
+        assert!(
+            hint.contains("verifies only that cited event/source references exist"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains("does not verify your interpretation or conclusion"),
+            "{hint}"
+        );
+        let synthesis_hint = context.staged_synthesis_system_hint();
+        assert!(
+            synthesis_hint.contains("verifies only that cited event/source references exist"),
+            "{synthesis_hint}"
+        );
+        assert!(
+            synthesis_hint.contains("does not verify your interpretation or conclusion"),
+            "{synthesis_hint}"
+        );
         assert!(LogExplorerTurnContext::new("bad window", "corpus-a", "x").is_err());
         assert!(LogExplorerTurnContext::new("window-a", "../corpus", "x").is_err());
     }
@@ -2982,23 +3005,19 @@ mod tests {
             source: "worker.log".into(),
             template_id: 7,
         }]);
-        assert!(linked_answer_cites_concrete_evidence(
+        assert!(linked_answer_references_available_event_identities(
             "Root cause at seq=101 source=worker.log.",
             &evidence,
         ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(!linked_answer_references_available_event_identities(
             "Root cause at seq=999 source=worker.log.",
             &evidence,
         ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(!linked_answer_references_available_event_identities(
             "Root cause at seq=101 source=fake.log.",
             &evidence,
         ));
-        assert!(linked_answer_cites_concrete_evidence(
-            "Root cause at seq=101 source=worker.log event_id=fabricated.",
-            &evidence,
-        ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(!linked_answer_references_available_event_identities(
             "Observed seq=101 source=worker.log; also seq=999 source=fake.log.",
             &evidence,
         ));
@@ -3007,16 +3026,34 @@ mod tests {
             source: "service logs/worker—west.log".into(),
             template_id: 8,
         }]);
-        assert!(linked_answer_cites_concrete_evidence(
+        assert!(linked_answer_references_available_event_identities(
             r#"Observed seq=202 source="service logs/worker—west.log" template_id=8."#,
             &spaced_source,
         ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(!linked_answer_references_available_event_identities(
             r#"Observed seq=202 source="service logs/worker—west.log" template_id=7."#,
             &spaced_source,
         ));
-        assert!(!linked_answer_cites_concrete_evidence(
+        assert!(!linked_answer_references_available_event_identities(
             "The logs show a serious timeout.",
+            &evidence,
+        ));
+    }
+
+    #[test]
+    fn linked_reference_check_does_not_trust_payload_event_id_as_citation_identity() {
+        let evidence = HashSet::from([crate::log_analysis::SearchEvidenceIdentity {
+            seq: 101,
+            source: "worker.log".into(),
+            template_id: 7,
+        }]);
+
+        assert!(linked_answer_references_available_event_identities(
+            "Model inference at seq=101 source=worker.log event_id=fabricated.",
+            &evidence,
+        ));
+        assert!(!linked_answer_references_available_event_identities(
+            "Model inference at seq=999 source=worker.log event_id=real-looking.",
             &evidence,
         ));
     }

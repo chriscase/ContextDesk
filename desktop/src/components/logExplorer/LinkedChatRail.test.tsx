@@ -1174,9 +1174,12 @@ describe("LinkedChatRail", () => {
 
     expect(
       await screen.findByText(
-        "Linked investigation completed with governed evidence tools",
+        "Linked investigation completed with governed evidence retrieval",
       ),
     ).toBeTruthy();
+    expect(
+      screen.getByTestId("linked-evidence-trust-disclosure").textContent,
+    ).toBe("Evidence references verified · model interpretation not verified");
     expect(screen.getByText("search_logs")).toBeTruthy();
     expect(screen.getByText("search_kb")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sources" }));
@@ -1558,6 +1561,7 @@ describe("LinkedChatRail", () => {
 
     const assistant = await screen.findByTestId("linked-chat-msg-assistant");
     expect(assistant.textContent).toContain(unavailable);
+    expect(screen.queryByTestId("linked-evidence-trust-disclosure")).toBeNull();
     expect(assistant.textContent).not.toContain("**Error:**");
     expect(
       within(assistant).getByText("Error:", { selector: "strong" }),
@@ -1847,6 +1851,7 @@ describe("LinkedChatRail", () => {
     fireEvent.click(screen.getByTestId("send-linked-chat"));
 
     expect(await screen.findByTestId("retry-linked-synthesis")).toBeTruthy();
+    expect(screen.queryByTestId("linked-evidence-trust-disclosure")).toBeNull();
     await waitFor(() => {
       const saved = stored;
       expect(

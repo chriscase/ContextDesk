@@ -127,9 +127,34 @@ type Props = {
 
 const NEAR_BOTTOM_PX = 64;
 const SWITCHER_SEARCH_THRESHOLD = 8;
+const GOVERNED_LOG_TOOL_NAMES = new Set([
+  "search_logs",
+  "cluster_problems",
+  "timeline",
+  "correlate_logs",
+  "anomalies_logs",
+  "trace_logs",
+]);
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function showsLinkedEvidenceTrustDisclosure(message: ChatMsg): boolean {
+  if (
+    message.role !== "assistant" ||
+    message.streaming ||
+    !message.content.trim() ||
+    message.content.includes("**Error:**") ||
+    message.content.includes("**Limited context:**")
+  ) {
+    return false;
+  }
+  return Boolean(
+    message.tools?.some(
+      (tool) => tool.ok === true && GOVERNED_LOG_TOOL_NAMES.has(tool.name),
+    ),
+  );
 }
 
 /** True when a completed load should still apply to the rail. */
@@ -247,6 +272,14 @@ function LinkedChatBubble({
         <SourceCitations citations={message.citations} />
       ) : null}
       <MarkdownBody text={message.content} streaming={message.streaming} />
+      {showsLinkedEvidenceTrustDisclosure(message) ? (
+        <div
+          className="log-explorer__chat-preview"
+          data-testid="linked-evidence-trust-disclosure"
+        >
+          Evidence references verified · model interpretation not verified
+        </div>
+      ) : null}
       {message.trail && message.trail.length > 0 && developerMode ? (
         <details className="log-explorer__chat-technical">
           <summary>Technical details</summary>
@@ -864,7 +897,7 @@ export function LinkedChatRail({
                   : phase === "synthesizing_answer"
                     ? retrySynthesisOnly
                       ? "Retrying answer synthesis from preserved evidence…"
-                      : "Synthesizing an evidence-cited answer…"
+                      : "Synthesizing an evidence-referenced answer…"
                     : null;
             if (label) {
               setStatusByChat((current) => ({
@@ -999,7 +1032,7 @@ export function LinkedChatRail({
           : endedWithError
             ? `Linked investigation stopped with ${turnModel.provider_label} · ${turnModel.label}. Retry, choose another tools-enabled model above, or configure one in Settings → AI.`
             : usedTools
-              ? "Linked investigation completed with governed evidence tools"
+              ? "Linked investigation completed with governed evidence retrieval"
               : "Linked chat response saved",
       }));
       if (endedWithError) {
@@ -1773,8 +1806,9 @@ export function LinkedChatRail({
           <li>
             <strong>Retrieval and synthesis</strong> ContextDesk selects and
             enforces source eligibility, executes retrieval, and caps results;
-            the model chooses among offered reads and connects the returned
-            evidence. Consulted tools and sources stay visible with the answer.
+            the host verifies bounded event/source references, while the model
+            interprets and connects the returned evidence. Consulted tools and
+            sources stay visible with the answer.
           </li>
           <li>
             <strong>Skills</strong> Process instructions only — not observed
