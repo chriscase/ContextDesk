@@ -652,6 +652,26 @@ fn log_lab_triage_stress_is_deterministic_safe_and_truthful() {
             .any(|component| component.as_os_str() == "truth")
             && path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
     }));
+    let runtime_text = paths
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for evaluator_label in [
+        "incident_id=",
+        "role=",
+        "TRIAGE_SIGNAL",
+        "trace-pool-exhaustion",
+        "trace-key-rollout",
+        "trace-cache-stampede",
+    ] {
+        assert!(
+            !runtime_text.contains(evaluator_label),
+            "runtime import leaked evaluator label `{evaluator_label}`"
+        );
+    }
+    assert!(runtime_text.contains("CDLAB2004 database pool exhausted"));
+    assert!(runtime_text.contains("trace-fixture-a17"));
     assert!(triage_stress_estimated_bytes(DEFAULT_TRIAGE_STRESS_EVENT_COUNT) > 80 * 1024 * 1024);
 
     eprintln!(
