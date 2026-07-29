@@ -67,12 +67,14 @@ describe("hostSaveLogDiagnosticReport", () => {
       "/tmp/contextdesk-diagnostic.md",
       "markdown",
       "# redacted diagnostic",
+      true,
     );
 
     expect(invokeMock).toHaveBeenCalledWith("save_log_diagnostic_report", {
       path: "/tmp/contextdesk-diagnostic.md",
       format: "markdown",
       content: "# redacted diagnostic",
+      overwriteConfirmed: true,
     });
   });
 });

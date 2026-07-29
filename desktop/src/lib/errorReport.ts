@@ -8,7 +8,15 @@ const TOKEN_RE =
 
 /** Host labels that look private/corp (not public SaaS). */
 const CORP_HOST_RE =
-  /\b(?:[a-z0-9-]+\.)*(?:internal|corp|intranet|local|lan|private|ies)\.[a-z0-9.-]+\b/gi;
+  /\b(?:[a-z0-9-]+\.)*(?:internal|corp|intranet|local|lan|private|ies)(?:\.[a-z0-9-]+)*\b/gi;
+const ABSOLUTE_UNIX_PATH_RE =
+  /(^|[\s("'`=:])\/(?!\/)[^\s)"'`,;]+/g;
+const ABSOLUTE_WINDOWS_PATH_RE =
+  /(?:[A-Za-z]:\\|\\\\)[^\s)"'`,;]+/g;
+const PRIVATE_IPV4_RE =
+  /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b/g;
+const PRIVATE_IPV6_RE =
+  /(^|[\s([{"'=])(?:::1|f[cd][0-9a-f:]*|fe[89ab][0-9a-f:]*)(?=$|[\s)\]}"',;])/gi;
 
 export type DiagnosticReport = {
   /** One-line human summary. */
@@ -28,11 +36,10 @@ export function redactDiagnosticText(raw: string): string {
   // Drop query strings on URLs (CQL, secrets in params).
   s = s.replace(/(https?:\/\/[^?\s]+)\?[^\s)\]"']*/gi, "$1?[REDACTED_QUERY]");
   s = s.replace(CORP_HOST_RE, "[REDACTED-HOST]");
-  // Private IPv4 / CGNAT
-  s = s.replace(
-    /\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b/g,
-    "[REDACTED-IP]",
-  );
+  s = s.replace(PRIVATE_IPV4_RE, "[REDACTED-IP]");
+  s = s.replace(PRIVATE_IPV6_RE, "$1[REDACTED-IP]");
+  s = s.replace(ABSOLUTE_UNIX_PATH_RE, "$1[REDACTED_PATH]");
+  s = s.replace(ABSOLUTE_WINDOWS_PATH_RE, "[REDACTED_PATH]");
   return s;
 }
 

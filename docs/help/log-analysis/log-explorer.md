@@ -260,15 +260,27 @@ the native file dialog.
 
 If an import fails, return to **Logs**. A **Failed import diagnostic available**
 card appears without creating or publishing a partial corpus. Preview, copy, or
-save it before clearing it. ContextDesk retains only one such diagnostic in
-memory: **Clear diagnostic**, the next ingest attempt, or an app restart removes
-it. A later attempt never silently inherits the previous failure.
+save it before clearing it. The preview includes typed counters for binary,
+empty, hidden, oversized, read-failed, and parse-failed sources and a bounded
+reason/basename transcript. At most 20 examples are retained; the report states
+how many additional observations were omitted. ContextDesk retains only one
+such diagnostic in memory: **Clear diagnostic**, the next ingest attempt, or an
+app restart removes it. Raw and package imports both clear the prior diagnostic
+before setup. A later attempt never silently inherits the previous failure, and
+a later success leaves no failed-import diagnostic.
 
 These reports exclude log/event payloads, absolute paths, source/service/host
 labels from the active view, filter and trace text, private hosts/IPs, chats,
-provider/model inventories, credentials, and evaluator truth. Redaction runs
-again when the native host writes the selected file, but you must still review
-the preview before sharing.
+provider/model inventories, credentials, and evaluator truth. The preview can
+be focused with the keyboard and scrolled independently. Markdown and JSON
+buttons announce which format is selected.
+
+The native host independently checks the exact visible preview before writing.
+If its privacy result would differ, save is refused rather than silently
+changing the export. Accepted reports use a restricted same-folder temporary
+file and atomic publication; replacing an existing file requires the native
+save panel's overwrite confirmation. You must still review the preview before
+sharing.
 
 Do not confuse diagnostics with **Export package…**. A diagnostic is a small
 metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing

@@ -376,12 +376,13 @@ fn log_lab_importer_edges_are_honest_and_hostile_archives_fail_closed() {
     )
     .unwrap();
     assert_eq!(report.stats.discovered_files, 4);
-    assert_eq!(report.stats.files, 2);
-    assert_eq!(report.stats.excluded_files, 1);
+    assert_eq!(report.stats.files, 1);
+    assert_eq!(report.stats.excluded_files, 2);
     assert_eq!(report.stats.failed_files, 0);
     assert_eq!(report.stats.ignored_files, 1);
     assert!(report.stats.partial);
     assert_eq!(report.stats.exclusion_counts["binary"], 1);
+    assert_eq!(report.stats.exclusion_counts["empty"], 1);
     assert_eq!(report.stats.exclusion_counts["hidden"], 1);
 
     let baseline_ids = LogCorpus::list_ids(&cache).unwrap();

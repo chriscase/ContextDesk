@@ -1,19 +1,24 @@
 //! Bounded, payload-free diagnostics for failed log-ingest attempts.
 //!
 //! A failed ingest cannot publish a corpus merely to make troubleshooting data
-//! available. This module therefore records only typed progress counters and a
-//! stable failure classification. It never retains source paths, progress
-//! messages, error strings, log records, or archive entry names.
+//! available. This module therefore records typed progress/evidence counters, a
+//! stable failure classification, and a capped transcript of core-sanitized
+//! final basenames. It never retains parent paths, archive ancestry, progress
+//! messages, error strings, or log records.
 
 use crate::process_progress::{
-    ProcessProgress, ProcessProgressKind, ProcessProgressObserver, ProcessProgressPhase,
+    LogIngestEvidence, LogIngestEvidenceReason, ProcessProgress, ProcessProgressKind,
+    ProcessProgressObserver, ProcessProgressPhase,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
 /// Schema version for the transient failed-ingest diagnostic DTO.
-pub const FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+pub const FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION: u32 = 2;
+
+/// Maximum basename/reason observations retained for one failed attempt.
+pub const MAX_FAILED_INGEST_EVIDENCE_ENTRIES: usize = 20;
 
 /// Coarse source kind retained without keeping the selected source path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +148,61 @@ impl Default for FailedIngestProgress {
     }
 }
 
+/// Separate typed scan counters for the literal failed-ingest evidence contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedIngestScanCounts {
+    /// NUL-bearing sources classified as binary.
+    pub binary: u64,
+    /// Completely read sources with no non-blank events.
+    pub empty: u64,
+    /// Hidden files or archive members ignored by policy.
+    pub hidden: u64,
+    /// Sources excluded by the member-size cap.
+    pub oversized: u64,
+    /// Metadata, open, or bounded source read failures.
+    pub read_failed: u64,
+    /// Source-line or archive parse failures.
+    pub parse_failed: u64,
+}
+
+impl FailedIngestScanCounts {
+    fn record(&mut self, reason: LogIngestEvidenceReason) {
+        let counter = match reason {
+            LogIngestEvidenceReason::Binary => &mut self.binary,
+            LogIngestEvidenceReason::Empty => &mut self.empty,
+            LogIngestEvidenceReason::Hidden => &mut self.hidden,
+            LogIngestEvidenceReason::Oversized => &mut self.oversized,
+            LogIngestEvidenceReason::ReadFailed => &mut self.read_failed,
+            LogIngestEvidenceReason::ParseFailed => &mut self.parse_failed,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
+/// Bounded, typed omission/failure evidence retained only for a failed attempt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedIngestEvidenceSummary {
+    /// Complete counters, even when the transcript example cap is reached.
+    pub scan_counts: FailedIngestScanCounts,
+    /// First bounded basename/reason observations in deterministic ingest order.
+    pub transcript: Vec<LogIngestEvidence>,
+    /// Number of additional observations omitted after the transcript cap.
+    pub omitted_entries: u64,
+}
+
+impl FailedIngestEvidenceSummary {
+    fn record(&mut self, evidence: LogIngestEvidence) {
+        self.scan_counts.record(evidence.reason);
+        if self.transcript.len() < MAX_FAILED_INGEST_EVIDENCE_ENTRIES {
+            self.transcript.push(evidence);
+        } else {
+            self.omitted_entries = self.omitted_entries.saturating_add(1);
+        }
+    }
+}
+
 /// One in-memory failed-ingest diagnostic safe to send to the trusted UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +221,8 @@ pub struct FailedIngestDiagnostic {
     pub cancelled: bool,
     /// Bounded typed progress counters.
     pub progress: FailedIngestProgress,
+    /// Bounded scan counters and basename/reason examples from typed callbacks.
+    pub evidence: FailedIngestEvidenceSummary,
     /// Confirms that only the allowlisted typed fields are present.
     pub redacted: bool,
 }
@@ -169,6 +231,7 @@ pub struct FailedIngestDiagnostic {
 #[derive(Debug, Default)]
 pub struct FailedIngestDiagnosticRecorder {
     progress: Mutex<FailedIngestProgress>,
+    evidence: Mutex<FailedIngestEvidenceSummary>,
 }
 
 impl FailedIngestDiagnosticRecorder {
@@ -198,6 +261,11 @@ impl FailedIngestDiagnosticRecorder {
             summary: reason_code.summary().into(),
             cancelled: reason_code == FailedIngestReason::Cancelled,
             progress,
+            evidence: self
+                .evidence
+                .lock()
+                .expect("failed ingest evidence")
+                .clone(),
             redacted: true,
         }
     }
@@ -215,6 +283,13 @@ impl ProcessProgressObserver for FailedIngestDiagnosticRecorder {
         progress.bytes_processed = max_optional(progress.bytes_processed, update.bytes_processed);
         progress.templates = max_optional(progress.templates, update.templates);
         progress.updates_seen = progress.updates_seen.saturating_add(1);
+    }
+
+    fn log_ingest_evidence(&self, evidence: LogIngestEvidence) {
+        self.evidence
+            .lock()
+            .expect("failed ingest evidence")
+            .record(evidence);
     }
 }
 
@@ -355,6 +430,10 @@ mod tests {
             .with_lines(120)
             .with_templates(7),
         );
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::ReadFailed,
+            Path::new("/Users/private/secret.log"),
+        ));
 
         let diagnostic = recorder.finish(
             "read failed at /Users/private/secret.log",
@@ -366,10 +445,11 @@ mod tests {
         assert_eq!(diagnostic.progress.lines_processed, Some(120));
         assert_eq!(diagnostic.progress.bytes_processed, Some(4_096));
         assert_eq!(diagnostic.progress.templates, Some(7));
+        assert_eq!(diagnostic.evidence.scan_counts.read_failed, 1);
+        assert_eq!(diagnostic.evidence.transcript[0].basename, "secret.log");
         let serialized = serde_json::to_string(&diagnostic).expect("serialize");
         for forbidden in [
             "/Users/",
-            "secret.log",
             "forbidden-token",
             "customer-private-value",
             "read failed",
@@ -377,6 +457,54 @@ mod tests {
             assert!(!serialized.contains(forbidden), "{serialized}");
         }
         assert!(serialized.len() < 2_048, "{serialized}");
+    }
+
+    #[test]
+    fn evidence_counters_remain_complete_when_transcript_is_bounded() {
+        let recorder = FailedIngestDiagnosticRecorder::default();
+        for index in 0..(MAX_FAILED_INGEST_EVIDENCE_ENTRIES + 7) {
+            recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+                LogIngestEvidenceReason::Binary,
+                Path::new(&format!("binary-{index}.log")),
+            ));
+        }
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::Empty,
+            Path::new("empty.log"),
+        ));
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::Hidden,
+            Path::new(".hidden.log"),
+        ));
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::Oversized,
+            Path::new("large.log"),
+        ));
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::ReadFailed,
+            Path::new("unreadable.log"),
+        ));
+        recorder.log_ingest_evidence(LogIngestEvidence::from_source(
+            LogIngestEvidenceReason::ParseFailed,
+            Path::new("malformed.log"),
+        ));
+
+        let diagnostic = recorder.finish(
+            "no safe/importable log events were found",
+            FailedIngestSourceKind::Directory,
+            123,
+        );
+        assert_eq!(
+            diagnostic.evidence.transcript.len(),
+            MAX_FAILED_INGEST_EVIDENCE_ENTRIES
+        );
+        assert_eq!(diagnostic.evidence.scan_counts.binary, 27);
+        assert_eq!(diagnostic.evidence.scan_counts.empty, 1);
+        assert_eq!(diagnostic.evidence.scan_counts.hidden, 1);
+        assert_eq!(diagnostic.evidence.scan_counts.oversized, 1);
+        assert_eq!(diagnostic.evidence.scan_counts.read_failed, 1);
+        assert_eq!(diagnostic.evidence.scan_counts.parse_failed, 1);
+        assert_eq!(diagnostic.evidence.omitted_entries, 12);
     }
 
     #[test]

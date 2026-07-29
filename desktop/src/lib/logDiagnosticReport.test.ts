@@ -172,7 +172,7 @@ describe("buildLogDiagnosticReport", () => {
   it("exports a failed ingest without a corpus, raw error, or source identity", () => {
     const report = buildLogDiagnosticReport({
       failedIngest: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         generatedAt: 1_753_680_000,
         sourceKind: "zip",
         reasonCode: "invalid_archive",
@@ -187,6 +187,29 @@ describe("buildLogDiagnosticReport", () => {
           templates: 0,
           updatesSeen: 4,
         },
+        evidence: {
+          scanCounts: {
+            binary: 3,
+            empty: 2,
+            hidden: 1,
+            oversized: 4,
+            readFailed: 1,
+            parseFailed: 1,
+          },
+          transcript: [
+            { reason: "binary", basename: "core.bin" },
+            {
+              reason: "read_failed",
+              basename:
+                "/Users/employee/private.internal/Bearer top-secret-token.log",
+            },
+            {
+              reason: "parse_failed",
+              basename: "customer.private.log",
+            },
+          ],
+          omittedEntries: 7,
+        },
         redacted: true,
       },
       environment: {
@@ -200,11 +223,25 @@ describe("buildLogDiagnosticReport", () => {
         message:
           "zip failed at /Users/employee/private.internal/secret.zip Bearer top-secret-token",
       },
+      userNote:
+        "Reproduced under /opt/company/logs on server.internal via 127.0.0.1, ::1, fd12:3456::7, and fe80::1",
     });
 
     expect(report.manifest.corpus).toBeNull();
     expect(report.manifest.failedIngest?.reasonCode).toBe("invalid_archive");
     expect(report.markdown).toContain("Corpus published: no");
+    expect(report.markdown).toContain("binary: 3");
+    expect(report.markdown).toContain("empty: 2");
+    expect(report.markdown).toContain("read_failed: 1");
+    expect(report.markdown).toContain("binary: core.bin");
+    expect(report.markdown).toContain(
+      "7 additional observation(s) omitted",
+    );
+    expect(report.manifest.failedIngest?.evidence.transcript).toEqual([
+      { reason: "binary", basename: "core.bin" },
+      { reason: "read_failed", basename: "[REDACTED_TOKEN]" },
+      { reason: "parse_failed", basename: "[REDACTED-HOST]" },
+    ]);
     expect(report.markdown).toContain(
       "cleared explicitly, by the next ingest attempt, or on app restart",
     );
@@ -214,9 +251,69 @@ describe("buildLogDiagnosticReport", () => {
       "private.internal",
       "secret.zip",
       "top-secret-token",
+      "/opt/company",
+      "server.internal",
+      "127.0.0.1",
+      "::1",
+      "fd12:3456::7",
+      "fe80::1",
     ]) {
       expect(exported).not.toContain(forbidden);
     }
+  });
+
+  it("independently re-bounds a hostile failed-ingest transcript", () => {
+    const report = buildLogDiagnosticReport({
+      failedIngest: {
+        schemaVersion: 2,
+        generatedAt: 1,
+        sourceKind: "directory",
+        reasonCode: "no_safe_events",
+        summary: "No safe events.",
+        cancelled: false,
+        progress: {
+          lastPhase: "parse",
+          linesProcessed: 0,
+          filesProcessed: 100,
+          bytesProcessed: 0,
+          templates: 0,
+          updatesSeen: 100,
+        },
+        evidence: {
+          scanCounts: {
+            binary: 100,
+            empty: 0,
+            hidden: 0,
+            oversized: 0,
+            readFailed: 0,
+            parseFailed: 0,
+          },
+          transcript: Array.from({ length: 100 }, (_, index) => ({
+            reason: "binary" as const,
+            basename: `/Users/private/parent-${index}/item-${index}.bin`,
+          })),
+          omittedEntries: 0,
+        },
+        redacted: true,
+      },
+      environment: {
+        appVersion: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "Linux",
+      },
+    });
+
+    expect(report.manifest.failedIngest?.evidence.transcript).toHaveLength(20);
+    expect(
+      report.manifest.failedIngest?.evidence.transcript[0]?.basename,
+    ).toBe("item-0.bin");
+    expect(report.manifest.failedIngest?.evidence.omittedEntries).toBe(80);
+    expect(report.markdown).not.toContain("/Users/");
+    expect(report.json).not.toContain("parent-99");
+    expect(new TextEncoder().encode(report.json).length).toBeLessThanOrEqual(
+      LOG_DIAGNOSTIC_REPORT_MAX_BYTES,
+    );
   });
 
   it("bounds active Explorer state without exporting filter or source values", () => {

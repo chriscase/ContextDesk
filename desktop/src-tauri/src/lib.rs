@@ -4956,8 +4956,18 @@ fn export_log_corpus_package(
 
 /// Write one bounded, redacted diagnostic to a path chosen by the native dialog.
 #[tauri::command]
-fn save_log_diagnostic_report(path: String, format: String, content: String) -> Result<(), String> {
-    log_diagnostics::save_log_diagnostic_report(std::path::Path::new(&path), &format, &content)
+fn save_log_diagnostic_report(
+    path: String,
+    format: String,
+    content: String,
+    overwrite_confirmed: bool,
+) -> Result<(), String> {
+    log_diagnostics::save_log_diagnostic_report(
+        std::path::Path::new(&path),
+        &format,
+        &content,
+        overwrite_confirmed,
+    )
 }
 
 /// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
@@ -4988,9 +4998,22 @@ fn import_log_corpus_package_path(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<LogPackageImportDto, String> {
+    // A package import is a new ingest attempt even though it does not produce
+    // the raw-ingest evidence DTO. Clear the prior transient failure before
+    // any cache/path validation can fail.
+    let diagnostic_attempt = state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .begin_attempt();
     let cache = log_cache_dir(&state)?;
     let report = cd_core::log_analysis::import_corpus_zip_path(&cache, std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
+    state
+        .failed_log_ingest_diagnostic
+        .lock()
+        .expect("failed_log_ingest_diagnostic")
+        .record_success(diagnostic_attempt);
     set_active_log_corpus_state_nonblocking(&state, Some(report.corpus_id.clone()));
     Ok(LogPackageImportDto {
         corpus_id: report.corpus_id,
@@ -5021,11 +5044,44 @@ impl cd_core::process_progress::ProcessProgressObserver for TauriLogIngestProgre
         self.recorder.progress(update.clone());
         let _ = self.app.emit("process-progress", update);
     }
+
+    fn log_ingest_evidence(&self, evidence: cd_core::process_progress::LogIngestEvidence) {
+        self.recorder.log_ingest_evidence(evidence);
+    }
 }
 
 /// Key used in `AppState.cancels` for SoftWrite log ingest (#498).
 const LOG_INGEST_CANCEL_KEY: &str = "log_ingest";
 const LOG_REANALYZE_CANCEL_KEY: &str = "log_reanalyze";
+
+fn register_exclusive_cancel(
+    cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    key: &str,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    already_active: &str,
+) -> Result<(), String> {
+    if cancels.contains_key(key) {
+        return Err(already_active.into());
+    }
+    cancels.insert(key.into(), flag);
+    Ok(())
+}
+
+fn remove_cancel_if_owned(
+    cancels: &mut HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    key: &str,
+    owner: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    if cancels
+        .get(key)
+        .is_some_and(|registered| Arc::ptr_eq(registered, owner))
+    {
+        cancels.remove(key);
+        true
+    } else {
+        false
+    }
+}
 
 fn desktop_local_log_embed_plan(
     host: &ToolHost,
@@ -5066,26 +5122,51 @@ async fn ingest_log_path(
     path: String,
     name: Option<String>,
 ) -> Result<LogIngestReportDto, String> {
-    let cache = log_cache_dir(&state)?;
-    let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
     let selected_path = std::path::PathBuf::from(&path);
     let source_kind = cd_core::log_analysis::FailedIngestSourceKind::from_path(&selected_path);
     let recorder = Arc::new(cd_core::log_analysis::FailedIngestDiagnosticRecorder::default());
-    let progress = TauriLogIngestProgress {
-        app: app.clone(),
-        recorder: Arc::clone(&recorder),
-    };
-    let name_owned = name.unwrap_or_else(|| "corpus".into());
+    let cancel = cd_core::process_progress::CancelFlag::new();
+    let cancel_registration = cancel.inner_arc();
+    {
+        let mut cancels = state.cancels.lock().expect("cancels");
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&cancel_registration),
+            "a log import is already running",
+        )?;
+    }
+    // Exclusive admission is not itself an ingest attempt. Once admitted,
+    // invalidate the previous generation before cache setup, provider lookup,
+    // or any other fallible ingest work. A setup failure belongs to this attempt.
     let diagnostic_attempt = state
         .failed_log_ingest_diagnostic
         .lock()
         .expect("failed_log_ingest_diagnostic")
         .begin_attempt();
-    let cancel = cd_core::process_progress::CancelFlag::new();
-    {
-        let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.insert(LOG_INGEST_CANCEL_KEY.into(), cancel.inner_arc());
-    }
+    let cache = match log_cache_dir(&state) {
+        Ok(cache) => cache,
+        Err(error) => {
+            let diagnostic = recorder.finish(&error, source_kind, cd_core::embed::now_unix_secs());
+            state
+                .failed_log_ingest_diagnostic
+                .lock()
+                .expect("failed_log_ingest_diagnostic")
+                .record_failure(diagnostic_attempt, diagnostic);
+            remove_cancel_if_owned(
+                &mut state.cancels.lock().expect("cancels"),
+                LOG_INGEST_CANCEL_KEY,
+                &cancel_registration,
+            );
+            return Err(error);
+        }
+    };
+    let (policy, embed_backend) = desktop_log_ingest_embed_plan_nonblocking(&state.host);
+    let progress = TauriLogIngestProgress {
+        app: app.clone(),
+        recorder: Arc::clone(&recorder),
+    };
+    let name_owned = name.unwrap_or_else(|| "corpus".into());
     let cancel_for_job = cancel.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         cd_core::log_analysis::ingest_path_with_policy_and_observer(
@@ -5102,7 +5183,7 @@ async fn ingest_log_path(
     .await;
     {
         let mut cancels = state.cancels.lock().expect("cancels");
-        cancels.remove(LOG_INGEST_CANCEL_KEY);
+        remove_cancel_if_owned(&mut cancels, LOG_INGEST_CANCEL_KEY, &cancel_registration);
     }
     let report = match outcome {
         Ok(Ok(report)) => {
@@ -7168,6 +7249,85 @@ pub fn run() {
 
 #[cfg(test)]
 mod s3_backup_host_tests;
+
+#[cfg(test)]
+mod log_ingest_cancel_registry_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn concurrent_log_ingest_start_cannot_replace_or_steal_cancellation() {
+        let mut cancels = HashMap::new();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&first),
+            "a log import is already running",
+        )
+        .expect("first import starts");
+        let error = register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&second),
+            "a log import is already running",
+        )
+        .expect_err("second import must be rejected");
+
+        assert_eq!(error, "a log import is already running");
+        let registered = cancels
+            .get(LOG_INGEST_CANCEL_KEY)
+            .expect("first registration remains");
+        assert!(Arc::ptr_eq(registered, &first));
+        registered.store(true, Ordering::SeqCst);
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_log_ingest_completion_cannot_clear_a_newer_registration() {
+        let mut cancels = HashMap::new();
+        let older = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let newer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&older),
+            "a log import is already running",
+        )
+        .expect("older import starts");
+        assert!(remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &older,
+        ));
+        register_exclusive_cancel(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            Arc::clone(&newer),
+            "a log import is already running",
+        )
+        .expect("newer import starts after older cleanup");
+
+        assert!(!remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &older,
+        ));
+        let registered = cancels
+            .get(LOG_INGEST_CANCEL_KEY)
+            .expect("newer registration remains");
+        assert!(Arc::ptr_eq(registered, &newer));
+        assert!(remove_cancel_if_owned(
+            &mut cancels,
+            LOG_INGEST_CANCEL_KEY,
+            &newer,
+        ));
+        assert!(!cancels.contains_key(LOG_INGEST_CANCEL_KEY));
+    }
+}
 
 #[cfg(test)]
 mod log_original_host_tests {

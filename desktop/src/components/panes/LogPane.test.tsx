@@ -21,6 +21,7 @@ const hostMocks = vi.hoisted(() => ({
   timeline: vi.fn(),
   setActiveCorpus: vi.fn(),
   ingest: vi.fn(),
+  importPackage: vi.fn(),
   reanalyze: vi.fn(),
   cancelReanalysis: vi.fn(),
   discard: vi.fn(),
@@ -30,6 +31,7 @@ const hostMocks = vi.hoisted(() => ({
   clearFailedIngestDiagnostic: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
+  openFile: vi.fn(),
   listenProgress: vi.fn(),
 }));
 
@@ -43,7 +45,7 @@ vi.mock("../../lib/host", () => ({
   hostDiscardLogCorpus: hostMocks.discard,
   hostExportLogCorpusPackage: vi.fn(),
   hostGetBranding: hostMocks.getBranding,
-  hostImportLogCorpusPackagePath: vi.fn(),
+  hostImportLogCorpusPackagePath: hostMocks.importPackage,
   hostGetFailedLogIngestDiagnostic: hostMocks.getFailedIngestDiagnostic,
   hostIngestLogPath: hostMocks.ingest,
   hostListLogTemplates: hostMocks.listTemplates,
@@ -59,7 +61,7 @@ vi.mock("../../lib/host", () => ({
 vi.mock("../../lib/dialogs", () => ({
   dialogConfirm: hostMocks.confirm,
   openDirectoryDialog: vi.fn(async () => null),
-  openFileDialog: vi.fn(async () => null),
+  openFileDialog: hostMocks.openFile,
   saveFileDialog: hostMocks.saveFile,
 }));
 
@@ -102,6 +104,11 @@ describe("LogPane", () => {
     hostMocks.setActiveCorpus.mockResolvedValue(null);
     hostMocks.getFailedIngestDiagnostic.mockResolvedValue(null);
     hostMocks.clearFailedIngestDiagnostic.mockResolvedValue(true);
+    hostMocks.importPackage.mockResolvedValue({
+      corpusId: "package-corpus",
+      name: "Package corpus",
+      originCorpusId: "origin-corpus",
+    });
     hostMocks.reanalyze.mockResolvedValue({
       state: "complete",
       modelId: "fixture-local",
@@ -126,6 +133,7 @@ describe("LogPane", () => {
     });
     hostMocks.saveDiagnostic.mockResolvedValue(undefined);
     hostMocks.saveFile.mockResolvedValue(null);
+    hostMocks.openFile.mockResolvedValue(null);
   });
 
   it("renders toolbar import/export actions and empty state", async () => {
@@ -377,6 +385,18 @@ describe("LogPane", () => {
     expect(screen.queryByRole("menu")).toBeNull();
     const note = within(dialog).getByLabelText(/Optional reproduction note/);
     await waitFor(() => expect(document.activeElement).toBe(note));
+    const markdownToggle = within(dialog).getByRole("button", {
+      name: "Markdown",
+    });
+    const jsonToggle = within(dialog).getByRole("button", { name: "JSON" });
+    expect(markdownToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(jsonToggle.getAttribute("aria-pressed")).toBe("false");
+    const keyboardPreview = within(dialog).getByLabelText(
+      "Markdown diagnostic preview",
+    );
+    expect(keyboardPreview.getAttribute("tabindex")).toBe("0");
+    act(() => keyboardPreview.focus());
+    expect(document.activeElement).toBe(keyboardPreview);
     expect(dialog.textContent).toContain("Raw logs and event payloads");
     expect(dialog.textContent).toContain("provider/model inventories");
     fireEvent.change(note, {
@@ -415,10 +435,13 @@ describe("LogPane", () => {
         "/tmp/corpus-diagnostic.md",
         "markdown",
         expect.stringContaining("# ContextDesk corpus diagnostic"),
+        true,
       ),
     );
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    fireEvent.click(jsonToggle);
+    expect(markdownToggle.getAttribute("aria-pressed")).toBe("false");
+    expect(jsonToggle.getAttribute("aria-pressed")).toBe("true");
     expect(
       within(dialog).getByLabelText("JSON diagnostic preview").textContent,
     ).toContain('"schemaVersion": 1');
@@ -428,6 +451,7 @@ describe("LogPane", () => {
         "/tmp/corpus-diagnostic.json",
         "json",
         expect.stringContaining('"schemaVersion": 1'),
+        true,
       ),
     );
 
@@ -438,7 +462,7 @@ describe("LogPane", () => {
 
   it("previews, copies, and clears one failed-ingest diagnostic without publishing a corpus", async () => {
     const firstFailure = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generatedAt: 1_753_680_000,
       sourceKind: "zip" as const,
       reasonCode: "invalid_archive" as const,
@@ -452,6 +476,25 @@ describe("LogPane", () => {
         bytesProcessed: 1024,
         templates: 0,
         updatesSeen: 3,
+      },
+      evidence: {
+        scanCounts: {
+          binary: 1,
+          empty: 1,
+          hidden: 1,
+          oversized: 1,
+          readFailed: 1,
+          parseFailed: 1,
+        },
+        transcript: [
+          { reason: "binary" as const, basename: "core.bin" },
+          { reason: "empty" as const, basename: "empty.log" },
+          {
+            reason: "parse_failed" as const,
+            basename: "malformed.log",
+          },
+        ],
+        omittedEntries: 2,
       },
       redacted: true as const,
     };
@@ -502,6 +545,12 @@ describe("LogPane", () => {
     expect(
       within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
     ).toContain("Reason: invalid_archive");
+    expect(
+      within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
+    ).toContain("binary: 1");
+    expect(
+      within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
+    ).toContain("parse_failed: malformed.log");
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Copy Markdown" }),
     );
@@ -511,6 +560,18 @@ describe("LogPane", () => {
     expect(copied).not.toContain("/Users/employee");
     expect(copied).not.toContain("private.internal");
     expect(copied).not.toContain("secret.zip");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "JSON" }));
+    const jsonPreview = within(dialog).getByLabelText(
+      "JSON diagnostic preview",
+    ).textContent;
+    expect(jsonPreview).toContain('"scanCounts"');
+    expect(jsonPreview).toContain('"binary": 1');
+    expect(jsonPreview).toContain('"basename": "malformed.log"');
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Copy JSON" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
 
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -529,6 +590,175 @@ describe("LogPane", () => {
     expect(hostMocks.clearFailedIngestDiagnostic).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(
       screen.getAllByRole("button", { name: "Import logs…" })[0],
+    );
+  });
+
+  it("replaces repeated failure evidence and clears it when a later import succeeds", async () => {
+    const failure = (summary: string, basename: string) => ({
+      schemaVersion: 2,
+      generatedAt: 1_753_680_000,
+      sourceKind: "directory" as const,
+      reasonCode: "no_safe_events" as const,
+      summary,
+      cancelled: false,
+      progress: {
+        lastPhase: "parse",
+        linesProcessed: 0,
+        filesProcessed: 1,
+        bytesProcessed: 4,
+        templates: 0,
+        updatesSeen: 3,
+      },
+      evidence: {
+        scanCounts: {
+          binary: 1,
+          empty: 0,
+          hidden: 0,
+          oversized: 0,
+          readFailed: 0,
+          parseFailed: 0,
+        },
+        transcript: [{ reason: "binary" as const, basename }],
+        omittedEntries: 0,
+      },
+      redacted: true as const,
+    });
+    const first = failure("First failed attempt.", "first.bin");
+    const second = failure("Second failed attempt.", "second.bin");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.ingest
+      .mockRejectedValueOnce(new Error("first failure"))
+      .mockRejectedValueOnce(new Error("second failure"))
+      .mockResolvedValueOnce({
+        corpusId: "successful-corpus",
+        lines: 1,
+        templates: 1,
+        reductionRatio: 1,
+        embedded: 0,
+        files: 1,
+        discoveredFiles: 1,
+        excludedFiles: 0,
+        failedFiles: 0,
+        ignoredFiles: 0,
+        exclusionCounts: {},
+        exclusionExamples: [],
+        partial: false,
+        sourceBytes: 24,
+        corpusBytes: 128,
+        levelCounts: { info: 1 },
+        tsMin: 1,
+        tsMax: 1,
+        formatCounts: { logfmt: 1 },
+        topTemplates: [],
+        embedding: {
+          state: "keyword_only",
+          modelId: null,
+          embeddedTemplates: 0,
+          totalTemplates: 1,
+          reason: "embedding_not_requested",
+          updatedAt: 1,
+        },
+      });
+    hostMocks.getFailedIngestDiagnostic
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+
+    render(<LogPane pickDirectory={async () => "/tmp/logs"} />);
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+    let available = await screen.findByRole("region", {
+      name: "Failed import diagnostic",
+    });
+    expect(available.textContent).toContain("First failed attempt.");
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+    await waitFor(() => {
+      available = screen.getByRole("region", {
+        name: "Failed import diagnostic",
+      });
+      expect(available.textContent).toContain("Second failed attempt.");
+      expect(available.textContent).not.toContain("First failed attempt.");
+    });
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Import logs…" })[0]!,
+    );
+    await waitFor(() => expect(hostMocks.ingest).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", {
+          name: "Failed import diagnostic",
+        }),
+      ).toBeNull(),
+    );
+    expect(hostMocks.getFailedIngestDiagnostic).toHaveBeenCalledTimes(3);
+  });
+
+  it("clears a stale raw-ingest diagnostic when a package import attempt begins", async () => {
+    hostMocks.getFailedIngestDiagnostic.mockResolvedValue({
+      schemaVersion: 2,
+      generatedAt: 1,
+      sourceKind: "directory",
+      reasonCode: "no_safe_events",
+      summary: "Stale raw ingest failure.",
+      cancelled: false,
+      progress: {
+        lastPhase: "parse",
+        linesProcessed: 0,
+        filesProcessed: 1,
+        bytesProcessed: 0,
+        templates: 0,
+        updatesSeen: 1,
+      },
+      evidence: {
+        scanCounts: {
+          binary: 1,
+          empty: 0,
+          hidden: 0,
+          oversized: 0,
+          readFailed: 0,
+          parseFailed: 0,
+        },
+        transcript: [{ reason: "binary", basename: "old.bin" }],
+        omittedEntries: 0,
+      },
+      redacted: true,
+    });
+    hostMocks.openFile.mockResolvedValue("/tmp/package.cdlog.zip");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.importPackage.mockRejectedValue(
+      new Error("package validation failed"),
+    );
+
+    render(<LogPane />);
+    expect(
+      await screen.findByRole("region", {
+        name: "Failed import diagnostic",
+      }),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Import package/i }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.importPackage).toHaveBeenCalledWith(
+        "/tmp/package.cdlog.zip",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", {
+          name: "Failed import diagnostic",
+        }),
+      ).toBeNull(),
+    );
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "package validation failed",
     );
   });
 

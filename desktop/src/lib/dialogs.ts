@@ -40,7 +40,10 @@ export async function openFileDialog(
   }
 }
 
-/** Save-file picker; returns absolute path or null. */
+/**
+ * Save-file picker; returns an absolute path only after the native panel has
+ * completed any existing-file overwrite confirmation.
+ */
 export async function saveFileDialog(
   title = "Save file",
   defaultPath?: string,

@@ -392,6 +392,7 @@ export function LogPane({ pickDirectory, onOpenHelp }: Props) {
     setBusy(true);
     setError(null);
     setNote(null);
+    setFailedIngestDiagnostic(null);
     try {
       const r = await hostImportLogCorpusPackagePath(path);
       setNote(

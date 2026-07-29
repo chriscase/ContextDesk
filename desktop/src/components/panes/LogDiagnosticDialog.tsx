@@ -75,13 +75,18 @@ export function LogDiagnosticDialog({
     if (!busy) onDismiss();
   };
 
-  async function copyMarkdown() {
+  async function copyPreview() {
     setResult(null);
+    const json = previewFormat === "json";
     try {
-      await navigator.clipboard.writeText(report.markdown);
-      setResult("Copied redacted Markdown. Review it before sharing.");
+      await navigator.clipboard.writeText(json ? report.json : report.markdown);
+      setResult(
+        `Copied redacted ${json ? "JSON" : "Markdown"}. Review it before sharing.`,
+      );
     } catch {
-      setResult("Clipboard unavailable. Use Save Markdown instead.");
+      setResult(
+        `Clipboard unavailable. Use Save ${json ? "JSON" : "Markdown"} instead.`,
+      );
     }
   }
 
@@ -110,6 +115,9 @@ export function LogDiagnosticDialog({
         path,
         format,
         markdown ? report.markdown : report.json,
+        // The native save panel performs the overwrite confirmation before it
+        // returns an existing destination path.
+        true,
       );
       setResult(
         `Saved redacted ${markdown ? "Markdown" : "JSON"} diagnostics. Review before sharing.`,
@@ -218,6 +226,7 @@ export function LogDiagnosticDialog({
             <button
               type="button"
               className="btn btn--ghost"
+              aria-pressed={previewFormat === "markdown"}
               data-active={previewFormat === "markdown" ? "true" : "false"}
               onClick={() => setPreviewFormat("markdown")}
             >
@@ -226,6 +235,7 @@ export function LogDiagnosticDialog({
             <button
               type="button"
               className="btn btn--ghost"
+              aria-pressed={previewFormat === "json"}
               data-active={previewFormat === "json" ? "true" : "false"}
               onClick={() => setPreviewFormat("json")}
             >
@@ -235,6 +245,7 @@ export function LogDiagnosticDialog({
         </div>
         <pre
           className="log-diagnostic__preview"
+          tabIndex={0}
           aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
         >
           {previewFormat === "markdown" ? report.markdown : report.json}
@@ -251,9 +262,9 @@ export function LogDiagnosticDialog({
             type="button"
             className="btn btn--ghost"
             disabled={busy}
-            onClick={() => void copyMarkdown()}
+            onClick={() => void copyPreview()}
           >
-            Copy Markdown
+            Copy {previewFormat === "json" ? "JSON" : "Markdown"}
           </button>
           <button
             type="button"

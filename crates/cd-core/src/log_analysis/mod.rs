@@ -33,8 +33,9 @@ pub use bookmarks::{
 };
 pub use diagnostics::{
     classify_failed_ingest, FailedIngestDiagnostic, FailedIngestDiagnosticRecorder,
-    FailedIngestDiagnosticStore, FailedIngestProgress, FailedIngestReason, FailedIngestSourceKind,
-    FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION,
+    FailedIngestDiagnosticStore, FailedIngestEvidenceSummary, FailedIngestProgress,
+    FailedIngestReason, FailedIngestScanCounts, FailedIngestSourceKind,
+    FAILED_INGEST_DIAGNOSTIC_SCHEMA_VERSION, MAX_FAILED_INGEST_EVIDENCE_ENTRIES,
 };
 pub use drain::{DrainMiner, TemplateInfo};
 pub use embed_policy::{

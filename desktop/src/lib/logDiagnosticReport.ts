@@ -9,6 +9,7 @@ import { redactDiagnosticText } from "./errorReport";
 export const LOG_DIAGNOSTIC_NOTE_MAX_CHARS = 1_200;
 export const LOG_DIAGNOSTIC_REPORT_MAX_BYTES = 64 * 1024;
 const MAX_EXAMPLES = 12;
+const MAX_FAILED_INGEST_TRANSCRIPT = 20;
 const MAX_COUNT_ENTRIES = 32;
 const MAX_LABEL_CHARS = 160;
 const MAX_STATUS_CHARS = 800;
@@ -127,6 +128,18 @@ export type LogDiagnosticManifest = {
       templates: number | null;
       updatesSeen: number;
     };
+    evidence: {
+      scanCounts: {
+        binary: number;
+        empty: number;
+        hidden: number;
+        oversized: number;
+        readFailed: number;
+        parseFailed: number;
+      };
+      transcript: { reason: string; basename: string }[];
+      omittedEntries: number;
+    };
     retention: "memory_only_until_clear_next_ingest_or_restart";
   } | null;
   activeView: LogDiagnosticActiveView | null;
@@ -150,7 +163,7 @@ const EXCLUDED_CONTENT = [
 ];
 
 const ABSOLUTE_UNIX_PATH_RE =
-  /(^|[\s("'`=])\/(?:Users|home|private|var\/folders|Volumes|tmp)\/[^\s)"'`,;]*/gi;
+  /(^|[\s("'`=:])\/(?!\/)[^\s)"'`,;]+/g;
 const ABSOLUTE_WINDOWS_PATH_RE =
   /(?:[A-Za-z]:\\|\\\\)[^\s)"'`,;]+/g;
 
@@ -325,6 +338,36 @@ function buildFailedIngest(
       templates: safeOptionalNumber(failure.progress.templates),
       updatesSeen: safeCount(failure.progress.updatesSeen),
     },
+    evidence: {
+      scanCounts: {
+        binary: safeCount(failure.evidence.scanCounts.binary),
+        empty: safeCount(failure.evidence.scanCounts.empty),
+        hidden: safeCount(failure.evidence.scanCounts.hidden),
+        oversized: safeCount(failure.evidence.scanCounts.oversized),
+        readFailed: safeCount(failure.evidence.scanCounts.readFailed),
+        parseFailed: safeCount(failure.evidence.scanCounts.parseFailed),
+      },
+      transcript: failure.evidence.transcript
+        .slice(0, MAX_FAILED_INGEST_TRANSCRIPT)
+        .map((entry) => {
+          const basename =
+            entry.basename.replace(/\\/g, "/").split("/").at(-1) ?? "";
+          return {
+            reason: sanitizeReason(entry.reason),
+            basename:
+              sanitizeText(basename, 96) || "[REDACTED_BASENAME]",
+          };
+        }),
+      omittedEntries: Math.min(
+        Number.MAX_SAFE_INTEGER,
+        safeCount(failure.evidence.omittedEntries) +
+          Math.max(
+            0,
+            failure.evidence.transcript.length -
+              MAX_FAILED_INGEST_TRANSCRIPT,
+          ),
+      ),
+    },
     retention: "memory_only_until_clear_next_ingest_or_restart",
   };
 }
@@ -409,6 +452,26 @@ function renderMarkdown(manifest: LogDiagnosticManifest): string {
           `- Files observed: ${nullable(failure.progress.filesProcessed?.toString() ?? null)}`,
           `- Bytes observed: ${nullable(failure.progress.bytesProcessed?.toString() ?? null)}`,
           `- Templates observed: ${nullable(failure.progress.templates?.toString() ?? null)}`,
+          "",
+          "### Scan evidence counters",
+          `- binary: ${failure.evidence.scanCounts.binary}`,
+          `- empty: ${failure.evidence.scanCounts.empty}`,
+          `- hidden: ${failure.evidence.scanCounts.hidden}`,
+          `- oversized: ${failure.evidence.scanCounts.oversized}`,
+          `- read_failed: ${failure.evidence.scanCounts.readFailed}`,
+          `- parse_failed: ${failure.evidence.scanCounts.parseFailed}`,
+          "",
+          "### Bounded basename/reason transcript",
+          ...(failure.evidence.transcript.length
+            ? failure.evidence.transcript.map(
+                (entry) => `- ${entry.reason}: ${entry.basename}`,
+              )
+            : ["- none recorded"]),
+          ...(failure.evidence.omittedEntries > 0
+            ? [
+                `- ${failure.evidence.omittedEntries} additional observation(s) omitted by the core transcript bound`,
+              ]
+            : []),
           "- Corpus published: no",
           "- Retention: memory only; cleared explicitly, by the next ingest attempt, or on app restart",
           "",

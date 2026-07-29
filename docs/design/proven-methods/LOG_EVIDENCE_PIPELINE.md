@@ -51,7 +51,7 @@ The reusable method is a layered evidence plane:
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
-| Privacy-reviewed diagnostic handoff                         | **Partial**                               | `diagnostics.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs`                                                | Literal failed-ingest transcript accounting remains #527         |
+| Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -367,28 +367,55 @@ content, chat state, and model/provider state are deliberately not represented.
 
 A failed ingest has no corpus identity. The trusted core recorder discards
 free-form progress messages and original errors after mapping them to one
-stable reason code. It retains only coarse source kind, last typed phase, and
-saturating progress counters. The desktop owns one in-memory slot: starting a
-later ingest clears it, a stale overlapping attempt cannot replace the newer
-slot, explicit Clear removes it, and restart removes it. Failure and
-cancellation therefore cannot publish a partial corpus merely to support
-diagnostics.
+stable final reason code. Raw intake sends a separate typed callback for only
+six evidence classes: `binary`, `empty`, `hidden`, `oversized`, `read_failed`,
+and `parse_failed`. That callback constructs a secret-scrubbed, bounded final
+basename in core; it never carries a parent path, archive ancestry, event
+payload, or parser/filesystem error string.
+
+The recorder keeps complete saturating counters for those six classes and at
+most 20 basename/reason observations in deterministic ingest order. An
+`omitted_entries` counter discloses additional observations beyond the
+transcript cap. `parse_failed` means a bounded source/archive representation
+could not be decoded under the intake contract (for example malformed ZIP
+metadata or an over-limit logical line); an unknown log syntax still uses the
+honest plain-log fallback and is not mislabeled as a parse failure.
+
+The desktop owns one in-memory slot. Raw ingest begins a new generation before
+fallible cache/provider setup; a setup failure is recorded into that new
+generation. Starting any later raw or package import clears the prior slot
+before its own fallible setup, a stale overlapping attempt cannot replace the
+newer generation, explicit Clear removes it, and restart removes it. A
+successful later attempt leaves the slot empty. Failure and cancellation
+therefore cannot publish a partial corpus merely to support diagnostics. The
+same typed observer is used for directory, directly selected ZIP, and
+recursively nested ZIP intake.
 
 These structural choices keep top-template patterns, event payloads, source
 labels and absolute paths, chats, provider/model inventories, evaluator truth,
 private network identities, and secrets outside the report.
 
-The user previews the exact Markdown or JSON before saving. The native writer
-accepts only a bounded payload and a user-selected `.md` or `.json` destination,
-reapplies redaction, refuses symlink destinations, and writes no hidden cache.
-Cancel therefore creates no file. Diagnostics remain distinct from a
+The user previews the exact Markdown or JSON before saving. Browser and host
+privacy checks cover secret tokens, ordinary private-suffix hosts such as
+`server.internal`, arbitrary absolute Unix/Windows paths, private/loopback IPv4,
+and loopback/unique-local/link-local IPv6. The native writer accepts only a
+bounded payload and a user-selected `.md` or `.json` destination and recomputes
+the privacy transform. If that result differs from the visible preview, save is
+rejected instead of silently changing the file.
+
+For an accepted exact preview, the host writes and syncs a restricted,
+create-new sibling temporary file. A new destination is published with a
+no-clobber hard link; a confirmed existing destination is atomically replaced
+on platforms where that primitive is available, otherwise replacement is
+refused and the user chooses a new name. The parent directory is synced on
+Unix, temporary files are cleaned after error, and symlink destinations are
+refused. Cancel therefore creates no file. Diagnostics remain distinct from a
 `.cdlog.zip` package, which intentionally contains analyzed corpus data.
 
-The remaining literal #527 work is a bounded basename/reason transcript plus
-scan-reason counters for binary, empty, hidden, oversized, read-failed, and
-parse-failed exclusions across directory and raw-ZIP trials. The one-slot
-diagnostic path does not invent counters or basename evidence that the failed
-core ingest did not return.
+The report builder independently re-bounds and sanitizes the typed evidence,
+and the native save boundary redacts every Markdown line or JSON string again.
+The UI therefore never reconstructs evidence by parsing free-form progress or
+error strings.
 
 ## 7. Performance and bounds
 

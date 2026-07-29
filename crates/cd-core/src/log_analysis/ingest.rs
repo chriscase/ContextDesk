@@ -12,8 +12,8 @@ use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use crate::memory::embed_blocking;
 use crate::process_progress::{
-    progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
-    ProcessProgressObserver, ProcessProgressPhase,
+    progress_basename, CancelFlag, LogIngestEvidence, LogIngestEvidenceReason, NoopProcessProgress,
+    ProcessProgress, ProcessProgressKind, ProcessProgressObserver, ProcessProgressPhase,
 };
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -255,6 +255,14 @@ fn cancelled(cancel: Option<&CancelFlag>) -> bool {
 
 fn emit(progress: &dyn ProcessProgressObserver, update: ProcessProgress) {
     progress.progress(update);
+}
+
+fn emit_ingest_evidence(
+    progress: &dyn ProcessProgressObserver,
+    reason: LogIngestEvidenceReason,
+    source: &Path,
+) {
+    progress.log_ingest_evidence(LogIngestEvidence::from_source(reason, source));
 }
 
 /// Soft max size per log member before skip (bytes). Overridable via env later.
@@ -1021,6 +1029,8 @@ fn read_bounded_line(
     output: &mut Vec<u8>,
     max_line_bytes: usize,
     cancel: Option<&CancelFlag>,
+    progress: &dyn ProcessProgressObserver,
+    source: &Path,
 ) -> CoreResult<usize> {
     let mut total = 0usize;
     loop {
@@ -1032,15 +1042,17 @@ fn read_bounded_line(
         let available = match reader.fill_buf() {
             Ok(available) => available,
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(CoreError::Policy(error.to_string()))
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, source);
+                return Err(CoreError::Policy(error.to_string()));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                 return Err(CoreError::Message(error.to_string()))
             }
             Err(error) => {
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, source);
                 return Err(CoreError::Message(format!(
                     "raw log source read failed: {error}"
-                )))
+                )));
             }
         };
         if available.is_empty() {
@@ -1051,6 +1063,7 @@ fn read_bounded_line(
             .position(|byte| *byte == b'\n')
             .map_or(available.len(), |position| position + 1);
         if output.len().saturating_add(through_newline) > max_line_bytes {
+            emit_ingest_evidence(progress, LogIngestEvidenceReason::ParseFailed, source);
             return Err(CoreError::Policy(format!(
                 "raw log line-length limit exceeded (>{max_line_bytes} bytes)"
             )));
@@ -1103,7 +1116,14 @@ fn ingest_lines_from_reader(
             return Err(CoreError::Message("ingest cancelled".into()));
         }
         raw_line.clear();
-        let bytes = read_bounded_line(reader, &mut raw_line, limits.max_line_bytes, cancel)?;
+        let bytes = read_bounded_line(
+            reader,
+            &mut raw_line,
+            limits.max_line_bytes,
+            cancel,
+            progress,
+            Path::new(source_label),
+        )?;
         if bytes == 0 {
             break;
         }
@@ -1359,9 +1379,27 @@ fn ingest_from_zip_file(
     let archive_file = file
         .try_clone()
         .map_err(|e| CoreError::Message(format!("clone zip source handle: {e}")))?;
-    let plans = preflight_raw_log_zip(&mut file, budget, limits, cancel)?;
-    let mut archive = zip::ZipArchive::new(archive_file)
-        .map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+    let plans = match preflight_raw_log_zip(&mut file, budget, limits, cancel) {
+        Ok(plans) => plans,
+        Err(error) => {
+            if !cancelled(cancel) {
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::ParseFailed,
+                    Path::new(archive_identity),
+                );
+            }
+            return Err(error);
+        }
+    };
+    let mut archive = zip::ZipArchive::new(archive_file).map_err(|e| {
+        emit_ingest_evidence(
+            progress,
+            LogIngestEvidenceReason::ParseFailed,
+            Path::new(archive_identity),
+        );
+        CoreError::Message(format!("zip open: {e}"))
+    })?;
     if archive.len() != plans.len() {
         return Err(CoreError::Policy(
             "raw log zip entry index is ambiguous".into(),
@@ -1419,6 +1457,11 @@ fn ingest_from_zip_file(
             }
             ZipEntryDisposition::Hidden => {
                 stats.ignored("hidden", Path::new(&source_identity));
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::Hidden,
+                    Path::new(&source_identity),
+                );
                 files_done += 1;
                 continue;
             }
@@ -1434,6 +1477,11 @@ fn ingest_from_zip_file(
             }
             ZipEntryDisposition::TooLarge => {
                 stats.excluded("too_large", Path::new(&source_identity));
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::Oversized,
+                    Path::new(&source_identity),
+                );
                 files_done += 1;
                 continue;
             }
@@ -1484,15 +1532,25 @@ fn ingest_from_zip_file(
         let head = match reader.fill_buf() {
             Ok(bytes) => &bytes[..bytes.len().min(8192)],
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(CoreError::Policy(error.to_string()))
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::ReadFailed,
+                    Path::new(&source_identity),
+                );
+                return Err(CoreError::Policy(error.to_string()));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
                 return Err(CoreError::Message(error.to_string()))
             }
             Err(error) => {
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::ReadFailed,
+                    Path::new(&source_identity),
+                );
                 return Err(CoreError::Message(format!(
                     "raw log zip member read failed: {error}"
-                )))
+                )));
             }
         };
         let nested_archive =
@@ -1522,7 +1580,19 @@ fn ingest_from_zip_file(
                 .with_lines(stats.lines)
                 .with_bytes(stats.source_bytes),
             );
-            let staged = stage_nested_archive(&mut reader, private_staging_root, cancel)?;
+            let staged = match stage_nested_archive(&mut reader, private_staging_root, cancel) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    if !cancelled(cancel) {
+                        emit_ingest_evidence(
+                            progress,
+                            LogIngestEvidenceReason::ReadFailed,
+                            Path::new(&source_identity),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             let bounded = reader.into_inner();
             if bounded.member_bytes != plan.expanded_size {
                 return Err(CoreError::Policy(format!(
@@ -1553,12 +1623,18 @@ fn ingest_from_zip_file(
         }
         if head.contains(&0) {
             stats.excluded("binary", Path::new(&source_identity));
+            emit_ingest_evidence(
+                progress,
+                LogIngestEvidenceReason::Binary,
+                Path::new(&source_identity),
+            );
             files_done += 1;
             continue;
         }
         reader.get_mut().commit_to_aggregate()?;
 
         let mut format_hint = None;
+        let lines_before = stats.lines;
         let completely_read = ingest_lines_from_reader(
             &mut reader,
             &source_identity,
@@ -1586,9 +1662,23 @@ fn ingest_from_zip_file(
 
         files_done += 1;
         if completely_read {
-            stats.imported();
+            if stats.lines == lines_before {
+                stats.excluded("empty", Path::new(&source_identity));
+                emit_ingest_evidence(
+                    progress,
+                    LogIngestEvidenceReason::Empty,
+                    Path::new(&source_identity),
+                );
+            } else {
+                stats.imported();
+            }
         } else {
             stats.failed("read_failed", Path::new(&source_identity));
+            emit_ingest_evidence(
+                progress,
+                LogIngestEvidenceReason::ReadFailed,
+                Path::new(&source_identity),
+            );
         }
         let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
@@ -1827,6 +1917,7 @@ fn ingest_path_into_cache(
         for ignored in &inventory.ignored {
             stats.discover();
             stats.ignored("hidden", ignored);
+            emit_ingest_evidence(progress, LogIngestEvidenceReason::Hidden, ignored);
         }
         for (excluded, reason) in &inventory.excluded {
             stats.discover();
@@ -1887,6 +1978,7 @@ fn ingest_path_into_cache(
                 Ok(metadata) => metadata.len(),
                 Err(_) => {
                     stats.failed("metadata_failed", file);
+                    emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
                     files_done += 1;
                     continue;
                 }
@@ -1908,6 +2000,7 @@ fn ingest_path_into_cache(
                 Err(CoreError::Policy(reason)) => return Err(CoreError::Policy(reason)),
                 Err(_) => {
                     stats.failed("open_failed", file);
+                    emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
                     files_done += 1;
                     continue;
                 }
@@ -1927,6 +2020,7 @@ fn ingest_path_into_cache(
                 Ok(read) => read,
                 Err(_) => {
                     stats.failed("read_failed", file);
+                    emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
                     files_done += 1;
                     continue;
                 }
@@ -1956,6 +2050,7 @@ fn ingest_path_into_cache(
             }
             if file_bytes > limits.max_file_bytes {
                 stats.excluded("too_large", file);
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::Oversized, file);
                 files_done += 1;
                 emit(
                     progress,
@@ -1988,18 +2083,21 @@ fn ingest_path_into_cache(
                 }
                 Err(_) => {
                     stats.failed("read_failed", file);
+                    emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
                     files_done += 1;
                     continue;
                 }
             };
             if head.contains(&0) {
                 stats.excluded("binary", file);
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::Binary, file);
                 files_done += 1;
                 continue;
             }
             reader.get_mut().commit_to_aggregate()?;
 
             let mut format_hint = None;
+            let lines_before = stats.lines;
             let completely_read = ingest_lines_from_reader(
                 &mut reader,
                 &rel,
@@ -2019,9 +2117,15 @@ fn ingest_path_into_cache(
             )?;
             files_done += 1;
             if completely_read {
-                stats.imported();
+                if stats.lines == lines_before {
+                    stats.excluded("empty", file);
+                    emit_ingest_evidence(progress, LogIngestEvidenceReason::Empty, file);
+                } else {
+                    stats.imported();
+                }
             } else {
                 stats.failed("read_failed", file);
+                emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
             }
             let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
             if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
@@ -2452,7 +2556,12 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
 mod tests {
     use super::*;
     use crate::embed::ConceptEmbedBackend;
-    use crate::process_progress::{CancelFlag, ProcessProgressPhase, RecordingProcessProgress};
+    use crate::log_analysis::{
+        FailedIngestDiagnostic, FailedIngestDiagnosticRecorder, FailedIngestSourceKind,
+    };
+    use crate::process_progress::{
+        CancelFlag, LogIngestEvidence, ProcessProgressPhase, RecordingProcessProgress,
+    };
     use std::io::Write;
 
     fn cache_tree_paths(root: &Path) -> Vec<PathBuf> {
@@ -2568,6 +2677,304 @@ mod tests {
         );
         assert!(LogCorpus::list_ids(cache).unwrap().is_empty());
         assert_no_ingest_staging(cache);
+    }
+
+    fn finish_failed_evidence(
+        recorder: &FailedIngestDiagnosticRecorder,
+        error: &CoreError,
+        source: &Path,
+    ) -> FailedIngestDiagnostic {
+        recorder.finish(
+            &error.to_string(),
+            FailedIngestSourceKind::from_path(source),
+            123,
+        )
+    }
+
+    #[test]
+    fn failed_directory_intake_reports_each_typed_exclusion_without_publication() {
+        let cases = [
+            ("binary.log", b"prefix\0binary".as_slice(), "binary"),
+            ("empty.log", b"\n \r\n".as_slice(), "empty"),
+            (".hidden.log", b"hidden\n".as_slice(), "hidden"),
+            ("oversized.log", b"0123456789abcdef".as_slice(), "oversized"),
+        ];
+        for (name, body, expected_reason) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("cache");
+            let logs = root.path().join("logs");
+            std::fs::create_dir_all(&logs).unwrap();
+            std::fs::write(logs.join(name), body).unwrap();
+            let recorder = FailedIngestDiagnosticRecorder::default();
+            let limits = RawIngestLimits {
+                max_file_bytes: if expected_reason == "oversized" {
+                    8
+                } else {
+                    1_024
+                },
+                ..RawIngestLimits::default()
+            };
+            let error =
+                ingest_with_limits(&cache, &logs, name, limits, &recorder, None).unwrap_err();
+            assert_atomic_failure(&cache, &error, "no safe/importable log events");
+            let diagnostic = finish_failed_evidence(&recorder, &error, &logs);
+            let counts = &diagnostic.evidence.scan_counts;
+            let observed = match expected_reason {
+                "binary" => counts.binary,
+                "empty" => counts.empty,
+                "hidden" => counts.hidden,
+                "oversized" => counts.oversized,
+                _ => unreachable!(),
+            };
+            assert_eq!(observed, 1, "{diagnostic:?}");
+            assert_eq!(diagnostic.evidence.transcript.len(), 1);
+            assert_eq!(
+                serde_json::to_value(&diagnostic.evidence.transcript[0]).unwrap()["reason"],
+                expected_reason
+            );
+            assert_eq!(diagnostic.evidence.transcript[0].basename, name);
+        }
+    }
+
+    #[test]
+    fn direct_and_nested_zip_intake_share_typed_evidence_and_safe_leaf_names() {
+        fn evidence_zip() -> Vec<u8> {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let stored = zip::write::SimpleFileOptions::default();
+            writer.start_file(".hidden.log", stored).unwrap();
+            writer.write_all(b"hidden\n").unwrap();
+            writer.start_file("empty.log", stored).unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.start_file("binary.log", stored).unwrap();
+            writer.write_all(b"x\0y").unwrap();
+            let deflated = stored.compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("oversized.log", deflated).unwrap();
+            writer.write_all(&vec![b'x'; 2_048]).unwrap();
+            writer.finish().unwrap().into_inner()
+        }
+
+        for nested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("cache");
+            let selected = root
+                .path()
+                .join(if nested { "outer.zip" } else { "direct.zip" });
+            let evidence_archive = evidence_zip();
+            std::fs::write(
+                &selected,
+                if nested {
+                    zip_bytes(&[("private-parent.zip", &evidence_archive)])
+                } else {
+                    evidence_archive
+                },
+            )
+            .unwrap();
+            let recorder = FailedIngestDiagnosticRecorder::default();
+            let error = ingest_with_limits(
+                &cache,
+                &selected,
+                "zip-evidence",
+                RawIngestLimits {
+                    max_file_bytes: 1_024,
+                    ..RawIngestLimits::default()
+                },
+                &recorder,
+                None,
+            )
+            .unwrap_err();
+            assert_atomic_failure(&cache, &error, "no safe/importable log events");
+            let diagnostic = finish_failed_evidence(&recorder, &error, &selected);
+            assert_eq!(diagnostic.evidence.scan_counts.binary, 1);
+            assert_eq!(diagnostic.evidence.scan_counts.empty, 1);
+            assert_eq!(diagnostic.evidence.scan_counts.hidden, 1);
+            assert_eq!(diagnostic.evidence.scan_counts.oversized, 1);
+            let basenames = diagnostic
+                .evidence
+                .transcript
+                .iter()
+                .map(|entry| entry.basename.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                basenames,
+                [".hidden.log", "empty.log", "binary.log", "oversized.log"]
+            );
+            assert!(
+                basenames.iter().all(|basename| !basename.contains("zip!/")),
+                "{basenames:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_direct_and_nested_archives_emit_parse_evidence_and_clean_staging() {
+        for nested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("cache");
+            let selected = root
+                .path()
+                .join(if nested { "outer.zip" } else { "broken.zip" });
+            std::fs::write(
+                &selected,
+                if nested {
+                    zip_bytes(&[("broken-inner.zip", b"PK\x03\x04malformed")])
+                } else {
+                    b"PK\x03\x04malformed".to_vec()
+                },
+            )
+            .unwrap();
+            let recorder = FailedIngestDiagnosticRecorder::default();
+            let error = ingest_with_limits(
+                &cache,
+                &selected,
+                "malformed",
+                RawIngestLimits::default(),
+                &recorder,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("zip"), "{error}");
+            assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+            assert_no_ingest_staging(&cache);
+            let diagnostic = finish_failed_evidence(&recorder, &error, &selected);
+            assert_eq!(diagnostic.evidence.scan_counts.parse_failed, 1);
+            assert_eq!(
+                diagnostic.evidence.transcript[0].basename,
+                if nested {
+                    "broken-inner.zip"
+                } else {
+                    "broken.zip"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_direct_and_nested_zip_members_emit_read_evidence_and_clean_staging() {
+        let body = b"level=error msg=checksum-sentinel\n";
+        for nested in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("cache");
+            let selected = root
+                .path()
+                .join(if nested { "outer.zip" } else { "corrupt.zip" });
+            let mut corrupt = zip_bytes(&[("unreadable.log", body)]);
+            let payload = corrupt
+                .windows(body.len())
+                .position(|window| window == body)
+                .expect("stored payload");
+            corrupt[payload + 8] ^= 0x20;
+            std::fs::write(
+                &selected,
+                if nested {
+                    zip_bytes(&[("inner.zip", &corrupt)])
+                } else {
+                    corrupt
+                },
+            )
+            .unwrap();
+
+            let recorder = FailedIngestDiagnosticRecorder::default();
+            let error = ingest_with_limits(
+                &cache,
+                &selected,
+                "corrupt-member",
+                RawIngestLimits::default(),
+                &recorder,
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("read")
+                    || error.to_string().contains("checksum")
+                    || error.to_string().contains("CRC"),
+                "{error}"
+            );
+            assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+            assert_no_ingest_staging(&cache);
+            let diagnostic = finish_failed_evidence(&recorder, &error, &selected);
+            assert_eq!(diagnostic.evidence.scan_counts.read_failed, 1);
+            assert_eq!(diagnostic.evidence.transcript[0].basename, "unreadable.log");
+        }
+    }
+
+    #[test]
+    fn overlong_source_line_is_typed_parse_failure_and_never_publishes() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let log = root.path().join("overlong.log");
+        std::fs::write(&log, "x".repeat(64)).unwrap();
+        let recorder = FailedIngestDiagnosticRecorder::default();
+        let error = ingest_with_limits(
+            &cache,
+            &log,
+            "overlong",
+            RawIngestLimits {
+                max_file_bytes: 128,
+                max_line_bytes: 16,
+                ..RawIngestLimits::default()
+            },
+            &recorder,
+            None,
+        )
+        .unwrap_err();
+        assert_atomic_failure(&cache, &error, "line-length limit");
+        let diagnostic = finish_failed_evidence(&recorder, &error, &log);
+        assert_eq!(diagnostic.evidence.scan_counts.parse_failed, 1);
+        assert_eq!(diagnostic.evidence.transcript[0].basename, "overlong.log");
+    }
+
+    #[test]
+    fn source_removed_after_scan_is_typed_read_failure_and_never_publishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RemoveAfterInventory {
+            source: PathBuf,
+            removed: AtomicBool,
+            diagnostic: FailedIngestDiagnosticRecorder,
+        }
+
+        impl ProcessProgressObserver for RemoveAfterInventory {
+            fn progress(&self, update: ProcessProgress) {
+                if update.phase == ProcessProgressPhase::Parse
+                    && !self.removed.swap(true, Ordering::SeqCst)
+                {
+                    std::fs::remove_file(&self.source).unwrap();
+                }
+                self.diagnostic.progress(update);
+            }
+
+            fn log_ingest_evidence(&self, evidence: LogIngestEvidence) {
+                self.diagnostic.log_ingest_evidence(evidence);
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let logs = root.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let source = logs.join("unreadable-after-scan.log");
+        std::fs::write(&source, "level=error msg=must-not-publish\n").unwrap();
+        let observer = RemoveAfterInventory {
+            source,
+            removed: AtomicBool::new(false),
+            diagnostic: FailedIngestDiagnosticRecorder::default(),
+        };
+        let error = ingest_with_limits(
+            &cache,
+            &logs,
+            "read-failure",
+            RawIngestLimits::default(),
+            &observer,
+            None,
+        )
+        .unwrap_err();
+        assert_atomic_failure(&cache, &error, "no safe/importable log events");
+        let diagnostic = finish_failed_evidence(&observer.diagnostic, &error, &logs);
+        assert_eq!(diagnostic.evidence.scan_counts.read_failed, 1);
+        assert_eq!(
+            diagnostic.evidence.transcript[0].basename,
+            "unreadable-after-scan.log"
+        );
     }
 
     #[test]
@@ -3548,7 +3955,15 @@ mod tests {
         );
         let mut record = Vec::new();
         assert_eq!(
-            read_bounded_line(&mut reader, &mut record, MAX_RAW_LOG_LINE_BYTES, None).unwrap(),
+            read_bounded_line(
+                &mut reader,
+                &mut record,
+                MAX_RAW_LOG_LINE_BYTES,
+                None,
+                &NoopProcessProgress,
+                Path::new("line.log"),
+            )
+            .unwrap(),
             MAX_RAW_LOG_LINE_BYTES
         );
         assert_eq!(record.len(), MAX_RAW_LOG_LINE_BYTES);
@@ -3755,13 +4170,19 @@ mod tests {
         struct CancelOnNestedStage {
             flag: CancelFlag,
             recorder: RecordingProcessProgress,
+            diagnostic: FailedIngestDiagnosticRecorder,
         }
         impl ProcessProgressObserver for CancelOnNestedStage {
             fn progress(&self, update: ProcessProgress) {
                 if update.message.starts_with("staging nested archive ") {
                     self.flag.cancel();
                 }
+                self.diagnostic.progress(update.clone());
                 self.recorder.progress(update);
+            }
+
+            fn log_ingest_evidence(&self, evidence: LogIngestEvidence) {
+                self.diagnostic.log_ingest_evidence(evidence);
             }
         }
 
@@ -3769,6 +4190,7 @@ mod tests {
         let observer = CancelOnNestedStage {
             flag: flag.clone(),
             recorder: RecordingProcessProgress::default(),
+            diagnostic: FailedIngestDiagnosticRecorder::default(),
         };
         let error = ingest_path_with_observer(
             &cache,
@@ -3787,6 +4209,16 @@ mod tests {
         );
         assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
         assert_no_ingest_staging(&cache);
+        let diagnostic = finish_failed_evidence(&observer.diagnostic, &error, &outer);
+        assert_eq!(
+            diagnostic.reason_code,
+            crate::log_analysis::FailedIngestReason::Cancelled
+        );
+        assert!(diagnostic.cancelled);
+        assert_eq!(
+            diagnostic.progress.last_phase,
+            ProcessProgressPhase::Cancelled
+        );
     }
 
     #[test]

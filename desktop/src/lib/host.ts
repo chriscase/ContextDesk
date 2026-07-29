@@ -1711,6 +1711,27 @@ export type FailedLogIngestDiagnosticDto = {
     templates: number | null;
     updatesSeen: number;
   };
+  evidence: {
+    scanCounts: {
+      binary: number;
+      empty: number;
+      hidden: number;
+      oversized: number;
+      readFailed: number;
+      parseFailed: number;
+    };
+    transcript: {
+      reason:
+        | "binary"
+        | "empty"
+        | "hidden"
+        | "oversized"
+        | "read_failed"
+        | "parse_failed";
+      basename: string;
+    }[];
+    omittedEntries: number;
+  };
   redacted: true;
 };
 
@@ -1931,12 +1952,14 @@ export async function hostSaveLogDiagnosticReport(
   path: string,
   format: "markdown" | "json",
   content: string,
+  overwriteConfirmed: boolean,
 ): Promise<void> {
   if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
   await invoke<void>("save_log_diagnostic_report", {
     path,
     format,
     content,
+    overwriteConfirmed,
   });
 }
 
