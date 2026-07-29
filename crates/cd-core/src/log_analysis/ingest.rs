@@ -272,15 +272,15 @@ pub const MAX_EXCLUSION_EXAMPLES: usize = 20;
 /// Maximum number of filesystem or archive entries inspected by one raw ingest.
 pub const MAX_RAW_LOG_ENTRIES: u64 = 50_000;
 
-/// Maximum aggregate expanded bytes inspected by one raw ingest (4 GiB).
+/// Maximum aggregate actual bytes streamed for import by one raw ingest (4 GiB).
 pub const MAX_RAW_LOG_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Maximum bytes in one logical log line, including its line ending (1 MiB).
-pub const MAX_RAW_LOG_LINE_BYTES: usize = 1024 * 1024;
-
-/// Compression-ratio checks ignore small members, then reject ratios above 250:1.
-pub const MAX_RAW_LOG_COMPRESSION_RATIO: u64 = 250;
-const MIN_COMPRESSION_RATIO_CHECK_BYTES: u64 = 1024 * 1024;
+/// Maximum bytes in one logical log line, including its line ending (16 MiB).
+///
+/// Absolute member and aggregate bounds remain authoritative. This higher
+/// record bound accommodates legitimate structured payloads and stack traces
+/// without permitting one record to grow without limit.
+pub const MAX_RAW_LOG_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 struct RawIngestLimits {
@@ -288,8 +288,6 @@ struct RawIngestLimits {
     max_file_bytes: u64,
     max_expanded_bytes: u64,
     max_line_bytes: usize,
-    max_compression_ratio: u64,
-    min_compression_ratio_check_bytes: u64,
 }
 
 impl Default for RawIngestLimits {
@@ -299,8 +297,6 @@ impl Default for RawIngestLimits {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_expanded_bytes: MAX_RAW_LOG_EXPANDED_BYTES,
             max_line_bytes: MAX_RAW_LOG_LINE_BYTES,
-            max_compression_ratio: MAX_RAW_LOG_COMPRESSION_RATIO,
-            min_compression_ratio_check_bytes: MIN_COMPRESSION_RATIO_CHECK_BYTES,
         }
     }
 }
@@ -308,7 +304,6 @@ impl Default for RawIngestLimits {
 #[derive(Debug, Default)]
 struct RawIngestBudget {
     entries: u64,
-    declared_expanded_bytes: u64,
     actual_bytes: u64,
 }
 
@@ -326,20 +321,6 @@ impl RawIngestBudget {
         }
         Ok(())
     }
-
-    fn add_declared_bytes(&mut self, count: u64, limits: RawIngestLimits) -> CoreResult<()> {
-        self.declared_expanded_bytes = self
-            .declared_expanded_bytes
-            .checked_add(count)
-            .ok_or_else(|| CoreError::Policy("raw log expanded-byte count overflow".into()))?;
-        if self.declared_expanded_bytes > limits.max_expanded_bytes {
-            return Err(CoreError::Policy(format!(
-                "raw log aggregate expanded-byte limit exceeded ({} > {})",
-                self.declared_expanded_bytes, limits.max_expanded_bytes
-            )));
-        }
-        Ok(())
-    }
 }
 
 struct BoundedSourceReader<'a, R> {
@@ -348,6 +329,7 @@ struct BoundedSourceReader<'a, R> {
     member_bytes: u64,
     member_limit: u64,
     aggregate_limit: u64,
+    counts_toward_aggregate: bool,
     cancel: Option<&'a CancelFlag>,
 }
 
@@ -364,8 +346,33 @@ impl<'a, R> BoundedSourceReader<'a, R> {
             member_bytes: 0,
             member_limit: limits.max_file_bytes,
             aggregate_limit: limits.max_expanded_bytes,
+            counts_toward_aggregate: false,
             cancel,
         }
+    }
+
+    /// Charge bytes already read for classification, then charge future reads.
+    ///
+    /// Hidden, binary, nested-archive, and other excluded entries never call
+    /// this method, so sniffing them cannot consume the aggregate import budget.
+    fn commit_to_aggregate(&mut self) -> CoreResult<()> {
+        if self.counts_toward_aggregate {
+            return Ok(());
+        }
+        let aggregate_total = self
+            .budget
+            .actual_bytes
+            .checked_add(self.member_bytes)
+            .ok_or_else(|| CoreError::Policy("raw log actual-byte count overflow".into()))?;
+        if aggregate_total > self.aggregate_limit {
+            return Err(CoreError::Policy(format!(
+                "raw log aggregate actual-byte limit exceeded ({} > {})",
+                aggregate_total, self.aggregate_limit
+            )));
+        }
+        self.budget.actual_bytes = aggregate_total;
+        self.counts_toward_aggregate = true;
+        Ok(())
     }
 }
 
@@ -381,34 +388,39 @@ impl<R: Read> Read for BoundedSourceReader<'_, R> {
             return Ok(0);
         }
         let member_remaining = self.member_limit.saturating_sub(self.member_bytes);
-        let aggregate_remaining = self
-            .aggregate_limit
-            .saturating_sub(self.budget.actual_bytes);
-        let allowed = output
+        let mut allowed = output
             .len()
-            .min(usize::try_from(member_remaining.saturating_add(1)).unwrap_or(usize::MAX))
-            .min(usize::try_from(aggregate_remaining.saturating_add(1)).unwrap_or(usize::MAX));
+            .min(usize::try_from(member_remaining.saturating_add(1)).unwrap_or(usize::MAX));
+        if self.counts_toward_aggregate {
+            let aggregate_remaining = self
+                .aggregate_limit
+                .saturating_sub(self.budget.actual_bytes);
+            allowed = allowed
+                .min(usize::try_from(aggregate_remaining.saturating_add(1)).unwrap_or(usize::MAX));
+        }
         let read = self.inner.read(&mut output[..allowed])?;
         if read == 0 {
             return Ok(0);
         }
         let read = read as u64;
         let member_total = self.member_bytes.saturating_add(read);
-        let aggregate_total = self.budget.actual_bytes.saturating_add(read);
         if member_total > self.member_limit {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "raw log member actual-byte limit exceeded",
             ));
         }
-        if aggregate_total > self.aggregate_limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "raw log aggregate actual-byte limit exceeded",
-            ));
-        }
         self.member_bytes = member_total;
-        self.budget.actual_bytes = aggregate_total;
+        if self.counts_toward_aggregate {
+            let aggregate_total = self.budget.actual_bytes.saturating_add(read);
+            if aggregate_total > self.aggregate_limit {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "raw log aggregate actual-byte limit exceeded",
+                ));
+            }
+            self.budget.actual_bytes = aggregate_total;
+        }
         Ok(read as usize)
     }
 }
@@ -604,6 +616,24 @@ fn portable_source_identity(path: &Path) -> CoreResult<String> {
     Ok(components.join("/"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZipEntryDisposition {
+    Import,
+    Directory,
+    Hidden,
+    NestedArchive,
+    Symlink,
+    NonRegular,
+    TooLarge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ZipEntryPlan {
+    identity: String,
+    expanded_size: u64,
+    disposition: ZipEntryDisposition,
+}
+
 fn read_zip_u16(bytes: &[u8], offset: usize) -> CoreResult<u16> {
     let value = bytes
         .get(offset..offset + 2)
@@ -618,31 +648,89 @@ fn read_zip_u32(bytes: &[u8], offset: usize) -> CoreResult<u32> {
     Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
-/// Validate every central-directory entry before `zip` reads any payload.
-///
-/// Some ZIP readers collapse duplicate names during open, so checking only the
-/// entries returned by `ZipArchive` cannot detect an ambiguous input.
-fn preflight_raw_log_zip(
-    file: &mut std::fs::File,
-    budget: &mut RawIngestBudget,
-    limits: RawIngestLimits,
-    cancel: Option<&CancelFlag>,
-) -> CoreResult<u64> {
+fn read_zip_u64(bytes: &[u8], offset: usize) -> CoreResult<u64> {
+    let value = bytes
+        .get(offset..offset + 8)
+        .ok_or_else(|| CoreError::Message("raw log zip metadata is truncated".into()))?;
+    Ok(u64::from_le_bytes([
+        value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
+    ]))
+}
+
+fn resolve_zip64_entry_values(
+    extra: &[u8],
+    expanded32: u32,
+    compressed32: u32,
+    local_offset32: u32,
+    disk_start16: u16,
+) -> CoreResult<(u64, u64, u64, u32)> {
+    let mut expanded = (expanded32 != u32::MAX).then_some(expanded32 as u64);
+    let mut compressed = (compressed32 != u32::MAX).then_some(compressed32 as u64);
+    let mut local_offset = (local_offset32 != u32::MAX).then_some(local_offset32 as u64);
+    let mut disk_start = (disk_start16 != u16::MAX).then_some(disk_start16 as u32);
+    let mut cursor = 0usize;
+    while cursor < extra.len() {
+        let kind = read_zip_u16(extra, cursor)?;
+        let size = read_zip_u16(extra, cursor + 2)? as usize;
+        cursor = cursor
+            .checked_add(4)
+            .ok_or_else(|| CoreError::Policy("raw log zip extra-field overflow".into()))?;
+        let end = cursor
+            .checked_add(size)
+            .ok_or_else(|| CoreError::Policy("raw log zip extra-field overflow".into()))?;
+        let field = extra
+            .get(cursor..end)
+            .ok_or_else(|| CoreError::Policy("raw log zip extra field is truncated".into()))?;
+        if kind == 0x0001 {
+            let mut offset = 0usize;
+            let carries_all_sizes = field.len() >= 24;
+            if expanded.is_none() || carries_all_sizes {
+                expanded = Some(read_zip_u64(field, offset)?);
+                offset += 8;
+            }
+            if compressed.is_none() || carries_all_sizes {
+                compressed = Some(read_zip_u64(field, offset)?);
+                offset += 8;
+            }
+            if local_offset.is_none() || carries_all_sizes {
+                local_offset = Some(read_zip_u64(field, offset)?);
+                offset += 8;
+            }
+            if disk_start.is_none() {
+                disk_start = Some(read_zip_u32(field, offset)?);
+            }
+        } else if kind == 0x9901 {
+            return Err(CoreError::Policy(
+                "encrypted raw log zip entries are not supported".into(),
+            ));
+        }
+        cursor = end;
+    }
+    let malformed =
+        || CoreError::Policy("Zip64 raw log archive entry is missing resolved metadata".into());
+    Ok((
+        expanded.ok_or_else(malformed)?,
+        compressed.ok_or_else(malformed)?,
+        local_offset.ok_or_else(malformed)?,
+        disk_start.ok_or_else(malformed)?,
+    ))
+}
+
+fn locate_raw_log_zip_directory(file: &mut std::fs::File) -> CoreResult<(u64, u64, u64)> {
     const EOCD_MIN_BYTES: usize = 22;
     const MAX_ZIP_COMMENT_BYTES: usize = u16::MAX as usize;
-    const CENTRAL_HEADER_BYTES: usize = 46;
-    const MAX_RAW_LOG_ENTRY_NAME_BYTES: usize = 4 * 1024;
     const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
-    const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
+    const ZIP64_LOCATOR_SIGNATURE: &[u8; 4] = b"PK\x06\x07";
+    const ZIP64_EOCD_SIGNATURE: &[u8; 4] = b"PK\x06\x06";
 
-    let compressed_len = file
+    let file_len = file
         .metadata()
         .map_err(|e| CoreError::Message(format!("read zip metadata: {e}")))?
         .len();
-    if compressed_len < EOCD_MIN_BYTES as u64 {
+    if file_len < EOCD_MIN_BYTES as u64 {
         return Err(CoreError::Message("zip open: missing end record".into()));
     }
-    let tail_len = usize::try_from(compressed_len)
+    let tail_len = usize::try_from(file_len)
         .unwrap_or(usize::MAX)
         .min(EOCD_MIN_BYTES + MAX_ZIP_COMMENT_BYTES);
     file.seek(SeekFrom::End(-(tail_len as i64)))
@@ -653,49 +741,131 @@ fn preflight_raw_log_zip(
     let eocd_in_tail = (0..=tail.len().saturating_sub(EOCD_SIGNATURE.len()))
         .rev()
         .find(|position| {
-            let position = *position;
-            if tail.get(position..position + 4) != Some(EOCD_SIGNATURE) {
-                return false;
-            }
-            let Some(comment) = tail.get(position + 20..position + 22) else {
-                return false;
-            };
-            let comment_len = u16::from_le_bytes([comment[0], comment[1]]) as usize;
-            position + EOCD_MIN_BYTES + comment_len == tail.len()
+            tail.get(*position..*position + 4) == Some(EOCD_SIGNATURE)
+                && tail
+                    .get(*position + 20..*position + 22)
+                    .is_some_and(|comment| {
+                        *position
+                            + EOCD_MIN_BYTES
+                            + u16::from_le_bytes([comment[0], comment[1]]) as usize
+                            == tail.len()
+                    })
         })
         .ok_or_else(|| CoreError::Message("zip open: missing end record".into()))?;
+    let absolute_eocd = file_len - tail_len as u64 + eocd_in_tail as u64;
     let eocd = &tail[eocd_in_tail..];
     let disk = read_zip_u16(eocd, 4)?;
     let central_disk = read_zip_u16(eocd, 6)?;
     let entries_on_disk = read_zip_u16(eocd, 8)?;
     let entries_total = read_zip_u16(eocd, 10)?;
-    let central_size = read_zip_u32(eocd, 12)?;
-    let central_offset = read_zip_u32(eocd, 16)?;
+    let central_size32 = read_zip_u32(eocd, 12)?;
+    let central_offset32 = read_zip_u32(eocd, 16)?;
     if disk != 0 || central_disk != 0 || entries_on_disk != entries_total {
         return Err(CoreError::Policy(
             "multi-disk raw log archives are not supported".into(),
         ));
     }
-    if entries_total == u16::MAX || central_size == u32::MAX || central_offset == u32::MAX {
-        return Err(CoreError::Policy(
-            "Zip64 raw log archive metadata is not supported".into(),
-        ));
-    }
-    budget.add_entries(entries_total as u64, limits)?;
-    let central_end = (central_offset as u64)
-        .checked_add(central_size as u64)
+
+    let needs_zip64 =
+        entries_total == u16::MAX || central_size32 == u32::MAX || central_offset32 == u32::MAX;
+    let (entry_count, central_size, central_offset, expected_central_end) = if needs_zip64 {
+        let locator_offset = absolute_eocd
+            .checked_sub(20)
+            .ok_or_else(|| CoreError::Policy("Zip64 raw log archive locator is missing".into()))?;
+        file.seek(SeekFrom::Start(locator_offset))
+            .map_err(|e| CoreError::Message(format!("seek Zip64 locator: {e}")))?;
+        let mut locator = [0u8; 20];
+        file.read_exact(&mut locator)
+            .map_err(|e| CoreError::Message(format!("read Zip64 locator: {e}")))?;
+        if &locator[..4] != ZIP64_LOCATOR_SIGNATURE
+            || read_zip_u32(&locator, 4)? != 0
+            || read_zip_u32(&locator, 16)? != 1
+        {
+            return Err(CoreError::Policy(
+                "Zip64 raw log archive locator is invalid or multi-disk".into(),
+            ));
+        }
+        let zip64_eocd_offset = read_zip_u64(&locator, 8)?;
+        file.seek(SeekFrom::Start(zip64_eocd_offset))
+            .map_err(|e| CoreError::Message(format!("seek Zip64 end record: {e}")))?;
+        let mut zip64_eocd = [0u8; 56];
+        file.read_exact(&mut zip64_eocd)
+            .map_err(|e| CoreError::Message(format!("read Zip64 end record: {e}")))?;
+        if &zip64_eocd[..4] != ZIP64_EOCD_SIGNATURE {
+            return Err(CoreError::Policy(
+                "Zip64 raw log archive end record is invalid".into(),
+            ));
+        }
+        let record_size = read_zip_u64(&zip64_eocd, 4)?;
+        if record_size < 44
+            || zip64_eocd_offset
+                .checked_add(12)
+                .and_then(|offset| offset.checked_add(record_size))
+                != Some(locator_offset)
+        {
+            return Err(CoreError::Policy(
+                "Zip64 raw log archive end record length is inconsistent".into(),
+            ));
+        }
+        let disk64 = read_zip_u32(&zip64_eocd, 16)?;
+        let central_disk64 = read_zip_u32(&zip64_eocd, 20)?;
+        let entries_on_disk64 = read_zip_u64(&zip64_eocd, 24)?;
+        let entries_total64 = read_zip_u64(&zip64_eocd, 32)?;
+        if disk64 != 0 || central_disk64 != 0 || entries_on_disk64 != entries_total64 {
+            return Err(CoreError::Policy(
+                "multi-disk Zip64 raw log archives are not supported".into(),
+            ));
+        }
+        (
+            entries_total64,
+            read_zip_u64(&zip64_eocd, 40)?,
+            read_zip_u64(&zip64_eocd, 48)?,
+            zip64_eocd_offset,
+        )
+    } else {
+        (
+            entries_total as u64,
+            central_size32 as u64,
+            central_offset32 as u64,
+            absolute_eocd,
+        )
+    };
+    let central_end = central_offset
+        .checked_add(central_size)
         .ok_or_else(|| CoreError::Policy("raw log zip central directory overflow".into()))?;
-    let absolute_eocd = compressed_len - tail_len as u64 + eocd_in_tail as u64;
-    if central_end != absolute_eocd {
+    if central_end != expected_central_end || central_end > file_len {
         return Err(CoreError::Policy(
             "raw log zip central directory is inconsistent".into(),
         ));
     }
+    Ok((entry_count, central_offset, central_end))
+}
 
-    file.seek(SeekFrom::Start(central_offset as u64))
+/// Validate and classify every central-directory entry before reading payload.
+///
+/// `zip` resolves valid Zip64 records and rejects missing/corrupt Zip64
+/// metadata, inconsistent central directories, and multi-disk archives. We
+/// independently walk every raw central entry so no name-index collapsing can
+/// hide duplicate or traversal ambiguity.
+fn preflight_raw_log_zip(
+    file: &mut std::fs::File,
+    budget: &mut RawIngestBudget,
+    limits: RawIngestLimits,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<Vec<ZipEntryPlan>> {
+    const CENTRAL_HEADER_BYTES: usize = 46;
+    const MAX_RAW_LOG_ENTRY_NAME_BYTES: usize = 4 * 1024;
+    const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
+
+    let (entry_count, central_offset, central_end) = locate_raw_log_zip_directory(file)?;
+    budget.add_entries(entry_count, limits)?;
+    let entry_capacity = usize::try_from(entry_count)
+        .map_err(|_| CoreError::Policy("raw log zip entry count exceeds memory range".into()))?;
+    let mut names = std::collections::HashSet::with_capacity(entry_capacity);
+    let mut plans = Vec::with_capacity(entry_capacity);
+    file.seek(SeekFrom::Start(central_offset))
         .map_err(|e| CoreError::Message(format!("seek zip central directory: {e}")))?;
-    let mut names = std::collections::HashSet::with_capacity(entries_total as usize);
-    for _ in 0..entries_total {
+    for _ in 0..entry_count {
         if cancelled(cancel) {
             return Err(CoreError::Message(
                 "ingest cancelled during zip preflight".into(),
@@ -709,54 +879,20 @@ fn preflight_raw_log_zip(
                 "raw log zip central directory entry is invalid".into(),
             ));
         }
-        let name_len = read_zip_u16(&header, 28)? as usize;
-        let extra_len = read_zip_u16(&header, 30)? as u64;
-        let comment_len = read_zip_u16(&header, 32)? as u64;
         let flags = read_zip_u16(&header, 8)?;
-        let compressed_size = read_zip_u32(&header, 20)? as u64;
-        let expanded_size = read_zip_u32(&header, 24)? as u64;
-        let disk_start = read_zip_u16(&header, 34)?;
+        let compressed32 = read_zip_u32(&header, 20)?;
+        let expanded32 = read_zip_u32(&header, 24)?;
+        let name_len = read_zip_u16(&header, 28)? as usize;
+        let extra_len = read_zip_u16(&header, 30)? as usize;
+        let comment_len = read_zip_u16(&header, 32)? as usize;
+        let disk_start16 = read_zip_u16(&header, 34)?;
         let external_attributes = read_zip_u32(&header, 38)?;
-        let local_header_offset = read_zip_u32(&header, 42)?;
+        let local_offset32 = read_zip_u32(&header, 42)?;
         if flags & 1 != 0 || flags & (1 << 6) != 0 {
             return Err(CoreError::Policy(
                 "encrypted raw log zip entries are not supported".into(),
             ));
         }
-        if compressed_size == u32::MAX as u64
-            || expanded_size == u32::MAX as u64
-            || local_header_offset == u32::MAX
-        {
-            return Err(CoreError::Policy(
-                "Zip64 raw log archive entries are not supported".into(),
-            ));
-        }
-        if disk_start != 0 {
-            return Err(CoreError::Policy(
-                "multi-disk raw log archive entries are not supported".into(),
-            ));
-        }
-        let unix_kind = (external_attributes >> 16) & 0o170000;
-        if unix_kind == 0o120000 {
-            return Err(CoreError::Policy(
-                "symlink raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if !matches!(unix_kind, 0 | 0o040000 | 0o100000) {
-            return Err(CoreError::Policy(
-                "non-regular raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if expanded_size >= limits.min_compression_ratio_check_bytes
-            && (compressed_size == 0
-                || expanded_size > compressed_size.saturating_mul(limits.max_compression_ratio))
-        {
-            return Err(CoreError::Policy(format!(
-                "raw log zip compression-ratio limit exceeded (>{}:1)",
-                limits.max_compression_ratio
-            )));
-        }
-        budget.add_declared_bytes(expanded_size, limits)?;
         if name_len == 0 || name_len > MAX_RAW_LOG_ENTRY_NAME_BYTES {
             return Err(CoreError::Policy(
                 "raw log zip entry name exceeds policy limit".into(),
@@ -767,19 +903,53 @@ fn preflight_raw_log_zip(
             .map_err(|e| CoreError::Message(format!("read zip entry name: {e}")))?;
         let name = std::str::from_utf8(&name_bytes)
             .map_err(|_| CoreError::Policy("raw log zip entry name is not UTF-8".into()))?;
-        let (normalized, _) = validate_raw_log_zip_entry(name)?;
-        if !names.insert(normalized) {
+        let (identity, directory_name) = validate_raw_log_zip_entry(name)?;
+        if !names.insert(identity.clone()) {
             return Err(CoreError::Policy(
                 "duplicate raw log zip entry rejected by policy".into(),
             ));
         }
-        let skip = extra_len
-            .checked_add(comment_len)
-            .ok_or_else(|| CoreError::Policy("raw log zip metadata overflow".into()))?;
-        file.seek(SeekFrom::Current(i64::try_from(skip).map_err(|_| {
-            CoreError::Policy("raw log zip metadata exceeds seek range".into())
-        })?))
-        .map_err(|e| CoreError::Message(format!("seek zip entry metadata: {e}")))?;
+        let mut extra = vec![0u8; extra_len];
+        file.read_exact(&mut extra)
+            .map_err(|e| CoreError::Message(format!("read zip entry extra field: {e}")))?;
+        file.seek(SeekFrom::Current(i64::try_from(comment_len).map_err(
+            |_| CoreError::Policy("raw log zip entry comment exceeds seek range".into()),
+        )?))
+        .map_err(|e| CoreError::Message(format!("seek zip entry comment: {e}")))?;
+        let (expanded_size, _compressed_size, _local_offset, disk_start) =
+            resolve_zip64_entry_values(
+                &extra,
+                expanded32,
+                compressed32,
+                local_offset32,
+                disk_start16,
+            )?;
+        if disk_start != 0 {
+            return Err(CoreError::Policy(
+                "multi-disk raw log archive entries are not supported".into(),
+            ));
+        }
+        let unix_kind = (external_attributes >> 16) & 0o170000;
+        let disposition = if unix_kind == 0o120000 {
+            ZipEntryDisposition::Symlink
+        } else if directory_name || unix_kind == 0o040000 {
+            ZipEntryDisposition::Directory
+        } else if !matches!(unix_kind, 0 | 0o100000) {
+            ZipEntryDisposition::NonRegular
+        } else if is_hidden_archive_identity(&identity) {
+            ZipEntryDisposition::Hidden
+        } else if has_zip_extension(Path::new(&identity)) {
+            ZipEntryDisposition::NestedArchive
+        } else if expanded_size > limits.max_file_bytes {
+            ZipEntryDisposition::TooLarge
+        } else {
+            ZipEntryDisposition::Import
+        };
+        plans.push(ZipEntryPlan {
+            identity,
+            expanded_size,
+            disposition,
+        });
     }
     if file
         .stream_position()
@@ -790,9 +960,7 @@ fn preflight_raw_log_zip(
             "raw log zip central directory lengths are inconsistent".into(),
         ));
     }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| CoreError::Message(format!("rewind zip: {e}")))?;
-    Ok(entries_total as u64)
+    Ok(plans)
 }
 
 fn read_bounded_line(
@@ -1005,14 +1173,18 @@ fn ingest_from_zip(
     }
 
     let mut file = open_selected_regular_file(zip_path)?;
-    let entry_count = preflight_raw_log_zip(&mut file, budget, limits, cancel)?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
-    if archive.len() as u64 != entry_count {
+    let archive_file = file
+        .try_clone()
+        .map_err(|e| CoreError::Message(format!("clone zip source handle: {e}")))?;
+    let plans = preflight_raw_log_zip(&mut file, budget, limits, cancel)?;
+    let mut archive = zip::ZipArchive::new(archive_file)
+        .map_err(|e| CoreError::Message(format!("zip open: {e}")))?;
+    if archive.len() != plans.len() {
         return Err(CoreError::Policy(
             "raw log zip entry index is ambiguous".into(),
         ));
     }
+    let entry_count = plans.len() as u64;
 
     emit(
         progress,
@@ -1027,8 +1199,7 @@ fn ingest_from_zip(
     );
 
     let mut files_done = 0u64;
-    let mut seen_names = std::collections::HashSet::new();
-    for i in 0..archive.len() {
+    for (i, plan) in plans.iter().enumerate() {
         if cancelled(cancel) {
             emit(
                 progress,
@@ -1045,49 +1216,42 @@ fn ingest_from_zip(
             return Err(CoreError::Message("ingest cancelled".into()));
         }
 
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
-        let name = entry.name().to_string();
         stats.discover();
-        let (rel, directory) = validate_raw_log_zip_entry(&name)?;
-        if !seen_names.insert(rel.clone()) {
-            return Err(CoreError::Policy(
-                "duplicate raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if entry.encrypted() {
-            return Err(CoreError::Policy(
-                "encrypted raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if entry.is_symlink() {
-            return Err(CoreError::Policy(
-                "symlink raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if !directory && !entry.is_file() {
-            return Err(CoreError::Policy(
-                "non-regular raw log zip entry rejected by policy".into(),
-            ));
-        }
-        if directory {
-            stats.ignored("directory", Path::new(&rel));
-            files_done += 1;
-            continue;
-        }
-        if is_hidden_archive_identity(&rel) {
-            stats.ignored("hidden", Path::new(&rel));
-            files_done += 1;
-            continue;
-        }
-        if has_zip_extension(Path::new(&rel)) {
-            stats.excluded("nested_archive_unsupported", Path::new(&rel));
-            files_done += 1;
-            continue;
+        let rel = plan.identity.as_str();
+        match plan.disposition {
+            ZipEntryDisposition::Import => {}
+            ZipEntryDisposition::Directory => {
+                stats.ignored("directory", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+            ZipEntryDisposition::Hidden => {
+                stats.ignored("hidden", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+            ZipEntryDisposition::NestedArchive => {
+                stats.excluded("nested_archive_unsupported", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+            ZipEntryDisposition::Symlink => {
+                stats.excluded("symlink", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+            ZipEntryDisposition::NonRegular => {
+                stats.excluded("non_regular", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
+            ZipEntryDisposition::TooLarge => {
+                stats.excluded("too_large", Path::new(rel));
+                files_done += 1;
+                continue;
+            }
         }
 
-        let size = entry.size();
         emit(
             progress,
             ProcessProgress::phase(
@@ -1097,7 +1261,7 @@ fn ingest_from_zip(
                     "zip member {}/{}: {}",
                     i + 1,
                     entry_count,
-                    progress_basename(std::path::Path::new(&rel))
+                    progress_basename(std::path::Path::new(rel))
                 ),
                 true,
             )
@@ -1107,10 +1271,23 @@ fn ingest_from_zip(
             .with_bytes(stats.source_bytes),
         );
 
-        if size > limits.max_file_bytes {
-            stats.excluded("too_large", Path::new(&rel));
-            files_done += 1;
-            continue;
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| CoreError::Message(format!("zip entry: {e}")))?;
+        let (runtime_identity, runtime_directory) = validate_raw_log_zip_entry(
+            std::str::from_utf8(entry.name_raw())
+                .map_err(|_| CoreError::Policy("raw log zip entry name is not UTF-8".into()))?,
+        )?;
+        if runtime_identity != rel
+            || runtime_directory
+            || !entry.is_file()
+            || entry.is_symlink()
+            || entry.encrypted()
+            || entry.size() != plan.expanded_size
+        {
+            return Err(CoreError::Policy(
+                "raw log zip entry changed after preflight".into(),
+            ));
         }
 
         let bounded = BoundedSourceReader::new(entry, budget, limits, cancel);
@@ -1130,22 +1307,23 @@ fn ingest_from_zip(
             }
         };
         if has_zip_signature(head) {
-            stats.excluded("nested_archive_unsupported", Path::new(&rel));
+            stats.excluded("nested_archive_unsupported", Path::new(rel));
             files_done += 1;
             continue;
         }
         if head.contains(&0) {
-            stats.excluded("binary", Path::new(&rel));
+            stats.excluded("binary", Path::new(rel));
             files_done += 1;
             continue;
         }
+        reader.get_mut().commit_to_aggregate()?;
 
         let mut format_hint = None;
 
         let completely_read = ingest_lines_from_reader(
             &mut reader,
-            &rel,
-            Some(Path::new(&rel)),
+            rel,
+            Some(Path::new(rel)),
             corpus,
             miner,
             stats,
@@ -1160,10 +1338,10 @@ fn ingest_from_zip(
             limits,
         )?;
         let bounded = reader.into_inner();
-        if bounded.member_bytes != size {
+        if bounded.member_bytes != plan.expanded_size {
             return Err(CoreError::Policy(format!(
-                "raw log zip member size mismatch (declared {size}, read {})",
-                bounded.member_bytes
+                "raw log zip member size mismatch (declared {}, read {})",
+                plan.expanded_size, bounded.member_bytes
             )));
         }
 
@@ -1171,7 +1349,7 @@ fn ingest_from_zip(
         if completely_read {
             stats.imported();
         } else {
-            stats.failed("read_failed", Path::new(&rel));
+            stats.failed("read_failed", Path::new(rel));
         }
         let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
@@ -1302,7 +1480,7 @@ fn ingest_path_inner_with_limits_and_fault(
     );
 
     let mut staging = IngestStaging::new(cache_root)?;
-    let report = ingest_path_into_cache(
+    let report = match ingest_path_into_cache(
         staging.cache_root(),
         path,
         name,
@@ -1314,7 +1492,28 @@ fn ingest_path_inner_with_limits_and_fault(
         cancel,
         limits,
         fault,
-    )?;
+    ) {
+        Ok(report) => report,
+        Err(error) if cancelled(cancel) => {
+            // Lower phases that already emitted Cancelled return this exact
+            // canonical message. Scan/preflight/read cancellation carries a
+            // more specific error and is translated here with one terminal
+            // progress event so hosts never present it as an ordinary failure.
+            if error.to_string() != "ingest cancelled" {
+                emit(
+                    progress,
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Cancelled,
+                        "ingest cancelled",
+                        false,
+                    ),
+                );
+            }
+            return Err(CoreError::Message("ingest cancelled".into()));
+        }
+        Err(error) => return Err(error),
+    };
 
     check_ingest_fault(fault, IngestCheckpoint::BeforeValidation)?;
     validate_staged_ingest(staging.cache_root(), &report)?;
@@ -1387,6 +1586,10 @@ fn ingest_path_into_cache(
             stats.discover();
             stats.ignored("hidden", ignored);
         }
+        for (excluded, reason) in &inventory.excluded {
+            stats.discover();
+            stats.excluded(reason, excluded);
+        }
         for _ in &inventory.files {
             stats.discover();
         }
@@ -1396,7 +1599,7 @@ fn ingest_path_into_cache(
             ));
         }
         let file_count = stats.discovered_files;
-        let mut files_done = inventory.ignored.len() as u64;
+        let mut files_done = (inventory.ignored.len() + inventory.excluded.len()) as u64;
 
         emit(
             progress,
@@ -1522,6 +1725,7 @@ fn ingest_path_into_cache(
                 files_done += 1;
                 continue;
             }
+            reader.get_mut().commit_to_aggregate()?;
 
             let rel_path = if path.is_dir() {
                 file.strip_prefix(path).unwrap_or(file.as_path())
@@ -1831,6 +2035,7 @@ fn validate_staged_ingest(staging_cache_root: &Path, report: &IngestReport) -> C
 struct FileInventory {
     files: Vec<PathBuf>,
     ignored: Vec<PathBuf>,
+    excluded: Vec<(PathBuf, &'static str)>,
     canonical_root: PathBuf,
 }
 
@@ -1855,9 +2060,6 @@ fn collect_log_files(
     };
     if metadata.is_file() {
         budget.add_entries(1, limits)?;
-        if !has_zip_extension(path) && metadata.len() <= limits.max_file_bytes {
-            budget.add_declared_bytes(metadata.len(), limits)?;
-        }
         out.files.push(path.to_path_buf());
         return Ok(out);
     }
@@ -1881,6 +2083,7 @@ fn collect_log_files(
     }
     out.files.sort();
     out.ignored.sort();
+    out.excluded.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(out)
 }
 
@@ -1918,9 +2121,8 @@ fn walk_dir(
         }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            return Err(CoreError::Policy(
-                "symlink log source rejected by policy".into(),
-            ));
+            out.excluded.push((path, "symlink"));
+            continue;
         }
         if file_type.is_dir() {
             let canonical = std::fs::canonicalize(&path)
@@ -1939,18 +2141,12 @@ fn walk_dir(
         } else if file_type.is_file() {
             let metadata = std::fs::symlink_metadata(&path)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CoreError::Policy(
-                    "log source changed during directory scan".into(),
-                ));
-            }
-            if !has_zip_extension(&path) && metadata.len() <= limits.max_file_bytes {
-                budget.add_declared_bytes(metadata.len(), limits)?;
+                out.excluded.push((path, "non_regular"));
+                continue;
             }
             out.files.push(path);
         } else {
-            return Err(CoreError::Policy(
-                "non-regular log source rejected by policy".into(),
-            ));
+            out.excluded.push((path, "non_regular"));
         }
     }
     Ok(())
@@ -2059,6 +2255,49 @@ mod tests {
             zip.write_all(body).unwrap();
         }
         zip.finish().unwrap().into_inner()
+    }
+
+    fn with_bounded_zip64_end_records(bytes: Vec<u8>) -> Vec<u8> {
+        let eocd = bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x05\x06")
+            .unwrap();
+        assert_eq!(bytes.len(), eocd + 22, "fixture must have no ZIP comment");
+        let entries = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]) as u64;
+        let central_size = u32::from_le_bytes([
+            bytes[eocd + 12],
+            bytes[eocd + 13],
+            bytes[eocd + 14],
+            bytes[eocd + 15],
+        ]) as u64;
+        let central_offset = u32::from_le_bytes([
+            bytes[eocd + 16],
+            bytes[eocd + 17],
+            bytes[eocd + 18],
+            bytes[eocd + 19],
+        ]) as u64;
+
+        let mut output = bytes[..eocd].to_vec();
+        output.extend_from_slice(b"PK\x06\x06");
+        output.extend_from_slice(&44u64.to_le_bytes());
+        output.extend_from_slice(&45u16.to_le_bytes());
+        output.extend_from_slice(&45u16.to_le_bytes());
+        output.extend_from_slice(&0u32.to_le_bytes());
+        output.extend_from_slice(&0u32.to_le_bytes());
+        output.extend_from_slice(&entries.to_le_bytes());
+        output.extend_from_slice(&entries.to_le_bytes());
+        output.extend_from_slice(&central_size.to_le_bytes());
+        output.extend_from_slice(&central_offset.to_le_bytes());
+        output.extend_from_slice(b"PK\x06\x07");
+        output.extend_from_slice(&0u32.to_le_bytes());
+        output.extend_from_slice(&(eocd as u64).to_le_bytes());
+        output.extend_from_slice(&1u32.to_le_bytes());
+
+        let mut conventional = bytes[eocd..].to_vec();
+        conventional[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        conventional[12..20].copy_from_slice(&[u8::MAX; 8]);
+        output.extend_from_slice(&conventional);
+        output
     }
 
     fn assert_atomic_failure(cache: &Path, error: &CoreError, expected: &str) {
@@ -2206,40 +2445,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn directory_walk_rejects_outside_symlinks_cycles_and_non_regular_entries() {
+    fn directory_walk_excludes_symlink_and_non_regular_entries_but_imports_safe_logs() {
         use std::os::unix::fs::symlink;
         use std::os::unix::net::UnixListener;
 
-        for case in ["outside", "cycle", "socket"] {
-            let dir = tempfile::tempdir().unwrap();
-            let cache = dir.path().join("cache");
-            let logs = dir.path().join("logs");
-            let outside = dir.path().join("outside");
-            std::fs::create_dir_all(&logs).unwrap();
-            std::fs::create_dir_all(&outside).unwrap();
-            std::fs::write(logs.join("safe.log"), "level=info msg=safe\n").unwrap();
-            std::fs::write(outside.join("secret.log"), "level=error msg=outside\n").unwrap();
-            let _socket = match case {
-                "outside" => {
-                    symlink(outside.join("secret.log"), logs.join("escape.log")).unwrap();
-                    None
-                }
-                "cycle" => {
-                    symlink(&logs, logs.join("cycle")).unwrap();
-                    None
-                }
-                "socket" => Some(UnixListener::bind(logs.join("events.sock")).unwrap()),
-                _ => unreachable!(),
-            };
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let logs = dir.path().join("logs");
+        let outside = dir.path().join("outside.log");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("safe.log"), "level=info msg=safe\n").unwrap();
+        std::fs::write(&outside, "level=error msg=must-not-import\n").unwrap();
+        symlink(&outside, logs.join("escape.log")).unwrap();
+        let _socket = UnixListener::bind(logs.join("events.sock")).unwrap();
 
-            let error = ingest_path(&cache, &logs, case, None, "none").unwrap_err();
-            let expected = if case == "socket" {
-                "non-regular"
-            } else {
-                "symlink"
-            };
-            assert_atomic_failure(&cache, &error, expected);
-        }
+        let report = ingest_path(&cache, &logs, "mixed-special", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.discovered_files, 3);
+        assert_eq!(report.stats.excluded_files, 2);
+        assert_eq!(report.stats.exclusion_counts["symlink"], 1);
+        assert_eq!(report.stats.exclusion_counts["non_regular"], 1);
+        assert!(report
+            .stats
+            .exclusion_examples
+            .contains(&"symlink: escape.log".to_string()));
+        assert!(report
+            .stats
+            .exclusion_examples
+            .contains(&"non_regular: events.sock".to_string()));
+        assert!(report.stats.partial);
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(
+            corpus.with_events(|events| events
+                .iter()
+                .map(|event| event.message.clone())
+                .collect::<Vec<_>>()),
+            ["safe".to_string()]
+        );
     }
 
     #[cfg(unix)]
@@ -2256,10 +2499,16 @@ mod tests {
 
         let error = ingest_path(&cache, &selected, "symlink", None, "none").unwrap_err();
         assert_atomic_failure(&cache, &error, "symlink");
+
+        let socket_cache = dir.path().join("socket-cache");
+        let socket_path = dir.path().join("selected.sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let error = ingest_path(&socket_cache, &socket_path, "socket", None, "none").unwrap_err();
+        assert_atomic_failure(&socket_cache, &error, "non-regular");
     }
 
     #[test]
-    fn zip_preflight_rejects_duplicate_traversal_symlink_and_non_regular_entries() {
+    fn zip_preflight_rejects_duplicate_and_traversal_entries() {
         let mut duplicate = zip_bytes(&[
             ("one.log", b"level=info msg=one\n"),
             ("two.log", b"level=info msg=two\n"),
@@ -2288,47 +2537,76 @@ mod tests {
             let error = ingest_path(&cache, &archive, case, None, "none").unwrap_err();
             assert_atomic_failure(&cache, &error, expected);
         }
+    }
 
+    #[test]
+    fn zip_excludes_symlink_and_non_regular_entries_but_imports_safe_logs() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
-        let symlink_zip = dir.path().join("symlink.zip");
+        let archive = dir.path().join("mixed-special.zip");
         {
-            let file = std::fs::File::create(&symlink_zip).unwrap();
+            let file = std::fs::File::create(&archive).unwrap();
             let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("safe.log", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"level=info msg=safe\n").unwrap();
             zip.add_symlink(
                 "link.log",
                 "../outside.log",
                 zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
+            zip.start_file("socket.log", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"level=error msg=must-not-import\n").unwrap();
             zip.finish().unwrap();
         }
-        let error = ingest_path(&cache, &symlink_zip, "symlink", None, "none").unwrap_err();
-        assert_atomic_failure(&cache, &error, "symlink");
-
-        let non_regular_zip = dir.path().join("non-regular.zip");
-        std::fs::write(
-            &non_regular_zip,
-            zip_bytes(&[("socket.log", b"level=info msg=not-regular\n")]),
-        )
-        .unwrap();
-        let mut bytes = std::fs::read(&non_regular_zip).unwrap();
-        let central = bytes
-            .windows(4)
-            .position(|window| window == b"PK\x01\x02")
-            .unwrap();
+        let mut bytes = std::fs::read(&archive).unwrap();
         let socket_mode = (0o140777u32) << 16;
-        bytes[central + 38..central + 42].copy_from_slice(&socket_mode.to_le_bytes());
-        std::fs::write(&non_regular_zip, bytes).unwrap();
-        let error = ingest_path(&cache, &non_regular_zip, "non-regular", None, "none").unwrap_err();
-        assert_atomic_failure(&cache, &error, "non-regular");
+        let socket_central = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(position, window)| (window == b"PK\x01\x02").then_some(position))
+            .find(|position| {
+                let name_len =
+                    u16::from_le_bytes([bytes[position + 28], bytes[position + 29]]) as usize;
+                bytes.get(position + 46..position + 46 + name_len) == Some(b"socket.log")
+            })
+            .unwrap();
+        bytes[socket_central + 38..socket_central + 42].copy_from_slice(&socket_mode.to_le_bytes());
+        std::fs::write(&archive, bytes).unwrap();
+
+        let report = ingest_path(&cache, &archive, "mixed-special", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.discovered_files, 3);
+        assert_eq!(report.stats.excluded_files, 2);
+        assert_eq!(report.stats.exclusion_counts["symlink"], 1);
+        assert_eq!(report.stats.exclusion_counts["non_regular"], 1);
+        assert!(report
+            .stats
+            .exclusion_examples
+            .contains(&"symlink: link.log".to_string()));
+        assert!(report
+            .stats
+            .exclusion_examples
+            .contains(&"non_regular: socket.log".to_string()));
+        assert!(report.stats.partial);
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(
+            corpus.with_events(|events| events
+                .iter()
+                .map(|event| event.message.clone())
+                .collect::<Vec<_>>()),
+            ["safe".to_string()]
+        );
     }
 
     #[test]
-    fn zip_preflight_rejects_encrypted_zip64_and_multi_disk_metadata() {
+    fn zip_preflight_rejects_encrypted_malformed_zip64_and_multi_disk_metadata() {
         for (case, expected, patch) in [
             ("encrypted", "encrypted", "flags"),
-            ("zip64", "Zip64", "size"),
+            ("malformed-zip64", "Zip64", "size"),
             ("multi-disk", "multi-disk", "disk"),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -2360,6 +2638,60 @@ mod tests {
             let error = ingest_path(&cache, &archive, case, None, "none").unwrap_err();
             assert_atomic_failure(&cache, &error, expected);
         }
+    }
+
+    #[test]
+    fn valid_bounded_zip64_entry_imports_through_resolved_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let archive = dir.path().join("bounded-zip64.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default().large_file(true);
+            zip.start_file("app.log", options).unwrap();
+            zip.write_all(b"level=info msg=zip64-safe\n").unwrap();
+            zip.finish().unwrap();
+        }
+        let bytes = std::fs::read(&archive).unwrap();
+        let central = bytes
+            .windows(4)
+            .position(|window| window == b"PK\x01\x02")
+            .unwrap();
+        assert!(
+            u32::from_le_bytes([
+                bytes[central + 24],
+                bytes[central + 25],
+                bytes[central + 26],
+                bytes[central + 27],
+            ]) == u32::MAX,
+            "fixture must carry a Zip64 size sentinel resolved by extra metadata"
+        );
+
+        let report = ingest_path(&cache, &archive, "bounded-zip64", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert!(!report.stats.partial);
+    }
+
+    #[test]
+    fn valid_bounded_zip64_end_records_import_through_resolved_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let archive = dir.path().join("bounded-zip64-end.zip");
+        std::fs::write(
+            &archive,
+            with_bounded_zip64_end_records(zip_bytes(&[(
+                "app.log",
+                b"level=info msg=zip64-end-safe\n",
+            )])),
+        )
+        .unwrap();
+
+        let report = ingest_path(&cache, &archive, "bounded-zip64-end", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert!(!report.stats.partial);
     }
 
     #[test]
@@ -2399,7 +2731,7 @@ mod tests {
     }
 
     #[test]
-    fn zip_entry_aggregate_and_compression_budgets_fail_atomically() {
+    fn entry_and_actual_byte_budgets_fail_atomically() {
         let cases = [
             (
                 "entries",
@@ -2414,7 +2746,7 @@ mod tests {
                 "entry limit",
             ),
             (
-                "expanded",
+                "actual-bytes",
                 zip_bytes(&[
                     ("one.log", b"level=info msg=one\n"),
                     ("two.log", b"level=info msg=two\n"),
@@ -2423,7 +2755,7 @@ mod tests {
                     max_expanded_bytes: 24,
                     ..RawIngestLimits::default()
                 },
-                "aggregate expanded-byte limit",
+                "aggregate actual-byte limit",
             ),
         ];
         for (case, bytes, limits, expected) in cases {
@@ -2436,38 +2768,115 @@ mod tests {
                     .unwrap_err();
             assert_atomic_failure(&cache, &error, expected);
         }
+    }
 
+    #[test]
+    fn excluded_content_does_not_consume_the_actual_byte_budget() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
-        let archive = dir.path().join("ratio.zip");
+        let archive = dir.path().join("excluded-budget.zip");
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("safe.log", options).unwrap();
+            zip.write_all(b"level=info msg=safe\n").unwrap();
+            zip.start_file(".hidden.log", options).unwrap();
+            zip.write_all(&[b'h'; 64]).unwrap();
+            zip.start_file("nested.zip", options).unwrap();
+            zip.write_all(&[b'n'; 64]).unwrap();
+            zip.start_file("oversized.log", options).unwrap();
+            zip.write_all(&[b'o'; 64]).unwrap();
+            zip.start_file("binary.log", options).unwrap();
+            zip.write_all(b"\0binary-content").unwrap();
+            zip.start_file("disguised.bundle", options).unwrap();
+            zip.write_all(b"PK\x03\x04nested").unwrap();
+            zip.finish().unwrap();
+        }
+        let limits = RawIngestLimits {
+            max_file_bytes: 32,
+            max_expanded_bytes: 24,
+            ..RawIngestLimits::default()
+        };
+        let report = ingest_with_limits(
+            &cache,
+            &archive,
+            "excluded-zip-budget",
+            limits,
+            &NoopProcessProgress,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.ignored_files, 1);
+        assert_eq!(report.stats.exclusion_counts["hidden"], 1);
+        assert_eq!(report.stats.exclusion_counts["too_large"], 1);
+        assert_eq!(report.stats.exclusion_counts["binary"], 1);
+        assert_eq!(
+            report.stats.exclusion_counts["nested_archive_unsupported"],
+            2
+        );
+
+        let directory_cache = dir.path().join("directory-cache");
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("safe.log"), b"level=info msg=safe\n").unwrap();
+        std::fs::write(logs.join("binary.log"), b"\0binary-content").unwrap();
+        std::fs::write(logs.join("nested.zip"), [b'n'; 64]).unwrap();
+        std::fs::write(logs.join("oversized.log"), [b'o'; 64]).unwrap();
+        let report = ingest_with_limits(
+            &directory_cache,
+            &logs,
+            "excluded-directory-budget",
+            limits,
+            &NoopProcessProgress,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.exclusion_counts["binary"], 1);
+        assert_eq!(report.stats.exclusion_counts["too_large"], 1);
+        assert_eq!(
+            report.stats.exclusion_counts["nested_archive_unsupported"],
+            1
+        );
+    }
+
+    #[test]
+    fn highly_repetitive_log_within_absolute_bounds_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let archive = dir.path().join("repetitive.zip");
         {
             let file = std::fs::File::create(&archive).unwrap();
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             zip.start_file("repeated.log", options).unwrap();
-            zip.write_all(&vec![b'a'; 4096]).unwrap();
+            let chunk = [b'a'; 64 * 1024];
+            for _ in 0..17 {
+                zip.write_all(&chunk).unwrap();
+            }
             zip.finish().unwrap();
         }
-        let limits = RawIngestLimits {
-            min_compression_ratio_check_bytes: 1,
-            max_compression_ratio: 2,
-            ..RawIngestLimits::default()
-        };
-        let error = ingest_with_limits(
-            &cache,
-            &archive,
-            "ratio",
-            limits,
-            &NoopProcessProgress,
-            None,
-        )
-        .unwrap_err();
-        assert_atomic_failure(&cache, &error, "compression-ratio limit");
+        {
+            let file = std::fs::File::open(&archive).unwrap();
+            let mut zip = zip::ZipArchive::new(file).unwrap();
+            let entry = zip.by_index(0).unwrap();
+            assert!(
+                entry.size() > entry.compressed_size().saturating_mul(250),
+                "fixture must exceed the removed blanket 250:1 rejection"
+            );
+        }
+        let report = ingest_path(&cache, &archive, "repetitive", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
     }
 
     #[test]
-    fn actual_byte_growth_and_line_length_limits_fail_atomically() {
+    fn actual_byte_growth_fails_atomically() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2506,23 +2915,32 @@ mod tests {
         let error =
             ingest_with_limits(&cache, &logs, "growth", limits, &observer, None).unwrap_err();
         assert_atomic_failure(&cache, &error, "actual-byte limit");
+    }
 
+    #[test]
+    fn production_line_bound_accepts_the_boundary_and_fails_atomically_above_it() {
+        let mut reader = BufReader::with_capacity(
+            64 * 1024,
+            std::io::repeat(b'x').take(MAX_RAW_LOG_LINE_BYTES as u64),
+        );
+        let mut record = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut record, MAX_RAW_LOG_LINE_BYTES, None).unwrap(),
+            MAX_RAW_LOG_LINE_BYTES
+        );
+        assert_eq!(record.len(), MAX_RAW_LOG_LINE_BYTES);
+        drop(record);
+
+        let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("line-cache");
         let long_line = dir.path().join("long.log");
-        std::fs::write(&long_line, format!("{}\n", "x".repeat(80))).unwrap();
-        let limits = RawIngestLimits {
-            max_line_bytes: 32,
-            ..RawIngestLimits::default()
-        };
-        let error = ingest_with_limits(
-            &cache,
-            &long_line,
-            "long-line",
-            limits,
-            &NoopProcessProgress,
-            None,
-        )
-        .unwrap_err();
+        let mut file = std::fs::File::create(&long_line).unwrap();
+        let chunk = [b'x'; 64 * 1024];
+        for _ in 0..=(MAX_RAW_LOG_LINE_BYTES / chunk.len()) {
+            file.write_all(&chunk).unwrap();
+        }
+        drop(file);
+        let error = ingest_path(&cache, &long_line, "long-line", None, "none").unwrap_err();
         assert_atomic_failure(&cache, &error, "line-length limit");
     }
 
@@ -2701,6 +3119,48 @@ mod tests {
         drop(updates);
         assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
         assert_no_ingest_staging(dir.path());
+    }
+
+    #[test]
+    fn read_cancellation_is_canonical_and_emits_terminal_cancelled_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let log = dir.path().join("cancel.log");
+        std::fs::write(&log, "level=info msg=must-not-import\n").unwrap();
+        let flag = CancelFlag::new();
+
+        struct CancelOnOpen {
+            flag: CancelFlag,
+            rec: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelOnOpen {
+            fn progress(&self, update: ProcessProgress) {
+                if update.message.starts_with("opening ") {
+                    self.flag.cancel();
+                }
+                self.rec.progress(update);
+            }
+        }
+
+        let observer = CancelOnOpen {
+            flag: flag.clone(),
+            rec: RecordingProcessProgress::default(),
+        };
+        let error = ingest_path_with_observer(
+            &cache,
+            &log,
+            "read-cancel",
+            None,
+            "none",
+            &observer,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "ingest cancelled");
+        let phases = observer.rec.phases();
+        assert_eq!(phases.last(), Some(&ProcessProgressPhase::Cancelled));
+        assert_no_ingest_staging(&cache);
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
     }
 
     #[test]
