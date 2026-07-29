@@ -5,8 +5,10 @@ import {
   hostGetFailedLogIngestDiagnostic,
   hostGetHandbookPage,
   hostInstallDemoLogCorpus,
+  hostLogCountEvents,
   hostOpenEngineeringHandbook,
   hostResolveHandbookLink,
+  hostLogQueryEventRows,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
   hostLogSourceCatalog,
@@ -29,6 +31,73 @@ beforeEach(() => {
   invokeMock.mockReset();
   (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ =
     {};
+});
+
+describe("split Log Explorer event queries", () => {
+  it("exposes bounded rows and exact counts as independent host requests", async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        events: [],
+        nextCursor: 42,
+        nextTs: 1_700_000_000,
+        timeQuality: "wall",
+      })
+      .mockResolvedValueOnce({ totalMatched: 250_000 });
+
+    await expect(
+      hostLogQueryEventRows("corpus-1", {
+        levels: ["error"],
+        afterSeq: 7,
+        afterTs: 1_699_999_999,
+        limit: 100,
+      }),
+    ).resolves.toMatchObject({
+      nextCursor: 42,
+      timeQuality: "wall",
+    });
+    await expect(
+      hostLogCountEvents("corpus-1", {
+        levels: ["error"],
+        afterSeq: 7,
+        afterTs: 1_699_999_999,
+        limit: 100,
+      }),
+    ).resolves.toEqual({ totalMatched: 250_000 });
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "log_query_event_rows", {
+      corpusId: "corpus-1",
+      query: {
+        levels: ["error"],
+        afterSeq: 7,
+        afterTs: 1_699_999_999,
+        limit: 100,
+      },
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "log_count_events", {
+      corpusId: "corpus-1",
+      query: {
+        levels: ["error"],
+        afterSeq: 7,
+        afterTs: 1_699_999_999,
+        limit: 100,
+      },
+    });
+  });
+
+  it("returns honest empty split results outside the desktop host", async () => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object })
+      .__TAURI_INTERNALS__;
+
+    await expect(hostLogQueryEventRows("corpus-1")).resolves.toEqual({
+      events: [],
+      nextCursor: null,
+      timeQuality: "order_only",
+    });
+    await expect(hostLogCountEvents("corpus-1")).resolves.toEqual({
+      totalMatched: 0,
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("hostLogSharedTimelineSummary", () => {

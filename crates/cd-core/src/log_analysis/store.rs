@@ -10,8 +10,11 @@ use crate::error::{CoreError, CoreResult};
 use crate::vector_index::{backend_name, select_backend, VectorIndex};
 use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -23,6 +26,63 @@ pub const EVENT_ENGINE: &str = "duckdb";
 
 /// `meta.json` schema version (v2 adds persisted ingest stats).
 pub const META_VERSION: u32 = 2;
+
+/// Maximum exact event-count predicates retained by one open corpus.
+///
+/// Explorer filters are user-controlled and therefore unbounded over time.
+/// Keeping this cache deliberately small prevents count optimization from
+/// becoming a second corpus-sized store.
+const EVENT_COUNT_CACHE_CAP: usize = 64;
+
+/// Fixed-size identity for an exact event-count predicate.
+///
+/// Query code hashes a canonical, typed predicate representation. Keeping the
+/// key opaque here avoids coupling the event store to Explorer query DTOs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct EventCountCacheKey(pub(crate) [u8; 32]);
+
+#[derive(Debug, Clone, Copy)]
+struct CachedEventCount {
+    revision: u64,
+    count: u64,
+}
+
+#[derive(Default)]
+struct EventCountCache {
+    entries: HashMap<EventCountCacheKey, CachedEventCount>,
+    order: VecDeque<EventCountCacheKey>,
+}
+
+impl EventCountCache {
+    fn get(&mut self, key: &EventCountCacheKey, revision: u64) -> Option<u64> {
+        let entry = self.entries.get(key).copied()?;
+        if entry.revision != revision {
+            self.entries.remove(key);
+            self.order.retain(|candidate| candidate != key);
+            return None;
+        }
+        self.order.retain(|candidate| candidate != key);
+        self.order.push_back(*key);
+        Some(entry.count)
+    }
+
+    fn insert(&mut self, key: EventCountCacheKey, entry: CachedEventCount) {
+        self.order.retain(|candidate| candidate != &key);
+        self.entries.insert(key, entry);
+        self.order.push_back(key);
+        while self.entries.len() > EVENT_COUNT_CACHE_CAP {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
 
 /// Snapshot of ingest / corpus statistics (persisted in meta.json).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -273,6 +333,13 @@ pub struct LogCorpus {
     index: Mutex<Box<dyn VectorIndex>>,
     /// Diagnostics: "exact" | "hnsw".
     index_backend: Mutex<&'static str>,
+    /// Exact event counts keyed by cursor-independent filter predicate.
+    event_count_cache: Mutex<EventCountCache>,
+    /// Changes only after a successful event append.
+    event_revision: AtomicU64,
+    /// Test instrumentation: physical `COUNT(*)` scans, not cache reads.
+    #[cfg(test)]
+    event_count_scans: AtomicUsize,
 }
 
 impl LogCorpus {
@@ -310,6 +377,10 @@ impl LogCorpus {
             templates: Mutex::new(HashMap::new()),
             index: Mutex::new(select_backend(0)),
             index_backend: Mutex::new(backend_name(0)),
+            event_count_cache: Mutex::new(EventCountCache::default()),
+            event_revision: AtomicU64::new(0),
+            #[cfg(test)]
+            event_count_scans: AtomicUsize::new(0),
         })
     }
 
@@ -385,6 +456,10 @@ impl LogCorpus {
             templates: Mutex::new(templates),
             index: Mutex::new(idx),
             index_backend: Mutex::new(backend_name(n_tpl)),
+            event_count_cache: Mutex::new(EventCountCache::default()),
+            event_revision: AtomicU64::new(0),
+            #[cfg(test)]
+            event_count_scans: AtomicUsize::new(0),
         })
     }
 
@@ -600,7 +675,63 @@ impl LogCorpus {
                 .map_err(|e| CoreError::Message(format!("duckdb flush: {e}")))?;
         }
         conn.execute_batch("COMMIT").map_err(duck_err)?;
+        // Publish the new revision while the database lock is still held. A
+        // concurrent count that started before this commit will then refuse to
+        // cache its result under the obsolete revision.
+        self.event_revision.fetch_add(1, Ordering::SeqCst);
+        drop(conn);
+        self.event_count_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         Ok(())
+    }
+
+    /// Current immutable-event revision used to validate exact-count cache hits.
+    pub(crate) fn event_revision(&self) -> u64 {
+        self.event_revision.load(Ordering::SeqCst)
+    }
+
+    /// Return an exact cached count only when it belongs to the current events.
+    pub(crate) fn cached_event_count(
+        &self,
+        key: &EventCountCacheKey,
+        revision: u64,
+    ) -> Option<u64> {
+        if self.event_revision() != revision {
+            return None;
+        }
+        self.event_count_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key, revision)
+    }
+
+    /// Cache an exact count only if no event append completed during its scan.
+    pub(crate) fn cache_event_count_if_current(
+        &self,
+        key: EventCountCacheKey,
+        revision: u64,
+        count: u64,
+    ) -> bool {
+        if self.event_revision() != revision {
+            return false;
+        }
+        self.event_count_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, CachedEventCount { revision, count });
+        self.event_revision() == revision
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_event_count_scan(&self) {
+        self.event_count_scans.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn event_count_scan_count(&self) -> usize {
+        self.event_count_scans.load(Ordering::SeqCst)
     }
 
     /// Whether this corpus contains at least one authoritative redacted source

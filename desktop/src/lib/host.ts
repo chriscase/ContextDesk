@@ -2104,6 +2104,14 @@ export type EventPageDto = {
   timeQuality: TimeQuality;
 };
 
+/** Bounded evidence rows/cursors without an exact full-filter count. */
+export type EventRowsPageDto = Omit<EventPageDto, "totalMatched">;
+
+/** Exact cursor-independent count for one event filter. */
+export type EventCountDto = {
+  totalMatched: number;
+};
+
 export type TimelineSummaryBucketDto = {
   index: number;
   start: number;
@@ -2392,6 +2400,32 @@ export async function hostLogQueryEvents(
     };
   }
   return invoke<EventPageDto>("log_query_events", { corpusId, query });
+}
+
+/** Load bounded evidence rows without waiting for an exact filtered count. */
+export async function hostLogQueryEventRows(
+  corpusId: string,
+  query: EventQueryDto = {},
+): Promise<EventRowsPageDto> {
+  if (!isTauri()) {
+    return {
+      events: [],
+      nextCursor: null,
+      timeQuality: "order_only",
+    };
+  }
+  return invoke<EventRowsPageDto>("log_query_event_rows", { corpusId, query });
+}
+
+/** Load/cache the exact total independently of bounded row pagination. */
+export async function hostLogCountEvents(
+  corpusId: string,
+  query: EventQueryDto = {},
+): Promise<EventCountDto> {
+  if (!isTauri()) {
+    return { totalMatched: 0 };
+  }
+  return invoke<EventCountDto>("log_count_events", { corpusId, query });
 }
 
 /**

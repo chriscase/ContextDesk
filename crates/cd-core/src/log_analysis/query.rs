@@ -4,10 +4,11 @@
 //! Hard page caps keep IPC and UI virtualization safe.
 
 use super::search::{search_logs, SearchLogsQuery};
-use super::store::{LogCorpus, LogEvent};
+use super::store::{EventCountCacheKey, LogCorpus, LogEvent};
 use crate::embed::EmbedBackend;
 use crate::error::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Hard max rows per page (IPC / virtualization).
@@ -600,6 +601,39 @@ pub struct EventPage {
     pub total_matched: u64,
     /// Corpus/window time quality hint.
     pub time_quality: TimeQuality,
+}
+
+/// Bounded event rows and keyset cursors, deliberately independent of an exact
+/// full-filter count.
+///
+/// This is the prompt Explorer evidence path for large corpora. Call
+/// [`query_event_count`] separately when an exact count is needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRowsPage {
+    /// Rows (≤ limit), always in ascending display order (`ts`/`seq` ASC).
+    pub events: Vec<ExplorerEvent>,
+    /// Pass as `after_seq` for the **newer** page.
+    pub next_cursor: Option<u64>,
+    /// Pass as `after_ts` with `next_cursor` when time-sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_ts: Option<i64>,
+    /// Pass as `before_seq` for the **older** page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<u64>,
+    /// Pass as `before_ts` with `prev_cursor` when time-sorted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_ts: Option<i64>,
+    /// Corpus/window time quality hint.
+    pub time_quality: TimeQuality,
+}
+
+/// Exact count under one cursor-independent event filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventCount {
+    /// Exact number of events matching the filter.
+    pub total_matched: u64,
 }
 
 /// Facet counts under the same filters (except the faceted dimension itself).
@@ -1237,6 +1271,21 @@ pub fn query_events(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventPage>
     query_events_with_additional_keyword(corpus, q, None)
 }
 
+/// Query only bounded rows and keyset cursors.
+///
+/// Unlike [`query_events`], this path never performs or waits for an exact
+/// `COUNT(*)`. It exists so hosts can put first useful evidence on the critical
+/// path while obtaining exact counts independently.
+pub fn query_event_rows(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventRowsPage> {
+    query_event_rows_with_additional_keyword(corpus, q, None)
+}
+
+/// Return the exact total for an event filter, ignoring page cursors, ordering,
+/// and limit. Exact results are boundedly cached by filter on the open corpus.
+pub fn query_event_count(corpus: &LogCorpus, q: &EventQuery) -> CoreResult<EventCount> {
+    query_event_count_with_additional_keyword(corpus, q, None)
+}
+
 /// Query events while requiring an additional case-insensitive message
 /// substring. Advanced Find uses this to intersect its literal query with the
 /// independently active Filter keyword without widening either predicate.
@@ -1245,20 +1294,34 @@ fn query_events_with_additional_keyword(
     q: &EventQuery,
     additional_keyword: Option<&str>,
 ) -> CoreResult<EventPage> {
+    // Rows intentionally run first. Existing callers retain the combined
+    // response contract, while pagination count work normally resolves from
+    // the cursor-independent cache populated for the first filter page.
+    let rows = query_event_rows_with_additional_keyword(corpus, q, additional_keyword)?;
+    let count = query_event_count_with_additional_keyword(corpus, q, additional_keyword)?;
+    Ok(EventPage {
+        events: rows.events,
+        next_cursor: rows.next_cursor,
+        next_ts: rows.next_ts,
+        prev_cursor: rows.prev_cursor,
+        prev_ts: rows.prev_ts,
+        total_matched: count.total_matched,
+        time_quality: rows.time_quality,
+    })
+}
+
+fn query_event_rows_with_additional_keyword(
+    corpus: &LogCorpus,
+    q: &EventQuery,
+    additional_keyword: Option<&str>,
+) -> CoreResult<EventRowsPage> {
     let limit = if q.limit == 0 {
         DEFAULT_EVENT_PAGE
     } else {
         q.limit.clamp(1, MAX_EVENT_PAGE)
     };
 
-    let (mut where_sql, mut binds) = build_where(q);
-    if let Some(keyword) = additional_keyword {
-        let keyword = keyword.trim();
-        if !keyword.is_empty() {
-            where_sql.push_str(" AND lower(message) LIKE ?");
-            binds.push(Value::Text(format!("%{}%", keyword.to_lowercase())));
-        }
-    }
+    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword);
     // Reverse page: only `before_*` (no `after_*`) — fetch the adjacent older
     // window via DESC + reverse so ASC LIMIT does not return corpus head (#538).
     let reverse_page = q.before_seq.is_some() && q.after_seq.is_none();
@@ -1314,7 +1377,6 @@ fn query_events_with_additional_keyword(
         }
     }
 
-    let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
     // Fetch one lookahead row so an exact-limit final page is a known boundary
     // instead of advertising a cursor that requires an empty probe (#640).
     let fetch_limit = limit.saturating_add(1);
@@ -1323,14 +1385,9 @@ fn query_events_with_additional_keyword(
          FROM events WHERE {page_where} ORDER BY {order} LIMIT {fetch_limit}"
     );
 
-    let (total_matched, mut events) = corpus.with_connection(|conn| {
-        let total_matched: i64 = {
-            let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
-            bind_and_query_row_i64(&mut stmt, &binds)?
-        };
+    let mut events = corpus.with_connection(|conn| {
         let mut stmt = conn.prepare(&sql).map_err(duck_err)?;
-        let events = bind_and_map_events(&mut stmt, &page_binds)?;
-        Ok((total_matched, events))
+        bind_and_map_events(&mut stmt, &page_binds)
     })?;
 
     let has_more_in_query_direction = events.len() > limit;
@@ -1390,14 +1447,60 @@ fn query_events_with_additional_keyword(
         summarize_event_quality(&events)
     };
 
-    Ok(EventPage {
+    Ok(EventRowsPage {
         events,
         next_cursor,
         next_ts,
         prev_cursor,
         prev_ts,
-        total_matched: total_matched.max(0) as u64,
         time_quality: tq,
+    })
+}
+
+fn query_event_count_with_additional_keyword(
+    corpus: &LogCorpus,
+    q: &EventQuery,
+    additional_keyword: Option<&str>,
+) -> CoreResult<EventCount> {
+    query_event_count_with_post_scan(corpus, q, additional_keyword, || {})
+}
+
+fn query_event_count_with_post_scan(
+    corpus: &LogCorpus,
+    q: &EventQuery,
+    additional_keyword: Option<&str>,
+    post_scan: impl FnOnce(),
+) -> CoreResult<EventCount> {
+    let (where_sql, binds) = build_where_with_additional_keyword(q, additional_keyword);
+    let key = event_count_cache_key(&where_sql, &binds)?;
+    let observed_revision = corpus.event_revision();
+    if let Some(count) = corpus.cached_event_count(&key, observed_revision) {
+        return Ok(EventCount {
+            total_matched: count,
+        });
+    }
+
+    let count_sql = format!("SELECT COUNT(*) FROM events WHERE {where_sql}");
+    let (snapshot_revision, count) = corpus.with_connection(|conn| {
+        // Event appends publish their revision while holding this same database
+        // lock. Reading it here therefore identifies the exact event snapshot
+        // counted below.
+        let snapshot_revision = corpus.event_revision();
+        #[cfg(test)]
+        corpus.record_event_count_scan();
+        let mut stmt = conn.prepare(&count_sql).map_err(duck_err)?;
+        let count = bind_and_query_row_i64(&mut stmt, &binds)?.max(0) as u64;
+        Ok((snapshot_revision, count))
+    })?;
+
+    // A count remains a truthful linearizable snapshot if an append commits
+    // after the database lock is released. Do not retry indefinitely: cache it
+    // only when that snapshot is still current, then return the snapshot either
+    // way. A later caller will count the newer revision.
+    post_scan();
+    let _ = corpus.cache_event_count_if_current(key, snapshot_revision, count);
+    Ok(EventCount {
+        total_matched: count,
     })
 }
 
@@ -2363,6 +2466,50 @@ fn event_matches_filter(event: &ExplorerEvent, filter: &EventQuery) -> bool {
 // ── SQL builders (parameterized) ────────────────────────────────────────────
 
 use duckdb::types::Value;
+
+fn build_where_with_additional_keyword(
+    q: &EventQuery,
+    additional_keyword: Option<&str>,
+) -> (String, Vec<Value>) {
+    let (mut where_sql, mut binds) = build_where(q);
+    if let Some(keyword) = additional_keyword {
+        let keyword = keyword.trim();
+        if !keyword.is_empty() {
+            where_sql.push_str(" AND lower(message) LIKE ?");
+            binds.push(Value::Text(format!("%{}%", keyword.to_lowercase())));
+        }
+    }
+    (where_sql, binds)
+}
+
+fn event_count_cache_key(where_sql: &str, binds: &[Value]) -> CoreResult<EventCountCacheKey> {
+    fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let mut hasher = Sha256::new();
+    update_len_prefixed(&mut hasher, where_sql.as_bytes());
+    hasher.update((binds.len() as u64).to_be_bytes());
+    for bind in binds {
+        match bind {
+            Value::BigInt(value) => {
+                hasher.update([0_u8]);
+                hasher.update(value.to_be_bytes());
+            }
+            Value::Text(value) => {
+                hasher.update([1_u8]);
+                update_len_prefixed(&mut hasher, value.as_bytes());
+            }
+            _ => {
+                return Err(CoreError::Message(
+                    "event count predicate contains an unsupported bind type".into(),
+                ));
+            }
+        }
+    }
+    Ok(EventCountCacheKey(hasher.finalize().into()))
+}
 
 /// Builds WHERE clause with `?` placeholders and binds in **appearance order**.
 fn build_where(q: &EventQuery) -> (String, Vec<Value>) {
@@ -3398,6 +3545,220 @@ mod tests {
         .unwrap();
         assert!(!api_only.events.is_empty());
         assert!(api_only.events.iter().all(|e| e.source.contains("api")));
+    }
+
+    #[test]
+    fn bounded_rows_are_independent_from_exact_count_scans() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+        let query = EventQuery {
+            levels: vec!["error".into()],
+            limit: 7,
+            ..Default::default()
+        };
+
+        let rows = query_event_rows(&corpus, &query).expect("bounded rows");
+        assert_eq!(rows.events.len(), 7);
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            0,
+            "the rows/cursors API must never run an exact count"
+        );
+
+        let exact = query_event_count(&corpus, &query).expect("exact count");
+        assert_eq!(exact.total_matched, 40);
+        assert_eq!(corpus.event_count_scan_count(), 1);
+
+        let cursor_variant = EventQuery {
+            after_seq: rows.next_cursor,
+            after_ts: rows.next_ts,
+            limit: 2,
+            sort_by_time: true,
+            ..query
+        };
+        let same_exact =
+            query_event_count(&corpus, &cursor_variant).expect("cursor-independent count");
+        assert_eq!(same_exact, exact);
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            1,
+            "cursor, ordering, and limit must not create a new count predicate"
+        );
+    }
+
+    #[test]
+    fn paginating_one_filter_reuses_one_exact_count_without_gaps_or_duplicates() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+        let mut after_seq = None;
+        let mut after_ts = None;
+        let mut seen = std::collections::HashSet::new();
+        let mut expected_total = None;
+        let mut pages = 0;
+
+        loop {
+            let page = query_events(
+                &corpus,
+                &EventQuery {
+                    sources: vec!["api.log".into()],
+                    limit: 7,
+                    after_seq,
+                    after_ts,
+                    ..Default::default()
+                },
+            )
+            .expect("page");
+            pages += 1;
+            assert!(pages < 20, "cursor failed to terminate");
+            match expected_total {
+                None => expected_total = Some(page.total_matched),
+                Some(expected) => assert_eq!(
+                    page.total_matched, expected,
+                    "pagination must never silently change the exact total"
+                ),
+            }
+            for event in &page.events {
+                assert_eq!(event.source, "api.log");
+                assert!(
+                    seen.insert(event.seq),
+                    "duplicate event {} across pages",
+                    event.seq
+                );
+            }
+            if page.next_cursor.is_none() {
+                assert!(page.next_ts.is_none());
+                break;
+            }
+            after_seq = page.next_cursor;
+            after_ts = page.next_ts;
+        }
+
+        assert_eq!(expected_total, Some(40));
+        assert_eq!(seen.len(), 40, "keyset pages must cover every match once");
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            1,
+            "all pagination requests for one filter generation share one count"
+        );
+    }
+
+    #[test]
+    fn exact_count_cache_is_filter_specific_and_invalidated_by_event_appends() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+
+        let errors = query_event_count(
+            &corpus,
+            &EventQuery {
+                levels: vec!["error".into()],
+                ..Default::default()
+            },
+        )
+        .expect("error count");
+        let worker = query_event_count(
+            &corpus,
+            &EventQuery {
+                sources: vec!["worker.log".into()],
+                ..Default::default()
+            },
+        )
+        .expect("worker count");
+        let plain = query_event_count(
+            &corpus,
+            &EventQuery {
+                sources: vec!["plain.log".into()],
+                ..Default::default()
+            },
+        )
+        .expect("plain count");
+        assert_eq!(errors.total_matched, 40);
+        assert_eq!(worker.total_matched, 40);
+        assert_eq!(plain.total_matched, 10);
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            3,
+            "distinct filters require distinct exact counts"
+        );
+
+        corpus
+            .push_events(&[LogEvent {
+                seq: 90,
+                ts: 1_700_000_500,
+                level: "error".into(),
+                service: Some("api".into()),
+                host: Some("h1".into()),
+                template_id: 0,
+                params: vec![],
+                trace_id: None,
+                message: "late failure".into(),
+                source: "api.log".into(),
+            }])
+            .expect("append event");
+
+        let refreshed = query_event_count(
+            &corpus,
+            &EventQuery {
+                levels: vec!["error".into()],
+                ..Default::default()
+            },
+        )
+        .expect("refreshed error count");
+        assert_eq!(refreshed.total_matched, 41);
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            4,
+            "a successful append must invalidate every prior filter count"
+        );
+    }
+
+    #[test]
+    fn count_returns_one_linearizable_snapshot_when_revision_advances_after_scan() {
+        let (dir, id) = multi_source_fixture();
+        let cache = dir.path().join("cache");
+        let corpus = LogCorpus::open(&cache, &id).expect("open corpus");
+        let filter = EventQuery {
+            levels: vec!["error".into()],
+            ..Default::default()
+        };
+
+        let snapshot = query_event_count_with_post_scan(&corpus, &filter, None, || {
+            corpus
+                .push_events(&[LogEvent {
+                    seq: 90,
+                    ts: 1_700_000_500,
+                    level: "error".into(),
+                    service: Some("api".into()),
+                    host: Some("h1".into()),
+                    template_id: 0,
+                    params: vec![],
+                    trace_id: None,
+                    message: "committed after count snapshot".into(),
+                    source: "api.log".into(),
+                }])
+                .expect("append after count scan");
+        })
+        .expect("linearizable count snapshot");
+
+        assert_eq!(
+            snapshot.total_matched, 40,
+            "the completed scan is exact at its database-lock linearization point"
+        );
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            1,
+            "a revision advance after the scan must not trigger an unbounded retry"
+        );
+
+        let current = query_event_count(&corpus, &filter).expect("new revision count");
+        assert_eq!(current.total_matched, 41);
+        assert_eq!(
+            corpus.event_count_scan_count(),
+            2,
+            "the stale snapshot must not be cached for the newer revision"
+        );
     }
 
     #[test]

@@ -7768,6 +7768,56 @@ async fn log_query_events(
         .map_err(|error| format!("log event query task join: {error}"))?
 }
 
+/// Count-free bounded event rows for hosts that load exact totals independently.
+fn query_log_event_rows_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventRowsPage, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_rows(&corpus, query).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_query_event_rows(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventRowsPage, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || {
+        query_log_event_rows_at(&handles, &cache, &corpus_id, &query)
+    })
+    .await
+    .map_err(|error| format!("log event rows task join: {error}"))?
+}
+
+/// Exact cursor-independent count for one event filter.
+fn count_log_events_at(
+    handles: &LogCorpusHandleCache,
+    cache: &std::path::Path,
+    corpus_id: &str,
+    query: &cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventCount, String> {
+    let corpus = handles.open(cache, corpus_id)?;
+    cd_core::log_analysis::query_event_count(&corpus, query).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn log_count_events(
+    state: State<'_, AppState>,
+    corpus_id: String,
+    query: cd_core::log_analysis::EventQuery,
+) -> Result<cd_core::log_analysis::EventCount, String> {
+    let cache = log_cache_dir(&state)?;
+    let handles = Arc::clone(&state.log_corpus_handles);
+    tokio::task::spawn_blocking(move || count_log_events_at(&handles, &cache, &corpus_id, &query))
+        .await
+        .map_err(|error| format!("log event count task join: {error}"))?
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum LogEventOriginalDto {
@@ -9634,6 +9684,8 @@ pub fn run() {
             set_active_log_corpus,
             get_active_log_corpus,
             log_query_events,
+            log_query_event_rows,
+            log_count_events,
             log_query_event_original,
             log_timeline_summary,
             log_shared_timeline_summary,
@@ -10000,8 +10052,18 @@ mod log_explorer_async_query_host_tests {
             ),
             (
                 "async fn log_query_events(",
-                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "/// Count-free bounded event rows",
                 "query_log_events_at",
+            ),
+            (
+                "async fn log_query_event_rows(",
+                "/// Exact cursor-independent count",
+                "query_log_event_rows_at",
+            ),
+            (
+                "async fn log_count_events(",
+                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]",
+                "count_log_events_at",
             ),
             (
                 "async fn log_query_event_original(",
@@ -10088,6 +10150,14 @@ mod log_explorer_async_query_host_tests {
             query_log_events_at(&handles, &cache, &report.corpus_id, &query).expect("event page");
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.total_matched, 2);
+
+        let rows = query_log_event_rows_at(&handles, &cache, &report.corpus_id, &query)
+            .expect("count-free event rows");
+        assert_eq!(rows.events.len(), 2);
+        assert!(rows.next_cursor.is_none());
+        let count = count_log_events_at(&handles, &cache, &report.corpus_id, &query)
+            .expect("independent exact event count");
+        assert_eq!(count.total_matched, 2);
 
         let facets =
             query_log_facets_at(&handles, &cache, &report.corpus_id, &query).expect("facets");
