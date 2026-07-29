@@ -6378,16 +6378,30 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "sequential tools in one turn must reuse the initialized corpus"
         );
+        let prior_turn = Arc::downgrade(&first);
 
         host.set_log_corpus_scope(Some(corpus_id.clone()));
         assert!(
             host.log_corpus_handle.lock().unwrap().is_none(),
             "a new turn scope must invalidate the prior handle"
         );
-        let reopened = host.open_log_corpus(&corpus_id).unwrap();
+        drop(first);
+        drop(second);
         assert!(
-            !Arc::ptr_eq(&first, &reopened),
-            "the next turn must reopen so re-analysis cannot leave stale state"
+            prior_turn.upgrade().is_none(),
+            "scope invalidation must release the prior turn handle"
+        );
+        let reopened = host.open_log_corpus(&corpus_id).unwrap();
+        let cached = host
+            .log_corpus_handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, corpus)| Arc::clone(corpus))
+            .expect("next turn cached reopened corpus");
+        assert!(
+            Arc::ptr_eq(&reopened, &cached),
+            "the next turn must cache its freshly reopened corpus"
         );
 
         host.set_active_log_corpus(None);
