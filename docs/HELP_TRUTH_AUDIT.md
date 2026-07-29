@@ -62,5 +62,6 @@ blanket claim that every future product change is automatically documented.
    `scripts/render_help_svg_contact_sheet.sh OUTPUT_DIRECTORY`.
 4. Search/read Help for lanes, Find vs Filter, bidirectional paging, long
    events, timeline navigator, linked chat, and first chat.
-5. Capture real HelpPane screenshots in dark, light, and slate at narrow,
-   normal, and wide sizes. Contact-sheet review does not replace this step.
+5. Capture real HelpPane screenshots in dark, light, slate, sand, and forest
+   at narrow, normal, and wide sizes. Contact-sheet review does not replace
+   this step.

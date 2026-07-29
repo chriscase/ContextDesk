@@ -7,23 +7,23 @@ company-data behavior, or owner acceptance.
 
 ## Exact app-build capture template
 
-The already-built application intended for the three replacement frames was
-built from exact app-source SHA
-`2be6f56c3ddab6e0b1d481d6ca42a4720dc78040`. Later documentation-only commits
+The application used for the current three public frames was built from exact
+app-source SHA
+`4cbdf664a794af3f424cd5bba8a4c621c3df3bae`. Later documentation-only commits
 may advance repository `HEAD` without changing those packaged application
 bytes.
 
 | Property | Required value |
 | --- | --- |
 | App | Packaged macOS `.app` from `desktop/src-tauri/target/release/bundle/macos/ContextDesk.app` |
-| App-source SHA | `2be6f56c3ddab6e0b1d481d6ca42a4720dc78040` |
+| App-source SHA | `4cbdf664a794af3f424cd5bba8a4c621c3df3bae` |
 | Capture method | Native packaged-app window capture, cropped to the application window |
 | Updater signing | Public key present; private key intentionally unset for the local unsigned bundle |
 
 | File | Surface | Dimensions |
 | --- | --- | --- |
 | `gallery/logs-library-demo.png` | Synthetic 25,000-event corpus in the Logs library | 1100 × 760 PNG |
-| `gallery/log-explorer-investigation.png` | Synthetic Log Explorer investigation with timeline, two lanes, payload-focused rows, and the chat rail collapsed | 1195 × 768 PNG |
+| `gallery/log-explorer-investigation.png` | Synthetic Log Explorer investigation with aligned CPU/heap/client tracks, two lanes, payload-focused rows, and the chat rail collapsed | 1195 × 768 PNG |
 | `gallery/help-appearance.png` | Demo-datasets Help article with the public Appearance picker open | 1100 × 760 PNG |
 
 The exact Git blob identities and completed byte-level publication review are
@@ -68,7 +68,7 @@ that an untested model or provider was used.
 ## Recapture procedure
 
 1. Use the already-built packaged application whose exact app-source SHA is
-   `2be6f56c3ddab6e0b1d481d6ca42a4720dc78040`. A later repository `HEAD` is
+   `4cbdf664a794af3f424cd5bba8a4c621c3df3bae`. A later repository `HEAD` is
    acceptable only when every intervening change is documentation-only and
    cannot alter the packaged application bytes.
 2. If the app must be rebuilt, check out the exact app-source SHA in an
@@ -90,8 +90,9 @@ that an untested model or provider was used.
    - Logs library: installed synthetic demo corpus, settled import summary, no
      menus, diagnostics, private paths, chat, or model controls.
    - Log Explorer: synthetic 25k corpus, two composed lanes, aligned time,
-     payload-focused preview rows, timeline and investigation controls, chat
-     rail fully collapsed, and no hover cards or popovers.
+     optional synthetic CPU/heap/client tracks, payload-focused rows, timeline
+     and investigation controls, chat rail fully collapsed, and no hover cards
+     or popovers.
    - Help: demo-datasets article with only the public Appearance theme names,
      descriptions, and palettes visible.
 5. Review the exact final pixels against the publication privacy gate.
