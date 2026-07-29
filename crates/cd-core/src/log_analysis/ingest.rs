@@ -525,7 +525,9 @@ impl IngestStaging {
         std::fs::create_dir_all(&parent)?;
         cleanup_abandoned_staging(&parent);
         let root = parent.join(Uuid::now_v7().to_string());
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let mut builder = builder;
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -839,7 +841,7 @@ fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
         ));
     }
     #[cfg(windows)]
-    {
+    let file = {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -850,14 +852,14 @@ fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
         }
         let expected = std::fs::canonicalize(path)
             .map_err(|error| CoreError::Message(format!("resolve selected source: {error}")))?;
-        return windows_secure_open_regular_file(
+        windows_secure_open_regular_file(
             path,
             &expected,
             None,
             "open source",
             "selected log source changed during secure open",
-        );
-    }
+        )?
+    };
     #[cfg(not(windows))]
     let file =
         std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open source: {e}")))?;
@@ -880,7 +882,6 @@ fn open_selected_regular_file(path: &Path) -> CoreResult<std::fs::File> {
             ));
         }
     }
-    #[cfg(not(windows))]
     Ok(file)
 }
 
@@ -2874,7 +2875,7 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
         return Err(CoreError::Policy("log source escaped selected root".into()));
     }
     #[cfg(windows)]
-    {
+    let file = {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -2883,14 +2884,14 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
                 "log source changed to a reparse point".into(),
             ));
         }
-        return windows_secure_open_regular_file(
+        windows_secure_open_regular_file(
             path,
             &canonical,
             Some(&inventory.canonical_root),
             "open log",
             "log source changed during secure open",
-        );
-    }
+        )?
+    };
     #[cfg(not(windows))]
     let file =
         std::fs::File::open(path).map_err(|e| CoreError::Message(format!("open log: {e}")))?;
@@ -2913,7 +2914,6 @@ fn open_inventory_file(inventory: &FileInventory, path: &Path) -> CoreResult<std
             ));
         }
     }
-    #[cfg(not(windows))]
     Ok(file)
 }
 
