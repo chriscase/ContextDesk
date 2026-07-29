@@ -1,12 +1,15 @@
 #[path = "support/log_lab_generator.rs"]
 mod log_lab_generator;
 
+use cd_core::investigations::InvestigationStore;
 use cd_core::log_analysis::{
     add_line_bookmark, cluster_problems, export_corpus_zip, import_corpus_zip_path, ingest_path,
-    ingest_path_with_observer, list_bookmarks, query_event_neighborhood, query_events,
-    query_facets, query_timeline_summary, search_events, search_events_advanced, timeline,
-    EventNeighborhoodQuery, EventQuery, EventSearchQuery, LogCorpus, SearchMatchMode, TimeQuality,
-    TimelineSummaryQuery, MAX_EVENT_PAGE, MAX_REGEX_SCAN_EVENTS,
+    ingest_path_with_observer, list_bookmarks, query_event_count, query_event_neighborhood,
+    query_event_rows, query_events, query_facets, query_shared_timeline_summary,
+    query_source_catalog, query_timeline_summary, search_events, search_events_advanced, timeline,
+    EventNeighborhoodQuery, EventQuery, EventSearchQuery, LogCorpus, LogSourceCatalogQuery,
+    SearchMatchMode, SharedTimelineSummaryQuery, TimeQuality, TimelineSummaryQuery, MAX_EVENT_PAGE,
+    MAX_REGEX_SCAN_EVENTS,
 };
 use cd_core::process_progress::{
     CancelFlag, ProcessProgress, ProcessProgressObserver, RecordingProcessProgress,
@@ -857,8 +860,8 @@ fn log_lab_triage_stress_minimum_product_path_keeps_rare_incident_signal() {
     );
 }
 
-/// Explicit local #745 scale vector. The generated 250k tree lives only in a
-/// temporary directory and is never checked into the repository.
+/// Explicit local #744/#745 scale vector. The generated 250k tree lives only in
+/// a temporary directory and is never checked into the repository.
 #[test]
 #[ignore = "explicit 250k triage-stress product-path proof"]
 fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
@@ -888,7 +891,39 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
         TRIAGE_STRESS_PARSER_TEMPLATE_COUNT
     );
 
+    let cold_open_started = Instant::now();
     let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+    let cold_open_ms = cold_open_started.elapsed().as_millis();
+
+    let summary_started = Instant::now();
+    let summary = corpus.summary();
+    let summary_ms = summary_started.elapsed().as_millis();
+    assert_eq!(
+        summary.event_count,
+        DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
+
+    let first_rows_started = Instant::now();
+    let first_rows = query_event_rows(
+        &corpus,
+        &EventQuery {
+            limit: MAX_EVENT_PAGE,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let first_rows_ms = first_rows_started.elapsed().as_millis();
+    assert_eq!(first_rows.events.len(), MAX_EVENT_PAGE);
+    assert!(first_rows.next_cursor.is_some());
+
+    let exact_count_started = Instant::now();
+    let exact_count = query_event_count(&corpus, &EventQuery::default()).unwrap();
+    let exact_count_ms = exact_count_started.elapsed().as_millis();
+    assert_eq!(
+        exact_count.total_matched,
+        DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
+
     let facets_started = Instant::now();
     let facets = query_facets(&corpus, &EventQuery::default()).unwrap();
     let facets_ms = facets_started.elapsed().as_millis();
@@ -897,6 +932,36 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     assert_eq!(facets.levels["debug"], 7_500);
     assert_eq!(facets.levels["info"], 160_000);
     assert_eq!(facets.sources.len(), TRIAGE_STRESS_SOURCE_COUNT);
+
+    let source_catalog_started = Instant::now();
+    let source_catalog = query_source_catalog(&corpus, &LogSourceCatalogQuery::default()).unwrap();
+    let source_catalog_ms = source_catalog_started.elapsed().as_millis();
+    assert_eq!(
+        source_catalog.total_matched as usize,
+        TRIAGE_STRESS_SOURCE_COUNT
+    );
+    assert_eq!(source_catalog.sources.len(), TRIAGE_STRESS_SOURCE_COUNT);
+
+    let bookmarks_started = Instant::now();
+    let bookmarks = list_bookmarks(&corpus).unwrap();
+    let bookmarks_ms = bookmarks_started.elapsed().as_millis();
+    assert!(bookmarks.is_empty());
+
+    let investigation_started = Instant::now();
+    let investigations = InvestigationStore::new(workspace.path().join("investigations"))
+        .list()
+        .unwrap();
+    let investigation_ms = investigation_started.elapsed().as_millis();
+    assert!(investigations.is_empty());
+
+    let shared_timeline_started = Instant::now();
+    let shared_timeline =
+        query_shared_timeline_summary(&corpus, &SharedTimelineSummaryQuery::default()).unwrap();
+    let shared_timeline_ms = shared_timeline_started.elapsed().as_millis();
+    assert_eq!(
+        shared_timeline.total_matched,
+        DEFAULT_TRIAGE_STRESS_EVENT_COUNT as u64
+    );
 
     let timeline_started = Instant::now();
     let buckets = timeline(&corpus, 300, None, None).unwrap();
@@ -930,14 +995,22 @@ fn log_lab_triage_stress_250k_product_path_is_bounded_and_truthful() {
     assert_eq!(manifest["expected"]["severities"]["info"], 160_000);
 
     eprintln!(
-        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} facets_ms={} timeline_ms={} cluster_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
+        "PASS triage-stress-250k events={} files={} templates={} source_bytes={} generation_ms={} import_ms={} cold_open_ms={} summary_ms={} first_rows_ms={} exact_count_ms={} facets_ms={} source_catalog_ms={} bookmarks_ms={} investigation_ms={} shared_timeline_ms={} agent_timeline_ms={} cluster_ms={} tree_sha256={} (one-machine observation; not a universal claim)",
         report.stats.lines,
         report.stats.files,
         report.stats.templates,
         report.stats.source_bytes,
         generation_ms,
         import_ms,
+        cold_open_ms,
+        summary_ms,
+        first_rows_ms,
+        exact_count_ms,
         facets_ms,
+        source_catalog_ms,
+        bookmarks_ms,
+        investigation_ms,
+        shared_timeline_ms,
         timeline_ms,
         cluster_ms,
         generation.tree_sha256
