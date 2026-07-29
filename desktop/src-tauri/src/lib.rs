@@ -9192,6 +9192,43 @@ mod log_diagnostic_export_authority_tests {
 }
 
 #[cfg(test)]
+mod failed_log_ingest_diagnostic_lifecycle_tests {
+    use super::*;
+
+    fn fresh_failed_ingest_state() -> Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore> {
+        Mutex::new(cd_core::log_analysis::FailedIngestDiagnosticStore::default())
+    }
+
+    #[test]
+    fn failed_ingest_diagnostics_are_process_memory_transient_across_fresh_state_construction() {
+        let first_state = fresh_failed_ingest_state();
+        let diagnostic = cd_core::log_analysis::FailedIngestDiagnosticRecorder::default().finish(
+            "source read failed",
+            cd_core::log_analysis::FailedIngestSourceKind::Directory,
+            1_735_737_600,
+        );
+        {
+            let mut store = first_state.lock().expect("first failed-ingest state");
+            let attempt = store.begin_attempt();
+            assert!(store.record_failure(attempt, diagnostic.clone()));
+            assert_eq!(store.snapshot(), Some(diagnostic));
+        }
+
+        drop(first_state);
+
+        let restarted_state = fresh_failed_ingest_state();
+        assert!(
+            restarted_state
+                .lock()
+                .expect("restarted failed-ingest state")
+                .snapshot()
+                .is_none(),
+            "a fresh process state must not reconstruct a prior failed-ingest diagnostic"
+        );
+    }
+}
+
+#[cfg(test)]
 mod log_ingest_cancel_registry_tests {
     use super::*;
     use std::sync::atomic::Ordering;
