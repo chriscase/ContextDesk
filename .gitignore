@@ -91,3 +91,7 @@ tarpaulin-report.html
 # Logs
 *.log
 logs/
+# Conformance fixtures must track synthetic log bytes (#764).
+!fixtures/incident-evidence/**/logs/
+!fixtures/incident-evidence/**/logs/**
+!fixtures/incident-evidence/**/*.log
