@@ -43,6 +43,22 @@
           "maxLength": 128
         },
         "timezoneResolved": { "type": "boolean" }
+      },
+      "if": {
+        "properties": {
+          "timezoneResolved": { "const": true }
+        },
+        "required": ["timezoneResolved"]
+      },
+      "then": {
+        "required": ["timezone"],
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
       }
     },
     "component": {

@@ -368,11 +368,20 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
             validate_time_basis(tb, &format!("{base}.timeBasis"), &mut diagnostics);
         }
 
-        // Resolve path under root without following escapes.
+        // Lexical resolve under root, then canonicalize every path (including
+        // intermediate directory symlinks) and require the real path stays
+        // under the canonical bundle root before any payload read/hash.
         let payload = match resolve_under_root(root, &c.path) {
             Ok(p) => p,
             Err(msg) => {
                 diagnostics.push(Diagnostic::new("path_escape", c.path.clone(), msg));
+                continue;
+            }
+        };
+        let payload = match ensure_within_bundle_root(root, &payload) {
+            Ok(p) => p,
+            Err(code_msg) => {
+                diagnostics.push(Diagnostic::new(code_msg.0, c.path.clone(), code_msg.1));
                 continue;
             }
         };
@@ -383,33 +392,6 @@ pub fn validate_directory(root: &Path) -> ValidationReport {
                 format!("payload file missing: {}", c.path),
             ));
             continue;
-        }
-        // Symlink escape: if symlink, ensure canonical parent stays under root.
-        if payload
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            match (payload.canonicalize(), root.canonicalize()) {
-                (Ok(real), Ok(root_real)) => {
-                    if !real.starts_with(&root_real) {
-                        diagnostics.push(Diagnostic::new(
-                            "symlink_escape",
-                            c.path.clone(),
-                            "symlink target escapes bundle root",
-                        ));
-                        continue;
-                    }
-                }
-                _ => {
-                    diagnostics.push(Diagnostic::new(
-                        "symlink_unresolvable",
-                        c.path.clone(),
-                        "symlink could not be resolved safely",
-                    ));
-                    continue;
-                }
-            }
         }
 
         let meta = match std::fs::metadata(&payload) {
@@ -649,6 +631,43 @@ fn resolve_under_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
         out.push(seg);
     }
     Ok(out)
+}
+
+/// Canonicalize `candidate` and require it to stay under the canonical bundle root.
+///
+/// Catches leaf symlinks **and** intermediate directory symlinks (e.g.
+/// `logs -> /tmp/outside` with path `logs/app.log`). Must run before any
+/// payload open/hash.
+fn ensure_within_bundle_root(
+    root: &Path,
+    candidate: &Path,
+) -> Result<PathBuf, (&'static str, String)> {
+    let root_real = root.canonicalize().map_err(|e| {
+        (
+            "root_unresolvable",
+            format!("bundle root could not be resolved: {e}"),
+        )
+    })?;
+    // Missing paths are not symlink escapes — keep payload_missing actionable.
+    if !candidate.exists() {
+        return Err((
+            "payload_missing",
+            format!("payload file missing: {}", candidate.display()),
+        ));
+    }
+    let real = candidate.canonicalize().map_err(|e| {
+        (
+            "symlink_unresolvable",
+            format!("payload path could not be resolved safely: {e}"),
+        )
+    })?;
+    if !real.starts_with(&root_real) {
+        return Err((
+            "symlink_escape",
+            "resolved payload path escapes bundle root (symlink or junction)".into(),
+        ));
+    }
+    Ok(real)
 }
 
 fn stream_sha256_hex(path: &Path) -> Result<String, String> {
@@ -914,5 +933,109 @@ mod tests {
         assert!(created_at_has_explicit_offset("2024-01-15T12:00:00Z"));
         assert!(created_at_has_explicit_offset("2024-01-15T12:00:00+00:00"));
         assert!(!created_at_has_explicit_offset("2024-01-15T12:00:00"));
+    }
+
+    #[test]
+    fn intermediate_dir_symlink_escape_rejected_before_hash() {
+        // logs/ is a symlink to an outside directory; path logs/secret.log must fail
+        // closed and must not successfully hash the outside file.
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.log");
+        std::fs::write(&secret, b"OUTSIDE_BUNDLE_PAYLOAD\n").unwrap();
+        let outside_hex = stream_sha256_hex(&secret).unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        let logs_link = root.join("logs");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &logs_link).expect("symlink logs dir");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), &logs_link).expect("symlink logs dir");
+
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"symlink-escape",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[{{
+    "id":"evil",
+    "role":"log",
+    "path":"logs/secret.log",
+    "mediaType":"text/plain",
+    "bytes":{bytes},
+    "sha256":"{hex}"
+  }}]
+}}"#,
+            bytes = std::fs::metadata(&secret).unwrap().len(),
+            hex = outside_hex
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+
+        let r = validate_directory(root);
+        assert!(
+            !r.ok,
+            "expected fail-closed, diagnostics={:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "symlink_escape" || d.code == "symlink_unresolvable"),
+            "expected symlink_escape, got {:?}",
+            r.diagnostics
+        );
+        // Must not report a clean hash match as success for the escaped path.
+        assert!(!r.diagnostics.is_empty());
+        assert_ne!(r.ok, true);
+    }
+
+    #[test]
+    fn leaf_symlink_escape_rejected() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("leaf.log");
+        std::fs::write(&secret, b"LEAF_OUTSIDE\n").unwrap();
+        let outside_hex = stream_sha256_hex(&secret).unwrap();
+
+        let bundle = tempfile::tempdir().unwrap();
+        let root = bundle.path();
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        let link = root.join("logs/app.log");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink leaf");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, &link).expect("symlink leaf");
+
+        let manifest = format!(
+            r#"{{
+  "schemaId":"contextdesk.incident_evidence.v1",
+  "minReaderVersion":1,
+  "bundleId":"leaf-symlink",
+  "createdAt":"2024-01-15T12:00:00Z",
+  "producer":{{"name":"t","version":"1"}},
+  "privacy":{{"redactionDeclared":true,"containsCredentials":false,"containsPii":false}},
+  "timeBasis":{{"timezone":"UTC","timezoneResolved":true}},
+  "components":[{{
+    "id":"evil",
+    "role":"log",
+    "path":"logs/app.log",
+    "mediaType":"text/plain",
+    "bytes":{bytes},
+    "sha256":"{hex}"
+  }}]
+}}"#,
+            bytes = std::fs::metadata(&secret).unwrap().len(),
+            hex = outside_hex
+        );
+        std::fs::write(root.join("manifest.json"), manifest).unwrap();
+        let r = validate_directory(root);
+        assert!(!r.ok, "{:?}", r.diagnostics);
+        assert!(r
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "symlink_escape" || d.code == "symlink_unresolvable"));
     }
 }
