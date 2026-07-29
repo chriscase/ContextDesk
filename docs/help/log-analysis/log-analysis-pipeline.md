@@ -31,7 +31,7 @@ clustering, and “why” tools.
 
 | Stage | What happens | Evidence or boundary |
 | --- | --- | --- |
-| Ingest | A file or directory is read into a named disposable corpus | `ingest_logs` is SoftWrite because it materializes local analysis data |
+| Ingest | A file, directory, or bounded ZIP bundle is read into a named disposable corpus | `ingest_logs` is SoftWrite because it materializes local analysis data |
 | Parse | Supported structured formats are parsed defensibly; malformed or unsupported structure falls back to retained redacted plain/order-only evidence rather than being dropped | No claim of perfect parsing or exhaustive per-line parse-error reporting |
 | Redact | Secret-like values and sensitive parameters are scrubbed | Redaction happens before persistence and embedding |
 | Template | Drain groups variable messages into stable templates | Parameters remain separate from the template pattern |
@@ -107,6 +107,36 @@ For a keyword-only or deferred corpus, choose **Re-analyze locally…** in Logs.
 After confirmation, ContextDesk embeds up to 2,048 templates without reparsing
 or duplicating events. Cancellation or failure keeps the previous keyword
 corpus and index. Semantic search is labeled available only after vectors exist.
+
+## Support bundles and nested ZIPs
+
+You can select a ZIP directly or select a directory that contains ZIP files.
+ContextDesk also follows ZIP members nested inside other ZIPs, which is useful
+for support bundles assembled from several hosts or services.
+
+Nested source identities remain unambiguous. For example:
+
+```text
+support.zip!/host-a.zip!/logs/app.log
+support.zip!/host-b.zip!/logs/app.log
+```
+
+The same basename in different folders or archives remains a different source.
+Archive paths are never extracted into the selected folder. Nested containers
+are streamed into private per-import staging and removed after success,
+failure, or cancellation.
+
+The shipped safety policy allows at most three ZIP containers in one identity
+chain, 50,000 cumulative entries, 512 MiB expanded bytes for one member, 4 GiB
+aggregate expanded bytes, and a 2,048:1 expanded-to-compressed ratio. It rejects
+ambiguous or traversing paths, backslashes, NULs, duplicate normalized
+identities, symlink-like members, encryption, malformed ZIP metadata, and
+multi-disk archives. Valid bounded Zip64 metadata is supported.
+
+A rejected or cancelled bundle publishes no partial corpus. If a failure
+occurs, return to **Logs** and use the memory-only failed-import diagnostic for
+a redacted support report. The report does not contain the archive payload or
+private source path.
 
 ## Current limits
 

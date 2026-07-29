@@ -40,6 +40,7 @@ The reusable method is a layered evidence plane:
 | Capability                                                  | Status                                    | ContextDesk evidence                                                                                                                           | Literal residual                                            |
 | ----------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Streaming batch ingest and omission accounting              | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs)                                                                              | Live tailing remains later work                             |
+| Bounded nested support-bundle ZIP intake                    | **Shipped**                               | [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) nested-archive preflight, private staging, virtual identities, and adversarial tests | Three-container depth and fixed safety caps are deliberate  |
 | Redaction before ordinary event persistence/embedding       | **Shipped**                               | [`redact_log.rs`](../../../crates/cd-core/src/log_analysis/redact_log.rs)                                                                      | Redaction cannot prove all domain-specific PII is removed   |
 | Bounded redacted Original representation                    | **Shipped**                               | `prepare_original_record` and additive store fields in [`ingest.rs`](../../../crates/cd-core/src/log_analysis/ingest.rs) and [`store.rs`](../../../crates/cd-core/src/log_analysis/store.rs) | Bounded redacted fidelity, not unbounded raw retention      |
 | JSON numeric/RFC3339 timestamp parsing                      | **Shipped**                               | [`parse.rs`](../../../crates/cd-core/src/log_analysis/parse.rs)                                                                                | Whole-second storage and incomplete provenance              |
@@ -236,10 +237,32 @@ Trust boundaries:
 
 1. Traverse only the selected import scope.
 2. Reject symlinks/path escapes and count excluded, ignored, and failed files.
-3. Read with bounded buffers.
-4. Frame records deterministically; today the common path is line-oriented.
-5. Preserve source and ingest-order identity.
-6. Report partial import honestly if discovered content was not fully imported.
+3. Treat a directly selected ZIP, a ZIP discovered in a directory, or a ZIP
+   member inside another ZIP as a container only after bounded central-directory
+   preflight.
+4. Validate every archive identity before payload reads. Reject absolute,
+   traversing, backslash-ambiguous, NUL-containing, duplicate-normalized, or
+   archive-delimiter-conflicting names.
+5. Preserve nested provenance with a virtual identity such as
+   `support.zip!/host-a.zip!/logs/app.log`; identical basenames in distinct
+   paths remain distinct sources.
+6. Stream ordinary members in place. Copy only a nested archive container into
+   private per-ingest staging, using a fixed buffer, and remove it when
+   recursion returns or the ingest guard unwinds.
+7. Apply cumulative entry and expanded-byte budgets across every nested level,
+   plus per-member, depth, and compression-ratio limits.
+8. Read records with bounded buffers.
+9. Frame records deterministically; today the common path is line-oriented.
+10. Preserve source and ingest-order identity.
+11. Report partial import honestly if discovered content was not fully imported.
+
+The ContextDesk reference policy permits three ZIP containers in one identity
+chain, 50,000 cumulative entries, 512 MiB expanded bytes per member, 4 GiB
+aggregate expanded bytes, and a 2,048:1 expanded-to-compressed ratio. These are
+replaceable product bounds, not portable magic numbers. A reimplementation
+must retain explicit caps, cumulative accounting, preflight-before-payload,
+private staging, stable virtual identity, cancellation, and atomic
+non-publication.
 
 ### 6.2 Normalize and redact
 
@@ -372,6 +395,11 @@ core ingest did not return.
 | Dimension                              |                            ContextDesk bound/policy | Behavior                                               |
 | -------------------------------------- | --------------------------------------------------: | ------------------------------------------------------ |
 | Source ingest memory                   |                        Streamed record/file buffers | Does not load whole corpus                             |
+| Archive-container depth                |                                          3 ZIP layers | Reject deeper chains atomically                        |
+| Raw bundle entries                     |                                   50,000 cumulative | Reject before unbounded traversal                      |
+| Archive member expanded bytes          |                                            512 MiB | Exclude or reject under the typed policy               |
+| Raw ingest aggregate expanded bytes    |                                              4 GiB | Reject atomically                                      |
+| Archive compression ratio              |                                            2,048:1 | Reject suspicious metadata before payload reads        |
 | Original (redacted)                    |                     64 KiB redacted UTF-8 per event | Truncate with metadata after full-record redaction     |
 | Ordinary event page                    |             200 default; core hard cap in query API | Keyset page                                            |
 | Timeline buckets                       |                                         256 maximum | Clamp; no event bodies                                 |
@@ -407,6 +435,7 @@ latency, template count, and cancellation—not only ingest throughput.
 | Mixed time quality            | Per-source/corpus classification | Align disabled or limited     | Inspect/fix source policy                  | Reliable peer does not upgrade it         |
 | Embedding unavailable/timeout | Embed status                     | Keyword-only/deferred/partial | Trusted reanalysis                         | Corpus remains usable                     |
 | Import omission/read error    | Per-file counters/reasons        | Partial corpus status         | Correct input and reimport                 | Missing data not hidden                   |
+| Unsafe/malformed nested ZIP   | Shared archive preflight/budgets | Stable import error           | Correct or split the bundle                | No partial corpus; private staging removed |
 | Cancelled ingest/reanalysis   | Cancel flag/progress             | Cancelled                     | Retry                                      | Previous published corpus/index preserved |
 | Malformed package             | Preflight/hash/schema checks     | Import error                  | Obtain valid package                       | No partial corpus publication             |
 | Stale evidence identity       | Source/time hint revalidation    | Stale/missing                 | Locate replacement explicitly              | No silent rebinding                       |
