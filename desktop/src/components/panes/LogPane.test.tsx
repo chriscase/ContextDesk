@@ -11,6 +11,10 @@ import {
   within,
 } from "@testing-library/react";
 import type { LogCorpusSummaryDto } from "../../lib/host";
+import {
+  renderLogDiagnosticMarkdown,
+  type LogDiagnosticManifest,
+} from "../../lib/logDiagnosticReport";
 import { LogPane } from "./LogPane";
 
 const hostMocks = vi.hoisted(() => ({
@@ -29,6 +33,7 @@ const hostMocks = vi.hoisted(() => ({
   getBranding: vi.fn(),
   getFailedIngestDiagnostic: vi.fn(),
   clearFailedIngestDiagnostic: vi.fn(),
+  prepareDiagnostic: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
   openFile: vi.fn(),
@@ -47,6 +52,7 @@ vi.mock("../../lib/host", () => ({
   hostGetBranding: hostMocks.getBranding,
   hostImportLogCorpusPackagePath: hostMocks.importPackage,
   hostGetFailedLogIngestDiagnostic: hostMocks.getFailedIngestDiagnostic,
+  hostPrepareLogDiagnosticReport: hostMocks.prepareDiagnostic,
   hostIngestLogPath: hostMocks.ingest,
   hostListLogTemplates: hostMocks.listTemplates,
   hostLogClusterProblems: hostMocks.clusterProblems,
@@ -132,6 +138,13 @@ describe("LogPane", () => {
       identity_line: "v0.1.0 · channel=dev",
     });
     hostMocks.saveDiagnostic.mockResolvedValue({ status: "saved" });
+    hostMocks.prepareDiagnostic.mockImplementation(
+      async (manifest: LogDiagnosticManifest) => ({
+        reportId: "cdlogdiag-0000000000000001-0000000000000001",
+        markdown: renderLogDiagnosticMarkdown(manifest),
+        json: JSON.stringify(manifest, null, 2),
+      }),
+    );
     hostMocks.saveFile.mockResolvedValue(null);
     hostMocks.openFile.mockResolvedValue(null);
   });
@@ -357,7 +370,10 @@ describe("LogPane", () => {
     });
     hostMocks.saveDiagnostic
       .mockResolvedValueOnce({ status: "cancelled" })
-      .mockResolvedValueOnce({ status: "saved" })
+      .mockResolvedValueOnce({
+        status: "saved_with_warning",
+        warning: "parent directory sync failed",
+      })
       .mockResolvedValueOnce({ status: "saved" });
 
     render(<LogPane />);
@@ -394,6 +410,11 @@ describe("LogPane", () => {
     const keyboardPreview = within(dialog).getByLabelText(
       "Markdown diagnostic preview",
     );
+    await waitFor(() =>
+      expect(keyboardPreview.textContent).toContain(
+        "# ContextDesk corpus diagnostic",
+      ),
+    );
     expect(keyboardPreview.getAttribute("tabindex")).toBe("0");
     act(() => keyboardPreview.focus());
     expect(document.activeElement).toBe(keyboardPreview);
@@ -404,6 +425,9 @@ describe("LogPane", () => {
         value: "Repro at /Users/chris/Company with Bearer secret-token-value",
       },
     });
+    await waitFor(() =>
+      expect(keyboardPreview.textContent).toContain("[REDACTED_PATH]"),
+    );
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Copy Markdown" }),
@@ -427,8 +451,8 @@ describe("LogPane", () => {
     );
     expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(1);
     expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
+      "cdlogdiag-0000000000000001-0000000000000001",
       "markdown",
-      expect.stringContaining("# ContextDesk corpus diagnostic"),
     );
 
     fireEvent.click(
@@ -436,10 +460,14 @@ describe("LogPane", () => {
     );
     await waitFor(() =>
       expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
+        "cdlogdiag-0000000000000001-0000000000000001",
         "markdown",
-        expect.stringContaining("# ContextDesk corpus diagnostic"),
       ),
     );
+    expect(
+      within(dialog).getByText(/Saved redacted Markdown diagnostics.*warning/),
+    ).toBeTruthy();
+    expect(dialog.textContent).not.toContain("Diagnostics were not saved");
     expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(2);
 
     fireEvent.click(jsonToggle);
@@ -451,8 +479,8 @@ describe("LogPane", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Save JSON…" }));
     await waitFor(() =>
       expect(hostMocks.saveDiagnostic).toHaveBeenLastCalledWith(
+        "cdlogdiag-0000000000000001-0000000000000001",
         "json",
-        expect.stringContaining('"schemaVersion": 1'),
       ),
     );
     expect(hostMocks.saveDiagnostic).toHaveBeenCalledTimes(3);
@@ -544,9 +572,12 @@ describe("LogPane", () => {
       name: "Export failed-ingest diagnostics",
     });
     expect(within(dialog).getByText(/latest failed import/)).toBeTruthy();
-    expect(
-      within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
-    ).toContain("Reason: invalid_archive");
+    await waitFor(() =>
+      expect(
+        within(dialog).getByLabelText("Markdown diagnostic preview")
+          .textContent,
+      ).toContain("Reason: invalid_archive"),
+    );
     expect(
       within(dialog).getByLabelText("Markdown diagnostic preview").textContent,
     ).toContain("binary: 1");

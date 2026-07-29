@@ -51,7 +51,7 @@ The reusable method is a layered evidence plane:
 | Drain templates and template-only embedding                 | **Shipped**                               | [`drain.rs`](../../../crates/cd-core/src/log_analysis/drain.rs), [`embed_policy.rs`](../../../crates/cd-core/src/log_analysis/embed_policy.rs) | Cloud embedding remains opt-in/follow-up                    |
 | Bounded event query, facets, Find, timeline summaries       | **Shipped**                               | [`query.rs`](../../../crates/cd-core/src/log_analysis/query.rs)                                                                                | Durable metric attachment and full #670 time policy         |
 | Search/correlation/anomaly/trace tool surface               | **Shipped**                               | [`search.rs`](../../../crates/cd-core/src/log_analysis/search.rs), [`why.rs`](../../../crates/cd-core/src/log_analysis/why.rs)                 | Provider quality requires tools-enabled acceptance          |
-| Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
+| Privacy-reviewed diagnostic handoff                         | **Shipped**                               | `diagnostics.rs`, typed ingest evidence callbacks in `ingest.rs`, `logDiagnosticReport.ts`, `LogDiagnosticDialog.tsx`, `log_diagnostic_report.rs`, and `log_diagnostics.rs` | Reports are memory-only metadata; users still review before sharing |
 | Durable noise/squelch policy                                | **Planned**                               | #671                                                                                                                                           | Filters exist; governed reusable noise policy does not      |
 
 ## 3. Reusable method
@@ -395,31 +395,42 @@ These structural choices keep top-template patterns, event payloads, source
 labels and absolute paths, chats, provider/model inventories, evaluator truth,
 private network identities, and secrets outside the report.
 
-The user previews the exact Markdown or JSON before saving. Browser and host
-privacy checks cover secret tokens, ordinary private-suffix hosts such as
-`server.internal`, arbitrary absolute Unix/Windows paths, private/loopback IPv4,
-and loopback/unique-local/link-local IPv6. The native writer accepts only a
-bounded format/content request and recomputes the privacy transform. The
-renderer cannot supply a destination, assert overwrite confirmation, or
-authorize itself through a separate IPC call. The invoking native window owns
-the Save panel and returns only typed `saved` or `cancelled` status. If the
-host privacy result differs from the visible preview, save is rejected instead
-of silently changing the file.
+The user previews the exact Markdown or JSON before saving. The renderer sends
+a recursively `deny_unknown_fields` metadata DTO, not report text. The host
+validates identifier and Git-SHA shapes, applies secret/location scrubbing to
+every untrusted string, enforces all collection and byte bounds, renders both
+formats, and returns those exact previews under a bounded opaque in-memory
+report ID. Unknown payload/model fields fail closed. Saving sends only that ID
+and the selected format; the renderer cannot author export text, select a
+destination, assert overwrite confirmation, or authorize itself through a
+separate IPC call.
+
+Host privacy handling covers secret tokens, ordinary private-suffix hosts such
+as `server.internal`, arbitrary absolute Unix/Windows paths, private/loopback
+IPv4, and loopback/unique-local/link-local IPv6. The invoking native window
+owns the Save panel. Cancellation is typed and writes nothing. A completed save
+returns `saved`; a cleanup or directory-durability failure after publication
+returns `saved_with_warning` so the UI never claims a committed report was not
+saved.
 
 For an accepted exact preview, the host writes and syncs a restricted,
-create-new sibling temporary file. A new destination is published with a
-no-clobber primitive. A native-panel-confirmed existing destination is
-atomically replaced with same-filesystem rename on Unix or write-through
-`MoveFileExW` on Windows. The parent directory is synced on Unix, temporary
-files are cleaned after error, and symlink or Windows reparse-point
-destinations are refused. Native-panel cancellation is a non-error and creates
-no file. Diagnostics remain distinct from a `.cdlog.zip` package, which
-intentionally contains analyzed corpus data.
+create-new sibling temporary file. A new destination is published without
+replacement using `renamex_np(RENAME_EXCL)` on macOS,
+`renameat2(RENAME_NOREPLACE)` on Linux, or write-through `MoveFileExW` without
+replacement on Windows. Unsupported Unix compatibility paths fail closed. A
+native-panel-confirmed existing destination is atomically replaced with
+same-filesystem rename on Unix or write-through `MoveFileExW` on Windows.
+Publication is the commit point. The parent directory is then synced on Unix;
+post-commit cleanup or sync failures become typed warnings. Temporary files are
+cleaned after pre-publication errors, and symlink or Windows reparse-point
+destinations are refused. Diagnostics remain distinct from a `.cdlog.zip`
+package, which intentionally contains analyzed corpus data.
 
-The report builder independently re-bounds and sanitizes the typed evidence,
-and the native save boundary redacts every Markdown line or JSON string again.
-The UI therefore never reconstructs evidence by parsing free-form progress or
-error strings.
+The renderer report builder still narrows product state into the allowlisted
+DTO for display responsiveness, but only the host-rendered and host-retained
+result can be copied or saved. The native write boundary revalidates the stored
+content before publication. The UI therefore never reconstructs evidence by
+parsing free-form progress or error strings.
 
 ## 7. Performance and bounds
 

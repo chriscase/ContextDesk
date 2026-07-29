@@ -9,6 +9,7 @@ import {
   hostResolveHandbookLink,
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
+  hostPrepareLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
   modelSelectionKey,
   normalizeProviderKind,
@@ -61,22 +62,61 @@ describe("hostLogSharedTimelineSummary", () => {
 });
 
 describe("hostSaveLogDiagnosticReport", () => {
-  it("sends only format and bounded content without destination or overwrite authority", async () => {
+  it("prepares a strict manifest and saves only by opaque id and format", async () => {
+    const manifest = {
+      schemaVersion: 1 as const,
+      generatedAt: "2026-07-29T12:34:56.000Z",
+      privacy: {
+        redacted: true as const,
+        reviewRequired: true as const,
+        excluded: [],
+      },
+      application: {
+        version: "0.1.0",
+        channel: "dev",
+        gitSha: null,
+        os: "macOS",
+      },
+      corpus: null,
+      failedIngest: null,
+      activeView: null,
+      currentStatus: null,
+      userNote: null,
+    };
+    invokeMock.mockResolvedValueOnce({
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: "# host rendered",
+      json: "{}",
+    });
+    await expect(hostPrepareLogDiagnosticReport(manifest)).resolves.toEqual({
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: "# host rendered",
+      json: "{}",
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "prepare_log_diagnostic_report",
+      { request: { manifest } },
+    );
+
     invokeMock.mockResolvedValue({ status: "saved" });
 
     await expect(
-      hostSaveLogDiagnosticReport("markdown", "# redacted diagnostic"),
+      hostSaveLogDiagnosticReport(
+        "cdlogdiag-0000000000000001-0000000000000001",
+        "markdown",
+      ),
     ).resolves.toEqual({ status: "saved" });
 
     expect(invokeMock).toHaveBeenCalledWith("save_log_diagnostic_report", {
       request: {
+        reportId: "cdlogdiag-0000000000000001-0000000000000001",
         format: "markdown",
-        content: "# redacted diagnostic",
       },
     });
-    const ipcArgs = JSON.stringify(invokeMock.mock.calls[0]?.[1]);
+    const ipcArgs = JSON.stringify(invokeMock.mock.calls.at(-1)?.[1]);
     expect(ipcArgs).not.toContain("path");
     expect(ipcArgs).not.toContain("overwrite");
+    expect(ipcArgs).not.toContain("content");
   });
 });
 

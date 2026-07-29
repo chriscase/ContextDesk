@@ -141,8 +141,9 @@ reason/basename examples. Additional examples are counted rather than retained.
 Archive ancestry, private source paths, raw parser/filesystem errors, and
 archive payloads are not included. The same evidence contract applies to a
 directory, a selected ZIP, and ZIPs nested inside that ZIP. Saving this report
-uses a host-owned native panel; the renderer cannot choose the destination or
-assert overwrite approval, and cancellation writes nothing.
+uses a strict host-rendered preview and a host-owned native panel. The renderer
+cannot author the exported report, choose the destination, or assert overwrite
+approval, and cancellation writes nothing.
 
 ## Current limits
 

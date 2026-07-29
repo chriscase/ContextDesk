@@ -148,6 +148,16 @@ vi.mock("../../lib/host", () => ({
   hostLogEditInvestigationNote: vi.fn(),
   hostLogPreviewInvestigationEvidence: vi.fn(),
   hostLogPreviewInvestigationFindingView: vi.fn(),
+  hostPrepareLogDiagnosticReport: vi.fn(async (manifest) => {
+    const actual = await vi.importActual<
+      typeof import("../../lib/logDiagnosticReport")
+    >("../../lib/logDiagnosticReport");
+    return {
+      reportId: "cdlogdiag-0000000000000001-0000000000000001",
+      markdown: actual.renderLogDiagnosticMarkdown(manifest),
+      json: JSON.stringify(manifest, null, 2),
+    };
+  }),
   hostSaveLogDiagnosticReport: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),
@@ -484,6 +494,12 @@ describe("LogExplorer shell", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Export corpus diagnostics",
     });
+    await waitFor(() =>
+      expect(
+        within(dialog).getByLabelText("Markdown diagnostic preview")
+          .textContent,
+      ).toContain("Active Explorer view (payload-free)"),
+    );
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Copy Markdown" }),
     );

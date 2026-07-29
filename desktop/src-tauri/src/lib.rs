@@ -1,6 +1,7 @@
 //! ContextDesk Tauri host — secrets stay here; webview gets redacted DTOs only.
 
 mod handbook;
+mod log_diagnostic_report;
 mod log_diagnostics;
 
 use cd_core::branding::Branding;
@@ -262,6 +263,9 @@ struct AppState {
     failed_log_ingest_diagnostic: Mutex<cd_core::log_analysis::FailedIngestDiagnosticStore>,
     /// Serializes the complete demo check/import/marker transaction.
     demo_log_install: tokio::sync::Mutex<()>,
+    /// Bounded host-rendered diagnostic previews keyed by opaque, process-local
+    /// report ids. The renderer never supplies export content.
+    log_diagnostic_reports: Mutex<log_diagnostic_report::LogDiagnosticReportStore>,
     /// Serializes chat-session writes across windows so governed fields cannot
     /// race ordinary transcript saves (#695).
     chat_session_mutation: Mutex<()>,
@@ -5716,13 +5720,20 @@ fn export_log_corpus_package(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LogDiagnosticExportRequest {
     format: String,
-    content: String,
+    report_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticPrepareRequest {
+    manifest: log_diagnostic_report::LogDiagnosticManifest,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum LogDiagnosticSaveStatus {
     Saved,
+    SavedWithWarning { warning: String },
     Cancelled,
 }
 
@@ -5751,20 +5762,49 @@ fn log_diagnostic_dialog_spec(format: &str) -> Result<LogDiagnosticDialogSpec, S
     }
 }
 
+#[cfg(test)]
 fn complete_log_diagnostic_export(
     request: &LogDiagnosticExportRequest,
+    reports: &log_diagnostic_report::LogDiagnosticReportStore,
     selected_path: Option<PathBuf>,
 ) -> Result<LogDiagnosticSaveStatus, String> {
-    log_diagnostics::validate_log_diagnostic_report(&request.format, &request.content)?;
+    let content = reports.content(&request.report_id, &request.format)?;
+    complete_log_diagnostic_export_content(&request.format, content, selected_path)
+}
+
+fn complete_log_diagnostic_export_content(
+    format: &str,
+    content: &str,
+    selected_path: Option<PathBuf>,
+) -> Result<LogDiagnosticSaveStatus, String> {
     let Some(path) = selected_path else {
         return Ok(LogDiagnosticSaveStatus::Cancelled);
     };
-    log_diagnostics::save_log_diagnostic_report_at_host_path(
-        &path,
-        &request.format,
-        &request.content,
-    )?;
-    Ok(LogDiagnosticSaveStatus::Saved)
+    let outcome = log_diagnostics::save_log_diagnostic_report_at_host_path(&path, format, content)?;
+    Ok(log_diagnostic_save_status(outcome))
+}
+
+fn log_diagnostic_save_status(
+    outcome: log_diagnostics::DiagnosticPublishOutcome,
+) -> LogDiagnosticSaveStatus {
+    match outcome.warning {
+        Some(warning) => LogDiagnosticSaveStatus::SavedWithWarning { warning },
+        None => LogDiagnosticSaveStatus::Saved,
+    }
+}
+
+/// Validate and scrub a strict payload-free manifest, render both exact
+/// previews in the trusted host, and retain them under an opaque memory-only id.
+#[tauri::command]
+fn prepare_log_diagnostic_report(
+    state: State<'_, AppState>,
+    request: LogDiagnosticPrepareRequest,
+) -> Result<log_diagnostic_report::PreparedLogDiagnostic, String> {
+    state
+        .log_diagnostic_reports
+        .lock()
+        .map_err(|_| "diagnostic report store is unavailable".to_string())?
+        .prepare(request.manifest)
 }
 
 /// Show the host-owned native Save panel and atomically write one bounded,
@@ -5773,9 +5813,18 @@ fn complete_log_diagnostic_export(
 #[tauri::command]
 async fn save_log_diagnostic_report(
     window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
     request: LogDiagnosticExportRequest,
 ) -> Result<LogDiagnosticSaveStatus, String> {
-    log_diagnostics::validate_log_diagnostic_report(&request.format, &request.content)?;
+    let content = {
+        let reports = state
+            .log_diagnostic_reports
+            .lock()
+            .map_err(|_| "diagnostic report store is unavailable".to_string())?;
+        reports
+            .content(&request.report_id, &request.format)?
+            .to_string()
+    };
     let spec = log_diagnostic_dialog_spec(&request.format)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     window
@@ -5796,7 +5845,7 @@ async fn save_log_diagnostic_report(
                 .map_err(|_| "native diagnostic Save dialog returned an invalid path".to_string())
         })
         .transpose()?;
-    complete_log_diagnostic_export(&request, selected)
+    complete_log_diagnostic_export_content(&request.format, &content, selected)
 }
 
 /// Read the one memory-only failed-ingest diagnostic, if the latest trial failed.
@@ -8120,6 +8169,9 @@ pub fn run() {
             cd_core::log_analysis::FailedIngestDiagnosticStore::default(),
         ),
         demo_log_install: tokio::sync::Mutex::new(()),
+        log_diagnostic_reports: Mutex::new(
+            log_diagnostic_report::LogDiagnosticReportStore::default(),
+        ),
         chat_session_mutation: Mutex::new(()),
         investigation_mutation: Mutex::new(()),
         cancels: Mutex::new(HashMap::new()),
@@ -8298,6 +8350,7 @@ pub fn run() {
             set_chat_linked_corpus,
             open_log_explorer,
             export_log_corpus_package,
+            prepare_log_diagnostic_report,
             save_log_diagnostic_report,
             import_log_corpus_package_path,
             write_memory_note,
@@ -8335,24 +8388,67 @@ mod s3_backup_host_tests;
 mod log_diagnostic_export_authority_tests {
     use super::*;
 
-    fn safe_request() -> LogDiagnosticExportRequest {
-        LogDiagnosticExportRequest {
+    fn prepared_request() -> (
+        log_diagnostic_report::LogDiagnosticReportStore,
+        LogDiagnosticExportRequest,
+        String,
+    ) {
+        let manifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "generatedAt": "2026-07-29T12:34:56.000Z",
+            "privacy": {
+                "redacted": true,
+                "reviewRequired": true,
+                "excluded": []
+            },
+            "application": {
+                "version": "0.1.0",
+                "channel": "dev",
+                "gitSha": "de43caeba66df05068a50db9356efad3b64a4a45",
+                "os": "macOS"
+            },
+            "corpus": {
+                "id": "019fab76-18ff-7361-8dd8-e4ddc0f1bb6c",
+                "name": "Incident",
+                "createdAt": 1700000000,
+                "engine": "duckdb",
+                "eventCount": 12,
+                "templateCount": 3,
+                "stats": null,
+                "embedding": { "state": "keyword_only" }
+            },
+            "failedIngest": null,
+            "activeView": null,
+            "currentStatus": null,
+            "userNote": null
+        }))
+        .expect("manifest");
+        let mut reports = log_diagnostic_report::LogDiagnosticReportStore::default();
+        let prepared = reports.prepare(manifest).expect("prepare report");
+        let markdown = prepared.markdown;
+        let request = LogDiagnosticExportRequest {
             format: "markdown".into(),
-            content: "# Safe diagnostic\n\n- Status: no private data".into(),
-        }
+            report_id: prepared.report_id,
+        };
+        (reports, request, markdown)
     }
 
     #[test]
-    fn ipc_request_rejects_renderer_destination_and_overwrite_authority() {
+    fn ipc_request_rejects_renderer_content_destination_and_overwrite_authority() {
         for forbidden in [
             serde_json::json!({
                 "format": "markdown",
-                "content": "# Safe diagnostic",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
+                "content": "# Renderer-authored diagnostic"
+            }),
+            serde_json::json!({
+                "format": "markdown",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
                 "path": "/tmp/renderer-selected.md"
             }),
             serde_json::json!({
                 "format": "markdown",
-                "content": "# Safe diagnostic",
+                "reportId": "cdlogdiag-0000000000000001-0000000000000001",
                 "overwriteConfirmed": true
             }),
         ] {
@@ -8362,16 +8458,17 @@ mod log_diagnostic_export_authority_tests {
         }
         serde_json::from_value::<LogDiagnosticExportRequest>(serde_json::json!({
             "format": "markdown",
-            "content": "# Safe diagnostic"
+            "reportId": "cdlogdiag-0000000000000001-0000000000000001"
         }))
-        .expect("format and content are the complete renderer request");
+        .expect("opaque report id and format are the complete renderer request");
     }
 
     #[test]
     fn host_dialog_cancellation_is_typed_and_writes_nothing() {
         let root = tempfile::tempdir().expect("temp root");
-        let status =
-            complete_log_diagnostic_export(&safe_request(), None).expect("cancel is not an error");
+        let (reports, request, _) = prepared_request();
+        let status = complete_log_diagnostic_export(&request, &reports, None)
+            .expect("cancel is not an error");
         assert_eq!(status, LogDiagnosticSaveStatus::Cancelled);
         assert_eq!(
             serde_json::to_value(status).expect("serialize status"),
@@ -8389,7 +8486,8 @@ mod log_diagnostic_export_authority_tests {
     fn host_selected_path_returns_typed_saved_status() {
         let root = tempfile::tempdir().expect("temp root");
         let destination = root.path().join("diagnostic.md");
-        let status = complete_log_diagnostic_export(&safe_request(), Some(destination.clone()))
+        let (reports, request, markdown) = prepared_request();
+        let status = complete_log_diagnostic_export(&request, &reports, Some(destination.clone()))
             .expect("host-selected save");
         assert_eq!(status, LogDiagnosticSaveStatus::Saved);
         assert_eq!(
@@ -8398,7 +8496,21 @@ mod log_diagnostic_export_authority_tests {
         );
         assert_eq!(
             std::fs::read_to_string(destination).expect("read saved report"),
-            safe_request().content
+            markdown
+        );
+    }
+
+    #[test]
+    fn post_publication_failure_serializes_as_saved_with_warning() {
+        let status = log_diagnostic_save_status(log_diagnostics::DiagnosticPublishOutcome {
+            warning: Some("parent directory sync failed".into()),
+        });
+        assert_eq!(
+            serde_json::to_value(status).expect("serialize warning status"),
+            serde_json::json!({
+                "status": "saved_with_warning",
+                "warning": "parent directory sync failed"
+            })
         );
     }
 }

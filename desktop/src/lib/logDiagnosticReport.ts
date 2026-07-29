@@ -383,7 +383,9 @@ function nullable(value: string | null): string {
   return value ?? "unknown";
 }
 
-function renderMarkdown(manifest: LogDiagnosticManifest): string {
+export function renderLogDiagnosticMarkdown(
+  manifest: LogDiagnosticManifest,
+): string {
   const stats = manifest.corpus?.stats ?? null;
   const failure = manifest.failedIngest;
   const activeView = manifest.activeView;
@@ -603,7 +605,7 @@ export function buildLogDiagnosticReport(args: {
         LOG_DIAGNOSTIC_NOTE_MAX_CHARS,
       ) || null,
   };
-  const markdown = renderMarkdown(manifest);
+  const markdown = renderLogDiagnosticMarkdown(manifest);
   const json = JSON.stringify(manifest, null, 2);
 
   if (

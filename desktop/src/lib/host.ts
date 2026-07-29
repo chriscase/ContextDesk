@@ -1984,18 +1984,37 @@ export async function hostExportLogCorpusPackage(
 
 export type LogDiagnosticSaveStatus = {
   status: "saved" | "cancelled";
+} | {
+  status: "saved_with_warning";
+  warning: string;
 };
+
+export type PreparedLogDiagnosticDto = {
+  reportId: string;
+  markdown: string;
+  json: string;
+};
+
+/** Ask the trusted host to validate, scrub, render, and retain an exact preview. */
+export async function hostPrepareLogDiagnosticReport(
+  manifest: import("./logDiagnosticReport").LogDiagnosticManifest,
+): Promise<PreparedLogDiagnosticDto> {
+  if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
+  return invoke<PreparedLogDiagnosticDto>("prepare_log_diagnostic_report", {
+    request: { manifest },
+  });
+}
 
 /** Ask the trusted host to select and atomically write one reviewed diagnostic. */
 export async function hostSaveLogDiagnosticReport(
+  reportId: string,
   format: "markdown" | "json",
-  content: string,
 ): Promise<LogDiagnosticSaveStatus> {
   if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
   return invoke<LogDiagnosticSaveStatus>("save_log_diagnostic_report", {
     request: {
+      reportId,
       format,
-      content,
     },
   });
 }

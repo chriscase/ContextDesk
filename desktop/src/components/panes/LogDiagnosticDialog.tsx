@@ -8,9 +8,11 @@ import {
   type LogDiagnosticStatus,
 } from "../../lib/logDiagnosticReport";
 import {
+  hostPrepareLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
   type FailedLogIngestDiagnosticDto,
   type LogCorpusSummaryDto,
+  type PreparedLogDiagnosticDto,
 } from "../../lib/host";
 
 type PreviewFormat = "markdown" | "json";
@@ -35,6 +37,9 @@ export function LogDiagnosticDialog({
     useState<PreviewFormat>("markdown");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [prepared, setPrepared] =
+    useState<PreparedLogDiagnosticDto | null>(null);
+  const [prepareError, setPrepareError] = useState<string | null>(null);
   const generatedAtRef = useRef(new Date());
   const dialogRef = useRef<HTMLDivElement>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -69,6 +74,25 @@ export function LogDiagnosticDialog({
     queueMicrotask(() => noteRef.current?.focus());
   }, []);
 
+  useEffect(() => {
+    let current = true;
+    setPrepared(null);
+    setPrepareError(null);
+    setResult(null);
+    void hostPrepareLogDiagnosticReport(report.manifest)
+      .then((next) => {
+        if (current) setPrepared(next);
+      })
+      .catch((error) => {
+        if (current) {
+          setPrepareError(`Could not prepare diagnostics: ${String(error)}`);
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, [report.manifest]);
+
   const dismiss = () => {
     if (!busy) onDismiss();
   };
@@ -76,8 +100,14 @@ export function LogDiagnosticDialog({
   async function copyPreview() {
     setResult(null);
     const json = previewFormat === "json";
+    if (!prepared) {
+      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(json ? report.json : report.markdown);
+      await navigator.clipboard.writeText(
+        json ? prepared.json : prepared.markdown,
+      );
       setResult(
         `Copied redacted ${json ? "JSON" : "Markdown"}. Review it before sharing.`,
       );
@@ -90,15 +120,25 @@ export function LogDiagnosticDialog({
 
   async function save(format: PreviewFormat) {
     const markdown = format === "markdown";
+    if (!prepared) {
+      setResult(prepareError ?? "The trusted host is still preparing the preview.");
+      return;
+    }
     setBusy(true);
     setResult(null);
     try {
       const outcome = await hostSaveLogDiagnosticReport(
+        prepared.reportId,
         format,
-        markdown ? report.markdown : report.json,
       );
       if (outcome.status === "cancelled") {
         setResult("Save cancelled. No file was written.");
+        return;
+      }
+      if (outcome.status === "saved_with_warning") {
+        setResult(
+          `Saved redacted ${markdown ? "Markdown" : "JSON"} diagnostics, but the host reported a durability warning: ${outcome.warning}`,
+        );
         return;
       }
       setResult(
@@ -230,7 +270,11 @@ export function LogDiagnosticDialog({
           tabIndex={0}
           aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
         >
-          {previewFormat === "markdown" ? report.markdown : report.json}
+          {prepared
+            ? previewFormat === "markdown"
+              ? prepared.markdown
+              : prepared.json
+            : prepareError ?? "Preparing exact preview in the trusted host…"}
         </pre>
 
         {result ? (
@@ -243,7 +287,7 @@ export function LogDiagnosticDialog({
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={busy}
+            disabled={busy || !prepared}
             onClick={() => void copyPreview()}
           >
             Copy {previewFormat === "json" ? "JSON" : "Markdown"}
@@ -251,7 +295,7 @@ export function LogDiagnosticDialog({
           <button
             type="button"
             className="btn btn--ghost"
-            disabled={busy}
+            disabled={busy || !prepared}
             onClick={() => void save("json")}
           >
             Save JSON…
@@ -259,7 +303,7 @@ export function LogDiagnosticDialog({
           <button
             type="button"
             className="btn btn--primary"
-            disabled={busy}
+            disabled={busy || !prepared}
             onClick={() => void save("markdown")}
           >
             {busy ? "Saving…" : "Save Markdown…"}

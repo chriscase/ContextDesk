@@ -36,16 +36,16 @@ impl DiagnosticFormat {
     }
 }
 
-pub fn validate_log_diagnostic_report(format: &str, content: &str) -> Result<(), String> {
-    let format = DiagnosticFormat::parse(format)?;
-    validate_content(format, content)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiagnosticPublishOutcome {
+    pub warning: Option<String>,
 }
 
 pub fn save_log_diagnostic_report_at_host_path(
     path: &Path,
     format: &str,
     content: &str,
-) -> Result<(), String> {
+) -> Result<DiagnosticPublishOutcome, String> {
     let format = DiagnosticFormat::parse(format)?;
     validate_content(format, content)?;
     validate_destination_path(path, format)?;
@@ -138,7 +138,20 @@ impl Drop for PendingDiagnosticTemp {
     }
 }
 
-fn atomic_publish(path: &Path, content: &str, destination_exists: bool) -> Result<(), String> {
+fn atomic_publish(
+    path: &Path,
+    content: &str,
+    destination_exists: bool,
+) -> Result<DiagnosticPublishOutcome, String> {
+    atomic_publish_with_post_commit_warning(path, content, destination_exists, None)
+}
+
+fn atomic_publish_with_post_commit_warning(
+    path: &Path,
+    content: &str,
+    destination_exists: bool,
+    forced_warning: Option<&str>,
+) -> Result<DiagnosticPublishOutcome, String> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -183,24 +196,126 @@ fn atomic_publish(path: &Path, content: &str, destination_exists: bool) -> Resul
             windows_move_file(&pending.path, path, false)?;
             pending.published = true;
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
         {
-            std::fs::hard_link(&pending.path, path).map_err(|error| {
-                format!("atomically publish new diagnostic without replacement: {error}")
-            })?;
-            std::fs::remove_file(&pending.path)
-                .map_err(|error| format!("remove diagnostic temporary link: {error}"))?;
+            unix_rename_no_replace(&pending.path, path)?;
             pending.published = true;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            return Err(
+                "atomic no-replace diagnostic publication is unavailable on this platform".into(),
+            );
         }
     }
 
+    let mut warnings = Vec::new();
+    if let Some(warning) = forced_warning {
+        warnings.push(warning.to_string());
+    }
     #[cfg(unix)]
     {
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("flush diagnostic destination directory: {error}"))?;
+        if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+            warnings.push(format!(
+                "the report was saved, but its parent directory could not be synchronized: {error}"
+            ));
+        }
+    }
+    Ok(DiagnosticPublishOutcome {
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn unix_rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renamex_np(old: *const c_char, new: *const c_char, flags: c_uint) -> c_int;
+    }
+
+    const RENAME_EXCL: c_uint = 0x0000_0004;
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| "diagnostic temporary path contains an invalid NUL".to_string())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| "diagnostic destination contains an invalid NUL".to_string())?;
+    // SAFETY: both pointers are valid NUL-terminated paths for the duration of
+    // the call, and RENAME_EXCL is the Darwin no-replace flag.
+    let renamed = unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if renamed != 0 {
+        return Err(format!(
+            "atomically publish new diagnostic without replacement: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
+}
+
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+))]
+fn unix_rename_no_replace(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::raw::{c_int, c_long, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn syscall(number: c_long, ...) -> c_long;
+    }
+
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_uint = 1;
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: c_long = 316;
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    const SYS_RENAMEAT2: c_long = 276;
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| "diagnostic temporary path contains an invalid NUL".to_string())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| "diagnostic destination contains an invalid NUL".to_string())?;
+    // SAFETY: both pointers are valid NUL-terminated paths for the duration of
+    // the call. The syscall number is gated to architectures where it is
+    // stable, and RENAME_NOREPLACE is the Linux no-replace flag.
+    let renamed = unsafe {
+        syscall(
+            SYS_RENAMEAT2,
+            AT_FDCWD,
+            source.as_ptr(),
+            AT_FDCWD,
+            destination.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if renamed != 0 {
+        return Err(format!(
+            "atomically publish new diagnostic without replacement: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )
+    ))
+))]
+fn unix_rename_no_replace(_source: &Path, _destination: &Path) -> Result<(), String> {
+    Err("atomic no-replace diagnostic publication is unavailable on this Unix platform".into())
 }
 
 #[cfg(windows)]
@@ -346,7 +461,7 @@ fn redact_json_value(value: &mut Value, key: Option<&str>, depth: usize) -> Resu
     Ok(())
 }
 
-fn redact_export_text(value: &str) -> String {
+pub(crate) fn redact_export_text(value: &str) -> String {
     let secret_scrubbed = cd_core::redact::scrub_secrets(value);
     redact_sensitive_locations(&secret_scrubbed)
 }
@@ -693,6 +808,46 @@ mod tests {
             std::fs::read_to_string(actual).expect("read actual"),
             "keep"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_unix_no_replace_publication_never_clobbers_a_racing_destination() {
+        let root = tempfile::tempdir().expect("temp root");
+        let destination = root.path().join("diagnostic.md");
+        std::fs::write(&destination, "# Existing diagnostic").expect("seed destination");
+
+        let error = atomic_publish(&destination, "# Must not clobber", false)
+            .expect_err("native no-replace publication must fail closed");
+        assert!(error.contains("without replacement"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read unchanged destination"),
+            "# Existing diagnostic"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_is_the_commit_point_for_cleanup_and_directory_sync_warnings() {
+        for warning in [
+            "the report was saved, but temporary cleanup failed",
+            "the report was saved, but directory synchronization failed",
+        ] {
+            let root = tempfile::tempdir().expect("temp root");
+            let destination = root.path().join("diagnostic.md");
+            let outcome = atomic_publish_with_post_commit_warning(
+                &destination,
+                "# Saved",
+                false,
+                Some(warning),
+            )
+            .expect("post-commit problem is a warning");
+            assert_eq!(outcome.warning.as_deref(), Some(warning));
+            assert_eq!(
+                std::fs::read_to_string(&destination).expect("read committed destination"),
+                "# Saved"
+            );
+        }
     }
 
     #[cfg(windows)]

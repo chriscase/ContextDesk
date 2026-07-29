@@ -286,14 +286,16 @@ provider/model inventories, credentials, and evaluator truth. The preview can
 be focused with the keyboard and scrolled independently. Markdown and JSON
 buttons announce which format is selected.
 
-The native host independently checks the exact visible preview before writing.
-If its privacy result would differ, save is refused rather than silently
-changing the export. The renderer sends only the selected format and redacted
-content; the host-owned native Save panel alone selects the destination and
-confirms replacement. Accepted reports use a restricted same-folder temporary
-file and atomic publication, including write-through native replacement on
-Windows. Cancelling the panel is a normal no-write outcome. You must still
-review the preview before sharing.
+The native host creates the exact visible preview from a strict, payload-free
+metadata manifest and retains it under a short-lived report ID. Saving sends
+only that ID and the selected format: the renderer cannot author report text,
+choose the destination, or claim overwrite approval. The host-owned native
+Save panel alone selects the destination and confirms replacement. Accepted
+reports use a restricted same-folder temporary file and native atomic
+publication without replacement for new files. Cancelling the panel is a
+normal no-write outcome. If publication succeeds but a later cleanup or
+directory-sync step fails, ContextDesk says the report was saved and shows a
+durability warning. You must still review the preview before sharing.
 
 Do not confuse diagnostics with **Export package…**. A diagnostic is a small
 metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing
