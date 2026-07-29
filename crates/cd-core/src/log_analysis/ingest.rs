@@ -15,7 +15,7 @@ use crate::process_progress::{
     progress_basename, CancelFlag, NoopProcessProgress, ProcessProgress, ProcessProgressKind,
     ProcessProgressObserver, ProcessProgressPhase,
 };
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -275,6 +275,19 @@ pub const MAX_RAW_LOG_ENTRIES: u64 = 50_000;
 /// Maximum aggregate actual bytes streamed for import by one raw ingest (4 GiB).
 pub const MAX_RAW_LOG_EXPANDED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Maximum number of archive containers in one source-identity chain.
+///
+/// A directly selected ZIP is depth 1, so this permits
+/// `outer.zip!/inner.zip!/deep.zip!/app.log` and refuses a fourth container.
+pub const MAX_RAW_LOG_ARCHIVE_DEPTH: u8 = 3;
+
+/// Maximum expanded-to-compressed ratio for a payload that will be read.
+///
+/// Absolute member and aggregate expanded-byte caps remain authoritative.
+/// The deliberately generous ratio preserves legitimate highly repetitive
+/// logs while rejecting corrupt or adversarial metadata before payload reads.
+pub const MAX_RAW_LOG_COMPRESSION_RATIO: u64 = 2_048;
+
 /// Maximum bytes in one logical log line, including its line ending (16 MiB).
 ///
 /// Absolute member and aggregate bounds remain authoritative. This higher
@@ -288,6 +301,8 @@ struct RawIngestLimits {
     max_file_bytes: u64,
     max_expanded_bytes: u64,
     max_line_bytes: usize,
+    max_archive_depth: u8,
+    max_compression_ratio: u64,
 }
 
 impl Default for RawIngestLimits {
@@ -297,6 +312,8 @@ impl Default for RawIngestLimits {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_expanded_bytes: MAX_RAW_LOG_EXPANDED_BYTES,
             max_line_bytes: MAX_RAW_LOG_LINE_BYTES,
+            max_archive_depth: MAX_RAW_LOG_ARCHIVE_DEPTH,
+            max_compression_ratio: MAX_RAW_LOG_COMPRESSION_RATIO,
         }
     }
 }
@@ -440,7 +457,13 @@ impl IngestStaging {
         let parent = cache_root.join(".log_ingest_staging");
         std::fs::create_dir_all(&parent)?;
         let root = parent.join(Uuid::now_v7().to_string());
-        std::fs::create_dir(&root)?;
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&root)?;
         Ok(Self { parent, root })
     }
 
@@ -561,6 +584,7 @@ fn validate_raw_log_zip_entry(name: &str) -> CoreResult<(String, bool)> {
     if name.is_empty()
         || name.starts_with(['/', '\\'])
         || name.contains('\\')
+        || name.contains("!/")
         || name.contains("//")
         || name.contains('\0')
     {
@@ -598,7 +622,13 @@ fn portable_source_identity(path: &Path) -> CoreResult<String> {
     for component in path.components() {
         match component {
             std::path::Component::Normal(value) => {
-                components.push(value.to_string_lossy().into_owned())
+                let value = value.to_string_lossy();
+                if value.ends_with('!') {
+                    return Err(CoreError::Policy(
+                        "log source identity conflicts with archive boundary syntax".into(),
+                    ));
+                }
+                components.push(value.into_owned())
             }
             std::path::Component::CurDir => {}
             _ => {
@@ -631,7 +661,16 @@ enum ZipEntryDisposition {
 struct ZipEntryPlan {
     identity: String,
     expanded_size: u64,
+    compressed_size: u64,
     disposition: ZipEntryDisposition,
+}
+
+fn compression_ratio_exceeded(expanded: u64, compressed: u64, limit: u64) -> bool {
+    expanded > 0
+        && (compressed == 0
+            || compressed
+                .checked_mul(limit)
+                .is_none_or(|allowed| expanded > allowed))
 }
 
 fn read_zip_u16(bytes: &[u8], offset: usize) -> CoreResult<u16> {
@@ -916,7 +955,7 @@ fn preflight_raw_log_zip(
             |_| CoreError::Policy("raw log zip entry comment exceeds seek range".into()),
         )?))
         .map_err(|e| CoreError::Message(format!("seek zip entry comment: {e}")))?;
-        let (expanded_size, _compressed_size, _local_offset, disk_start) =
+        let (expanded_size, compressed_size, _local_offset, disk_start) =
             resolve_zip64_entry_values(
                 &extra,
                 expanded32,
@@ -938,16 +977,30 @@ fn preflight_raw_log_zip(
             ZipEntryDisposition::NonRegular
         } else if is_hidden_archive_identity(&identity) {
             ZipEntryDisposition::Hidden
-        } else if has_zip_extension(Path::new(&identity)) {
-            ZipEntryDisposition::NestedArchive
         } else if expanded_size > limits.max_file_bytes {
             ZipEntryDisposition::TooLarge
+        } else if has_zip_extension(Path::new(&identity)) {
+            ZipEntryDisposition::NestedArchive
         } else {
             ZipEntryDisposition::Import
         };
+        if matches!(
+            disposition,
+            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive
+        ) && compression_ratio_exceeded(
+            expanded_size,
+            compressed_size,
+            limits.max_compression_ratio,
+        ) {
+            return Err(CoreError::Policy(format!(
+                "raw log zip compression-ratio limit exceeded ({} expanded / {} compressed > {}:1)",
+                expanded_size, compressed_size, limits.max_compression_ratio
+            )));
+        }
         plans.push(ZipEntryPlan {
             identity,
             expanded_size,
+            compressed_size,
             disposition,
         });
     }
@@ -1144,10 +1197,135 @@ fn ingest_lines_from_reader(
     Ok(true)
 }
 
-/// Stream zip members in-place (no full extract to temp). Cancel checked **per entry**.
+/// One nested archive copied into the hidden per-ingest tree.
+///
+/// The file is removed as soon as recursion returns. The enclosing
+/// [`IngestStaging`] guard also removes it after every error or cancellation.
+struct PrivateStagedArchive {
+    path: PathBuf,
+}
+
+impl PrivateStagedArchive {
+    fn create(root: &Path) -> CoreResult<(Self, std::fs::File)> {
+        let mut directory = std::fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directory.mode(0o700);
+        }
+        directory.create(root)?;
+
+        let path = root.join(format!("{}.zip", Uuid::now_v7()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&path)
+            .map_err(|e| CoreError::Message(format!("create private nested archive: {e}")))?;
+        Ok((Self { path }, file))
+    }
+}
+
+impl Drop for PrivateStagedArchive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn stage_nested_archive(
+    reader: &mut dyn Read,
+    private_staging_root: &Path,
+    cancel: Option<&CancelFlag>,
+) -> CoreResult<PrivateStagedArchive> {
+    let (staged, mut output) = PrivateStagedArchive::create(private_staging_root)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        if cancelled(cancel) {
+            return Err(CoreError::Message(
+                "ingest cancelled while staging nested archive".into(),
+            ));
+        }
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(CoreError::Policy(error.to_string()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return Err(CoreError::Message(error.to_string()))
+            }
+            Err(error) => {
+                return Err(CoreError::Message(format!(
+                    "read nested raw log archive: {error}"
+                )))
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|e| CoreError::Message(format!("stage nested raw log archive: {e}")))?;
+    }
+    output
+        .flush()
+        .map_err(|e| CoreError::Message(format!("flush nested raw log archive: {e}")))?;
+    Ok(staged)
+}
+
+fn archive_member_identity(archive_identity: &str, member_identity: &str) -> String {
+    format!("{archive_identity}!/{member_identity}")
+}
+
+/// Stream ZIP members in-place. Nested archive members alone are copied into
+/// bounded private staging because ZIP readers require `Read + Seek`.
 #[allow(clippy::too_many_arguments)]
 fn ingest_from_zip(
     zip_path: &Path,
+    private_staging_root: &Path,
+    corpus: &LogCorpus,
+    miner: &mut DrainMiner,
+    stats: &mut IngestStats,
+    seq: &mut u64,
+    batch: &mut Vec<IngestedLogEvent>,
+    progress: &dyn ProcessProgressObserver,
+    cancel: Option<&CancelFlag>,
+    kind: ProcessProgressKind,
+    budget: &mut RawIngestBudget,
+    limits: RawIngestLimits,
+) -> CoreResult<u64> {
+    let file = open_selected_regular_file(zip_path)?;
+    let archive_identity = portable_source_identity(Path::new(&progress_basename(zip_path)))?;
+    ingest_from_zip_file(
+        file,
+        &archive_identity,
+        1,
+        false,
+        private_staging_root,
+        corpus,
+        miner,
+        stats,
+        seq,
+        batch,
+        progress,
+        cancel,
+        kind,
+        budget,
+        limits,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_from_zip_file(
+    mut file: std::fs::File,
+    archive_identity: &str,
+    archive_depth: u8,
+    prefix_members: bool,
+    private_staging_root: &Path,
     corpus: &LogCorpus,
     miner: &mut DrainMiner,
     stats: &mut IngestStats,
@@ -1171,8 +1349,13 @@ fn ingest_from_zip(
         );
         return Err(CoreError::Message("ingest cancelled".into()));
     }
+    if archive_depth == 0 || archive_depth > limits.max_archive_depth {
+        return Err(CoreError::Policy(format!(
+            "raw log nested archive depth limit exceeded ({} > {})",
+            archive_depth, limits.max_archive_depth
+        )));
+    }
 
-    let mut file = open_selected_regular_file(zip_path)?;
     let archive_file = file
         .try_clone()
         .map_err(|e| CoreError::Message(format!("clone zip source handle: {e}")))?;
@@ -1191,7 +1374,10 @@ fn ingest_from_zip(
         ProcessProgress::phase(
             kind,
             ProcessProgressPhase::Scan,
-            format!("zip has {entry_count} entr(y/ies); streaming members"),
+            format!(
+                "archive {} depth {archive_depth} has {entry_count} entr(y/ies)",
+                progress_basename(Path::new(archive_identity))
+            ),
             true,
         )
         .with_fraction(0.1)
@@ -1218,35 +1404,36 @@ fn ingest_from_zip(
 
         stats.discover();
         let rel = plan.identity.as_str();
+        let nested_archive_identity = archive_member_identity(archive_identity, rel);
+        let source_identity = if prefix_members {
+            nested_archive_identity.clone()
+        } else {
+            rel.to_string()
+        };
         match plan.disposition {
-            ZipEntryDisposition::Import => {}
+            ZipEntryDisposition::Import | ZipEntryDisposition::NestedArchive => {}
             ZipEntryDisposition::Directory => {
-                stats.ignored("directory", Path::new(rel));
+                stats.ignored("directory", Path::new(&source_identity));
                 files_done += 1;
                 continue;
             }
             ZipEntryDisposition::Hidden => {
-                stats.ignored("hidden", Path::new(rel));
-                files_done += 1;
-                continue;
-            }
-            ZipEntryDisposition::NestedArchive => {
-                stats.excluded("nested_archive_unsupported", Path::new(rel));
+                stats.ignored("hidden", Path::new(&source_identity));
                 files_done += 1;
                 continue;
             }
             ZipEntryDisposition::Symlink => {
-                stats.excluded("symlink", Path::new(rel));
+                stats.excluded("symlink", Path::new(&source_identity));
                 files_done += 1;
                 continue;
             }
             ZipEntryDisposition::NonRegular => {
-                stats.excluded("non_regular", Path::new(rel));
+                stats.excluded("non_regular", Path::new(&source_identity));
                 files_done += 1;
                 continue;
             }
             ZipEntryDisposition::TooLarge => {
-                stats.excluded("too_large", Path::new(rel));
+                stats.excluded("too_large", Path::new(&source_identity));
                 files_done += 1;
                 continue;
             }
@@ -1258,10 +1445,11 @@ fn ingest_from_zip(
                 kind,
                 ProcessProgressPhase::Scan,
                 format!(
-                    "zip member {}/{}: {}",
+                    "archive member {}/{} at depth {}: {}",
                     i + 1,
                     entry_count,
-                    progress_basename(std::path::Path::new(rel))
+                    archive_depth,
+                    progress_basename(Path::new(rel))
                 ),
                 true,
             )
@@ -1284,6 +1472,7 @@ fn ingest_from_zip(
             || entry.is_symlink()
             || entry.encrypted()
             || entry.size() != plan.expanded_size
+            || entry.compressed_size() != plan.compressed_size
         {
             return Err(CoreError::Policy(
                 "raw log zip entry changed after preflight".into(),
@@ -1306,23 +1495,73 @@ fn ingest_from_zip(
                 )))
             }
         };
-        if has_zip_signature(head) {
-            stats.excluded("nested_archive_unsupported", Path::new(rel));
+        let nested_archive =
+            plan.disposition == ZipEntryDisposition::NestedArchive || has_zip_signature(head);
+        if nested_archive {
+            let next_depth = archive_depth.saturating_add(1);
+            if next_depth > limits.max_archive_depth {
+                return Err(CoreError::Policy(format!(
+                    "raw log nested archive depth limit exceeded ({} > {})",
+                    next_depth, limits.max_archive_depth
+                )));
+            }
+            reader.get_mut().commit_to_aggregate()?;
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Scan,
+                    format!(
+                        "staging nested archive {} for bounded depth {}",
+                        progress_basename(Path::new(rel)),
+                        next_depth
+                    ),
+                    true,
+                )
+                .with_files(files_done)
+                .with_lines(stats.lines)
+                .with_bytes(stats.source_bytes),
+            );
+            let staged = stage_nested_archive(&mut reader, private_staging_root, cancel)?;
+            let bounded = reader.into_inner();
+            if bounded.member_bytes != plan.expanded_size {
+                return Err(CoreError::Policy(format!(
+                    "raw log zip member size mismatch (declared {}, read {})",
+                    plan.expanded_size, bounded.member_bytes
+                )));
+            }
+            let nested_file = open_selected_regular_file(&staged.path)?;
+            ingest_from_zip_file(
+                nested_file,
+                &nested_archive_identity,
+                next_depth,
+                true,
+                private_staging_root,
+                corpus,
+                miner,
+                stats,
+                seq,
+                batch,
+                progress,
+                cancel,
+                kind,
+                budget,
+                limits,
+            )?;
             files_done += 1;
             continue;
         }
         if head.contains(&0) {
-            stats.excluded("binary", Path::new(rel));
+            stats.excluded("binary", Path::new(&source_identity));
             files_done += 1;
             continue;
         }
         reader.get_mut().commit_to_aggregate()?;
 
         let mut format_hint = None;
-
         let completely_read = ingest_lines_from_reader(
             &mut reader,
-            rel,
+            &source_identity,
             Some(Path::new(rel)),
             corpus,
             miner,
@@ -1349,7 +1588,7 @@ fn ingest_from_zip(
         if completely_read {
             stats.imported();
         } else {
-            stats.failed("read_failed", Path::new(rel));
+            stats.failed("read_failed", Path::new(&source_identity));
         }
         let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
@@ -1565,10 +1804,13 @@ fn ingest_path_into_cache(
     let mut seq = 0u64;
     let mut batch = Vec::with_capacity(256);
     let mut budget = RawIngestBudget::default();
+    let private_archive_root = cache_root.join(".nested_archives");
     let files_done = if is_zip_file(path) {
-        // Stream members without full extract-to-temp (#499 skeptic fix).
+        // Stream members without full extraction. Only nested archive
+        // containers are copied into the hidden, bounded per-ingest tree.
         ingest_from_zip(
             path,
+            &private_archive_root,
             &corpus,
             &mut miner,
             &mut stats,
@@ -1641,12 +1883,6 @@ fn ingest_path_into_cache(
                 return Err(CoreError::Message("ingest cancelled".into()));
             }
 
-            if has_zip_extension(file) {
-                stats.excluded("nested_archive_unsupported", file);
-                files_done += 1;
-                continue;
-            }
-
             let file_bytes = match std::fs::symlink_metadata(file) {
                 Ok(metadata) => metadata.len(),
                 Err(_) => {
@@ -1655,6 +1891,69 @@ fn ingest_path_into_cache(
                     continue;
                 }
             };
+            emit(
+                progress,
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Parse,
+                    format!("opening {}", progress_basename(file)),
+                    true,
+                )
+                .with_lines(stats.lines)
+                .with_files(files_done)
+                .with_bytes(stats.source_bytes),
+            );
+            let mut fh = match open_inventory_file(&inventory, file) {
+                Ok(file) => file,
+                Err(CoreError::Policy(reason)) => return Err(CoreError::Policy(reason)),
+                Err(_) => {
+                    stats.failed("open_failed", file);
+                    files_done += 1;
+                    continue;
+                }
+            };
+            let rel_path = if path.is_dir() {
+                file.strip_prefix(path).unwrap_or(file.as_path())
+            } else {
+                Path::new(
+                    file.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("log"),
+                )
+            };
+            let rel = portable_source_identity(rel_path)?;
+            let mut signature = [0u8; 4];
+            let signature_len = match fh.read(&mut signature) {
+                Ok(read) => read,
+                Err(_) => {
+                    stats.failed("read_failed", file);
+                    files_done += 1;
+                    continue;
+                }
+            };
+            fh.seek(SeekFrom::Start(0))
+                .map_err(|e| CoreError::Message(format!("rewind log source: {e}")))?;
+            if has_zip_extension(file) || has_zip_signature(&signature[..signature_len]) {
+                ingest_from_zip_file(
+                    fh,
+                    &rel,
+                    1,
+                    true,
+                    &private_archive_root,
+                    &corpus,
+                    &mut miner,
+                    &mut stats,
+                    &mut seq,
+                    &mut batch,
+                    progress,
+                    cancel,
+                    kind,
+                    &mut budget,
+                    limits,
+                )?;
+                files_done += 1;
+                continue;
+            }
             if file_bytes > limits.max_file_bytes {
                 stats.excluded("too_large", file);
                 files_done += 1;
@@ -1677,28 +1976,6 @@ fn ingest_path_into_cache(
                 );
                 continue;
             }
-
-            emit(
-                progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Parse,
-                    format!("opening {}", progress_basename(file)),
-                    true,
-                )
-                .with_lines(stats.lines)
-                .with_files(files_done)
-                .with_bytes(stats.source_bytes),
-            );
-            let fh = match open_inventory_file(&inventory, file) {
-                Ok(file) => file,
-                Err(CoreError::Policy(reason)) => return Err(CoreError::Policy(reason)),
-                Err(_) => {
-                    stats.failed("open_failed", file);
-                    files_done += 1;
-                    continue;
-                }
-            };
             let bounded = BoundedSourceReader::new(fh, &mut budget, limits, cancel);
             let mut reader = BufReader::with_capacity(64 * 1024, bounded);
             let head = match reader.fill_buf() {
@@ -1715,28 +1992,12 @@ fn ingest_path_into_cache(
                     continue;
                 }
             };
-            if has_zip_signature(head) {
-                stats.excluded("nested_archive_unsupported", file);
-                files_done += 1;
-                continue;
-            }
             if head.contains(&0) {
                 stats.excluded("binary", file);
                 files_done += 1;
                 continue;
             }
             reader.get_mut().commit_to_aggregate()?;
-
-            let rel_path = if path.is_dir() {
-                file.strip_prefix(path).unwrap_or(file.as_path())
-            } else {
-                Path::new(
-                    file.file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("log"),
-                )
-            };
-            let rel = portable_source_identity(rel_path)?;
 
             let mut format_hint = None;
             let completely_read = ingest_lines_from_reader(
@@ -2310,22 +2571,36 @@ mod tests {
     }
 
     #[test]
-    fn nested_archives_are_explicitly_unsupported_in_directories_and_zip_members() {
+    fn nested_zip_success_from_directory_and_archive_preserves_virtual_identities() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
         let logs = dir.path().join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("visible.log"), "level=info msg=visible\n").unwrap();
-        let inner = zip_bytes(&[("deep/app.log", b"level=error msg=must-not-parse\n")]);
+        let inner = zip_bytes(&[("deep/app.log", b"level=error msg=nested-visible\n")]);
         std::fs::write(logs.join("host-a.zip"), &inner).unwrap();
         std::fs::write(logs.join("host-a.bundle"), &inner).unwrap();
 
         let directory_report =
             ingest_path(&cache, &logs, "directory-nested", None, "none").unwrap();
-        assert_eq!(directory_report.stats.lines, 1);
+        assert_eq!(directory_report.stats.lines, 3);
+        assert_eq!(directory_report.stats.files, 3);
+        assert!(!directory_report.stats.partial);
+        let directory_corpus = LogCorpus::open(&cache, &directory_report.corpus_id).unwrap();
+        let mut directory_sources = directory_corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        directory_sources.sort();
         assert_eq!(
-            directory_report.stats.exclusion_counts["nested_archive_unsupported"],
-            2
+            directory_sources,
+            [
+                "host-a.bundle!/deep/app.log",
+                "host-a.zip!/deep/app.log",
+                "visible.log"
+            ]
         );
 
         let outer = dir.path().join("outer.zip");
@@ -2339,40 +2614,55 @@ mod tests {
         )
         .unwrap();
         let archive_report = ingest_path(&cache, &outer, "zip-nested", None, "none").unwrap();
-        assert_eq!(archive_report.stats.lines, 1);
+        assert_eq!(archive_report.stats.lines, 3);
+        assert_eq!(archive_report.stats.files, 3);
+        assert!(!archive_report.stats.partial);
+        let archive_corpus = LogCorpus::open(&cache, &archive_report.corpus_id).unwrap();
+        let mut archive_sources = archive_corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        archive_sources.sort();
         assert_eq!(
-            archive_report.stats.exclusion_counts["nested_archive_unsupported"],
-            2
+            archive_sources,
+            [
+                "outer.zip!/host-b.bundle!/deep/app.log",
+                "outer.zip!/host-b.zip!/deep/app.log",
+                "visible.log"
+            ]
         );
+        assert_no_ingest_staging(&cache);
+    }
 
-        let malformed = dir.path().join("malformed-container.zip");
+    #[test]
+    fn nested_zip_malformed_container_fails_atomically_and_cleans_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
         std::fs::write(
-            &malformed,
+            &outer,
             zip_bytes(&[
-                ("visible.log", b"level=info msg=still-visible\n"),
+                ("visible.log", b"level=info msg=must-not-publish\n"),
                 ("broken.zip", b"PK\x03\x04malformed nested bytes"),
             ]),
         )
         .unwrap();
-        let malformed_report =
-            ingest_path(&cache, &malformed, "malformed-nested", None, "none").unwrap();
-        assert_eq!(malformed_report.stats.lines, 1);
-        assert_eq!(
-            malformed_report.stats.exclusion_counts["nested_archive_unsupported"],
-            1
-        );
+
+        let error = ingest_path(&cache, &outer, "malformed-nested", None, "none").unwrap_err();
+        assert_atomic_failure(&cache, &error, "zip open");
     }
 
     #[test]
-    fn nested_archive_only_input_fails_atomically_instead_of_parsing_zip_bytes() {
+    fn nested_zip_binary_only_input_fails_atomically_and_cleans_staging() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
-        let logs = dir.path().join("logs");
-        std::fs::create_dir_all(&logs).unwrap();
-        let inner = zip_bytes(&[("app.log", b"level=error msg=hidden-in-archive\n")]);
-        std::fs::write(logs.join("host.zip"), inner).unwrap();
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[("binary.log", b"prefix\0binary")]);
+        std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
 
-        let error = ingest_path(&cache, &logs, "nested-only", None, "none").unwrap_err();
+        let error = ingest_path(&cache, &outer, "binary-nested", None, "none").unwrap_err();
         assert_atomic_failure(&cache, &error, "no safe/importable log events");
     }
 
@@ -2411,6 +2701,82 @@ mod tests {
         assert_eq!(archive_report.stats.lines, 1);
         assert_eq!(archive_report.stats.ignored_files, 1);
         assert_eq!(archive_report.stats.exclusion_counts["hidden"], 1);
+
+        let nested_cache = dir.path().join("nested-cache");
+        let nested_path = dir.path().join("nested-hidden.zip");
+        let inner = zip_bytes(&[
+            (
+                ".private/deep/secret.log",
+                b"level=error msg=must-not-import\n",
+            ),
+            ("visible.log", b"level=info msg=nested-visible\n"),
+        ]);
+        std::fs::write(&nested_path, zip_bytes(&[("host.zip", &inner)])).unwrap();
+        let nested_report =
+            ingest_path(&nested_cache, &nested_path, "hidden-nested", None, "none").unwrap();
+        assert_eq!(nested_report.stats.lines, 1);
+        assert_eq!(nested_report.stats.ignored_files, 1);
+        assert_eq!(nested_report.stats.exclusion_counts["hidden"], 1);
+    }
+
+    #[test]
+    fn nested_zip_summary_and_progress_use_bounded_basename_only_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("support.zip");
+        let inner = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("safe.log", options).unwrap();
+            writer.write_all(b"level=info msg=safe\n").unwrap();
+            writer.start_file(".hidden.log", options).unwrap();
+            writer.write_all(b"must-not-import\n").unwrap();
+            writer.start_file("binary.log", options).unwrap();
+            writer.write_all(b"prefix\0binary").unwrap();
+            writer
+                .add_symlink("link.log", "../outside.log", options)
+                .unwrap();
+            writer.finish().unwrap().into_inner()
+        };
+        std::fs::write(&outer, zip_bytes(&[("host-a.zip", &inner)])).unwrap();
+        let recorder = RecordingProcessProgress::default();
+
+        let report = ingest_path_with_observer(
+            &cache,
+            &outer,
+            "nested-reporting",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.stats.files, 1);
+        assert_eq!(report.stats.ignored_files, 1);
+        assert_eq!(report.stats.excluded_files, 2);
+        assert_eq!(report.stats.failed_files, 0);
+        assert_eq!(report.stats.exclusion_counts["hidden"], 1);
+        assert_eq!(report.stats.exclusion_counts["binary"], 1);
+        assert_eq!(report.stats.exclusion_counts["symlink"], 1);
+        assert_eq!(
+            report.stats.exclusion_examples,
+            [
+                "hidden: .hidden.log",
+                "binary: binary.log",
+                "symlink: link.log"
+            ]
+        );
+        assert!(report.stats.partial);
+        let updates = recorder.updates.lock().unwrap();
+        assert!(updates
+            .iter()
+            .any(|update| update.message.contains("depth 2")));
+        assert!(updates
+            .iter()
+            .all(|update| !update.message.contains("/Users/")));
+        assert!(updates.iter().all(|update| !update
+            .message
+            .contains(dir.path().to_string_lossy().as_ref())));
     }
 
     #[test]
@@ -2441,6 +2807,37 @@ mod tests {
         });
         sources.sort();
         assert_eq!(sources, ["host-a/app.log", "host-b/app.log"]);
+    }
+
+    #[test]
+    fn nested_zip_same_basenames_in_distinct_archives_keep_distinct_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("support.zip");
+        let host_a = zip_bytes(&[("logs/app.log", b"level=info msg=host-a\n")]);
+        let host_b = zip_bytes(&[("logs/app.log", b"level=error msg=host-b\n")]);
+        std::fs::write(
+            &outer,
+            zip_bytes(&[("hosts/a.zip", &host_a), ("hosts/b.zip", &host_b)]),
+        )
+        .unwrap();
+
+        let report = ingest_path(&cache, &outer, "same-nested-basename", None, "none").unwrap();
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        let mut sources = corpus.with_events(|events| {
+            events
+                .iter()
+                .map(|event| event.source.clone())
+                .collect::<Vec<_>>()
+        });
+        sources.sort();
+        assert_eq!(
+            sources,
+            [
+                "support.zip!/hosts/a.zip!/logs/app.log",
+                "support.zip!/hosts/b.zip!/logs/app.log"
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -2535,6 +2932,131 @@ mod tests {
             let archive = dir.path().join(format!("{case}.zip"));
             std::fs::write(&archive, bytes).unwrap();
             let error = ingest_path(&cache, &archive, case, None, "none").unwrap_err();
+            assert_atomic_failure(&cache, &error, expected);
+        }
+    }
+
+    #[test]
+    fn nested_zip_duplicate_normalized_identity_fails_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let mut inner = zip_bytes(&[
+            ("one.log", b"level=info msg=one\n"),
+            ("two.log", b"level=info msg=two\n"),
+        ]);
+        let central_positions: Vec<_> = inner
+            .windows(4)
+            .enumerate()
+            .filter_map(|(position, window)| (window == b"PK\x01\x02").then_some(position))
+            .collect();
+        assert_eq!(central_positions.len(), 2);
+        let second_name = central_positions[1] + 46;
+        inner[second_name..second_name + 7].copy_from_slice(b"one.log");
+        std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+
+        let error = ingest_path(&cache, &outer, "duplicate-nested", None, "none").unwrap_err();
+        assert_atomic_failure(&cache, &error, "duplicate");
+    }
+
+    #[test]
+    fn nested_zip_traversal_backslash_nul_and_symlink_metadata_are_rejected_or_excluded() {
+        for (case, inner, expected) in [
+            (
+                "traversal",
+                zip_bytes(&[("../escape.log", b"level=error msg=escape\n")]),
+                "path rejected",
+            ),
+            (
+                "backslash",
+                zip_bytes(&[("logs\\app.log", b"level=error msg=ambiguous\n")]),
+                "path rejected",
+            ),
+            (
+                "virtual-delimiter",
+                zip_bytes(&[("host.zip!/app.log", b"level=error msg=ambiguous\n")]),
+                "path rejected",
+            ),
+            (
+                "nul",
+                {
+                    let mut bytes = zip_bytes(&[("nul.log", b"level=error msg=nul\n")]);
+                    let central = bytes
+                        .windows(4)
+                        .position(|window| window == b"PK\x01\x02")
+                        .unwrap();
+                    bytes[central + 49] = 0;
+                    bytes
+                },
+                "path rejected",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = dir.path().join("cache");
+            let outer = dir.path().join(format!("{case}.zip"));
+            std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+            let error = ingest_path(&cache, &outer, case, None, "none").unwrap_err();
+            assert_atomic_failure(&cache, &error, expected);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("symlink.zip");
+        let inner = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default();
+            writer.start_file("safe.log", options).unwrap();
+            writer.write_all(b"level=info msg=safe\n").unwrap();
+            writer
+                .add_symlink("link.log", "../outside.log", options)
+                .unwrap();
+            writer.finish().unwrap().into_inner()
+        };
+        std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+        let report = ingest_path(&cache, &outer, "nested-symlink", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.exclusion_counts["symlink"], 1);
+        assert!(report
+            .stats
+            .exclusion_examples
+            .contains(&"symlink: link.log".to_string()));
+        assert!(report.stats.partial);
+    }
+
+    #[test]
+    fn nested_zip_encrypted_malformed_zip64_and_multi_disk_metadata_fail_atomically() {
+        for (case, expected, patch) in [
+            ("encrypted", "encrypted", "flags"),
+            ("malformed-zip64", "Zip64", "size"),
+            ("multi-disk", "multi-disk", "disk"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = dir.path().join("cache");
+            let outer = dir.path().join(format!("{case}.zip"));
+            let mut inner = zip_bytes(&[("app.log", b"level=info msg=safe\n")]);
+            let central = inner
+                .windows(4)
+                .position(|window| window == b"PK\x01\x02")
+                .unwrap();
+            let eocd = inner
+                .windows(4)
+                .position(|window| window == b"PK\x05\x06")
+                .unwrap();
+            match patch {
+                "flags" => {
+                    let flags = u16::from_le_bytes([inner[central + 8], inner[central + 9]]) | 1;
+                    inner[central + 8..central + 10].copy_from_slice(&flags.to_le_bytes());
+                }
+                "size" => {
+                    inner[central + 24..central + 28].copy_from_slice(&u32::MAX.to_le_bytes());
+                }
+                "disk" => {
+                    inner[eocd + 4..eocd + 6].copy_from_slice(&1u16.to_le_bytes());
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+            let error = ingest_path(&cache, &outer, case, None, "none").unwrap_err();
             assert_atomic_failure(&cache, &error, expected);
         }
     }
@@ -2695,6 +3217,28 @@ mod tests {
     }
 
     #[test]
+    fn nested_zip_valid_bounded_zip64_imports_through_shared_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = with_bounded_zip64_end_records(zip_bytes(&[(
+            "app.log",
+            b"level=info msg=nested-zip64-safe\n",
+        )]));
+        std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+
+        let report = ingest_path(&cache, &outer, "nested-zip64", None, "none").unwrap();
+        assert_eq!(report.stats.lines, 1);
+        assert_eq!(report.stats.files, 1);
+        assert!(!report.stats.partial);
+        let corpus = LogCorpus::open(&cache, &report.corpus_id).unwrap();
+        assert_eq!(
+            corpus.with_events(|events| events[0].source.clone()),
+            "outer.zip!/host.zip!/app.log"
+        );
+    }
+
+    #[test]
     fn zip_per_member_cap_is_an_honest_exclusion() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -2771,6 +3315,97 @@ mod tests {
     }
 
     #[test]
+    fn nested_zip_depth_entry_member_aggregate_and_ratio_limits_fail_atomically() {
+        let leaf = zip_bytes(&[("app.log", b"level=error msg=deep\n")]);
+        let middle = zip_bytes(&[("deep.zip", &leaf)]);
+        let too_deep = zip_bytes(&[("middle.zip", &middle)]);
+
+        let two_entries = zip_bytes(&[
+            ("one.log", b"level=info msg=one\n"),
+            ("two.log", b"level=info msg=two\n"),
+        ]);
+        let entry_limited = zip_bytes(&[("host.zip", &two_entries)]);
+
+        let oversized_leaf_body = vec![b'x'; 96];
+        let oversized_leaf = zip_bytes(&[("large.log", &oversized_leaf_body)]);
+        let member_limited = zip_bytes(&[("host.zip", &oversized_leaf)]);
+
+        let aggregate_body = b"level=error msg=aggregate-budget\n";
+        let aggregate_inner = zip_bytes(&[("app.log", aggregate_body)]);
+        let aggregate_limited = zip_bytes(&[("host.zip", &aggregate_inner)]);
+        let aggregate_cap = aggregate_inner.len() as u64 + aggregate_body.len() as u64 - 1;
+
+        let ratio_inner = {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("repeated.log", options).unwrap();
+            writer.write_all(&vec![b'a'; 64 * 1024]).unwrap();
+            writer.finish().unwrap().into_inner()
+        };
+        let ratio_limited = zip_bytes(&[("host.zip", &ratio_inner)]);
+
+        let cases = [
+            (
+                "depth",
+                too_deep,
+                RawIngestLimits {
+                    max_archive_depth: 2,
+                    ..RawIngestLimits::default()
+                },
+                "depth limit",
+            ),
+            (
+                "entry",
+                entry_limited,
+                RawIngestLimits {
+                    max_entries: 2,
+                    ..RawIngestLimits::default()
+                },
+                "entry limit",
+            ),
+            (
+                "member",
+                member_limited,
+                RawIngestLimits {
+                    max_file_bytes: 64,
+                    ..RawIngestLimits::default()
+                },
+                "no safe/importable log events",
+            ),
+            (
+                "aggregate",
+                aggregate_limited,
+                RawIngestLimits {
+                    max_expanded_bytes: aggregate_cap,
+                    ..RawIngestLimits::default()
+                },
+                "aggregate actual-byte limit",
+            ),
+            (
+                "ratio",
+                ratio_limited,
+                RawIngestLimits {
+                    max_compression_ratio: 2,
+                    ..RawIngestLimits::default()
+                },
+                "compression-ratio limit",
+            ),
+        ];
+
+        for (case, bytes, limits, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = dir.path().join("cache");
+            let outer = dir.path().join(format!("{case}.zip"));
+            std::fs::write(&outer, bytes).unwrap();
+            let error =
+                ingest_with_limits(&cache, &outer, case, limits, &NoopProcessProgress, None)
+                    .unwrap_err();
+            assert_atomic_failure(&cache, &error, expected);
+        }
+    }
+
+    #[test]
     fn excluded_content_does_not_consume_the_actual_byte_budget() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
@@ -2783,14 +3418,10 @@ mod tests {
             zip.write_all(b"level=info msg=safe\n").unwrap();
             zip.start_file(".hidden.log", options).unwrap();
             zip.write_all(&[b'h'; 64]).unwrap();
-            zip.start_file("nested.zip", options).unwrap();
-            zip.write_all(&[b'n'; 64]).unwrap();
             zip.start_file("oversized.log", options).unwrap();
             zip.write_all(&[b'o'; 64]).unwrap();
             zip.start_file("binary.log", options).unwrap();
             zip.write_all(b"\0binary-content").unwrap();
-            zip.start_file("disguised.bundle", options).unwrap();
-            zip.write_all(b"PK\x03\x04nested").unwrap();
             zip.finish().unwrap();
         }
         let limits = RawIngestLimits {
@@ -2813,17 +3444,13 @@ mod tests {
         assert_eq!(report.stats.exclusion_counts["hidden"], 1);
         assert_eq!(report.stats.exclusion_counts["too_large"], 1);
         assert_eq!(report.stats.exclusion_counts["binary"], 1);
-        assert_eq!(
-            report.stats.exclusion_counts["nested_archive_unsupported"],
-            2
-        );
 
         let directory_cache = dir.path().join("directory-cache");
         let logs = dir.path().join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::write(logs.join("safe.log"), b"level=info msg=safe\n").unwrap();
         std::fs::write(logs.join("binary.log"), b"\0binary-content").unwrap();
-        std::fs::write(logs.join("nested.zip"), [b'n'; 64]).unwrap();
+        std::fs::write(logs.join("oversized-b.bin"), [b'n'; 64]).unwrap();
         std::fs::write(logs.join("oversized.log"), [b'o'; 64]).unwrap();
         let report = ingest_with_limits(
             &directory_cache,
@@ -2837,11 +3464,7 @@ mod tests {
         assert_eq!(report.stats.lines, 1);
         assert_eq!(report.stats.files, 1);
         assert_eq!(report.stats.exclusion_counts["binary"], 1);
-        assert_eq!(report.stats.exclusion_counts["too_large"], 1);
-        assert_eq!(
-            report.stats.exclusion_counts["nested_archive_unsupported"],
-            1
-        );
+        assert_eq!(report.stats.exclusion_counts["too_large"], 2);
     }
 
     #[test]
@@ -3119,6 +3742,51 @@ mod tests {
         drop(updates);
         assert!(LogCorpus::list_ids(dir.path()).unwrap().is_empty());
         assert_no_ingest_staging(dir.path());
+    }
+
+    #[test]
+    fn nested_zip_cancellation_during_private_staging_is_atomic_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let outer = dir.path().join("outer.zip");
+        let inner = zip_bytes(&[("app.log", &vec![b'a'; 256 * 1024])]);
+        std::fs::write(&outer, zip_bytes(&[("host.zip", &inner)])).unwrap();
+
+        struct CancelOnNestedStage {
+            flag: CancelFlag,
+            recorder: RecordingProcessProgress,
+        }
+        impl ProcessProgressObserver for CancelOnNestedStage {
+            fn progress(&self, update: ProcessProgress) {
+                if update.message.starts_with("staging nested archive ") {
+                    self.flag.cancel();
+                }
+                self.recorder.progress(update);
+            }
+        }
+
+        let flag = CancelFlag::new();
+        let observer = CancelOnNestedStage {
+            flag: flag.clone(),
+            recorder: RecordingProcessProgress::default(),
+        };
+        let error = ingest_path_with_observer(
+            &cache,
+            &outer,
+            "nested-cancel",
+            None,
+            "none",
+            &observer,
+            Some(&flag),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "ingest cancelled");
+        assert_eq!(
+            observer.recorder.phases().last(),
+            Some(&ProcessProgressPhase::Cancelled)
+        );
+        assert!(LogCorpus::list_ids(&cache).unwrap().is_empty());
+        assert_no_ingest_staging(&cache);
     }
 
     #[test]
