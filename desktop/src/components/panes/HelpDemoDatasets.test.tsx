@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createRef } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { HelpTocEntryDto } from "../../lib/host";
 import { HelpMarkdown } from "./HelpMarkdown";
@@ -155,16 +161,31 @@ describe("rendered demo-dataset Help (#715)", () => {
     });
     renderDemoHelp();
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy sh block" }));
+    const pathCommand = screen
+      .getAllByText((_content, element) => element?.tagName === "CODE")
+      .find((element) => element.textContent?.includes("git rev-parse"));
+    const pathCommandBlock = pathCommand?.closest(".help-code");
+    if (!pathCommandBlock) {
+      throw new Error("portable repository path command is missing");
+    }
+    fireEvent.click(
+      within(pathCommandBlock as HTMLElement).getByRole("button", {
+        name: "Copy sh block",
+      }),
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Copied sh block" }),
+        within(pathCommandBlock as HTMLElement).getByRole("button", {
+          name: "Copied sh block",
+        }),
       ).toBeTruthy(),
     );
     expect(writeText).toHaveBeenCalledWith(
       'cd "$(git rev-parse --show-toplevel)/fixtures/log-lab/scenarios/checkout-cascade/import" && pwd',
     );
-    expect(screen.getByRole("status").textContent).toBe(
+    expect(
+      within(pathCommandBlock as HTMLElement).getByRole("status").textContent,
+    ).toBe(
       "sh block copied to clipboard",
     );
   });
