@@ -5338,6 +5338,21 @@ export function LogExplorer({ corpusId }: Props) {
                       ))}
                     </div>
                   </div>
+                  {boundaryLabel === "Start of matched logs" ? (
+                    <div
+                      className="log-explorer__lane-paging log-explorer__lane-paging--upper"
+                      data-testid={`lane-boundary-start-${lane.id}`}
+                      aria-live="polite"
+                      aria-label={`${lane.label} upper paging boundary`}
+                    >
+                      <span
+                        className="log-explorer__paging-boundary"
+                        title={boundaryTitle}
+                      >
+                        {boundaryLabel}
+                      </span>
+                    </div>
+                  ) : null}
                   <VirtualizedEventList
                     events={laneEvents[lane.id] ?? []}
                     alignedRows={
@@ -5435,14 +5450,17 @@ export function LogExplorer({ corpusId }: Props) {
                       </button>
                     </div>
                   ) : null}
-                  {paging?.loading || boundaryLabel ? (
+                  {paging?.loading ||
+                  (boundaryLabel &&
+                    boundaryLabel !== "Start of matched logs") ? (
                     <div
                       className="log-explorer__lane-paging"
                       data-testid={`lane-paging-${lane.id}`}
                       aria-live="polite"
                       aria-label={`${lane.label} paging status`}
                     >
-                      {boundaryLabel ? (
+                      {boundaryLabel &&
+                      boundaryLabel !== "Start of matched logs" ? (
                         <span
                           className="log-explorer__paging-boundary"
                           title={boundaryTitle}

@@ -4031,6 +4031,25 @@ describe("LogExplorer shell", () => {
     );
   });
 
+  it("places the start boundary above the lane event viewport", async () => {
+    const firstPage = eventPage("api.log", "wall", 2, 1_700_000_000, 4);
+    firstPage.nextCursor = firstPage.events.at(-1)!.seq;
+    firstPage.nextTs = firstPage.events.at(-1)!.ts;
+    vi.mocked(host.hostLogQueryEvents).mockResolvedValue(firstPage);
+
+    render(<LogExplorer corpusId="c1" />);
+
+    const boundary = await screen.findByTestId(
+      "lane-boundary-start-lane-0",
+    );
+    const viewport = screen.getByTestId("virtualized-event-list");
+    expect(
+      boundary.compareDocumentPosition(viewport) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(screen.queryByTestId("lane-paging-lane-0")).toBeNull();
+  });
+
   it("keeps a paging failure local to its lane and retries without clearing evidence", async () => {
     let newerAttempts = 0;
     const middle = defaultEventPage();

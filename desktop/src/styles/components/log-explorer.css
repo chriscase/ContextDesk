@@ -408,6 +408,11 @@
   padding: 0.25rem 0;
 }
 
+.log-explorer__lane-paging--upper {
+  justify-content: flex-start;
+  padding: 0.18rem 0.5rem;
+}
+
 .log-explorer__paging-boundary,
 .log-explorer__paging-loading {
   color: var(--text-muted, #838995);
