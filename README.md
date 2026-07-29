@@ -36,11 +36,23 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 ### Product gallery (packaged app)
 
-Public product captures are temporarily withheld pending neutral-profile
-recapture, exact source-SHA recording, and publication review under
-[#653](https://github.com/chriscase/ContextDesk/issues/653). Existing
-acceptance captures may contain owner-specific model/profile information or
-show an older interface and are not current product evidence.
+![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
+
+**Start with repeatable evidence.** Install the bundled synthetic corpus during
+first-run setup, inspect its import summary, and open it directly in Log
+Explorer.
+
+![ContextDesk Log Explorer investigating synthetic logs with aligned lanes and timeline](docs/media/gallery/log-explorer-investigation.png)
+
+**Investigate without losing provenance.** Navigate time, compose source lanes,
+inspect payloads, filter events, and retain evidence while the linked-chat area
+remains optional.
+
+![ContextDesk Help Center explaining demonstration datasets with the appearance picker open](docs/media/gallery/help-appearance.png)
+
+**Guidance is built in.** Search the offline Help Center for workflows, demo
+datasets, context boundaries, and trust behavior, with accessible appearance
+choices.
 
 ### From raw logs to a durable investigation
 
@@ -149,8 +161,9 @@ machine-checked against production symbols. Partial work is listed separately.
 Deterministic Log Lab corpora exercise 100,000-event multi-lane investigation
 and a separate 25,000-event seven-day time span. These fixture counts support
 repeatable acceptance checks; they are not production ceilings or universal
-performance claims. Neutral exact-SHA screenshots will return here only after
-they pass the publication gate tracked by #653.
+performance claims. Public screenshots are governed by the exact-build
+publication gate tracked by
+[#653](https://github.com/chriscase/ContextDesk/issues/653).
 
 **Roadmap / partial (do not treat as done):**
 
