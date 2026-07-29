@@ -5,6 +5,7 @@
 import {
   classifyModelRole,
   formatRoleHintAccessible,
+  recommendationBasisLabel,
   type ModelRoleSuggestion,
 } from "../../lib/modelRoleHints";
 
@@ -25,6 +26,7 @@ export function ModelRoleHintLine({
   const raw = modelId?.trim() ?? "";
   if (!raw) return null;
   const s = suggestion ?? classifyModelRole(raw);
+  const basis = recommendationBasisLabel(s.source);
   const a11y = formatRoleHintAccessible(s);
   return (
     <p
@@ -40,8 +42,7 @@ export function ModelRoleHintLine({
       <span className="model-role-hint__suggested">{s.suggestedFor}</span>
       <span className="model-role-hint__basis">
         {" "}
-        · Basis: {s.basisLabel}
-        {s.confidence !== "low" ? ` (${s.confidence})` : ""}
+        · Basis: {basis} · Confidence: {s.confidence}
       </span>
     </p>
   );

@@ -55,9 +55,12 @@ reranking, or unqualified) based on the **name** alone.
   labeled unqualified until you confirm them.
 - Suggestions never silently change an existing default or role binding; you
   confirm every change.
-- Hidden or curated model choices are not expanded or exported merely to
-  compute a hint. Model inventories and private aliases do not belong in
-  shareable diagnostics or public screenshots.
+- The name classifier accepts one already-visible id and does not enumerate a
+  provider inventory. Provider-scoped hidden-model filtering is separate work
+  tracked by #678; until that production state is connected, do not treat role
+  hints as implementing model visibility preferences.
+- Model inventories and private aliases do not belong in shareable diagnostics
+  or public screenshots.
 
 ## Tool calling and context
 
@@ -77,4 +80,3 @@ does not make remote content processing local.
 
 For a 429, authentication failure, or empty model list, see
 help://common-problems.
-

@@ -1,6 +1,9 @@
 /** Client-side preflight mirror (host will call cd-core later). */
 
-import { classifyModelRole } from "./modelRoleHints";
+import {
+  classifyModelRole,
+  recommendationBasisLabel,
+} from "./modelRoleHints";
 
 export type PreflightLevel = "pass" | "warn" | "fail" | "off";
 
@@ -135,7 +138,7 @@ export function runClientPreflight(s: AppSetupState): PreflightReport {
         id: "provider.model",
         title: "Chat model",
         level: "pass",
-        detail: `Model: ${s.chatModel} · ${hint.suggestedFor} · Basis: ${hint.basisLabel} (not measured capability)`,
+        detail: `Model: ${s.chatModel} · ${hint.suggestedFor} · Basis: ${recommendationBasisLabel(hint.source)} (${hint.confidence} confidence; not measured capability)`,
         fixAction: "ai",
       });
     }

@@ -126,4 +126,19 @@ describe("AiSection role-hint defaults (#723)", () => {
       /Basis: Name hint/,
     );
   });
+
+  it("shows exactly one role hint for a custom model id", async () => {
+    listModels.mockResolvedValue(["grok-3", "bge-m3"]);
+    render(
+      <Harness initial={baseDraft({ chatModel: "corp-private-deployment" })} />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await waitFor(() => expect(listModels).toHaveBeenCalled());
+
+    const hints = screen.getAllByTestId("model-role-hint");
+    expect(hints).toHaveLength(1);
+    expect(hints[0]?.textContent).toContain("Unqualified");
+  });
 });

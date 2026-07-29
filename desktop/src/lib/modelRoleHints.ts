@@ -244,7 +244,21 @@ export function excludeHiddenModelIds(
 
 /** Accessible one-line summary for a suggestion (role + basis). */
 export function formatRoleHintAccessible(s: ModelRoleSuggestion): string {
-  return `${s.suggestedFor}. Basis: ${s.basisLabel} (${s.confidence} confidence). Not measured capability.`;
+  return `${s.suggestedFor}. Basis: ${recommendationBasisLabel(s.source)} (${s.confidence} confidence). Not measured capability.`;
+}
+
+/** Human-readable evidence basis derived from the typed source, never caller copy. */
+export function recommendationBasisLabel(source: HintSource): string {
+  switch (source) {
+    case "name_hint":
+      return "Name hint";
+    case "provider_metadata":
+      return "Provider metadata";
+    case "measured_locally":
+      return "Measured locally";
+    case "user_override":
+      return "User override";
+  }
 }
 
 /**
@@ -254,22 +268,6 @@ export function formatRoleHintAccessible(s: ModelRoleSuggestion): string {
 export function describeRecommendationBasis(
   sources: HintSource[],
 ): string {
-  const labels: string[] = [];
-  for (const src of sources) {
-    switch (src) {
-      case "name_hint":
-        labels.push("Name hint");
-        break;
-      case "provider_metadata":
-        labels.push("Provider metadata");
-        break;
-      case "measured_locally":
-        labels.push("Measured locally");
-        break;
-      case "user_override":
-        labels.push("User override");
-        break;
-    }
-  }
+  const labels = sources.map(recommendationBasisLabel);
   return labels.length ? labels.join(" · ") : "Name hint";
 }

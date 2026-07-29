@@ -1,0 +1,96 @@
+{
+  "catalog_version": "contextdesk.model_role_hints.v1",
+  "cases": [
+    {
+      "id": "grok-3",
+      "role": "investigator",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "gpt-4o-mini",
+      "role": "investigator",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "qwen3-27b",
+      "role": "investigator",
+      "confidence": "medium",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "custom-instruct-7b",
+      "role": "investigator",
+      "confidence": "medium",
+      "source": "name_hint",
+      "ordinary_chat_default": true
+    },
+    {
+      "id": "bge-m3",
+      "role": "embedding",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "e5-large-v2",
+      "role": "embedding",
+      "confidence": "medium",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "nomic-embed-text",
+      "role": "embedding",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "qwen3-reranker-0.6b",
+      "role": "reranker",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "gpt-oss-reranker-v1",
+      "role": "reranker",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "chat-bge-m3-embed",
+      "role": "embedding",
+      "confidence": "high",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "corp-prod-v3",
+      "role": "unknown",
+      "confidence": "low",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "corp-whisper-router",
+      "role": "unknown",
+      "confidence": "low",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    },
+    {
+      "id": "voice-tts-prod",
+      "role": "unknown",
+      "confidence": "low",
+      "source": "name_hint",
+      "ordinary_chat_default": false
+    }
+  ]
+}

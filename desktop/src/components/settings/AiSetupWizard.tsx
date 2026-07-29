@@ -15,7 +15,6 @@ import {
 } from "../../lib/host";
 import {
   classifyModelRole,
-  excludeHiddenModelIds,
   initialChatPickerSelection,
   sortIdsForChatPicker,
 } from "../../lib/modelRoleHints";
@@ -97,17 +96,10 @@ const GATEWAY_PRESETS: { id: string; label: string; base: string; hint: string }
  * users can still select them intentionally. Does not change an existing
  * default until the user confirms apply.
  */
-function preferChatModels(
-  ids: string[],
-  hiddenIds?: ReadonlySet<string> | readonly string[] | null,
-): string[] {
-  const visible = excludeHiddenModelIds(ids, hiddenIds);
-  // Drop pure TTS/whisper noise that is never a chat role.
-  const filtered = visible.filter((id) => {
-    const l = id.toLowerCase();
-    return !l.includes("whisper") && !l.includes("tts");
-  });
-  return sortIdsForChatPicker(filtered);
+function preferChatModels(ids: string[]): string[] {
+  // Classification changes ordering only. A private or unfamiliar deployment
+  // id must never disappear because its text resembles a specialty family.
+  return sortIdsForChatPicker(ids);
 }
 
 /**

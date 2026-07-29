@@ -5149,11 +5149,7 @@ async fn list_models_for_draft(
         // ranked last by the role-hint catalog (#723). Never drop embed/rerank.
         let mut ids: Vec<String> = result.models.into_iter().map(|m| m.id).collect();
         if ids.is_empty() {
-            ids = result
-                .chat_candidates
-                .into_iter()
-                .map(|m| m.id)
-                .collect();
+            ids = result.chat_candidates.into_iter().map(|m| m.id).collect();
         }
         // If user forced a flavor that didn't match probe, still return what we got.
         if matches!(kind, ProviderKind::Ollama) && result.flavor.as_deref() != Some("ollama") {

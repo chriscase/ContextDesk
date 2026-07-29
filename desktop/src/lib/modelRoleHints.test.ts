@@ -3,6 +3,7 @@
  * Drives the shipped `classifyModelRole` / `sortIdsForChatPicker` entry points.
  */
 import { describe, expect, it } from "vitest";
+import goldenCatalog from "../../../fixtures/providers/model-role-hints.v1.json";
 import {
   MODEL_ROLE_HINT_CATALOG_VERSION,
   classifyModelRole,
@@ -15,6 +16,24 @@ import {
 } from "./modelRoleHints";
 
 describe("modelRoleHints (#723)", () => {
+  it("matches the same checked-in golden catalog as Rust", () => {
+    expect(goldenCatalog.catalog_version).toBe(
+      MODEL_ROLE_HINT_CATALOG_VERSION,
+    );
+    for (const expected of goldenCatalog.cases) {
+      const actual = classifyModelRole(expected.id);
+      expect(actual.catalogVersion, expected.id).toBe(
+        goldenCatalog.catalog_version,
+      );
+      expect(actual.role, expected.id).toBe(expected.role);
+      expect(actual.confidence, expected.id).toBe(expected.confidence);
+      expect(actual.source, expected.id).toBe(expected.source);
+      expect(actual.ordinaryChatDefault, expected.id).toBe(
+        expected.ordinary_chat_default,
+      );
+    }
+  });
+
   it("uses a stable catalog version", () => {
     expect(classifyModelRole("grok-3").catalogVersion).toBe(
       MODEL_ROLE_HINT_CATALOG_VERSION,

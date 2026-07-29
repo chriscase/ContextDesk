@@ -248,6 +248,54 @@ fn chat_picker_rank(id: &str) -> i32 {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Deserialize)]
+    struct GoldenCatalog {
+        catalog_version: String,
+        cases: Vec<GoldenCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GoldenCase {
+        id: String,
+        role: ModelRoleHint,
+        confidence: HintConfidence,
+        source: HintSource,
+        ordinary_chat_default: bool,
+    }
+
+    #[test]
+    fn shared_golden_catalog_matches_rust_rules() {
+        let fixture: GoldenCatalog = serde_json::from_str(include_str!(
+            "../../../fixtures/providers/model-role-hints.v1.json"
+        ))
+        .expect("shared model-role golden fixture must parse");
+        assert_eq!(
+            fixture.catalog_version, MODEL_ROLE_HINT_CATALOG_VERSION,
+            "catalog fixture version must move with production rules"
+        );
+
+        for case in fixture.cases {
+            let actual = classify_model_role(&case.id);
+            assert_eq!(
+                actual.catalog_version, fixture.catalog_version,
+                "catalog version for {}",
+                case.id
+            );
+            assert_eq!(actual.role, case.role, "role for {}", case.id);
+            assert_eq!(
+                actual.confidence, case.confidence,
+                "confidence for {}",
+                case.id
+            );
+            assert_eq!(actual.source, case.source, "source for {}", case.id);
+            assert_eq!(
+                actual.ordinary_chat_default, case.ordinary_chat_default,
+                "ordinary default eligibility for {}",
+                case.id
+            );
+        }
+    }
+
     #[test]
     fn catalog_version_is_stable() {
         assert_eq!(

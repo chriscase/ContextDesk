@@ -11,7 +11,6 @@ import {
 } from "../../lib/host";
 import {
   classifyModelRole,
-  excludeHiddenModelIds,
   preferredChatDefaultId,
   sortIdsForChatPicker,
 } from "../../lib/modelRoleHints";
@@ -97,8 +96,7 @@ export function AiSection({
         chatModel: null,
       }).then((list) => {
         if (cancelled) return;
-        // #678: when a hide set exists later, filter here — never expand hidden inventory.
-        const ordered = sortIdsForChatPicker(excludeHiddenModelIds(list, null));
+        const ordered = sortIdsForChatPicker(list);
         setDiscoveredModels(ordered);
         setModelsLoading(false);
         if (ordered.length === 0) {
@@ -619,10 +617,12 @@ export function AiSection({
             })}
             <option value="__other__">Other… (type below)</option>
           </SelectField>
-          <ModelRoleHintLine
-            id={`${baseId}-model-role-hint`}
-            modelId={draft.chatModel}
-          />
+          {modelInList ? (
+            <ModelRoleHintLine
+              id={`${baseId}-model-role-hint`}
+              modelId={draft.chatModel}
+            />
+          ) : null}
         </>
       ) : null}
       {discoveredModels.length === 0 || selectValue === "__other__" || !modelInList ? (

@@ -99,4 +99,72 @@ describe("AiSetupWizard specialty inventory (#723)", () => {
     };
     expect(payload.setup.chatModel).toBe("bge-m3");
   });
+
+  it("keeps deceptive private tts/whisper aliases selectable by keyboard and applies the chosen id", async () => {
+    probe.mockResolvedValue({
+      ok: true,
+      flavor: "ollama",
+      base_url: "http://127.0.0.1:11434",
+      effective_base_url: "http://127.0.0.1:11434",
+      models: [
+        { id: "grok-3", kind: "chat", source: "ollama" },
+        { id: "corp-whisper-router", kind: "unknown", source: "ollama" },
+        { id: "voice-tts-prod", kind: "unknown", source: "ollama" },
+      ],
+      chat_candidates: [{ id: "grok-3", kind: "chat", source: "ollama" }],
+      embed_candidates: [],
+      notes: [],
+      errors: [],
+      local_ollama_reachable: true,
+      local_ollama_models: [],
+    });
+
+    const onApplyAndSave = vi.fn();
+    render(
+      <AiSetupWizard
+        baseId="wiz-private"
+        draft={draft()}
+        setDraft={vi.fn()}
+        apiKeyDraft=""
+        setApiKeyDraft={vi.fn()}
+        candidates={[]}
+        onApplyAndSave={onApplyAndSave}
+      />,
+    );
+
+    const ollamaPath = screen.queryByRole("button", { name: /Ollama/i });
+    if (ollamaPath) fireEvent.click(ollamaPath);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Discover options/i }),
+    );
+    await waitFor(() => expect(probe).toHaveBeenCalled());
+
+    const select = await screen.findByRole("combobox", {
+      name: /Chat model/i,
+    });
+    expect(
+      screen.getByRole("option", { name: /corp-whisper-router/ }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: /voice-tts-prod/ }),
+    ).toBeTruthy();
+
+    select.focus();
+    expect(document.activeElement).toBe(select);
+    fireEvent.keyDown(select, { key: "ArrowDown" });
+    fireEvent.change(select, { target: { value: "corp-whisper-router" } });
+    expect((select as HTMLSelectElement).value).toBe("corp-whisper-router");
+    expect(screen.getByTestId("model-role-hint").textContent).toContain(
+      "Unqualified",
+    );
+
+    const apply = screen.getByRole("button", { name: /Apply & Save/i });
+    apply.focus();
+    expect(document.activeElement).toBe(apply);
+    fireEvent.click(apply);
+    await waitFor(() => expect(onApplyAndSave).toHaveBeenCalledOnce());
+    expect(onApplyAndSave.mock.calls[0]?.[0].setup.chatModel).toBe(
+      "corp-whisper-router",
+    );
+  });
 });
