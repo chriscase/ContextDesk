@@ -34,6 +34,7 @@ const hostMocks = vi.hoisted(() => ({
   getFailedIngestDiagnostic: vi.fn(),
   clearFailedIngestDiagnostic: vi.fn(),
   prepareDiagnostic: vi.fn(),
+  releaseDiagnostic: vi.fn(),
   saveDiagnostic: vi.fn(),
   saveFile: vi.fn(),
   openFile: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock("../../lib/host", () => ({
   hostImportLogCorpusPackagePath: hostMocks.importPackage,
   hostGetFailedLogIngestDiagnostic: hostMocks.getFailedIngestDiagnostic,
   hostPrepareLogDiagnosticReport: hostMocks.prepareDiagnostic,
+  hostReleaseLogDiagnosticReport: hostMocks.releaseDiagnostic,
   hostIngestLogPath: hostMocks.ingest,
   hostListLogTemplates: hostMocks.listTemplates,
   hostLogClusterProblems: hostMocks.clusterProblems,
@@ -138,6 +140,7 @@ describe("LogPane", () => {
       identity_line: "v0.1.0 · channel=dev",
     });
     hostMocks.saveDiagnostic.mockResolvedValue({ status: "saved" });
+    hostMocks.releaseDiagnostic.mockResolvedValue(true);
     hostMocks.prepareDiagnostic.mockImplementation(
       async (manifest: LogDiagnosticManifest) => ({
         reportId: "cdlogdiag-0000000000000001-0000000000000001",
@@ -398,6 +401,15 @@ describe("LogPane", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Export corpus diagnostics",
     });
+    const scrollBody = within(dialog).getByRole("region", {
+      name: "Diagnostic details and exact preview",
+    });
+    const primarySave = within(dialog).getByRole("button", {
+      name: "Save Markdown…",
+    });
+    expect(scrollBody.tabIndex).toBe(0);
+    expect(scrollBody.contains(primarySave)).toBe(false);
+    expect(primarySave.closest("footer")?.parentElement).toBe(dialog);
     expect(screen.queryByRole("menu")).toBeNull();
     const note = within(dialog).getByLabelText(/Optional reproduction note/);
     await waitFor(() => expect(document.activeElement).toBe(note));
@@ -442,7 +454,7 @@ describe("LogPane", () => {
     expect(copied).not.toContain(item.sourceLabel);
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Save Markdown…" }),
+      primarySave,
     );
     await waitFor(() =>
       expect(

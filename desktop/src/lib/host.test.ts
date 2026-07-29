@@ -10,6 +10,7 @@ import {
   hostLogQueryEventOriginal,
   hostLogSharedTimelineSummary,
   hostPrepareLogDiagnosticReport,
+  hostReleaseLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
   modelSelectionKey,
   normalizeProviderKind,
@@ -117,6 +118,21 @@ describe("hostSaveLogDiagnosticReport", () => {
     expect(ipcArgs).not.toContain("path");
     expect(ipcArgs).not.toContain("overwrite");
     expect(ipcArgs).not.toContain("content");
+
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(
+      hostReleaseLogDiagnosticReport(
+        "cdlogdiag-0000000000000001-0000000000000001",
+      ),
+    ).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenLastCalledWith(
+      "release_log_diagnostic_report",
+      {
+        request: {
+          reportId: "cdlogdiag-0000000000000001-0000000000000001",
+        },
+      },
+    );
   });
 });
 

@@ -2005,6 +2005,16 @@ export async function hostPrepareLogDiagnosticReport(
   });
 }
 
+/** Release one superseded process-local diagnostic preview. */
+export async function hostReleaseLogDiagnosticReport(
+  reportId: string,
+): Promise<boolean> {
+  if (!isTauri()) throw new Error("Diagnostic export requires Tauri host");
+  return invoke<boolean>("release_log_diagnostic_report", {
+    request: { reportId },
+  });
+}
+
 /** Ask the trusted host to select and atomically write one reviewed diagnostic. */
 export async function hostSaveLogDiagnosticReport(
   reportId: string,

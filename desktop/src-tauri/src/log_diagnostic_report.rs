@@ -288,6 +288,19 @@ impl LogDiagnosticReportStore {
             _ => Err("diagnostic format must be markdown or json".into()),
         }
     }
+
+    pub fn release(&mut self, report_id: &str) -> Result<bool, String> {
+        validate_report_id(report_id)?;
+        let Some(index) = self
+            .reports
+            .iter()
+            .position(|report| report.id == report_id)
+        else {
+            return Ok(false);
+        };
+        self.reports.remove(index);
+        Ok(true)
+    }
 }
 
 fn next_report_id() -> String {
@@ -1171,5 +1184,26 @@ mod tests {
         ] {
             assert!(store.content(invalid, "markdown").is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn releasing_a_report_removes_only_that_host_rendered_preview() {
+        let manifest: LogDiagnosticManifest =
+            serde_json::from_value(safe_manifest_value()).expect("manifest");
+        let mut store = LogDiagnosticReportStore::default();
+        let first = store.prepare(manifest.clone()).expect("first");
+        let second = store.prepare(manifest).expect("second");
+
+        assert!(store.release(&first.report_id).expect("release first"));
+        assert!(!store
+            .release(&first.report_id)
+            .expect("release is idempotent"));
+        assert!(store.content(&first.report_id, "markdown").is_err());
+        assert_eq!(
+            store
+                .content(&second.report_id, "markdown")
+                .expect("second remains"),
+            second.markdown
+        );
     }
 }

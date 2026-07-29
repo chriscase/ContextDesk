@@ -9,6 +9,7 @@ import {
 } from "../../lib/logDiagnosticReport";
 import {
   hostPrepareLogDiagnosticReport,
+  hostReleaseLogDiagnosticReport,
   hostSaveLogDiagnosticReport,
   type FailedLogIngestDiagnosticDto,
   type LogCorpusSummaryDto,
@@ -16,6 +17,15 @@ import {
 } from "../../lib/host";
 
 type PreviewFormat = "markdown" | "json";
+export const PREPARE_DEBOUNCE_MS = 140;
+
+async function releasePreparedReport(reportId: string) {
+  try {
+    await hostReleaseLogDiagnosticReport(reportId);
+  } catch {
+    // The store is bounded and process-local; an expired id is already released.
+  }
+}
 
 export function LogDiagnosticDialog({
   corpus,
@@ -43,6 +53,10 @@ export function LogDiagnosticDialog({
   const generatedAtRef = useRef(new Date());
   const dialogRef = useRef<HTMLDivElement>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
+  const mountedRef = useRef(true);
+  const prepareVersionRef = useRef(0);
+  const prepareQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const preparedRef = useRef<PreparedLogDiagnosticDto | null>(null);
   const titleId = useId();
   const descriptionId = useId();
   const noteId = useId();
@@ -75,21 +89,55 @@ export function LogDiagnosticDialog({
   }, []);
 
   useEffect(() => {
-    let current = true;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      prepareVersionRef.current += 1;
+      const selected = preparedRef.current;
+      preparedRef.current = null;
+      if (selected) void releasePreparedReport(selected.reportId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const version = ++prepareVersionRef.current;
     setPrepared(null);
     setPrepareError(null);
     setResult(null);
-    void hostPrepareLogDiagnosticReport(report.manifest)
-      .then((next) => {
-        if (current) setPrepared(next);
-      })
-      .catch((error) => {
-        if (current) {
-          setPrepareError(`Could not prepare diagnostics: ${String(error)}`);
-        }
-      });
+    const timer = window.setTimeout(() => {
+      prepareQueueRef.current = prepareQueueRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!mountedRef.current || version !== prepareVersionRef.current) {
+            return;
+          }
+          try {
+            const next = await hostPrepareLogDiagnosticReport(report.manifest);
+            if (!mountedRef.current || version !== prepareVersionRef.current) {
+              await releasePreparedReport(next.reportId);
+              return;
+            }
+            const previous = preparedRef.current;
+            preparedRef.current = next;
+            setPrepared(next);
+            if (previous && previous.reportId !== next.reportId) {
+              await releasePreparedReport(previous.reportId);
+            }
+          } catch (error) {
+            if (!mountedRef.current || version !== prepareVersionRef.current) {
+              return;
+            }
+            const previous = preparedRef.current;
+            preparedRef.current = null;
+            if (previous) await releasePreparedReport(previous.reportId);
+            setPrepareError(
+              `Could not prepare diagnostics: ${String(error)}`,
+            );
+          }
+        });
+    }, PREPARE_DEBOUNCE_MS);
     return () => {
-      current = false;
+      window.clearTimeout(timer);
     };
   }, [report.manifest]);
 
@@ -212,76 +260,84 @@ export function LogDiagnosticDialog({
           </button>
         </header>
 
-        <div className="log-diagnostic__privacy" role="note">
-          <strong>Review before sharing.</strong>
-          <span>
-            Raw logs and event payloads, absolute paths, chats, provider/model
-            inventories, secrets, and evaluator truth are excluded.
-          </span>
-        </div>
-
-        <label className="log-diagnostic__note" htmlFor={noteId}>
-          <span>
-            Optional reproduction note
-            <small>
-              {Array.from(userNote).length}/{LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
-            </small>
-          </span>
-          <textarea
-            ref={noteRef}
-            id={noteId}
-            value={userNote}
-            maxLength={LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
-            disabled={busy}
-            placeholder="What did you do, and what did you expect?"
-            onChange={(event) => setUserNote(event.target.value)}
-          />
-        </label>
-
-        <div className="log-diagnostic__preview-header">
-          <strong>Exact export preview</strong>
-          <div
-            className="log-diagnostic__format"
-            role="group"
-            aria-label="Diagnostic preview format"
-          >
-            <button
-              type="button"
-              className="btn btn--ghost"
-              aria-pressed={previewFormat === "markdown"}
-              data-active={previewFormat === "markdown" ? "true" : "false"}
-              onClick={() => setPreviewFormat("markdown")}
-            >
-              Markdown
-            </button>
-            <button
-              type="button"
-              className="btn btn--ghost"
-              aria-pressed={previewFormat === "json"}
-              data-active={previewFormat === "json" ? "true" : "false"}
-              onClick={() => setPreviewFormat("json")}
-            >
-              JSON
-            </button>
-          </div>
-        </div>
-        <pre
-          className="log-diagnostic__preview"
+        <div
+          className="log-diagnostic__body"
+          data-testid="log-diagnostic-scroll-body"
+          role="region"
+          aria-label="Diagnostic details and exact preview"
           tabIndex={0}
-          aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
         >
-          {prepared
-            ? previewFormat === "markdown"
-              ? prepared.markdown
-              : prepared.json
-            : prepareError ?? "Preparing exact preview in the trusted host…"}
-        </pre>
+          <div className="log-diagnostic__privacy" role="note">
+            <strong>Review before sharing.</strong>
+            <span>
+              Raw logs and event payloads, absolute paths, chats, provider/model
+              inventories, secrets, and evaluator truth are excluded.
+            </span>
+          </div>
 
-        {result ? (
-          <p className="log-diagnostic__result" role="status">
-            {result}
-          </p>
-        ) : null}
+          <label className="log-diagnostic__note" htmlFor={noteId}>
+            <span>
+              Optional reproduction note
+              <small>
+                {Array.from(userNote).length}/{LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
+              </small>
+            </span>
+            <textarea
+              ref={noteRef}
+              id={noteId}
+              value={userNote}
+              maxLength={LOG_DIAGNOSTIC_NOTE_MAX_CHARS}
+              disabled={busy}
+              placeholder="What did you do, and what did you expect?"
+              onChange={(event) => setUserNote(event.target.value)}
+            />
+          </label>
+
+          <div className="log-diagnostic__preview-header">
+            <strong>Exact export preview</strong>
+            <div
+              className="log-diagnostic__format"
+              role="group"
+              aria-label="Diagnostic preview format"
+            >
+              <button
+                type="button"
+                className="btn btn--ghost"
+                aria-pressed={previewFormat === "markdown"}
+                data-active={previewFormat === "markdown" ? "true" : "false"}
+                onClick={() => setPreviewFormat("markdown")}
+              >
+                Markdown
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                aria-pressed={previewFormat === "json"}
+                data-active={previewFormat === "json" ? "true" : "false"}
+                onClick={() => setPreviewFormat("json")}
+              >
+                JSON
+              </button>
+            </div>
+          </div>
+          <pre
+            className="log-diagnostic__preview"
+            tabIndex={0}
+            aria-label={`${previewFormat === "markdown" ? "Markdown" : "JSON"} diagnostic preview`}
+          >
+            {prepared
+              ? previewFormat === "markdown"
+                ? prepared.markdown
+                : prepared.json
+              : prepareError ?? "Preparing exact preview in the trusted host…"}
+          </pre>
+
+          {result ? (
+            <p className="log-diagnostic__result" role="status">
+              {result}
+            </p>
+          ) : null}
+        </div>
 
         <footer className="log-diagnostic__actions">
           <button

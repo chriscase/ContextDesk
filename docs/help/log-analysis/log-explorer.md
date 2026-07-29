@@ -300,6 +300,11 @@ normal no-write outcome. If publication succeeds but a later cleanup or
 directory-sync step fails, ContextDesk says the report was saved and shows a
 durability warning. You must still review the preview before sharing.
 
+At short window heights, scroll **Diagnostic details and exact preview**; the
+dialog title, Close action, and Copy/Save actions remain available outside that
+scrolling region. Note edits prepare only the latest host-rendered generation,
+so rapid typing cannot leave the visible preview with an expired save ID.
+
 Do not confuse diagnostics with **Export package…**. A diagnostic is a small
 metadata and reproduction report. A `.cdlog.zip` is an explicit data-sharing
 workflow that contains the analyzed corpus and should be handled according to

@@ -405,6 +405,12 @@ and the selected format; the renderer cannot author export text, select a
 destination, assert overwrite confirmation, or authorize itself through a
 separate IPC call.
 
+Reproduction-note edits are debounced and host preparations are serialized.
+Queued stale generations are discarded before host work, stale completions are
+released, an accepted replacement releases its prior report ID, and closing
+the dialog releases the selected ID. This keeps the visible preview saveable
+even when many edits occur within the host store's bounded report window.
+
 Host privacy handling covers secret tokens, ordinary private-suffix hosts such
 as `server.internal`, arbitrary absolute Unix/Windows paths, private/loopback
 IPv4, and loopback/unique-local/link-local IPv6. The invoking native window

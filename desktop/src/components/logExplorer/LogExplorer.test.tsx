@@ -158,6 +158,7 @@ vi.mock("../../lib/host", () => ({
       json: JSON.stringify(manifest, null, 2),
     };
   }),
+  hostReleaseLogDiagnosticReport: vi.fn(async () => true),
   hostSaveLogDiagnosticReport: vi.fn(),
   hostSaveChatSession: vi.fn(),
   hostSetChatLinkedCorpus: vi.fn(),

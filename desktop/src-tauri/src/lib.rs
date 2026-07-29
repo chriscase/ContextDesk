@@ -5963,6 +5963,12 @@ struct LogDiagnosticPrepareRequest {
     manifest: log_diagnostic_report::LogDiagnosticManifest,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LogDiagnosticReleaseRequest {
+    report_id: String,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum LogDiagnosticSaveStatus {
@@ -6039,6 +6045,20 @@ fn prepare_log_diagnostic_report(
         .lock()
         .map_err(|_| "diagnostic report store is unavailable".to_string())?
         .prepare(request.manifest)
+}
+
+/// Release one process-local diagnostic preview when the renderer replaces or
+/// closes it. Unknown/expired ids are harmless; malformed ids fail closed.
+#[tauri::command]
+fn release_log_diagnostic_report(
+    state: State<'_, AppState>,
+    request: LogDiagnosticReleaseRequest,
+) -> Result<bool, String> {
+    state
+        .log_diagnostic_reports
+        .lock()
+        .map_err(|_| "diagnostic report store is unavailable".to_string())?
+        .release(&request.report_id)
 }
 
 /// Show the host-owned native Save panel and atomically write one bounded,
@@ -8664,6 +8684,7 @@ pub fn run() {
             open_log_explorer,
             export_log_corpus_package,
             prepare_log_diagnostic_report,
+            release_log_diagnostic_report,
             save_log_diagnostic_report,
             import_log_corpus_package_path,
             write_memory_note,
