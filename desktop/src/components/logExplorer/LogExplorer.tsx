@@ -844,6 +844,7 @@ export function LogExplorer({ corpusId }: Props) {
   const [findUseSemantic, setFindUseSemantic] = useState(false);
   const [findPartial, setFindPartial] = useState(false);
   const [findSearching, setFindSearching] = useState(false);
+  const [findLocating, setFindLocating] = useState(false);
   const [findCancelling, setFindCancelling] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState("");
@@ -1000,6 +1001,7 @@ export function LogExplorer({ corpusId }: Props) {
   const semanticAvailable =
     (summary?.embedding?.embeddedTemplates ?? summary?.stats?.embedded ?? 0) >
     0;
+  const findBusy = findSearching || findLocating;
 
   const setAutoStatus = useCallback((nextStatus: string) => {
     if (autoStatusLockRef.current === "bookmark-restore") {
@@ -1751,8 +1753,10 @@ export function LogExplorer({ corpusId }: Props) {
       focusRow?: boolean;
       viewFilters?: ExplorerFilters;
       selectTarget?: boolean;
+      isCurrent?: () => boolean;
     },
   ): Promise<"found" | "hidden_by_filter" | "missing"> => {
+    if (opts?.isCurrent && !opts.isCurrent()) return "missing";
     const base =
       opts?.viewFilters ?? (opts?.clearFilters ? emptyFilters() : filters);
     const sourceFilter =
@@ -1775,6 +1779,7 @@ export function LogExplorer({ corpusId }: Props) {
       filter,
       sortByTime: true,
     });
+    if (opts?.isCurrent && !opts.isCurrent()) return "missing";
     if (nb.status === "found") {
       const laneId = opts?.laneId ?? "lane-0";
       applyNeighborhoodToLane(nb, laneId);
@@ -1809,12 +1814,16 @@ export function LogExplorer({ corpusId }: Props) {
       .find((lane) => (laneEvents[lane.id] ?? []).some((e) => e.seq === seq)) ??
     null;
 
-  const focusFindMatch = async (match: {
-    seq: number;
-    source?: string | null;
-  }): Promise<
+  const focusFindMatch = async (
+    match: {
+      seq: number;
+      source?: string | null;
+    },
+    isCurrent: () => boolean,
+  ): Promise<
     "focused" | "outside_visible_lanes" | "hidden_by_filter" | "missing"
   > => {
+    if (!isCurrent()) return "missing";
     const targetLane =
       visibleLaneForSource(match.source) ??
       visibleLaneWithResidentSeq(match.seq);
@@ -1825,6 +1834,7 @@ export function LogExplorer({ corpusId }: Props) {
       (e) => e.seq === match.seq,
     );
     if (residentTarget) {
+      if (!isCurrent()) return "missing";
       setFocusLaneId(targetLane.id);
       setLaneScrollSeq((m) => ({ ...m, [targetLane.id]: match.seq }));
       return "focused";
@@ -1832,6 +1842,7 @@ export function LogExplorer({ corpusId }: Props) {
     const status = await seekToSeq(match.seq, {
       laneId: targetLane.id,
       sources: targetLane.sources,
+      isCurrent,
     });
     return status === "found" ? "focused" : status;
   };
@@ -1848,6 +1859,7 @@ export function LogExplorer({ corpusId }: Props) {
     if (backendRequestId) void hostCancelLogSearch(backendRequestId);
     findActiveRef.current = false;
     setFindSearching(false);
+    setFindLocating(false);
     setFindCancelling(false);
     setFindActiveQuery(null);
     setFindMatches([]);
@@ -1897,8 +1909,8 @@ export function LogExplorer({ corpusId }: Props) {
     findActiveRef.current = true;
     setFindActiveQuery(q);
     setFindSearching(true);
+    setFindLocating(false);
     setFindCancelling(false);
-    setBusy(true);
     setError(null);
     try {
       const result = await hostLogSearchEventsAdvanced(corpusId, {
@@ -1918,6 +1930,11 @@ export function LogExplorer({ corpusId }: Props) {
         }),
       });
       if (requestId !== findRequestRef.current) return;
+      if (activeFindRequestRef.current === backendRequestId) {
+        activeFindRequestRef.current = null;
+      }
+      setFindSearching(false);
+      setFindCancelling(false);
       if (result.cancelled) {
         setStatus("Find cancelled · previous visible results preserved");
         return;
@@ -1962,7 +1979,16 @@ export function LogExplorer({ corpusId }: Props) {
       let findContextStatus: Awaited<ReturnType<typeof focusFindMatch>> | null =
         null;
       if (seqs.length > 0) {
-        findContextStatus = await focusFindMatch(hits[index]!.event);
+        setFindLocating(true);
+        setStatus(
+          `Find (${matchMode === "regex" ? "regex" : "literal"}): result page ready`,
+        );
+        findContextStatus = await focusFindMatch(
+          hits[index]!.event,
+          () => requestId === findRequestRef.current,
+        );
+        if (requestId !== findRequestRef.current) return;
+        setFindLocating(false);
       }
       const modeLabel = matchMode === "regex" ? "regex" : "literal";
       const extra = [
@@ -2000,8 +2026,8 @@ export function LogExplorer({ corpusId }: Props) {
           activeFindRequestRef.current = null;
         }
         setFindSearching(false);
+        setFindLocating(false);
         setFindCancelling(false);
-        setBusy(false);
       }
     }
   };
@@ -2010,13 +2036,21 @@ export function LogExplorer({ corpusId }: Props) {
     const requestId = activeFindRequestRef.current;
     if (!requestId || findCancelling) return;
     setFindCancelling(true);
-    setStatus("Cancelling Find…");
+    setStatus("Find cancellation requested");
     try {
       const signalled = await hostCancelLogSearch(requestId);
-      if (!signalled && activeFindRequestRef.current === requestId) {
+      if (activeFindRequestRef.current !== requestId) return;
+      if (!signalled) {
         setFindCancelling(false);
         setStatus("Find is still running · try Cancel again");
+        return;
       }
+      findRequestRef.current += 1;
+      activeFindRequestRef.current = null;
+      setFindSearching(false);
+      setFindLocating(false);
+      setFindCancelling(false);
+      setStatus("Find cancellation requested · previous visible results preserved");
     } catch (cancelError) {
       if (activeFindRequestRef.current !== requestId) return;
       setFindCancelling(false);
@@ -2095,23 +2129,39 @@ export function LogExplorer({ corpusId }: Props) {
       return;
     }
     const next = findIndex + dir;
+    const requestId = ++findRequestRef.current;
     setFindIndex(next);
     const seq = findMatches[next]!;
-    const findContextStatus = await focusFindMatch({
-      seq,
-      source: findMatchSources[seq],
-    });
-    setStatus(
-      `Find: match ${findBase + next + 1} of ${
-        findTotalExact
-          ? findTotal
-          : `${Math.max(findTotal, findBase + findMatches.length)}+`
-      }${
-        findContextStatus === "outside_visible_lanes"
-          ? " · target outside visible lanes; context not broadened"
-          : ""
-      }`,
-    );
+    setFindLocating(true);
+    setStatus(`Find: match ${findBase + next + 1} requested`);
+    try {
+      const findContextStatus = await focusFindMatch(
+        {
+          seq,
+          source: findMatchSources[seq],
+        },
+        () => requestId === findRequestRef.current,
+      );
+      if (requestId !== findRequestRef.current) return;
+      setStatus(
+        `Find: match ${findBase + next + 1} of ${
+          findTotalExact
+            ? findTotal
+            : `${Math.max(findTotal, findBase + findMatches.length)}+`
+        }${
+          findContextStatus === "outside_visible_lanes"
+            ? " · target outside visible lanes; context not broadened"
+            : ""
+        }`,
+      );
+    } catch (stepError) {
+      if (requestId !== findRequestRef.current) return;
+      setError(String(stepError));
+    } finally {
+      if (requestId === findRequestRef.current) {
+        setFindLocating(false);
+      }
+    }
   };
 
   /** Filter: reduce visible events by keyword ∩ facets (#523). */
@@ -2356,12 +2406,12 @@ export function LogExplorer({ corpusId }: Props) {
         uiState: {
           category: error
             ? "error"
-            : busy
+            : busy || findBusy
               ? "busy"
               : status === "Ready"
                 ? "ready"
                 : "active",
-          busy,
+          busy: busy || findBusy,
           hasError: Boolean(error),
         },
       },
@@ -2899,6 +2949,7 @@ export function LogExplorer({ corpusId }: Props) {
       activeFindRequestRef.current = null;
       if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
       setFindSearching(false);
+      setFindLocating(false);
       setFindCancelling(false);
       suppressNextFindRefreshRef.current = true;
       setFilters(openFilters);
@@ -2958,6 +3009,7 @@ export function LogExplorer({ corpusId }: Props) {
     activeFindRequestRef.current = null;
     if (activeFindRequest) void hostCancelLogSearch(activeFindRequest);
     setFindSearching(false);
+    setFindLocating(false);
     setFindCancelling(false);
     suppressNextFindRefreshRef.current = true;
     setFindActiveQuery(null);
@@ -4527,8 +4579,9 @@ export function LogExplorer({ corpusId }: Props) {
                   className="log-explorer__btn"
                   data-testid="log-explorer-find-prev"
                   disabled={
-                    findHistory.length === 0 &&
-                    (findMatches.length === 0 || findIndex === 0)
+                    findBusy ||
+                    (findHistory.length === 0 &&
+                      (findMatches.length === 0 || findIndex === 0))
                   }
                   onClick={() => void findStep(-1)}
                 >
@@ -4539,9 +4592,10 @@ export function LogExplorer({ corpusId }: Props) {
                   className="log-explorer__btn"
                   data-testid="log-explorer-find-next"
                   disabled={
-                    !findNextCursor &&
-                    (findMatches.length === 0 ||
-                      findIndex === findMatches.length - 1)
+                    findBusy ||
+                    (!findNextCursor &&
+                      (findMatches.length === 0 ||
+                        findIndex === findMatches.length - 1))
                   }
                   onClick={() => void findStep(1)}
                 >
@@ -5877,7 +5931,17 @@ export function LogExplorer({ corpusId }: Props) {
 
       <div className="log-explorer__status" role="status">
         {error ? `Error: ${error}` : status}
-        {busy ? " · busy" : ""}
+        {findSearching
+          ? findCancelling
+            ? " · cancelling Find"
+            : status === "Find is still running · try Cancel again"
+              ? ""
+              : " · searching"
+          : findLocating
+            ? " · locating match"
+            : busy
+              ? " · busy"
+              : ""}
       </div>
     </div>
   );

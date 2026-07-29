@@ -229,6 +229,62 @@ function defaultEventPage(): host.EventPageDto {
   };
 }
 
+function nonresidentFindEvent(
+  seq: number,
+  message: string,
+): host.ExplorerEventDto {
+  return {
+    ...defaultEventPage().events[0]!,
+    seq,
+    ts: 1_700_000_000 + seq,
+    message,
+    source: "api.log",
+  };
+}
+
+function findResultFor(
+  event: host.ExplorerEventDto,
+  options: {
+    nextCursor?: number | null;
+    nextTs?: number | null;
+    totalMatched?: number | null;
+  } = {},
+): host.EventSearchResultDto {
+  return {
+    hits: [
+      {
+        event,
+        score: 1,
+        matchKind: "keyword",
+        templateId: event.templateId,
+      },
+    ],
+    nextCursor: options.nextCursor ?? null,
+    nextTs: options.nextTs ?? null,
+    totalMatched: options.totalMatched ?? 1,
+    partial: false,
+    scanned: 1,
+  };
+}
+
+function foundNeighborhoodFor(
+  event: host.ExplorerEventDto,
+): Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>> {
+  return {
+    status: "found",
+    target: event,
+    targetIndex: 0,
+    events: [event],
+    totalMatched: 1,
+    corpusTotal: 10,
+    timeQuality: "wall",
+    nextCursor: null,
+    nextTs: null,
+    prevCursor: null,
+    prevTs: null,
+  };
+}
+
 function resolvedInvestigation(
   item: host.InvestigationEvidenceItemDto,
   event: host.ExplorerEventDto,
@@ -4861,6 +4917,277 @@ describe("LogExplorer shell", () => {
     expect(screen.queryByText(/Match 1 of 99/)).toBeNull();
   });
 
+  it("retires backend cancellation before locating a nonresident Find match", async () => {
+    const target = nonresidentFindEvent(90, "needle located in context");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
+      findResultFor(target),
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: target.seq }),
+      ),
+    );
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "result page ready · locating match",
+    );
+    expect(screen.getByTestId("log-explorer-find-prev")).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(screen.getByTestId("log-explorer-find-next")).toHaveProperty(
+      "disabled",
+      true,
+    );
+    expect(host.hostCancelLogSearch).not.toHaveBeenCalled();
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(
+      await screen.findByText(/Match 1 of 1.*1 result identities resident/),
+    ).toBeTruthy();
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "locating match",
+    );
+  });
+
+  it("clears Find-owned state and ignores a late search response when the term changes", async () => {
+    const pendingSearch = deferred<host.EventSearchResultDto>();
+    const target = nonresidentFindEvent(91, "stale search target");
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-term");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(
+      pendingSearch.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    const find = screen.getByTestId("log-explorer-find");
+    fireEvent.change(find, { target: { value: "needle" } });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByTestId("log-explorer-find-cancel");
+
+    fireEvent.change(find, { target: { value: "replacement" } });
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find term changed — press Find to apply",
+    );
+    expect(screen.getByRole("status").textContent).not.toMatch(
+      /busy|searching|locating match/,
+    );
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-term"),
+    );
+
+    await act(async () => {
+      pendingSearch.resolve(findResultFor(target));
+      await pendingSearch.promise;
+    });
+    expect(host.hostLogQueryEventNeighborhood).not.toHaveBeenCalled();
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find term changed — press Find to apply",
+    );
+  });
+
+  it("ignores a late Find neighborhood after the match mode changes", async () => {
+    const target = nonresidentFindEvent(92, "stale mode target");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockResolvedValue(
+      findResultFor(target),
+    );
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "locating match",
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("log-explorer-advanced-toggle"));
+    fireEvent.click(screen.getByTestId("find-mode-regex"));
+    expect(screen.getByRole("status").textContent).toContain(
+      "Find mode changed — press Find to apply",
+    );
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "locating match",
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+  });
+
+  it("ignores a late Find neighborhood after a Filter refresh", async () => {
+    const target = nonresidentFindEvent(93, "stale unfiltered location");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    let searchCount = 0;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      searchCount += 1;
+      return searchCount === 1
+        ? findResultFor(target)
+        : {
+            hits: [],
+            nextCursor: null,
+            nextTs: null,
+            totalMatched: 0,
+            partial: false,
+            scanned: 0,
+          };
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "locating match",
+      ),
+    );
+
+    const errorFacet = screen.getByText("error").closest("label");
+    fireEvent.click(within(errorFacet!).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(host.hostLogSearchEventsAdvanced).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toContain(
+        "no matches for “needle”",
+      ),
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(target));
+      await neighborhood.promise;
+    });
+    expect(screen.queryByText(target.message)).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "no matches for “needle”",
+    );
+  });
+
+  it("cancels one active backend Find request when Explorer unmounts", async () => {
+    const pendingSearch = deferred<host.EventSearchResultDto>();
+    vi.mocked(host.createLogSearchRequestId).mockReturnValue("find-unmount");
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockReturnValue(
+      pendingSearch.promise,
+    );
+
+    const view = render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByTestId("log-explorer-find-cancel");
+
+    view.unmount();
+    await waitFor(() =>
+      expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-unmount"),
+    );
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingSearch.resolve({
+        hits: [],
+        nextCursor: null,
+        nextTs: null,
+        totalMatched: 0,
+        partial: false,
+        scanned: 0,
+      });
+      await pendingSearch.promise;
+    });
+    expect(host.hostCancelLogSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the locating phase when cursor pagination reveals a nonresident match", async () => {
+    const first = defaultEventPage().events[0]!;
+    const second = nonresidentFindEvent(94, "second page target");
+    const neighborhood = deferred<
+      Awaited<ReturnType<typeof host.hostLogQueryEventNeighborhood>>
+    >();
+    let searchCount = 0;
+    vi.mocked(host.hostLogSearchEventsAdvanced).mockImplementation(async () => {
+      searchCount += 1;
+      return searchCount === 1
+        ? findResultFor(first, {
+            nextCursor: first.seq,
+            nextTs: first.ts,
+            totalMatched: 2,
+          })
+        : findResultFor(second, { totalMatched: 2 });
+    });
+    vi.mocked(host.hostLogQueryEventNeighborhood).mockReturnValue(
+      neighborhood.promise,
+    );
+
+    render(<LogExplorer corpusId="c1" />);
+    await screen.findByText("auth failure");
+    fireEvent.change(screen.getByTestId("log-explorer-find"), {
+      target: { value: "needle" },
+    });
+    fireEvent.click(screen.getByTestId("log-explorer-find-run"));
+    await screen.findByText(/Match 1 of 2.*1 result identities resident/);
+
+    fireEvent.click(screen.getByTestId("log-explorer-find-next"));
+    await waitFor(() =>
+      expect(host.hostLogQueryEventNeighborhood).toHaveBeenCalledWith(
+        "c1",
+        expect.objectContaining({ targetSeq: second.seq }),
+      ),
+    );
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "result page ready · locating match",
+    );
+
+    await act(async () => {
+      neighborhood.resolve(foundNeighborhoodFor(second));
+      await neighborhood.promise;
+    });
+    expect(
+      await screen.findByText(/Match 2 of 2.*1 result identities resident/),
+    ).toBeTruthy();
+  });
+
   it("cancels an in-flight Find without replacing the previous visible results", async () => {
     vi.mocked(host.createLogSearchRequestId)
       .mockReturnValueOnce("find-kept")
@@ -4914,11 +5241,15 @@ describe("LogExplorer shell", () => {
     );
 
     fireEvent.click(cancel);
-    expect(cancel.textContent).toBe("Cancelling…");
-    expect(cancel).toHaveProperty("disabled", true);
     await waitFor(() =>
       expect(host.hostCancelLogSearch).toHaveBeenCalledWith("find-cancelled"),
     );
+    expect(
+      await screen.findByText(
+        "Find cancellation requested · previous visible results preserved",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
 
     await act(async () => {
       cancelledSearch.resolve({
@@ -4932,18 +5263,17 @@ describe("LogExplorer shell", () => {
         ],
         nextCursor: null,
         nextTs: null,
-        totalMatched: null,
-        partial: true,
-        diagnostic: "cancelled",
-        cancelled: true,
+        totalMatched: 99,
+        partial: false,
+        cancelled: false,
         scanned: 12,
       });
       await Promise.resolve();
     });
 
     expect(
-      await screen.findByText(
-        "Find cancelled · previous visible results preserved",
+      screen.getByText(
+        "Find cancellation requested · previous visible results preserved",
       ),
     ).toBeTruthy();
     expect(
@@ -4981,7 +5311,12 @@ describe("LogExplorer shell", () => {
     await waitFor(() =>
       expect(host.hostCancelLogSearch).toHaveBeenNthCalledWith(2, "find-race"),
     );
-    expect(retry.textContent).toBe("Cancelling…");
+    expect(screen.queryByTestId("log-explorer-find-cancel")).toBeNull();
+    expect(
+      await screen.findByText(
+        "Find cancellation requested · previous visible results preserved",
+      ),
+    ).toBeTruthy();
 
     await act(async () => {
       pendingSearch.resolve({
@@ -4997,8 +5332,8 @@ describe("LogExplorer shell", () => {
       await Promise.resolve();
     });
     expect(
-      await screen.findByText(
-        "Find cancelled · previous visible results preserved",
+      screen.getByText(
+        "Find cancellation requested · previous visible results preserved",
       ),
     ).toBeTruthy();
   });
