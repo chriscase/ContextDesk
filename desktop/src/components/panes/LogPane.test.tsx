@@ -1023,6 +1023,163 @@ describe("LogPane", () => {
     await waitFor(() => expect(document.activeElement).toBe(menuTrigger));
   });
 
+  it("serializes host activation so the newest corpus is written last (#743)", async () => {
+    const first = corpus("corpus-a", "Slow activation");
+    const second = corpus("corpus-b", "Newest activation");
+    const firstActivation = deferred<null>();
+    hostMocks.listCorpora.mockResolvedValue([first, second]);
+    hostMocks.setActiveCorpus.mockImplementation((id: string) =>
+      id === first.id ? firstActivation.promise : Promise.resolve(null),
+    );
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    );
+    await waitFor(() =>
+      expect(hostMocks.setActiveCorpus).toHaveBeenCalledWith(first.id),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName(second.name),
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: second.name }),
+    ).toBeTruthy();
+    expect(hostMocks.setActiveCorpus.mock.calls.map(([id]) => id)).toEqual([
+      first.id,
+    ]);
+
+    await act(async () => {
+      firstActivation.resolve(null);
+      await firstActivation.promise;
+    });
+    await waitFor(() =>
+      expect(hostMocks.setActiveCorpus.mock.calls.map(([id]) => id)).toEqual([
+        first.id,
+        second.id,
+      ]),
+    );
+    expect(screen.getByRole("heading", { name: second.name })).toBeTruthy();
+  });
+
+  it("surfaces activation failure only for the current corpus (#743)", async () => {
+    const item = corpus("corpus-a", "Activation failure");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.setActiveCorpus.mockRejectedValue(
+      new Error("host activation unavailable"),
+    );
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(item.name),
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: item.name }),
+    ).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "host activation unavailable",
+    );
+  });
+
+  it("ignores an older corpus-list refresh that resolves after a newer import refresh (#743)", async () => {
+    const oldCorpus = corpus("corpus-old", "Obsolete list");
+    const newCorpus = corpus("corpus-new", "Imported list");
+    const oldList = deferred<LogCorpusSummaryDto[]>();
+    const newList = deferred<LogCorpusSummaryDto[]>();
+    hostMocks.listCorpora
+      .mockReturnValueOnce(oldList.promise)
+      .mockReturnValueOnce(newList.promise);
+    hostMocks.openFile.mockResolvedValue("/tmp/synthetic-package.cdlog");
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.importPackage.mockResolvedValue({
+      corpusId: newCorpus.id,
+      name: newCorpus.name,
+      originCorpusId: "synthetic-origin",
+    });
+
+    render(<LogPane />);
+    fireEvent.click(screen.getByRole("button", { name: "Import package…" }));
+    await waitFor(() => expect(hostMocks.listCorpora).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      newList.resolve([newCorpus]);
+      await newList.promise;
+    });
+    expect(
+      await screen.findByRole("heading", { name: newCorpus.name }),
+    ).toBeTruthy();
+
+    await act(async () => {
+      oldList.resolve([oldCorpus]);
+      await oldList.promise;
+    });
+    expect(
+      screen.getByRole("button", {
+        name: corpusButtonName(newCorpus.name),
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: corpusButtonName(oldCorpus.name),
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps the newest corpus selected when an older discard finishes late (#743)", async () => {
+    const first = corpus("corpus-a", "Discard pending");
+    const second = corpus("corpus-b", "Keep selected");
+    const discard = deferred<void>();
+    hostMocks.listCorpora
+      .mockResolvedValueOnce([first, second])
+      .mockResolvedValue([second]);
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.discard.mockReturnValue(discard.promise);
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(first.name),
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: `More actions for ${first.name}` }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /Discard corpus/i }),
+    );
+    await waitFor(() => expect(hostMocks.discard).toHaveBeenCalledWith(first.id));
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: corpusButtonName(second.name),
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: second.name }),
+    ).toBeTruthy();
+
+    await act(async () => {
+      discard.resolve();
+      await discard.promise;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: corpusButtonName(first.name),
+        }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("heading", { name: second.name })).toBeTruthy();
+  });
+
   it("isolates deferred analysis by corpus and coalesces repeated activation (#743)", async () => {
     const first = {
       ...corpus("corpus-a", "API incident"),
@@ -1225,24 +1382,17 @@ describe("LogPane", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
     // Stale ready cache must not short-circuit after eventCount change.
-    const load = screen.queryByRole("button", { name: "Load analysis" });
-    const refreshBtn = screen.queryByRole("button", { name: "Refresh analysis" });
-    // After invalidation status is idle → Load analysis, not Refresh.
-    expect(load || refreshBtn).toBeTruthy();
-    if (refreshBtn) {
-      // If still ready, force would refetch — still count as extra host calls.
-      fireEvent.click(refreshBtn);
-    } else if (load) {
-      fireEvent.click(load);
-    }
+    const load = screen.getByRole("button", { name: "Load analysis" });
+    expect(
+      screen.queryByRole("button", { name: "Refresh analysis" }),
+    ).toBeNull();
+    fireEvent.click(load);
     await waitFor(() =>
-      expect(hostMocks.clusterProblems.mock.calls.length).toBeGreaterThanOrEqual(
-        2,
-      ),
+      expect(hostMocks.clusterProblems).toHaveBeenCalledTimes(2),
     );
   });
 
-  it("records one-machine selection vs analysis timing for a 250k corpus card (#743)", async () => {
+  it("records honest component timing boundaries for a synthetic 250k corpus card (#743)", async () => {
     const large = {
       ...corpus("timing-250k", "Timing incident"),
       eventCount: 250_000,
@@ -1256,15 +1406,16 @@ describe("LogPane", () => {
 
     const t0 = performance.now();
     render(<LogPane />);
+    const card = await screen.findByRole("button", {
+      name: corpusButtonName(large.name),
+    });
     const listReady = performance.now();
 
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: corpusButtonName(large.name),
-      }),
-    );
+    fireEvent.click(card);
     expect(await screen.findByTestId("log-overview")).toBeTruthy();
     const selectionReady = performance.now();
+    expect(hostMocks.clusterProblems).not.toHaveBeenCalled();
+    expect(hostMocks.listTemplates).not.toHaveBeenCalled();
 
     // Optional analysis is explicit and independent of selection timing.
     fireEvent.click(screen.getByRole("tab", { name: "Analysis" }));
@@ -1284,21 +1435,65 @@ describe("LogPane", () => {
     const listMs = listReady - t0;
     const selectMs = selectionReady - listReady;
     const analysisMs = analysisDone - analysisStarted;
-    // Selection path must not include waiting for cluster/template (those start later).
-    expect(hostMocks.clusterProblems).toHaveBeenCalledTimes(1);
-    expect(selectMs).toBeLessThan(analysisMs + 50); // analysis includes deferred host work
-    // Local evidence only — not a universal SLO.
+    expect([listMs, selectMs, analysisMs].every((value) => value >= 0)).toBe(
+      true,
+    );
+    // Component-harness evidence only — not a DuckDB or packaged-app SLO.
     console.info(
       JSON.stringify({
-        kind: "log-pane-743-timing",
-        machine: "local-one-machine",
+        kind: "log-pane-743-component-timing",
+        environment: "vitest-jsdom-with-deferred-host-mocks",
         eventCount: 250_000,
         list_render_ms: Number(listMs.toFixed(2)),
         selection_to_overview_ms: Number(selectMs.toFixed(2)),
         on_demand_analysis_ms: Number(analysisMs.toFixed(2)),
-        note: "Synthetic card with deferred host mocks; separates selection from optional analysis.",
+        note: "Synthetic card only; packaged DuckDB timing remains required.",
       }),
     );
+  });
+
+  it("waits for both optional analysis calls to settle before enabling retry (#743)", async () => {
+    const item = corpus("corpus-a", "Partial analysis failure");
+    const pendingTemplates = deferred<LogTemplateRowDto[]>();
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.clusterProblems
+      .mockRejectedValueOnce(new Error("cluster failed"))
+      .mockResolvedValue([]);
+    hostMocks.listTemplates
+      .mockReturnValueOnce(pendingTemplates.promise)
+      .mockResolvedValue([]);
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(item.name),
+      }),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Analysis" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load analysis" }));
+    await waitFor(() =>
+      expect(hostMocks.clusterProblems).toHaveBeenCalledTimes(1),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Loading analysis…" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Retry analysis" }),
+    ).toBeNull();
+
+    await act(async () => {
+      pendingTemplates.resolve([]);
+      await pendingTemplates.promise;
+    });
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "cluster failed",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry analysis" }));
+    await waitFor(() =>
+      expect(hostMocks.clusterProblems).toHaveBeenCalledTimes(2),
+    );
+    expect(hostMocks.listTemplates).toHaveBeenCalledTimes(2);
   });
 
   it("keeps diagnostics and retry available after on-demand analysis fails (#743)", async () => {
@@ -1387,6 +1582,37 @@ describe("LogPane", () => {
       );
       expect(hostMocks.reanalyze).toHaveBeenCalledWith(corpus.id);
     });
+  });
+
+  it("invalidates optional analysis after same-count local re-analysis (#743)", async () => {
+    const item = corpus("corpus-reanalyze", "Same-count re-analysis");
+    hostMocks.listCorpora.mockResolvedValue([item]);
+    hostMocks.confirm.mockResolvedValue(true);
+    hostMocks.listTemplates.mockResolvedValue([
+      { id: 1, pattern: "BEFORE_REANALYSIS", count: 3, severity: 2 },
+    ]);
+
+    render(<LogPane />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: corpusButtonName(item.name),
+      }),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load analysis" }));
+    expect(await screen.findByText("BEFORE_REANALYSIS")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("reanalyze-log-corpus"));
+    await waitFor(() =>
+      expect(hostMocks.reanalyze).toHaveBeenCalledWith(item.id),
+    );
+    await screen.findByText(/Local re-analysis complete:/);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Templates" }));
+    expect(screen.getByRole("button", { name: "Load analysis" })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Refresh analysis" }),
+    ).toBeNull();
   });
 
   it("shows progress and routes cancellation to re-analysis", async () => {
