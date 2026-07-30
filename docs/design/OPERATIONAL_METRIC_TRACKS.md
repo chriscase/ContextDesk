@@ -1,8 +1,8 @@
 # Operational metric tracks
 
-Status: **standalone rendering, validation, deterministic fixtures, and bounded
-Log Explorer session import are implemented; durable attachment, persistence,
-and incident-bundle import remain residual work.**
+Status: **standalone rendering, shared host validation, deterministic fixtures,
+and one durable corpus-scoped manual attachment are implemented;
+incident-bundle import and multiple attachments remain residual work.**
 
 This design adds generic operational measurements beside logs without pretending
 that unlike units are directly comparable. CPU percentage, heap bytes, concurrent
@@ -93,18 +93,31 @@ Folder coincidence is never an attachment. A metric document becomes relevant
 to logs only through an explicit corpus or investigation attachment and
 compatible normalized time.
 
-### Current bounded session import
+### Current bounded durable attachment
 
-The Timeline Navigator can load one v1 JSON metric document into the current
-Explorer session. It accepts at most 8 MB, 32 series, and 250,000 source points;
-the renderer then applies its separate per-track point bound. Every series must
-have explicit wall-clock quality and the document must overlap the current
-reliable log timeline. Validation fails closed and reports JSON paths.
+The Timeline Navigator can attach one v1 JSON metric document to the exact
+corpus. The manual UI accepts at most 8 MB, 32 series, and 250,000 source
+points; the shared core validator additionally enforces the normative document
+caps before application-controlled storage. The renderer then applies its
+separate per-track point bound. Validation fails closed and reports JSON paths.
 
-The loaded filename and **session only · not persisted** state stay visible.
-Closing the Explorer loses the attachment. Hiding the tracks unmounts their
-renderer while retaining the session document; collapsing the Timeline prevents
-timeline and metric rendering work. Pointer release or Enter/Space maps the
+The safe filename, stored digest prefix, **attached to this corpus**, and **not
+shared with the agent** state stay visible. Closing/reopening Explorer and
+restarting the application restore and revalidate the stored copy without
+reading the original file. Replacement validates and writes the new copy before
+replacing the incumbent; explicit removal affects only the attachment.
+Missing, corrupt, and unsupported stored state fails visibly. Another corpus
+never inherits the attachment.
+
+An attachment may be stored while it is not renderable. Every series must have
+explicit wall-clock quality, the corpus must have a reliable shared wall clock,
+and the document must overlap the current log timeline before tracks render.
+Order-only, mixed, or non-overlapping state remains attached with an explicit
+reason instead of being plotted on an invented axis.
+
+Hiding the tracks unmounts their renderer while retaining the durable document;
+collapsing the Timeline prevents timeline and metric rendering work. Pointer
+release or Enter/Space maps the
 shared metric cursor to one bounded timeline bucket seek and delegates the
 existing nearby-log load. Compact is the default session track size, with
 standard and detailed choices in the metric header. In the stacked
@@ -366,15 +379,15 @@ gaps, cap input size, and pass the final document through the shared validator.
 - cursor preview, range selection, and pointer-release seek callbacks.
 
 It deliberately does not query logs or own attachment state. Timeline Navigator
-owns the session attachment, resolves releases to nearby events, requeries the
-bounded histogram when the user explicitly zooms, and keeps metric rendering
-inactive while its panel is closed.
+owns presentation state and delegates durable attachment validation/storage to
+`cd-core` through DTO-only Tauri commands. It resolves releases to nearby
+events, requeries the bounded histogram when the user explicitly zooms, and
+keeps metric rendering inactive while its panel is closed.
 
-The following are **not shipped by the current session slice**:
+The following are **not shipped by the current durable-attachment slice**:
 
 - archive or incident-bundle metric import;
-- host-side validation, persistence, attachment, or detachment;
-- durable reopening of a prior metric attachment;
+- more than one metric attachment per corpus;
 - metric context packaging for chat;
 - arbitrary customer adapter execution or adapter sandboxing;
 - persisted track visibility, ordering, or user-authored thresholds.

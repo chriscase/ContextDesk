@@ -1,0 +1,231 @@
+# Incident Evidence Bundle interchange
+
+**Method status:** **Partial.** Normative v1 schema, JSON Schemas, frozen
+fixtures, offline directory validator (#764), and deterministic ZIP pack/validate
+(#765) ship. Product import/attachment UX remains residual on #763.
+
+## 1. Problem
+
+Support and platform teams need a low-friction, tool-agnostic hand-off for
+authorized incident logs, operational metrics, and bounded supporting files.
+
+Without a contract, collectors invent zip layouts, drop hashes, guess
+timezones, collapse multi-source basenames, or mix evaluator truth into runtime
+data. Importers cannot fail closed on traversal or hash mismatch, and metrics
+appear related to logs only by folder coincidence.
+
+Out of scope for this method: live streaming collectors, DuckDB generation by
+producers, Investigation/Case collaborative documents (#532), and product
+import UI (later #763 slices).
+
+## 2. Status and evidence
+
+| Capability | Status | Evidence | Residual |
+| --- | --- | --- | --- |
+| Normative schema id + RFC specification | **Shipped** | [`INCIDENT_EVIDENCE_BUNDLE_V1.md`](../../specs/INCIDENT_EVIDENCE_BUNDLE_V1.md) | — |
+| JSON Schemas | **Shipped** | [`docs/specs/incident-evidence/schemas/`](../../specs/incident-evidence/schemas/) | — |
+| Frozen valid/invalid fixtures | **Shipped** | [`fixtures/incident-evidence/`](../../../fixtures/incident-evidence/) | — |
+| Offline directory validator + CLI | **Shipped** | [`incident_evidence.rs`](../../../crates/cd-core/src/incident_evidence.rs), `cd-validate-incident-evidence` | — |
+| Deterministic ZIP pack/validate | **Shipped** | [`incident_evidence_archive.rs`](../../../crates/cd-core/src/incident_evidence_archive.rs) (#765) | Product import residual |
+| Producer templates | **Shipped** | [`examples/incident-evidence-producers/`](../../../examples/incident-evidence-producers/) | — |
+| Help discoverability | **Shipped** | [`incident-evidence-bundle.md`](../../help/log-analysis/incident-evidence-bundle.md) | — |
+| Product import/attachment UX | **Planned** | — | #763 later slices |
+| Investigation/Case portable bundles | **Planned** | Distinct collaborative format | #532 Phase D |
+
+## 3. Reusable method
+
+1. Collect only authorized files under relative paths.
+2. Stream-hash each payload (SHA-256 lowercase) and record exact byte lengths.
+3. Declare components with roles: `log`, `operational_metrics`, `attachment`, `readme`.
+4. Declare privacy flags and time-basis honesty (never invent timezones).
+5. Emit `manifest.json` with exact `schemaId` `contextdesk.incident_evidence.v1`.
+6. Validate offline before transfer; fail closed on path/hash/limit errors.
+7. Future product import re-validates and publishes new identities only after success.
+
+```mermaid
+flowchart LR
+%% title: Producer through offline validation to residual import
+    P["Producer files"] --> M["manifest.json + hashes"]
+    M --> V["Offline validator"]
+    V -->|"ok"| T["Transfer"]
+    V -->|"fail"| F["Actionable diagnostics"]
+    T --> I["Product import residual"]
+```
+
+## 4. Inputs, outputs, and data contracts
+
+### Inputs
+
+| Field/concept | Type or shape | Required | Validation |
+| --- | --- | --- | --- |
+| Bundle root | Directory or deterministic ZIP | yes | Contains capped root `manifest.json` |
+| Component path | Relative POSIX path | yes | No absolute/traversal/drive prefixes |
+| Component hash | 64 lowercase hex | yes | Stream-verified SHA-256 |
+| Operational metrics document | Published [`operational-metrics.v1.json`](../../specs/incident-evidence/schemas/operational-metrics.v1.json) | when role used | `schemaVersion: 1`, bounded series/points, provenance, time quality; no second series schema |
+
+### Outputs
+
+| Field/concept | Meaning | Bounded by | Provenance |
+| --- | --- | --- | --- |
+| ValidationReport | Deterministic diagnostics | Explicit size/count caps | File/JSON paths |
+| (Future) imported identities | New corpus/metric ids | Product policy | Explicit user import |
+
+## 5. Invariants and trust boundaries
+
+- Reject unsafe paths before payload reads.
+- Stream hashes; do not require whole large files in memory.
+- No network I/O in the offline validator.
+- No product publication from the offline tool.
+- Evidence bundles ≠ `contextdesk.log_corpus.v1` analysis packages ≠ #532 cases.
+- Reuse operational-metrics v1; do not redefine series samples.
+- Treat JSON Schema as structural tooling; the offline validator is
+  authoritative for payload bytes, hashes, filesystem/archive safety, IANA
+  zones, sentinels, and cross-component limits.
+
+![Trust boundary between producer, offline validator, and residual product publish](../../help/assets/incident-evidence-trust.svg)
+
+## 6. Algorithm or process detail
+
+1. Cap-read and parse `manifest.json`.
+2. Enforce schema id, reader version, privacy, and time-basis honesty.
+3. For each component: validate relative path; resolve under root; reject symlink escape; compare size; stream SHA-256.
+4. For `operational_metrics` roles, apply the same bounded operational-metrics
+   v1 structural and provenance validation used by the production UI.
+5. Emit sorted diagnostics; `ok` only when empty.
+
+![Bundle anatomy with manifest, logs, metrics, attachments](../../help/assets/incident-evidence-anatomy.svg)
+
+## 7. Performance and bounds
+
+| Limit | Value |
+| --- | --- |
+| Manifest max | 1 MiB (`MAX_MANIFEST_BYTES`) |
+| Components max | 512 (`MAX_COMPONENTS`) |
+| Per-file max | 512 MiB (`MAX_PER_FILE_BYTES`) |
+| Aggregate max | 2 GiB (`MAX_AGGREGATE_BYTES`) |
+| Relative path max | 1024 bytes |
+| Hash buffer | 64 KiB streaming |
+
+## 8. Failure and recovery
+
+Failures are fail-closed with stable diagnostic codes (`unsafe_path`,
+`hash_mismatch`, `byte_count_mismatch`, `unsupported_schema_id`,
+`timezone_dishonest`, `forbidden_sentinel`, `payload_missing`, `unknown_role`,
+and archive safety diagnostics). Producers re-hash after any rewrite and re-run
+validation. Partial product publication is forbidden when import exists.
+
+## 9. Observability
+
+CLI output is deterministic:
+
+```text
+incident-evidence-validate ok=… root=…
+schemaId=…
+bundleId=…
+diagnostics=N
+<code> | <path> | <message>
+```
+
+## 10. Security and privacy
+
+- Shareable bundles set `containsCredentials=false` and avoid private absolute paths.
+- Manifest text must not embed evaluator-truth sentinels.
+- Offline validation performs no network access.
+- Attachments are not ambient model context without future product governance.
+
+## 11. UX and human factors
+
+Help explains producer workflow, bundle vs analysis package vs Investigation,
+privacy review, and troubleshooting. Product import UX is residual and must not
+be claimed shipped by this chapter. Diagrams use explicit theme-safe colors
+that remain legible when embedded as images in light and dark themes.
+
+![Producer validates before transfer; import residual](../../help/assets/incident-evidence-lifecycle.svg)
+
+## 12. Test matrix
+
+| Case | Expectation |
+| --- | --- |
+| Minimal log-only fixture | `ok` |
+| Logs + CPU/heap/clients metrics | `ok` |
+| Multi-source duplicate basenames | `ok` with distinct relative paths |
+| Unsupported schema id | fail `unsupported_schema_id` |
+| Hash / byte mismatch | fail matching codes |
+| Traversal / absolute / drive path | fail `unsafe_path` |
+| Dishonest timezone | fail `timezone_dishonest` |
+| Evaluator-truth sentinel | fail `forbidden_sentinel` |
+| Unknown role | fail `unknown_role` |
+| Metrics role with non-JSON media type | fail `metrics_media_type_invalid` in directory and ZIP forms |
+| Deterministic archive pack + validate | byte-identical output; directory/ZIP rule parity |
+
+## 13. ContextDesk production anchors
+
+| Concern | Path |
+| --- | --- |
+| Spec | `docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md` |
+| Validator | `crates/cd-core/src/incident_evidence.rs` |
+| CLI | `crates/cd-core/src/bin/cd-validate-incident-evidence.rs` |
+| Fixtures | `fixtures/incident-evidence/` |
+| Help | `docs/help/log-analysis/incident-evidence-bundle.md` |
+| Drift | `scripts/check_incident_evidence_drift.mjs` |
+| Related package discipline | `crates/cd-core/src/log_analysis/package.rs` |
+
+## 14. Shipped / partial / planned matrix
+
+| Surface | Status |
+| --- | --- |
+| Interchange contract + offline validate | **Shipped** (#764) |
+| Producer templates + Help/Handbook | **Shipped** (#764) |
+| Directory/ZIP import UX | **Planned** (#763) |
+| Deterministic archive produce/validate (offline) | **Shipped** (#765) |
+| Investigation/Case bundles | **Planned** (#532) |
+
+## 15. Reimplementation notes
+
+1. Keep validation pure and offline.
+2. Prefer streaming hashes and explicit caps over “best effort” loads.
+3. Reuse operational-metrics v1 documents unchanged.
+4. Keep analysis packages and Investigation documents on separate schema ids.
+5. Treat unknown roles as fail-closed until a documented expansion ships.
+
+## 16. Coding-agent implementation prompt
+
+This prompt is intentionally architecture-neutral. Replace bracketed values;
+the agent should not need ContextDesk validator source:
+
+```text
+Add a ContextDesk Incident Evidence Bundle v1 exporter to [APPLICATION] using
+[LANGUAGE/BUILD SYSTEM]. Treat docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md and
+its linked JSON Schemas as authoritative.
+
+Authorized inputs:
+- logs: [LOCATIONS OR COLLECTION API]
+- operational metrics: [LOCATIONS/API OR NONE]
+- bounded attachments: [POLICY OR NONE]
+
+Emit stable relative paths, exact byte lengths, lowercase SHA-256 hashes,
+producer identity, privacy declarations, and explicit time-basis provenance.
+Reuse docs/specs/incident-evidence/schemas/operational-metrics.v1.json without
+changing its series/point schema, and declare it as application/json. Never
+guess a timezone, follow symlinks, include credentials/private absolute paths,
+or include diagnoses/evaluator truth. JSON Schema is structural only: run the
+offline validator for bytes, hashes, paths, timezones, sentinels, limits, and
+archive safety.
+
+Start from the nearest example in examples/incident-evidence-producers/.
+Generate a fully synthetic fixture and prove:
+1. directory validation succeeds;
+2. two independent pack runs are byte-identical;
+3. ZIP validation succeeds;
+4. duplicate basenames retain distinct relative identities;
+5. a deliberate hash or unsafe-path mutation fails closed.
+
+Report every assumption the public specification did not settle. Do not read
+crates/cd-core/src/incident_evidence*.rs to fill documentation gaps.
+```
+
+## 17. Open residuals
+
+- Product import/attachment UX for directory and archive forms (#763).
+- Round-trip product tests once import lands.
+- #532 Investigation/Case portable bundles remain a separate contract.

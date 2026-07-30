@@ -1,0 +1,19 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "bad-hash",
+  "createdAt": "2024-01-15T12:00:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": { "redactionDeclared": true, "containsCredentials": false, "containsPii": false },
+  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "components": [
+    {
+      "id": "log-app",
+      "role": "log",
+      "path": "logs/app.log",
+      "mediaType": "text/plain",
+      "bytes": 45,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

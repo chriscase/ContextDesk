@@ -39,6 +39,42 @@ the product remains rename-friendly through [`branding.toml`](branding.toml).
 
 ![ContextDesk Logs library showing an installed synthetic demonstration corpus](docs/media/gallery/logs-library-demo.png)
 
+## Integrate your application data
+
+**Hand off incident evidence with a versioned contract.** Producers can build an
+**Incident Evidence Bundle** (`contextdesk.incident_evidence.v1`) as a directory
+or deterministic ZIP with hashed logs, optional operational-metrics v1
+documents, and privacy declarations. Validate offline before transfer:
+
+```bash
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle
+cargo run -p cd-core --bin cd-validate-incident-evidence -- pack ./my-bundle --output ./my-bundle.zip
+cargo run -p cd-core --bin cd-validate-incident-evidence -- validate ./my-bundle.zip
+```
+
+**Start here:** [Incident Evidence Bundle integration guide](docs/help/log-analysis/incident-evidence-bundle.md) ·
+normative spec: [`docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md`](docs/specs/INCIDENT_EVIDENCE_BUNDLE_V1.md) ·
+JSON Schemas: [`docs/specs/incident-evidence/schemas/`](docs/specs/incident-evidence/schemas/) ·
+templates: [`examples/incident-evidence-producers/`](examples/incident-evidence-producers/) ·
+fixtures: [`fixtures/incident-evidence/`](fixtures/incident-evidence/) ·
+[Engineering Handbook method](docs/design/proven-methods/INCIDENT_EVIDENCE_BUNDLE.md).
+Directory
+conformance is [#764](https://github.com/chriscase/ContextDesk/issues/764);
+deterministic ZIP pack/validate is [#765](https://github.com/chriscase/ContextDesk/issues/765).
+Product import/attachment UX remains residual on
+[#763](https://github.com/chriscase/ContextDesk/issues/763).
+
+To delegate an exporter to a coding agent, give it this repository and prompt:
+
+> Implement a ContextDesk Incident Evidence Bundle v1 exporter for this
+> application using the normative specification and JSON Schemas linked above.
+> Emit authorized logs under stable relative paths and, when available,
+> operational-metrics v1 documents with source provenance. Compute exact byte
+> counts and lowercase SHA-256 hashes, declare time and privacy honestly, then
+> run the documented directory validation, deterministic ZIP packing, and ZIP
+> validation commands. Do not inspect ContextDesk implementation code or invent
+> fields outside the published contract.
+
 **Start with repeatable evidence.** Install the bundled synthetic corpus during
 first-run setup, inspect its import summary, and open it directly in Log
 Explorer.

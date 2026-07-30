@@ -1,0 +1,1 @@
+Synthetic operator note: restart observed after deploy marker D1.

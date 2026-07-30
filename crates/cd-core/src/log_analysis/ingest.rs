@@ -299,8 +299,30 @@ fn cancelled(cancel: Option<&CancelFlag>) -> bool {
     cancel.map(|c| c.is_cancelled()).unwrap_or(false)
 }
 
-fn emit(progress: &dyn ProcessProgressObserver, update: ProcessProgress) {
+fn emit(progress: &dyn ProcessProgressObserver, mut update: ProcessProgress) {
+    if update.kind == ProcessProgressKind::LogIngest && update.phase != ProcessProgressPhase::Parse
+    {
+        update.fraction = None;
+    }
     progress.progress(update);
+}
+
+fn parse_file_fraction(completed_files: u64, total_files: u64) -> Option<f32> {
+    if total_files == 0 {
+        return None;
+    }
+    let fraction = (completed_files.min(total_files) as f64 / total_files as f64) as f32;
+    fraction.is_finite().then_some(fraction.clamp(0.0, 1.0))
+}
+
+fn with_parse_file_fraction(
+    mut update: ProcessProgress,
+    completed_files: u64,
+    total_files: u64,
+) -> ProcessProgress {
+    debug_assert_eq!(update.phase, ProcessProgressPhase::Parse);
+    update.fraction = parse_file_fraction(completed_files, total_files);
+    update
 }
 
 fn emit_ingest_evidence(
@@ -1502,7 +1524,6 @@ fn ingest_lines_from_reader(
                         "writing event batches",
                         true,
                     )
-                    .with_fraction(0.45)
                     .with_lines(stats.lines)
                     .with_files(files_done)
                     .with_bytes(stats.source_bytes),
@@ -1512,21 +1533,22 @@ fn ingest_lines_from_reader(
             batch.clear();
         }
         if stats.lines.is_multiple_of(PROGRESS_EVERY_LINES) {
-            let frac =
-                0.15 + 0.45 * ((files_done as f32 + 0.5) / file_count.max(1) as f32).min(1.0);
             emit(
                 progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Parse,
-                    format!("parsing {source_label} ({} lines so far)", stats.lines),
-                    true,
-                )
-                .with_fraction(frac)
-                .with_lines(stats.lines)
-                .with_files(files_done)
-                .with_bytes(stats.source_bytes)
-                .with_templates(miner.templates().len() as u64),
+                with_parse_file_fraction(
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Parse,
+                        format!("parsing {source_label} ({} lines so far)", stats.lines),
+                        true,
+                    )
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes)
+                    .with_templates(miner.templates().len() as u64),
+                    files_done,
+                    file_count,
+                ),
             );
         }
     }
@@ -1733,7 +1755,6 @@ fn ingest_from_zip_file(
             ),
             true,
         )
-        .with_fraction(0.1)
         .with_files(entry_count),
     );
 
@@ -1816,7 +1837,6 @@ fn ingest_from_zip_file(
                 ),
                 true,
             )
-            .with_fraction(0.1 + 0.05 * ((i as f32 + 1.0) / entry_count.max(1) as f32))
             .with_files(files_done)
             .with_lines(stats.lines)
             .with_bytes(stats.source_bytes),
@@ -1993,21 +2013,23 @@ fn ingest_from_zip_file(
                 Path::new(&source_identity),
             );
         }
-        let frac = 0.15 + 0.45 * (files_done as f32 / entry_count.max(1) as f32);
         if files_done == 1 || files_done == entry_count || files_done.is_multiple_of(5) {
             emit(
                 progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Template,
-                    "Drain templating + redaction (zip stream)",
-                    true,
-                )
-                .with_fraction(frac)
-                .with_lines(stats.lines)
-                .with_files(files_done)
-                .with_bytes(stats.source_bytes)
-                .with_templates(miner.templates().len() as u64),
+                with_parse_file_fraction(
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Parse,
+                        "Parsing archive entries",
+                        true,
+                    )
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes)
+                    .with_templates(miner.templates().len() as u64),
+                    files_done,
+                    entry_count,
+                ),
             );
         }
     }
@@ -2098,8 +2120,7 @@ fn ingest_path_inner_with_limits_and_fault(
             ProcessProgressPhase::Starting,
             format!("starting ingest of {source_label}"),
             true,
-        )
-        .with_fraction(0.0),
+        ),
     );
 
     if cancelled(cancel) {
@@ -2122,8 +2143,7 @@ fn ingest_path_inner_with_limits_and_fault(
             ProcessProgressPhase::Scan,
             format!("scanning {source_label}"),
             true,
-        )
-        .with_fraction(0.05),
+        ),
     );
 
     let mut staging = IngestStaging::new(cache_root)?;
@@ -2205,7 +2225,6 @@ fn ingest_path_inner_with_limits_and_fault(
             completion_message,
             false,
         )
-        .with_fraction(1.0)
         .with_lines(report.stats.lines)
         .with_files(report.stats.files as u64)
         .with_bytes(report.stats.source_bytes)
@@ -2287,20 +2306,22 @@ fn ingest_path_into_cache(
                 format!("found {file_count} file entr(y/ies)"),
                 true,
             )
-            .with_fraction(0.1)
             .with_files(file_count),
         );
 
         emit(
             progress,
-            ProcessProgress::phase(
-                kind,
-                ProcessProgressPhase::Parse,
-                "parsing and templating lines",
-                true,
-            )
-            .with_fraction(0.15)
-            .with_files(file_count),
+            with_parse_file_fraction(
+                ProcessProgress::phase(
+                    kind,
+                    ProcessProgressPhase::Parse,
+                    "parsing and templating lines",
+                    true,
+                )
+                .with_files(files_done),
+                files_done,
+                file_count,
+            ),
         );
 
         for file in &inventory.files {
@@ -2330,15 +2351,19 @@ fn ingest_path_into_cache(
             };
             emit(
                 progress,
-                ProcessProgress::phase(
-                    kind,
-                    ProcessProgressPhase::Parse,
-                    format!("opening {}", progress_basename(file)),
-                    true,
-                )
-                .with_lines(stats.lines)
-                .with_files(files_done)
-                .with_bytes(stats.source_bytes),
+                with_parse_file_fraction(
+                    ProcessProgress::phase(
+                        kind,
+                        ProcessProgressPhase::Parse,
+                        format!("opening {}", progress_basename(file)),
+                        true,
+                    )
+                    .with_lines(stats.lines)
+                    .with_files(files_done)
+                    .with_bytes(stats.source_bytes),
+                    files_done,
+                    file_count,
+                ),
             );
             let mut fh = match open_inventory_file(&inventory, file) {
                 Ok(file) => file,
@@ -2399,18 +2424,21 @@ fn ingest_path_into_cache(
                 files_done += 1;
                 emit(
                     progress,
-                    ProcessProgress::phase(
-                        kind,
-                        ProcessProgressPhase::Parse,
-                        format!(
-                            "skipped oversized {} ({} bytes > {} cap)",
-                            progress_basename(file),
-                            file_bytes,
-                            limits.max_file_bytes
+                    with_parse_file_fraction(
+                        ProcessProgress::phase(
+                            kind,
+                            ProcessProgressPhase::Parse,
+                            format!(
+                                "skipped oversized {} ({} bytes > {} cap)",
+                                progress_basename(file),
+                                file_bytes,
+                                limits.max_file_bytes
+                            ),
+                            true,
                         ),
-                        true,
+                        files_done,
+                        file_count,
                     )
-                    .with_fraction(0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32))
                     .with_lines(stats.lines)
                     .with_files(files_done),
                 );
@@ -2470,26 +2498,41 @@ fn ingest_path_into_cache(
                 stats.failed("read_failed", file);
                 emit_ingest_evidence(progress, LogIngestEvidenceReason::ReadFailed, file);
             }
-            let frac = 0.15 + 0.45 * (files_done as f32 / file_count.max(1) as f32);
             if files_done == 1 || files_done == file_count || files_done.is_multiple_of(5) {
                 emit(
                     progress,
-                    ProcessProgress::phase(
-                        kind,
-                        ProcessProgressPhase::Template,
-                        "Drain templating + redaction",
-                        true,
-                    )
-                    .with_fraction(frac)
-                    .with_lines(stats.lines)
-                    .with_files(files_done)
-                    .with_bytes(stats.source_bytes)
-                    .with_templates(miner.templates().len() as u64),
+                    with_parse_file_fraction(
+                        ProcessProgress::phase(
+                            kind,
+                            ProcessProgressPhase::Parse,
+                            "Parsing and grouping patterns",
+                            true,
+                        )
+                        .with_lines(stats.lines)
+                        .with_files(files_done)
+                        .with_bytes(stats.source_bytes)
+                        .with_templates(miner.templates().len() as u64),
+                        files_done,
+                        file_count,
+                    ),
                 );
             }
         }
         files_done
     };
+
+    emit(
+        progress,
+        ProcessProgress::phase(
+            kind,
+            ProcessProgressPhase::Template,
+            "Grouping parsed patterns",
+            true,
+        )
+        .with_lines(stats.lines)
+        .with_files(files_done)
+        .with_templates(miner.templates().len() as u64),
+    );
 
     if stats.lines == 0 {
         return Err(CoreError::Message(
@@ -2505,7 +2548,6 @@ fn ingest_path_into_cache(
             "redaction complete for parsed messages",
             true,
         )
-        .with_fraction(0.62)
         .with_lines(stats.lines)
         .with_files(files_done),
     );
@@ -2520,7 +2562,6 @@ fn ingest_path_into_cache(
                 // After first store, cancel is less clean; still allow between template persist.
                 true,
             )
-            .with_fraction(0.7)
             .with_lines(stats.lines),
         );
         corpus.push_ingested_events(&batch)?;
@@ -2551,7 +2592,6 @@ fn ingest_path_into_cache(
             "persisting template table",
             false, // flush in progress — not cleanly cancellable mid-upsert
         )
-        .with_fraction(0.78)
         .with_lines(stats.lines),
     );
 
@@ -2584,10 +2624,8 @@ fn ingest_path_into_cache(
                 format!("embedding up to {cap} top templates (bulk SoftWrite cap)"),
                 false,
             )
-            .with_fraction(0.85)
             .with_templates(corpus.template_count() as u64),
         );
-        let total_t = to_embed.len().max(1) as f32;
         let mut hash_cache: std::collections::HashMap<String, Vec<f32>> =
             std::collections::HashMap::new();
         for (i, row) in to_embed.into_iter().enumerate() {
@@ -2624,7 +2662,6 @@ fn ingest_path_into_cache(
                         "embedding templates",
                         false,
                     )
-                    .with_fraction(0.85 + 0.12 * (i as f32 / total_t))
                     .with_templates(embedded as u64),
                 );
             }
@@ -5016,6 +5053,94 @@ mod tests {
             "one embed per distinct template (content-hash keyed)"
         );
         assert!(report.stats.templates < 5);
+    }
+
+    #[test]
+    fn parse_file_fraction_requires_a_real_total_and_stays_bounded() {
+        assert_eq!(parse_file_fraction(0, 0), None);
+        assert_eq!(parse_file_fraction(0, 2), Some(0.0));
+        assert_eq!(parse_file_fraction(1, 2), Some(0.5));
+        assert_eq!(parse_file_fraction(2, 2), Some(1.0));
+        assert_eq!(parse_file_fraction(3, 2), Some(1.0));
+        assert_eq!(parse_file_fraction(u64::MAX, u64::MAX), Some(1.0));
+    }
+
+    #[test]
+    fn log_ingest_non_parse_phases_discard_fractions() {
+        let recorder = RecordingProcessProgress::default();
+        let phases = [
+            ProcessProgressPhase::Starting,
+            ProcessProgressPhase::Scan,
+            ProcessProgressPhase::Template,
+            ProcessProgressPhase::Redact,
+            ProcessProgressPhase::Store,
+            ProcessProgressPhase::Embed,
+            ProcessProgressPhase::Completed,
+            ProcessProgressPhase::Cancelled,
+            ProcessProgressPhase::Failed,
+        ];
+        for phase in phases {
+            emit(
+                &recorder,
+                ProcessProgress::phase(ProcessProgressKind::LogIngest, phase, "test", false)
+                    .with_fraction(0.5),
+            );
+        }
+
+        let updates = recorder.updates.lock().unwrap();
+        assert_eq!(updates.len(), phases.len());
+        assert!(
+            updates.iter().all(|update| update.fraction.is_none()),
+            "non-Parse phases must remain indeterminate: {updates:?}"
+        );
+    }
+
+    #[test]
+    fn log_ingest_reports_fraction_only_for_parse_file_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("a.log"), "level=info msg=started\n").unwrap();
+        std::fs::write(logs.join("b.log"), "level=error msg=failed\n").unwrap();
+        let recorder = RecordingProcessProgress::default();
+
+        ingest_path_with_observer(
+            dir.path(),
+            &logs,
+            "truthful-progress",
+            None,
+            "none",
+            &recorder,
+            None,
+        )
+        .unwrap();
+
+        let updates = recorder.updates.lock().unwrap();
+        let parse_fractions: Vec<f32> = updates
+            .iter()
+            .filter(|update| update.phase == ProcessProgressPhase::Parse)
+            .filter_map(|update| update.fraction)
+            .collect();
+        assert!(!parse_fractions.is_empty(), "updates={updates:?}");
+        assert!(
+            parse_fractions
+                .iter()
+                .all(|fraction| fraction.is_finite() && (0.0..=1.0).contains(fraction)),
+            "parse fractions must be finite and bounded: {parse_fractions:?}"
+        );
+        assert!(
+            parse_fractions.contains(&0.0)
+                && parse_fractions.contains(&0.5)
+                && parse_fractions.contains(&1.0),
+            "expected completed_files / total_files progress: {parse_fractions:?}"
+        );
+        assert!(
+            updates
+                .iter()
+                .filter(|update| update.phase != ProcessProgressPhase::Parse)
+                .all(|update| update.fraction.is_none()),
+            "non-Parse phases must remain indeterminate: {updates:?}"
+        );
     }
 
     #[test]

@@ -769,7 +769,7 @@ describe("LinkedChatRail", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    const stop = await screen.findByRole("button", { name: "Stop" });
+    const stop = await screen.findByRole("button", { name: /Stop/ });
     stop.focus();
     fireEvent.click(stop);
     fireEvent.click(stop);
@@ -781,14 +781,14 @@ describe("LinkedChatRail", () => {
         "Cancellation requested. Waiting for the current turn to stop…",
       ),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Stopping…" })).toBe(stop);
+    expect(screen.getByRole("button", { name: /Stopping/ })).toBe(stop);
     expect(document.activeElement).toBe(stop);
 
     await act(async () => {
       resolveCancellation?.();
       await Promise.resolve();
     });
-    expect(screen.getByRole("button", { name: "Stopping…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Stopping/ })).toBeTruthy();
 
     await act(async () => {
       resolveTurn?.([
@@ -866,21 +866,21 @@ describe("LinkedChatRail", () => {
       target: { value: "Start a slow turn" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Stop/ }));
 
     expect(
       await screen.findByText(
         /Could not request cancellation: Error: cancellation channel unavailable/,
       ),
     ).toBeTruthy();
-    const retry = screen.getByRole("button", { name: "Stop" });
+    const retry = screen.getByRole("button", { name: /Stop/ });
     expect(retry.getAttribute("aria-disabled")).toBe("false");
 
     fireEvent.click(retry);
     await waitFor(() =>
       expect(host.hostCancelTurn).toHaveBeenNthCalledWith(2, "chat-retry-stop"),
     );
-    expect(screen.getByRole("button", { name: "Stopping…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Stopping/ })).toBeTruthy();
     expect(
       screen.getByText(
         "Cancellation requested. Waiting for the current turn to stop…",
@@ -962,7 +962,7 @@ describe("LinkedChatRail", () => {
         target: { value: prompt },
       });
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
-      await screen.findByRole("button", { name: "Stop" });
+      await screen.findByRole("button", { name: /Stop/ });
     };
 
     await openChat("Chat A");
@@ -970,11 +970,11 @@ describe("LinkedChatRail", () => {
     await openChat("Chat B");
     await startTurn("Investigate B");
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
     expect(host.hostCancelTurn).toHaveBeenLastCalledWith("chat-b");
 
     await openChat("Chat A");
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
     expect(host.hostCancelTurn).toHaveBeenNthCalledWith(2, "chat-a");
     expect(host.hostCancelTurn).toHaveBeenCalledTimes(2);
 
@@ -2443,5 +2443,338 @@ describe("LinkedChatRail", () => {
     expect(
       (screen.getByLabelText("Chat message") as HTMLTextAreaElement).value,
     ).toBe("draft for A");
+  });
+
+  it("strips machine log_nav JSON from transcript and shows a single chip", async () => {
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _t, _f, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "text_delta",
+            payload: {
+              text: 'Here is the finding. {"type":"log_nav","corpusId":"c1","sources":["api.log"],"label":"Focus api"} End note.',
+            },
+          },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const e of events) onEvent?.(e);
+        return events;
+      },
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "nav please" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByTestId("linked-chat-nav-chip");
+    expect(screen.getByText(/Here is the finding/)).toBeTruthy();
+    expect(screen.getByText(/End note/)).toBeTruthy();
+    expect(screen.queryByText(/"type":"log_nav"/)).toBeNull();
+    expect(screen.getAllByTestId("linked-chat-nav-chip")).toHaveLength(1);
+    expect(screen.getByText("Focus api")).toBeTruthy();
+  });
+
+  it("shows quiet unreadable message for malformed navigation-like output", async () => {
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _t, _f, _m, _p, onEvent) => {
+        const events: host.EventDto[] = [
+          {
+            kind: "text_delta",
+            payload: {
+              text: 'Broken {"type":"log_nav","corpusId":"c1","sources":[',
+            },
+          },
+          { kind: "turn_completed", payload: {} },
+        ];
+        for (const e of events) onEvent?.(e);
+        return events;
+      },
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "nav" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByTestId("linked-chat-nav-unreadable");
+    expect(
+      screen.getByText("Navigation proposal could not be read."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/"type":"log_nav"/)).toBeNull();
+    expect(screen.queryByTestId("linked-chat-nav-chip")).toBeNull();
+  });
+
+  it("shows host phase with elapsed time and keeps SR free of tick spam", async () => {
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "slow" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByRole("button", { name: /Stop/ });
+    // Drive host phase through the real onEvent callback captured by agentTurn.
+    const onEvent = vi.mocked(host.agentTurn).mock.calls[0]?.[5] as
+      | ((ev: host.EventDto) => void)
+      | undefined;
+    expect(onEvent).toEqual(expect.any(Function));
+    await act(async () => {
+      onEvent?.({
+        kind: "turn_phase",
+        payload: { phase: "choosing_evidence" },
+      });
+    });
+    expect(screen.getByTestId("linked-chat-phase")).toBeTruthy();
+    expect(
+      screen.getByRole("status").textContent,
+    ).toMatch(/Choosing bounded evidence/);
+    const elapsed = screen.getByTestId("linked-chat-elapsed");
+    expect(elapsed.getAttribute("aria-hidden")).toBe("true");
+    expect(elapsed.textContent).toMatch(/\d/);
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "done." } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+  });
+
+  it("marks collapsed rail busy while a turn is in flight", async () => {
+    let resolveTurn: ((events: host.EventDto[]) => void) | undefined;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _t, _f, _m, _p, onEvent) =>
+        await new Promise<host.EventDto[]>((resolve) => {
+          resolveTurn = (events) => {
+            for (const e of events) onEvent?.(e);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    const { rerender } = render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        collapsed={false}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "busy collapse" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByRole("button", { name: /Stop/ });
+    rerender(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+        collapsed
+      />,
+    );
+    const rail = await screen.findByTestId("log-explorer-chat");
+    expect(rail.getAttribute("data-collapsed")).toBe("true");
+    expect(rail.getAttribute("data-busy")).toBe("true");
+    expect(rail.getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByTestId("linked-chat-collapsed-busy")).toBeTruthy();
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "ok" } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+  });
+
+  it("Stop accessible name states it cancels the current turn", async () => {
+    let resolveTurn: ((events: host.EventDto[]) => void) | undefined;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _t, _f, _m, _p, onEvent) =>
+        await new Promise<host.EventDto[]>((resolve) => {
+          resolveTurn = (events) => {
+            for (const e of events) onEvent?.(e);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(screen.getByLabelText("Chat message"), {
+      target: { value: "cancel wording" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    const stop = await screen.findByRole("button", {
+      name: /Stop — cancel the current turn/i,
+    });
+    expect((stop as HTMLButtonElement).title.toLowerCase()).toMatch(/cancel/);
+    expect(stop.className).toMatch(/stop/);
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "ok" } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+  });
+
+  it("does not flash unreadable while a valid log_nav is still streaming", async () => {
+    const { LinkedAssistantBody } = await import("./LinkedChatRail");
+    const partial =
+      'Finding… {"type":"log_nav","corpusId":"c1","sources":["a.log"],"label":"Partial';
+    const { rerender, queryByTestId, getByText } = render(
+      <LinkedAssistantBody content={partial} streaming />,
+    );
+    expect(queryByTestId("linked-chat-nav-unreadable")).toBeNull();
+    expect(getByText(/Finding/)).toBeTruthy();
+    // Still incomplete nav-like JSON — no polished unreadable flash mid-stream.
+    expect(queryByTestId("linked-chat-nav-unreadable")).toBeNull();
+
+    // Completed stream with still-malformed payload → quiet unreadable once.
+    rerender(
+      <LinkedAssistantBody content={partial} streaming={false} />,
+    );
+    expect(queryByTestId("linked-chat-nav-unreadable")).toBeTruthy();
+    expect(getByText("Navigation proposal could not be read.")).toBeTruthy();
+
+    // Completed stream with closed valid payload → chip path (no unreadable).
+    const complete =
+      'Finding… {"type":"log_nav","corpusId":"c1","sources":["a.log"],"label":"Done"}';
+    rerender(
+      <LinkedAssistantBody content={complete} streaming={false} />,
+    );
+    expect(queryByTestId("linked-chat-nav-unreadable")).toBeNull();
+    expect(getByText(/Finding/)).toBeTruthy();
+    expect(queryByTestId("linked-chat-nav-unreadable")).toBeNull();
+  });
+
+  it("advances elapsed with fake timers without SR live-region ticks", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveTurn: ((events: host.EventDto[]) => void) | null = null;
+    vi.mocked(host.agentTurn).mockImplementation(
+      async (_id, _text, _fl, _m, _p, onEvent) =>
+        new Promise((resolve) => {
+          resolveTurn = (events) => {
+            for (const event of events) onEvent?.(event);
+            resolve(events);
+          };
+        }),
+    );
+    vi.mocked(host.hostSaveChatSession).mockImplementation(async (s) => s);
+    vi.mocked(host.hostLoadChatSession).mockImplementation(async (id) =>
+      sessionDto(id, "Logs · fixture"),
+    );
+
+    render(
+      <LinkedChatRail
+        corpusId="c1"
+        corpusName="fixture"
+        agentContext={baseContext}
+        onApplyNav={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByTestId("new-linked-chat"));
+    await waitFor(() => expect(host.hostSaveChatSession).toHaveBeenCalled());
+    fireEvent.change(await screen.findByLabelText("Chat message"), {
+      target: { value: "timer" },
+    });
+    fireEvent.click(screen.getByTestId("send-linked-chat"));
+    await screen.findByRole("button", { name: /Stop/ });
+    const onEvent = vi.mocked(host.agentTurn).mock.calls[0]?.[5] as
+      | ((ev: host.EventDto) => void)
+      | undefined;
+    await act(async () => {
+      onEvent?.({
+        kind: "turn_phase",
+        payload: { phase: "retrieving_evidence" },
+      });
+    });
+    const elapsed = screen.getByTestId("linked-chat-elapsed");
+    expect(elapsed.getAttribute("aria-hidden")).toBe("true");
+    const before = elapsed.textContent ?? "";
+    await act(async () => {
+      vi.advanceTimersByTime(2500);
+    });
+    // Elapsed text may change; live status role must still only hold the phase.
+    expect(screen.getByRole("status").textContent).toMatch(
+      /Retrieving bounded evidence/,
+    );
+    expect(screen.getByRole("status").textContent).not.toMatch(/\d+\.\d+s/);
+    expect(elapsed.textContent).not.toBe("");
+    void before;
+    await act(async () => {
+      resolveTurn?.([
+        { kind: "text_delta", payload: { text: "ok" } },
+        { kind: "turn_completed", payload: {} },
+      ]);
+    });
+    vi.useRealTimers();
   });
 });

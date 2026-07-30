@@ -128,12 +128,14 @@
   color: var(--fg, #e8eaed);
 }
 
-.timeline-navigator__metric-action:disabled {
+.timeline-navigator__metric-action:disabled,
+.timeline-navigator__metric-action[aria-disabled="true"] {
   opacity: 0.45;
   cursor: default;
 }
 
-.timeline-navigator__metric-action:disabled:hover {
+.timeline-navigator__metric-action:disabled:hover,
+.timeline-navigator__metric-action[aria-disabled="true"]:hover {
   border-color: var(--border-subtle, #2a2d33);
   color: color-mix(in srgb, var(--fg, #e8eaed) 78%, var(--fg-muted, #9aa0a6));
 }
@@ -141,6 +143,37 @@
 .timeline-navigator__metric-action:focus-visible {
   outline: 2px solid var(--accent, #5b9fd4);
   outline-offset: 1px;
+}
+
+/* Accessible supporting copy when attached metrics cannot share the corpus clock. */
+.timeline-navigator__metric-gate {
+  margin: 0.2rem 0 0;
+  max-width: 36rem;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.68rem;
+  line-height: 1.35;
+}
+
+.timeline-navigator__metric-status,
+.timeline-navigator__metric-confirm {
+  margin: 0.25rem 0;
+  color: var(--fg-muted, #9aa0a6);
+  font-size: 0.68rem;
+}
+
+.timeline-navigator__metric-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border-subtle, #2a2d33);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--bg-app, #0b0c0e) 82%, transparent);
+}
+
+.timeline-navigator__metric-confirm span {
+  flex: 1;
+  min-width: 0;
 }
 
 .timeline-navigator__current {
@@ -406,6 +439,8 @@
 }
 
 .timeline-navigator__metric-error,
+.timeline-navigator__metric-status,
+.timeline-navigator__metric-confirm,
 .timeline-navigator__session-metrics {
   grid-column: 1 / -1;
 }
@@ -482,6 +517,11 @@
     align-items: flex-start;
     flex-direction: column;
     padding-left: 3rem;
+  }
+
+  .timeline-navigator__metric-confirm {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

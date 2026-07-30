@@ -1,0 +1,25 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "bad-eval-truth",
+  "createdAt": "2024-01-15T12:00:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": {
+    "redactionDeclared": true,
+    "containsCredentials": false,
+    "containsPii": false,
+    "notes": "contains evaluator_truth catalog reference"
+  },
+  "timeBasis": { "timezone": "UTC", "timezoneResolved": true },
+  "components": [
+    {
+      "id": "log-app",
+      "role": "log",
+      "path": "logs/app.log",
+      "mediaType": "text/plain",
+      "bytes": 33,
+      "sha256": "870cb6d9b28c4b9db843458b979ba9347050cd7756e410f5e82f60ebc2d65ba5",
+      "sourceLabel": "EVALUATOR_TRUTH"
+    }
+  ]
+}

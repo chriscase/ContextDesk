@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampLaneCount,
   computeGaps,
+  exactAlignmentAllowed,
   linkAllowed,
   scrubLinked,
 } from "./lanes";
@@ -45,6 +46,20 @@ describe("lanes link/gap", () => {
     expect(r.linked).toBe(true);
     expect(r.peerPositions.find((p) => p.laneId === "api")?.seq).toBe(2);
     expect(r.peerPositions.find((p) => p.laneId === "worker")?.seq).toBe(11);
+  });
+
+  it("allows approximate mixed-time follow but refuses exact mixed-time gaps", () => {
+    const lanes = [
+      { id: "a", events: [{ seq: 1, ts: 100 }] },
+      { id: "b", events: [{ seq: 2, ts: 200 }] },
+    ];
+    expect(linkAllowed("mixed")).toBeNull();
+    expect(scrubLinked(100, lanes, "mixed").linked).toBe(true);
+    expect(exactAlignmentAllowed("mixed")).toMatch(/reliable shared wall clock/);
+    expect(computeGaps(lanes, 100, 201, 10, "mixed")).toEqual({
+      error:
+        "exact alignment requires a reliable shared wall clock; corpus has mixed time quality",
+    });
   });
 
   it("finds gaps where one lane empty", () => {

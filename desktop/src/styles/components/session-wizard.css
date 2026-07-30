@@ -134,7 +134,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .process-progress__bar-fill[data-indeterminate="true"] {
+  .process-progress__bar-track[data-indeterminate="true"] {
     animation: none !important;
   }
 }
@@ -288,30 +288,48 @@
 }
 
 .process-progress__bar-track {
+  appearance: none;
+  display: block;
+  width: 100%;
   height: 6px;
+  border: 0;
   border-radius: 999px;
   background: var(--cd-border, #2a3140);
   overflow: hidden;
 }
 
-.process-progress__bar-fill {
-  height: 100%;
-  background: var(--cd-accent, #5b8cff);
+.process-progress__bar-track::-webkit-progress-bar {
+  background: var(--cd-border, #2a3140);
   border-radius: 999px;
-  transition: width 0.2s ease;
 }
 
-.process-progress__bar-fill[data-indeterminate="true"] {
-  width: 35% !important;
+.process-progress__bar-track::-webkit-progress-value {
+  background: var(--cd-accent, #5b8cff);
+  border-radius: 999px;
+}
+
+.process-progress__bar-track::-moz-progress-bar {
+  background: var(--cd-accent, #5b8cff);
+  border-radius: 999px;
+}
+
+.process-progress__bar-track[data-indeterminate="true"] {
+  background: linear-gradient(
+    90deg,
+    var(--cd-border, #2a3140) 0%,
+    var(--cd-accent, #5b8cff) 45%,
+    var(--cd-border, #2a3140) 70%
+  );
+  background-size: 220% 100%;
   animation: process-progress-slide 1.2s ease-in-out infinite;
 }
 
 @keyframes process-progress-slide {
   0% {
-    transform: translateX(-40%);
+    background-position: 100% 0;
   }
   100% {
-    transform: translateX(220%);
+    background-position: -100% 0;
   }
 }
 

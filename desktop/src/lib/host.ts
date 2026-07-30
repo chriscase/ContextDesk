@@ -1137,6 +1137,97 @@ export async function hostSetProviderToolsEnabled(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Capability qualification (#724) — user-triggered; never auto-run
+// ---------------------------------------------------------------------------
+
+export type CapabilityCheckDto = {
+  kind: string;
+  status: "pass" | "degraded" | "fail" | "untested" | string;
+  elapsed_ms: number;
+  tested_at: number;
+  reason: string;
+};
+
+export type QualificationReportDto = {
+  profile_id: string;
+  endpoint_fingerprint: string;
+  model_id: string;
+  schema_version: string;
+  role_hint: string;
+  cancelled: boolean;
+  stale: boolean;
+  finished_at: number;
+  checks: CapabilityCheckDto[];
+};
+
+export type QualificationSelectArgs = {
+  profileId?: string | null;
+  modelId?: string | null;
+  baseUrl?: string | null;
+  apiKey?: string | null;
+};
+
+function qualificationReq(args: QualificationSelectArgs = {}) {
+  return {
+    profile_id: args.profileId ?? null,
+    model_id: args.modelId ?? null,
+    base_url: args.baseUrl ?? null,
+    api_key: args.apiKey ?? null,
+  };
+}
+
+/** Cached report only (no network / no probes). */
+export async function hostGetCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<QualificationReportDto | null> {
+  if (!isTauri()) return null;
+  try {
+    return await invoke<QualificationReportDto | null>(
+      "get_capability_qualification",
+      { req: qualificationReq(args) },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Explicit start of synthetic probes against the configured provider. */
+export async function hostStartCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<QualificationReportDto> {
+  if (!isTauri()) {
+    throw new Error("Capability qualification requires the desktop host");
+  }
+  return invoke<QualificationReportDto>("start_capability_qualification", {
+    req: qualificationReq(args),
+  });
+}
+
+/** Cooperative cancel for an in-flight qualification run. */
+export async function hostCancelCapabilityQualification(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("cancel_capability_qualification");
+  } catch {
+    return false;
+  }
+}
+
+/** Clear cached result for the exact selected model only. */
+export async function hostClearCapabilityQualification(
+  args: QualificationSelectArgs = {},
+): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("clear_capability_qualification", {
+      req: qualificationReq(args),
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function hostGetDefaultChatModel(): Promise<string | null> {
   if (!isTauri()) return null;
   return invoke<string>("get_default_chat_model");
@@ -1936,6 +2027,73 @@ export async function hostLogSearch(
 export async function hostDiscardLogCorpus(corpusId: string): Promise<void> {
   if (!isTauri()) throw new Error("Discard requires Tauri host");
   await invoke("discard_log_corpus", { corpusId });
+}
+
+export type OperationalMetricsAttachmentSourceDto =
+  | { kind: "manual_load" }
+  | {
+      kind: "incident_evidence";
+      bundle_id: string;
+      component_id: string;
+    };
+
+export type OperationalMetricsAttachmentMetadataDto = {
+  schemaVersion: number;
+  attachmentId: string;
+  corpusId: string;
+  contentSha256: string;
+  contentBytes: number;
+  metricSchemaVersion: number;
+  displayName: string;
+  validatedAtUnixSecs: number;
+  source: OperationalMetricsAttachmentSourceDto;
+  timeQualityDeclarations: TimeQuality[];
+};
+
+export type OperationalMetricsAttachmentDto = {
+  metadata: OperationalMetricsAttachmentMetadataDto;
+  documentText: string;
+};
+
+/** Persist one bounded, validated metric document for the exact corpus. */
+export async function hostSaveLogOperationalMetricsAttachment(
+  corpusId: string,
+  documentText: string,
+  displayLabel: string,
+  source: OperationalMetricsAttachmentSourceDto = { kind: "manual_load" },
+): Promise<OperationalMetricsAttachmentDto> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  return invoke<OperationalMetricsAttachmentDto>(
+    "log_save_operational_metrics_attachment",
+    { corpusId, documentText, displayLabel, source },
+  );
+}
+
+/** Restore and revalidate the exact corpus's stored metric attachment. */
+export async function hostLoadLogOperationalMetricsAttachment(
+  corpusId: string,
+): Promise<OperationalMetricsAttachmentDto> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  return invoke<OperationalMetricsAttachmentDto>(
+    "log_load_operational_metrics_attachment",
+    { corpusId },
+  );
+}
+
+/** Remove only the exact corpus's stored metric attachment. */
+export async function hostRemoveLogOperationalMetricsAttachment(
+  corpusId: string,
+): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Metric attachment requires the desktop app");
+  }
+  await invoke<void>("log_remove_operational_metrics_attachment", {
+    corpusId,
+  });
 }
 
 /**

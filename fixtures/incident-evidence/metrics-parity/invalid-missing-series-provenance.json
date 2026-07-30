@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "missing-prov",
+  "name": "Missing series provenance",
+  "series": [
+    {
+      "id": "cpu",
+      "name": "CPU",
+      "unit": "%",
+      "timeQuality": "wall",
+      "points": [
+        {
+          "timestamp": 1,
+          "value": 1
+        }
+      ]
+    }
+  ]
+}

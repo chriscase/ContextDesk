@@ -14,6 +14,7 @@ pub mod embed_policy;
 pub mod format_profile;
 pub mod ingest;
 pub mod lanes;
+pub mod operational_metrics;
 pub mod package;
 pub mod parse;
 pub mod query;
@@ -60,6 +61,14 @@ pub use ingest::{
 pub use lanes::{
     clamp_lane_count, compute_gaps, link_allowed, nearest_at_or_after, scrub_linked, GapRegion,
     LaneEventRef, LinkScrubResult, PeerPosition, MAX_LANES,
+};
+pub use operational_metrics::{
+    load_operational_metrics_attachment, remove_operational_metrics_attachment,
+    save_operational_metrics_attachment, OperationalMetricsAttachment,
+    OperationalMetricsAttachmentError, OperationalMetricsAttachmentMetadata,
+    OperationalMetricsAttachmentSource, MAX_OPERATIONAL_METRICS_ATTACHMENT_BYTES,
+    MAX_OPERATIONAL_METRICS_DISPLAY_LABEL_BYTES, OPERATIONAL_METRICS_ATTACHMENT_SCHEMA_VERSION,
+    OPERATIONAL_METRICS_DOCUMENT_SCHEMA_VERSION,
 };
 pub use package::{
     export_corpus_zip, import_corpus_zip, import_corpus_zip_path, import_corpus_zip_reader,

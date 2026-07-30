@@ -5,3 +5,8 @@ fixtures/log-lab/** text eol=lf
 fixtures/log-lab/**/*.zip -text -eol
 fixtures/log-lab/**/04-crlf.log -text -eol whitespace=-trailing-space
 fixtures/log-lab/**/binary.log -text -eol
+
+# Incident Evidence Bundle manifests hash exact payload bytes. Keep the frozen
+# text fixtures LF-stable so validation is identical on Windows, macOS, Linux.
+fixtures/incident-evidence/** text eol=lf
+fixtures/incident-evidence/**/*.zip -text -eol

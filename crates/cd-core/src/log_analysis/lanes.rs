@@ -69,10 +69,26 @@ pub struct PeerPosition {
 pub fn link_allowed(quality: TimeQuality) -> Result<(), String> {
     match quality {
         TimeQuality::Wall => Ok(()),
-        TimeQuality::Mixed => Ok(()), // allowed with UI badge; still wall-ish
+        // Follow is deliberately approximate and may seek among the wall-clock
+        // subset of a mixed corpus. It must never be described as exact align.
+        TimeQuality::Mixed => Ok(()),
         TimeQuality::OrderOnly => Err(
             "timestamp link requires wall-clock time; corpus is order-only (seq is not calendar time)"
                 .into(),
+        ),
+    }
+}
+
+/// Decide whether exact time alignment and gap claims are trustworthy.
+pub fn exact_alignment_allowed(quality: TimeQuality) -> Result<(), String> {
+    match quality {
+        TimeQuality::Wall => Ok(()),
+        TimeQuality::Mixed => Err(
+            "exact alignment requires a reliable shared wall clock; corpus has mixed time quality"
+                .into(),
+        ),
+        TimeQuality::OrderOnly => Err(
+            "exact alignment requires a reliable shared wall clock; corpus is order-only".into(),
         ),
     }
 }
@@ -147,7 +163,7 @@ pub fn compute_gaps(
     bucket_secs: i64,
     quality: TimeQuality,
 ) -> Result<Vec<GapRegion>, String> {
-    link_allowed(quality)?;
+    exact_alignment_allowed(quality)?;
     if lanes.is_empty() || window_to <= window_from {
         return Ok(vec![]);
     }
@@ -223,6 +239,18 @@ mod tests {
         assert!(!r.linked);
         assert!(r.refuse_reason.is_some());
         assert!(link_allowed(TimeQuality::OrderOnly).is_err());
+    }
+
+    #[test]
+    fn mixed_time_allows_approximate_follow_but_refuses_exact_gaps() {
+        let lanes = vec![
+            ("a".into(), vec![ev(1, 100)]),
+            ("b".into(), vec![ev(2, 200)]),
+        ];
+        let follow = scrub_linked(100, &lanes, TimeQuality::Mixed);
+        assert!(follow.linked);
+        assert!(exact_alignment_allowed(TimeQuality::Mixed).is_err());
+        assert!(compute_gaps(&lanes, 100, 201, 10, TimeQuality::Mixed).is_err());
     }
 
     #[test]

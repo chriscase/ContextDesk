@@ -41,6 +41,27 @@ import {
   type ModelOptionDto,
   type SessionMetaDto,
 } from "../../lib/host";
+import {
+  applyEventsToMessage,
+  newSession,
+  nowIso,
+  sessionFromDto,
+  sessionToDto,
+  type ChatMsg,
+} from "../../lib/session";
+import {
+  extractAndCleanLogNav,
+  extractLogNavFromText,
+  LOG_NAV_UNREADABLE_MESSAGE,
+  type LogNavAction,
+} from "../../lib/logExplorer/logNav";
+import { useMessageWindow } from "../../hooks/useMessageWindow";
+import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
+import { HelpTip } from "../HelpTip";
+import { IconChevronRight } from "../icons";
+import { MarkdownBody } from "../MarkdownBody";
+import { SourceCitations } from "../SourceCitations";
+import { ToolCallList } from "../ToolCallList";
 
 export function hasHostLinkedSynthesisRetry(
   events: EventDto[],
@@ -59,25 +80,66 @@ export function hasHostLinkedSynthesisRetry(
       event.payload.model_id === modelId,
   );
 }
-import {
-  applyEventsToMessage,
-  newSession,
-  nowIso,
-  sessionFromDto,
-  sessionToDto,
-  type ChatMsg,
-} from "../../lib/session";
-import {
-  extractLogNavFromText,
-  type LogNavAction,
-} from "../../lib/logExplorer/logNav";
-import { useMessageWindow } from "../../hooks/useMessageWindow";
-import { HELP_LINKED_CHAT_CONTEXT } from "../../lib/helpContent";
-import { HelpTip } from "../HelpTip";
-import { IconChevronRight } from "../icons";
-import { MarkdownBody } from "../MarkdownBody";
-import { SourceCitations } from "../SourceCitations";
-import { ToolCallList } from "../ToolCallList";
+
+/** Format elapsed ms for linked-turn phase display. */
+export function formatLinkedElapsed(ms: number): string {
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.floor(s)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function LinkedElapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <span
+      className="log-explorer__chat-elapsed"
+      data-testid="linked-chat-elapsed"
+      aria-hidden="true"
+    >
+      {formatLinkedElapsed(Math.max(0, now - startedAt))}
+    </span>
+  );
+}
+
+/**
+ * Visible assistant body: strip machine log_nav JSON; quiet unreadable note.
+ * While streaming, incomplete nav-like JSON must not flash the unreadable
+ * message — only strip what we can; gate unreadable on !streaming.
+ */
+export function LinkedAssistantBody({
+  content,
+  streaming,
+}: {
+  content: string;
+  streaming?: boolean;
+}) {
+  const cleaned = useMemo(() => extractAndCleanLogNav(content), [content]);
+  const prose = cleaned.displayText;
+  const showUnreadable = cleaned.unreadableProposal && !streaming;
+  return (
+    <>
+      {prose ? <MarkdownBody text={prose} streaming={streaming} /> : null}
+      {!prose && !showUnreadable && streaming ? (
+        <MarkdownBody text="" streaming />
+      ) : null}
+      {showUnreadable ? (
+        <p
+          className="log-explorer__nav-unreadable"
+          data-testid="linked-chat-nav-unreadable"
+        >
+          {LOG_NAV_UNREADABLE_MESSAGE}
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 export type AgentContextSummary = {
   corpusId: string;
@@ -271,7 +333,10 @@ function LinkedChatBubble({
       {message.citations && message.citations.length > 0 ? (
         <SourceCitations citations={message.citations} />
       ) : null}
-      <MarkdownBody text={message.content} streaming={message.streaming} />
+      <LinkedAssistantBody
+        content={message.content}
+        streaming={message.streaming}
+      />
       {showsLinkedEvidenceTrustDisclosure(message) ? (
         <div
           className="log-explorer__chat-preview"
@@ -327,6 +392,14 @@ export function LinkedChatRail({
    * chat A must not leak into chat B when the user switches mid-turn (#543).
    */
   const [busyByChat, setBusyByChat] = useState<Record<string, boolean>>({});
+  /** Epoch ms when the current turn became busy (per chat). */
+  const [turnStartedAtByChat, setTurnStartedAtByChat] = useState<
+    Record<string, number | null>
+  >({});
+  /** Host-authored phase label only (null = honestly indeterminate). */
+  const [hostPhaseByChat, setHostPhaseByChat] = useState<
+    Record<string, string | null>
+  >({});
   const [cancellationRequestedByChat, setCancellationRequestedByChat] =
     useState<Record<string, boolean>>({});
   const [errorByChat, setErrorByChat] = useState<Record<string, string | null>>(
@@ -444,6 +517,13 @@ export function LinkedChatRail({
     ? (followByChat[activeChatId] ?? true)
     : true;
   const busy = activeChatId ? (busyByChat[activeChatId] ?? false) : false;
+  const hostPhase = activeChatId
+    ? (hostPhaseByChat[activeChatId] ?? null)
+    : null;
+  const turnStartedAt = activeChatId
+    ? (turnStartedAtByChat[activeChatId] ?? null)
+    : null;
+  const anyBusy = Object.values(busyByChat).some(Boolean);
   const cancellationRequested = activeChatId
     ? (cancellationRequestedByChat[activeChatId] ?? false)
     : false;
@@ -830,6 +910,8 @@ export function LinkedChatRail({
     sendingChatsRef.current.add(sessionId);
     terminalChatsRef.current.delete(sessionId);
     setBusyByChat((m) => ({ ...m, [sessionId!]: true }));
+    setTurnStartedAtByChat((m) => ({ ...m, [sessionId!]: Date.now() }));
+    setHostPhaseByChat((m) => ({ ...m, [sessionId!]: null }));
     setCancellationRequestedByChat((m) => ({
       ...m,
       [sessionId!]: false,
@@ -900,6 +982,10 @@ export function LinkedChatRail({
                       : "Synthesizing an evidence-referenced answer…"
                     : null;
             if (label) {
+              setHostPhaseByChat((current) => ({
+                ...current,
+                [sessionId!]: label,
+              }));
               setStatusByChat((current) => ({
                 ...current,
                 [sessionId!]: label,
@@ -993,11 +1079,11 @@ export function LinkedChatRail({
         setMessages(mapSessionMessages(persisted));
       }
 
-      const found = extractLogNavFromText(assistant.content);
-      if (found.length) {
+      const extracted = extractAndCleanLogNav(assistant.content);
+      if (extracted.actions.length) {
         setNavChipsByChat((byChat) => {
           const next = [...(byChat[sessionId!] ?? [])];
-          for (const a of found) {
+          for (const a of extracted.actions) {
             if (
               !next.some(
                 (x) =>
@@ -1061,6 +1147,8 @@ export function LinkedChatRail({
         focusComposerAfterTurnRef.current = sessionId;
       }
       setBusyByChat((m) => ({ ...m, [sessionId!]: false }));
+      setTurnStartedAtByChat((m) => ({ ...m, [sessionId!]: null }));
+      setHostPhaseByChat((m) => ({ ...m, [sessionId!]: null }));
       setCancellationRequestedByChat((m) => ({
         ...m,
         [sessionId!]: false,
@@ -1290,13 +1378,20 @@ export function LinkedChatRail({
   };
 
   if (visible && collapsed && !compactLayout) {
+    const collapsedBusy = anyBusy;
     return (
       <aside
         id="log-explorer-investigation-panel"
         className="log-explorer__chat log-explorer__chat--rail log-explorer__chat--collapsed"
         data-testid="log-explorer-chat"
         data-collapsed="true"
-        aria-label="Linked corpus chat collapsed"
+        data-busy={collapsedBusy ? "true" : "false"}
+        aria-busy={collapsedBusy ? true : undefined}
+        aria-label={
+          collapsedBusy
+            ? "Linked corpus chat collapsed, turn in progress"
+            : "Linked corpus chat collapsed"
+        }
         style={
           desktopGridColumn == null
             ? undefined
@@ -1308,10 +1403,18 @@ export function LinkedChatRail({
           type="button"
           className="log-explorer__chat-reopen"
           data-testid="expand-linked-chat"
-          aria-label={`Expand linked chat rail${chats.length > 0 ? `, ${chats.length} chat${chats.length === 1 ? "" : "s"}` : ""}`}
+          aria-label={`Expand linked chat rail${chats.length > 0 ? `, ${chats.length} chat${chats.length === 1 ? "" : "s"}` : ""}${collapsedBusy ? ", turn in progress" : ""}`}
           onClick={toggleCollapsed}
         >
           <span aria-hidden="true">Chat</span>
+          {collapsedBusy ? (
+            <span
+              className="log-explorer__chat-reopen-busy"
+              data-testid="linked-chat-collapsed-busy"
+              aria-hidden="true"
+              title="Turn in progress"
+            />
+          ) : null}
           {chats.length > 0 ? (
             <span
               className="log-explorer__chat-reopen-count"
@@ -1860,20 +1963,58 @@ export function LinkedChatRail({
 
       {(error ||
         status ||
+        busy ||
         (activeChatId && synthesisRetryByChat[activeChatId])) && (
-        <div className="log-explorer__chat-status" role="status">
-          {error ? `Error: ${error}` : status}
-          {activeChatId && synthesisRetryByChat[activeChatId] ? (
-            <button
-              type="button"
-              className="log-explorer__btn"
-              data-testid="retry-linked-synthesis"
-              disabled={busy}
-              onClick={() => void sendChat({ retrySynthesisOnly: true })}
-            >
-              Retry synthesis
-            </button>
-          ) : null}
+        <div
+          className="log-explorer__chat-status"
+          data-testid="linked-chat-status"
+        >
+          <div className="log-explorer__chat-status-row">
+            {/*
+              Single status node for phase/error copy (no duplicate sr-only twin).
+              Elapsed sits outside the live region so ticks are never announced.
+            */}
+            <span role="status" aria-live="polite" aria-atomic="true">
+              {error
+                ? `Error: ${error}`
+                : busy && cancellationRequested && status
+                  ? status
+                  : busy && hostPhase
+                    ? hostPhase
+                    : busy && !hostPhase
+                      ? "Working…"
+                      : status || ""}
+            </span>
+            {busy &&
+            hostPhase &&
+            !cancellationRequested &&
+            turnStartedAt != null ? (
+              <LinkedElapsed startedAt={turnStartedAt} />
+            ) : null}
+            {busy && !cancellationRequested ? (
+              <span
+                data-testid={
+                  hostPhase
+                    ? "linked-chat-phase"
+                    : "linked-chat-phase-indeterminate"
+                }
+                // Visual/status copy lives in the live region above; this is a
+                // stable test hook without a second text node.
+                hidden
+              />
+            ) : null}
+            {activeChatId && synthesisRetryByChat[activeChatId] ? (
+              <button
+                type="button"
+                className="log-explorer__btn"
+                data-testid="retry-linked-synthesis"
+                disabled={busy}
+                onClick={() => void sendChat({ retrySynthesisOnly: true })}
+              >
+                Retry synthesis
+              </button>
+            ) : null}
+          </div>
         </div>
       )}
 
@@ -1905,11 +2046,29 @@ export function LinkedChatRail({
         </span>
         <button
           type="button"
-          className="log-explorer__btn log-explorer__btn--active"
+          className={
+            busy
+              ? "log-explorer__btn log-explorer__btn--stop"
+              : "log-explorer__btn log-explorer__btn--active"
+          }
           data-testid="send-linked-chat"
           aria-disabled={busy && cancellationRequested}
           disabled={busy ? cancellationRequested : !draft.trim()}
           onClick={() => (busy ? void requestCancellation() : void sendChat())}
+          aria-label={
+            busy
+              ? cancellationRequested
+                ? "Stopping… — cancelling the current turn"
+                : "Stop — cancel the current turn"
+              : "Send"
+          }
+          title={
+            busy
+              ? cancellationRequested
+                ? "Cancellation requested — cancelling the current turn"
+                : "Cancel the current turn"
+              : "Send message"
+          }
         >
           {busy ? (cancellationRequested ? "Stopping…" : "Stop") : "Send"}
         </button>

@@ -11,6 +11,8 @@ use crate::vector_index::{backend_name, select_backend, VectorIndex};
 use duckdb::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -26,6 +28,9 @@ pub const EVENT_ENGINE: &str = "duckdb";
 
 /// `meta.json` schema version (v2 adds persisted ingest stats).
 pub const META_VERSION: u32 = 2;
+
+/// Bound application-owned corpus metadata before allocation or parsing.
+const MAX_CORPUS_META_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Maximum exact event-count predicates retained by one open corpus.
 ///
@@ -1113,6 +1118,28 @@ fn contained_existing_corpus_root(cache_root: &Path, id: &str) -> CoreResult<Pat
     Ok(root)
 }
 
+/// Resolve only the trusted structural root for an exact published corpus.
+///
+/// Attachment sidecars use this path so restore does not open DuckDB, parse
+/// templates, or construct a vector index merely to locate corpus-owned
+/// storage. Identity and containment remain identical to [`LogCorpus::open`].
+pub(super) fn contained_exact_corpus_root(cache_root: &Path, id: &str) -> CoreResult<PathBuf> {
+    validate_corpus_id(id)?;
+    let root = contained_existing_corpus_root(cache_root, id)?;
+    let meta = read_meta_file(&root)?;
+    if meta.id != id {
+        return Err(CoreError::Message(format!(
+            "corpus metadata id mismatch: requested {id}"
+        )));
+    }
+    if !root.join("events.duckdb").is_file() {
+        return Err(CoreError::Message(format!(
+            "corpus {id} missing events.duckdb"
+        )));
+    }
+    Ok(root)
+}
+
 fn init_schema(conn: &Connection) -> CoreResult<()> {
     conn.execute_batch(
         r#"
@@ -1167,14 +1194,52 @@ pub fn write_meta_file(root: &Path, meta: &CorpusMeta) -> CoreResult<()> {
 
 /// Read meta.json from a corpus root.
 pub fn read_meta_file(root: &Path) -> CoreResult<CorpusMeta> {
-    let raw = std::fs::read_to_string(root.join("meta.json"))
-        .map_err(|e| CoreError::Message(format!("read meta: {e}")))?;
+    let path = root.join("meta.json");
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| CoreError::Message(format!("read meta: {error}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| CoreError::Message(format!("inspect meta: {error}")))?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_CORPUS_META_BYTES
+    {
+        return Err(CoreError::Message(
+            "meta.json must be a bounded regular non-symlink file".into(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_CORPUS_META_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CoreError::Message(format!("read meta: {error}")))?;
+    if bytes.len() as u64 > MAX_CORPUS_META_BYTES {
+        return Err(CoreError::Message(
+            "meta.json exceeds its storage bound".into(),
+        ));
+    }
+    let raw = std::str::from_utf8(&bytes)
+        .map_err(|_| CoreError::Message("meta.json must be valid UTF-8".into()))?;
     // Prefer typed parse; fall back for very old meta shapes.
-    if let Ok(m) = serde_json::from_str::<CorpusMeta>(&raw) {
+    if let Ok(m) = serde_json::from_str::<CorpusMeta>(raw) {
         return Ok(m);
     }
     let v: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| CoreError::Message(format!("parse meta: {e}")))?;
+        serde_json::from_str(raw).map_err(|e| CoreError::Message(format!("parse meta: {e}")))?;
     Ok(CorpusMeta {
         meta_version: v.get("meta_version").and_then(|x| x.as_u64()).unwrap_or(1) as u32,
         id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").into(),
@@ -1275,6 +1340,35 @@ mod tests {
             0,
             "rejected identifiers must not initialize an escaped database"
         );
+    }
+
+    #[test]
+    fn corpus_metadata_reader_rejects_oversized_content_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "bounded meta").unwrap();
+        std::fs::write(
+            corpus.root().join("meta.json"),
+            vec![b' '; (MAX_CORPUS_META_BYTES + 1) as usize],
+        )
+        .unwrap();
+        let error = read_meta_file(corpus.root()).unwrap_err();
+        assert!(error.to_string().contains("bounded regular"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corpus_metadata_reader_never_follows_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = LogCorpus::create(dir.path(), "meta symlink").unwrap();
+        let meta_path = corpus.root().join("meta.json");
+        let outside = dir.path().join("outside-meta.json");
+        std::fs::rename(&meta_path, &outside).unwrap();
+        symlink(&outside, &meta_path).unwrap();
+        let error = read_meta_file(corpus.root()).unwrap_err();
+        assert!(error.to_string().contains("read meta"));
+        assert!(outside.is_file());
     }
 
     #[test]

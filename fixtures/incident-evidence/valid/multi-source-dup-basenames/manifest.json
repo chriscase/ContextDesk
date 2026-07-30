@@ -1,0 +1,33 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "synthetic-multi-source-dup-basenames",
+  "createdAt": "2024-01-15T12:15:00Z",
+  "producer": { "name": "fixture-generator", "version": "0.1.0" },
+  "privacy": {
+    "redactionDeclared": true,
+    "containsCredentials": false,
+    "containsPii": false
+  },
+  "timeBasis": { "timezone": null, "timezoneResolved": false },
+  "components": [
+    {
+      "id": "log-api-app",
+      "role": "log",
+      "path": "logs/api/app.log",
+      "mediaType": "text/plain",
+      "bytes": 35,
+      "sha256": "52be349fae9af99e8a377ec2f2ae9834e9cfd3223435ef4e0b7282983b0f75cb",
+      "sourceLabel": "api"
+    },
+    {
+      "id": "log-worker-app",
+      "role": "log",
+      "path": "logs/worker/app.log",
+      "mediaType": "text/plain",
+      "bytes": 38,
+      "sha256": "720adc81a8211a9070fcd43217a6bef746ed63ba6d80f2dd8b38d13d15e36ea8",
+      "sourceLabel": "worker"
+    }
+  ]
+}

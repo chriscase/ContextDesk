@@ -10,10 +10,15 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
+  hostLoadLogOperationalMetricsAttachment,
   hostLogQueryEvents,
   hostLogSharedTimelineSummary,
+  hostRemoveLogOperationalMetricsAttachment,
+  hostSaveLogOperationalMetricsAttachment,
   type EventQueryDto,
   type ExplorerEventDto,
+  type OperationalMetricsAttachmentDto,
+  type OperationalMetricsAttachmentMetadataDto,
   type SharedTimelineLaneSummaryDto,
   type SharedTimelineSeverity,
   type SharedTimelineSummaryDto,
@@ -27,6 +32,7 @@ import { HelpTip } from "../HelpTip";
 import { OperationalMetricTracks } from "./OperationalMetricTracks";
 import {
   metricDocumentTimeRange,
+  metricLoadGate,
   validateOperationalMetricsDocument,
   type OperationalMetricRange,
   type OperationalMetricsDocumentV1,
@@ -37,6 +43,80 @@ const NAVIGATOR_BUCKETS = 96;
 const MAX_SESSION_METRIC_BYTES = 8 * 1_048_576;
 const MAX_SESSION_METRIC_SERIES = 32;
 const MAX_SESSION_METRIC_POINTS = 250_000;
+
+function attachmentErrorCode(cause: unknown): string | null {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    typeof cause.code === "string"
+  ) {
+    return cause.code;
+  }
+  return null;
+}
+
+function attachmentFailureDetail(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string") return cause;
+  if (typeof cause !== "object" || cause === null) {
+    return "The operation did not complete.";
+  }
+  if (
+    "diagnostics" in cause &&
+    Array.isArray(cause.diagnostics) &&
+    cause.diagnostics.length > 0
+  ) {
+    return cause.diagnostics
+      .slice(0, 3)
+      .map((diagnostic) => {
+        if (typeof diagnostic !== "object" || diagnostic === null) {
+          return "invalid metric document";
+        }
+        const path =
+          "path" in diagnostic && typeof diagnostic.path === "string"
+            ? diagnostic.path
+            : "$";
+        const message =
+          "message" in diagnostic && typeof diagnostic.message === "string"
+            ? diagnostic.message
+            : "is invalid";
+        return `${path}: ${message}`;
+      })
+      .join("; ");
+  }
+  switch (attachmentErrorCode(cause)) {
+    case "too_large":
+      return "The metric document exceeds the supported size.";
+    case "invalid_source":
+      return "The attachment display name or provenance is invalid.";
+    case "unsupported_attachment_version":
+    case "unsupported_metric_schema":
+      return "This build does not support the metric document version.";
+    case "corrupt":
+      return "The stored attachment failed integrity checks.";
+    case "storage":
+      return "Application storage could not complete the operation.";
+    default:
+      return "The operation did not complete.";
+  }
+}
+
+function attachmentRecoveryMessage(cause: unknown): string {
+  switch (attachmentErrorCode(cause)) {
+    case "corrupt":
+      return "The stored metric attachment failed integrity checks and was not loaded. Replace or remove the attachment.";
+    case "unsupported_attachment_version":
+    case "unsupported_metric_schema":
+      return "The stored metric attachment uses a version this build cannot read. Remove it or open the corpus with a compatible build.";
+    case "corpus_unavailable":
+      return "The metric attachment could not be restored because this corpus is unavailable.";
+    case "storage":
+      return "The metric attachment could not be read from application storage.";
+    default:
+      return `Metric attachment unavailable: ${attachmentFailureDetail(cause)}`;
+  }
+}
 
 type Props = {
   corpusId: string;
@@ -180,7 +260,13 @@ export function TimelineNavigator({
   const [metricDocument, setMetricDocument] =
     useState<OperationalMetricsDocumentV1 | null>(null);
   const [metricFileName, setMetricFileName] = useState<string | null>(null);
+  const [metricAttachment, setMetricAttachment] =
+    useState<OperationalMetricsAttachmentMetadataDto | null>(null);
   const [metricError, setMetricError] = useState<string | null>(null);
+  const [metricBusy, setMetricBusy] = useState<
+    "restoring" | "saving" | "removing" | null
+  >(null);
+  const [confirmMetricRemoval, setConfirmMetricRemoval] = useState(false);
   const [metricsOpen, setMetricsOpen] = useState(false);
   const [metricDensity, setMetricDensity] = useState<
     "compact" | "standard" | "detailed"
@@ -202,6 +288,7 @@ export function TimelineNavigator({
   const [status, setStatus] = useState("Loading bounded timeline summary…");
   const toggleRef = useRef<HTMLButtonElement>(null);
   const metricInputRef = useRef<HTMLInputElement>(null);
+  const metricRestoreRequest = useRef(0);
   const summaryRequest = useRef(0);
   const seekRequest = useRef(0);
   const effectiveFilter: EventQueryDto = metricViewRange
@@ -250,6 +337,58 @@ export function TimelineNavigator({
     return () =>
       document.removeEventListener("pointerdown", dismissOnPointer, true);
   }, [clearDetail, detailIndex]);
+
+  const applyStoredMetricAttachment = useCallback(
+    (attachment: OperationalMetricsAttachmentDto) => {
+      const parsed = JSON.parse(attachment.documentText) as unknown;
+      const validated = validateOperationalMetricsDocument(parsed);
+      if (!validated.ok) {
+        throw new Error("stored document failed renderer validation");
+      }
+      setMetricDocument(validated.data);
+      setMetricAttachment(attachment.metadata);
+      setMetricFileName(attachment.metadata.displayName);
+      setMetricError(null);
+      setMetricsOpen(true);
+      setMetricSelection(null);
+      setMetricViewRange(null);
+      return validated.data;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const request = ++metricRestoreRequest.current;
+    setMetricDocument(null);
+    setMetricAttachment(null);
+    setMetricFileName(null);
+    setMetricError(null);
+    setMetricsOpen(false);
+    setConfirmMetricRemoval(false);
+    if (!open || !ready) {
+      setMetricBusy(null);
+      return;
+    }
+    setMetricBusy("restoring");
+    void hostLoadLogOperationalMetricsAttachment(corpusId)
+      .then((attachment) => {
+        if (request !== metricRestoreRequest.current) return;
+        applyStoredMetricAttachment(attachment);
+      })
+      .catch((cause) => {
+        if (request !== metricRestoreRequest.current) return;
+        if (attachmentErrorCode(cause) === "missing") return;
+        setMetricError(attachmentRecoveryMessage(cause));
+      })
+      .finally(() => {
+        if (request === metricRestoreRequest.current) setMetricBusy(null);
+      });
+    return () => {
+      if (request === metricRestoreRequest.current) {
+        metricRestoreRequest.current += 1;
+      }
+    };
+  }, [applyStoredMetricAttachment, corpusId, open, ready]);
 
   useEffect(() => {
     setDetailIndex(null);
@@ -504,6 +643,40 @@ export function TimelineNavigator({
     [previewTimestamp, summary],
   );
 
+  const corpusMetricGate = useMemo(
+    () =>
+      metricLoadGate(summary, {
+        loading,
+        error,
+      }),
+    [summary, loading, error],
+  );
+  const metricSeriesHaveWallTime =
+    metricDocument?.series.every((series) => series.timeQuality === "wall") ??
+    false;
+  const metricOverlapsLogTimeline =
+    metricRange != null &&
+    summary?.spanFrom != null &&
+    summary.spanTo != null &&
+    metricRange.to >= summary.spanFrom &&
+    metricRange.from <= summary.spanTo;
+  const metricsCanRender =
+    metricDocument != null &&
+    corpusMetricGate.allowed &&
+    metricSeriesHaveWallTime &&
+    metricOverlapsLogTimeline;
+  const metricsBlockReason =
+    metricDocument == null
+      ? null
+      : !corpusMetricGate.allowed
+        ? corpusMetricGate.reason
+        : !metricSeriesHaveWallTime
+          ? "Attached metrics need explicit wall-clock timestamps for every series before they can be aligned."
+          : !metricOverlapsLogTimeline
+            ? "Attached metric timestamps do not overlap the current log timeline."
+            : null;
+  const metricsHelpId = "timeline-metric-load-reason";
+
   const importSessionMetrics = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
@@ -513,8 +686,12 @@ export function TimelineNavigator({
       setMetricError("Metric bundle exceeds the 8 MB session import limit.");
       return;
     }
+    const priorDocument = metricDocument;
+    const priorAttachment = metricAttachment;
+    const priorFileName = metricFileName;
     try {
-      const parsed = JSON.parse(await file.text()) as unknown;
+      const documentText = await file.text();
+      const parsed = JSON.parse(documentText) as unknown;
       const validated = validateOperationalMetricsDocument(parsed);
       if (!validated.ok) {
         throw new Error(
@@ -538,41 +715,43 @@ export function TimelineNavigator({
           `Metric bundle has more than ${MAX_SESSION_METRIC_POINTS.toLocaleString()} points.`,
         );
       }
-      if (
-        validated.data.series.some((series) => series.timeQuality !== "wall")
-      ) {
-        throw new Error(
-          "Session metric alignment requires explicit wall-clock timestamps for every series.",
-        );
-      }
-      const metricRange = metricDocumentTimeRange(validated.data);
-      if (
-        summary?.timeQuality !== "wall" ||
-        summary.spanFrom == null ||
-        summary.spanTo == null
-      ) {
-        throw new Error(
-          "The current log view does not have a reliable wall-clock axis.",
-        );
-      }
-      if (
-        metricRange.to < summary.spanFrom ||
-        metricRange.from > summary.spanTo
-      ) {
-        throw new Error(
-          "Metric timestamps do not overlap the current log timeline.",
-        );
-      }
-      setMetricDocument(validated.data);
-      setMetricFileName(file.name);
-      setMetricsOpen(true);
+      setMetricBusy("saving");
+      const saved = await hostSaveLogOperationalMetricsAttachment(
+        corpusId,
+        documentText,
+        file.name,
+      );
+      const stored = applyStoredMetricAttachment(saved);
+      const storedRange = metricDocumentTimeRange(stored);
+      previewTimestamp(storedRange.from);
+    } catch (cause) {
+      setMetricDocument(priorDocument);
+      setMetricAttachment(priorAttachment);
+      setMetricFileName(priorFileName);
+      setMetricError(`Metrics not attached: ${attachmentFailureDetail(cause)}`);
+    } finally {
+      setMetricBusy(null);
+    }
+  };
+
+  const removeMetricAttachment = async () => {
+    setMetricBusy("removing");
+    setMetricError(null);
+    try {
+      await hostRemoveLogOperationalMetricsAttachment(corpusId);
+      setMetricDocument(null);
+      setMetricAttachment(null);
+      setMetricFileName(null);
+      setMetricsOpen(false);
       setMetricSelection(null);
       setMetricViewRange(null);
-      previewTimestamp(metricRange.from);
+      setConfirmMetricRemoval(false);
     } catch (cause) {
-      setMetricDocument(null);
-      setMetricFileName(null);
-      setMetricError(`Metric bundle not loaded: ${String(cause)}`);
+      setMetricError(
+        `Metric attachment not removed: ${attachmentRecoveryMessage(cause)}`,
+      );
+    } finally {
+      setMetricBusy(null);
     }
   };
 
@@ -744,9 +923,17 @@ export function TimelineNavigator({
                     <button
                       type="button"
                       className="timeline-navigator__metric-action"
-                      onClick={() => metricInputRef.current?.click()}
+                      data-testid="timeline-metric-load"
+                      disabled={metricBusy != null}
+                      onClick={() => {
+                        metricInputRef.current?.click();
+                      }}
                     >
-                      {metricDocument ? "Replace metrics" : "Load metrics…"}
+                      {metricBusy === "saving"
+                        ? "Attaching metrics…"
+                        : metricDocument
+                          ? "Replace metrics…"
+                          : "Load metrics…"}
                     </button>
                     {metricDocument ? (
                       <>
@@ -762,16 +949,10 @@ export function TimelineNavigator({
                         <button
                           type="button"
                           className="timeline-navigator__metric-action"
-                          onClick={() => {
-                            setMetricDocument(null);
-                            setMetricFileName(null);
-                            setMetricError(null);
-                            setMetricsOpen(false);
-                            setMetricSelection(null);
-                            setMetricViewRange(null);
-                          }}
+                          disabled={metricBusy != null}
+                          onClick={() => setConfirmMetricRemoval(true)}
                         >
-                          Clear
+                          Remove attachment
                         </button>
                       </>
                     ) : null}
@@ -781,6 +962,17 @@ export function TimelineNavigator({
                       content={HELP_TIMELINE_NAVIGATOR}
                     />
                   </div>
+                  {metricDocument && metricsBlockReason ? (
+                    <p
+                      id={metricsHelpId}
+                      className="timeline-navigator__metric-gate"
+                      data-testid="timeline-metric-load-reason"
+                      role="note"
+                      tabIndex={0}
+                    >
+                      {metricsBlockReason}
+                    </p>
+                  ) : null}
                 </div>
                 <div
                   className="log-explorer__navigator-bars timeline-navigator__chart"
@@ -1002,7 +1194,45 @@ export function TimelineNavigator({
                   {metricError}
                 </div>
               ) : null}
-              {metricDocument && metricsOpen ? (
+              {metricBusy === "restoring" ? (
+                <p
+                  className="timeline-navigator__metric-status"
+                  role="status"
+                >
+                  Restoring attached metrics…
+                </p>
+              ) : null}
+              {confirmMetricRemoval && metricDocument ? (
+                <div
+                  className="timeline-navigator__metric-confirm"
+                  role="group"
+                  aria-label="Confirm metric attachment removal"
+                >
+                  <span>
+                    Remove {metricFileName}? Logs, findings, and the original
+                    file are unaffected.
+                  </span>
+                  <button
+                    type="button"
+                    className="timeline-navigator__metric-action"
+                    disabled={metricBusy != null}
+                    onClick={() => void removeMetricAttachment()}
+                  >
+                    {metricBusy === "removing"
+                      ? "Removing…"
+                      : "Confirm remove"}
+                  </button>
+                  <button
+                    type="button"
+                    className="timeline-navigator__metric-action"
+                    disabled={metricBusy != null}
+                    onClick={() => setConfirmMetricRemoval(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : null}
+              {metricDocument && metricsOpen && metricsCanRender ? (
                 <section
                   id="timeline-session-metrics"
                   className="timeline-navigator__session-metrics"
@@ -1010,7 +1240,7 @@ export function TimelineNavigator({
                 >
                   <div className="timeline-navigator__session-metrics-note">
                     <div>
-                      <strong>Session metrics</strong>
+                      <strong>Attached metrics</strong>
                       <label>
                         Track size
                         <select
@@ -1057,7 +1287,11 @@ export function TimelineNavigator({
                       </button>
                     </div>
                     <span title={metricFileName ?? undefined}>
-                      {metricFileName} · session only · not persisted
+                      {metricFileName} · attached to this corpus · not shared
+                      with the agent
+                      {metricAttachment
+                        ? ` · ${metricAttachment.contentSha256.slice(0, 8)}`
+                        : ""}
                       {metricExtendsBeyondLogTimeline
                         ? " · clipped to the shared log timeline"
                         : ""}

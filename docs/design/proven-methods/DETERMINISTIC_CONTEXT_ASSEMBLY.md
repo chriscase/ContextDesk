@@ -44,7 +44,8 @@ synthesis only after required deterministic steps succeed.
 | Session file packs are scoped and bounded                      | **Shipped** | [`session_context.rs`](../../../crates/cd-core/src/session_context.rs)                                           | Not the path for multi-million-line log corpora                                                    |
 | Broad linked-log triage brief                                  | **Shipped (agent-testable)** | [`tool_host.rs`](../../../crates/cd-core/src/tool_host.rs) `build_broad_log_triage_brief` and [`agent.rs`](../../../crates/cd-core/src/agent.rs) broad-turn admission | Exact packaged 250,000+ event proof with a tools-enabled provider remains #745 |
 | Slow-provider phase lifecycle and synthesis-only retry         | **Shipped (agent-testable)** | One monotonic turn ceiling, bounded phases, immediate cancellation, host-only evidence checkpoint, and tool-closed retry | Native cold/slow tools-enabled provider acceptance remains on #649                                 |
-| Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678; exact qualification remains #724            |
+| Name-based model-role guidance                                 | **Partial** | Versioned hints inform setup, Settings, and preflight without claiming measured capability                       | Provider-scoped hidden-model integration remains #678                                                  |
+| Explicit synthetic capability qualification                    | **Partial** | User-triggered probes, cache key isolation, inert tools, Settings control, and mock-transport tests ship (#724) | Packaged proof against real tools-enabled/disabled profiles remains owner/environment residual        |
 | Ranked multi-source context planner                            | **Partial** | Deterministic eligibility and simple ranking ship                                                                | Richer planning must not weaken host policy                                                        |
 
 Issue status is descriptive, not proof by itself. The production paths and
@@ -155,8 +156,11 @@ Keep four evidence bases distinct in both data and presentation:
 Presentation derives its basis label from that typed source rather than trusting
 preformatted copy. Name hints never silently replace an existing user choice.
 The current role-hint slice remains **Partial**: provider-scoped visibility
-preferences depend on #678, and exact user-triggered capability qualification
-belongs to #724.
+preferences depend on #678. Exact user-triggered capability qualification
+(#724) ships as a **Partial** path: synthetic probes, inert host-validated
+tools, local cache isolation, and Settings **Qualify selected model…** are
+wired; packaged proof with real tools-enabled and tools-disabled profiles
+remains an owner/environment residual.
 
 ## 4. Inputs, outputs, and portable contracts
 
@@ -543,7 +547,8 @@ assert the sentinel is absent from model-facing messages.
 | Cross-source read           | **Partial** | Requested governed reads can be offered after log grounding                | No unrestricted autonomous source crawl                                   |
 | Small-model staging         | **Shipped** | Constrained first log search and tool-closed synthesis path                | No guarantee every small model follows native tools                       |
 | Slow provider lifecycle     | **Shipped (agent-testable)** | Adaptive or explicit whole-turn ceiling, bounded truthful phases, immediate Stop, evidence-preserving synthesis retry | Native cold/slow tools-enabled profile acceptance remains #649 |
-| Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim; hidden-model integration remains #678 and measured qualification remains #724 |
+| Model-role guidance         | **Partial** | Versioned name hints are shown with typed basis and confidence; specialty and unknown ids stay selectable | No cross-gateway capability claim; hidden-model integration remains #678 |
+| Measured qualification      | **Partial** | Explicit synthetic probes record pass/degraded/fail/untested per profile/endpoint/model/schema (#724) | No quality or permanent reliability claim; real packaged profile proof residual |
 | Model proposals changing UI | **Partial** | Structured `log_nav` is opt-in                                             | Rich finding proposal/approval lifecycle remains #646                     |
 | Evaluator-truth exclusion   | **Shipped** | Known-truth fixture discipline keeps the answer key outside attached roots | Not a formal noninterference proof                                        |
 
@@ -585,7 +590,10 @@ Avoid these shortcuts:
   the deterministic core/component lifecycle and synthesis-only retry ship.
 - #646/#532: ranked proposals, review history, walkthroughs, and report
   assembly.
-- #678/#724: connect provider-scoped hidden-model state without expanding
+- #724 residual: packaged proof with real tools-enabled and tools-disabled
+  provider profiles (owner environment; synthetic path ships in
+  `crates/cd-core/src/capability_qualification.rs` and desktop host IPC).
+- #678: connect provider-scoped hidden-model state without expanding
   inventories, then qualify exact deployed capabilities through explicit
   user-triggered probes. Names remain hints and are never a gateway standard.
 - Provider acceptance: a real tools-enabled company profile must be selected

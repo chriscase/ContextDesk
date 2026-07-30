@@ -1,0 +1,38 @@
+{
+  "schemaId": "contextdesk.incident_evidence.v1",
+  "minReaderVersion": 1,
+  "bundleId": "synthetic-logs-plus-metrics",
+  "createdAt": "2024-01-15T12:10:00Z",
+  "producer": {
+    "name": "fixture-generator",
+    "version": "0.1.0"
+  },
+  "privacy": {
+    "redactionDeclared": true,
+    "containsCredentials": false,
+    "containsPii": false
+  },
+  "timeBasis": {
+    "timezone": "UTC",
+    "timezoneResolved": true
+  },
+  "components": [
+    {
+      "id": "log-api",
+      "role": "log",
+      "path": "logs/api.log",
+      "mediaType": "text/plain",
+      "bytes": 33,
+      "sha256": "c44760d25f40c0a575f41a6a3d8ac6ee0bdb4065c256881da2561dba64834e9a",
+      "sourceLabel": "api"
+    },
+    {
+      "id": "metrics-perf",
+      "role": "operational_metrics",
+      "path": "metrics/operational-metrics.v1.json",
+      "mediaType": "application/json",
+      "bytes": 1776,
+      "sha256": "0509168abfab96cf686d5f1955af6ffec10480151fdd262e42336a5835ac96a1"
+    }
+  ]
+}

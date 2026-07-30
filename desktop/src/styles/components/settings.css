@@ -711,3 +711,82 @@
   padding: 0.75rem 0.75rem 0.25rem;
   margin-top: 0.35rem;
 }
+
+/* Capability qualification (#724) — compact results under AI settings */
+.cap-qual {
+  margin-top: var(--space-3, 12px);
+  padding-top: var(--space-2, 8px);
+  border-top: 1px solid var(--border);
+}
+
+.cap-qual__actions {
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+}
+
+.cap-qual__list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cap-qual__item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  font-size: var(--text-xs, 0.75rem);
+  line-height: 1.4;
+}
+
+.cap-qual__status {
+  grid-row: 1 / span 2;
+  align-self: start;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.cap-qual__status--pass {
+  color: var(--ok, #3d9a6a);
+  border-color: color-mix(in srgb, var(--ok, #3d9a6a) 40%, var(--border));
+}
+
+.cap-qual__status--degraded {
+  color: var(--warn, #c4922a);
+  border-color: color-mix(in srgb, var(--warn, #c4922a) 40%, var(--border));
+}
+
+.cap-qual__status--fail {
+  color: var(--danger, #d14);
+  border-color: color-mix(in srgb, var(--danger, #d14) 40%, var(--border));
+}
+
+.cap-qual__status--untested {
+  color: var(--text-muted);
+}
+
+.cap-qual__kind {
+  color: var(--text);
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.cap-qual__meta {
+  color: var(--text-muted);
+  grid-column: 2;
+}
+
+.cap-qual__footer {
+  margin-top: 8px;
+  word-break: break-word;
+}

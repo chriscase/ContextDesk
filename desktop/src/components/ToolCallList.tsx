@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { IconAlert, IconCheck, IconTool, IconWarn } from "./icons";
+import { IconAlert, IconCheck, IconTool } from "./icons";
 
 export type ToolCallView = {
   id: string;
@@ -18,10 +18,28 @@ type Props = {
   collapseAfter?: number;
 };
 
-function StatusIcon({ ok }: { ok?: boolean }) {
-  if (ok === true) return <IconCheck />;
-  if (ok === false) return <IconAlert />;
-  return <IconWarn />;
+export type ToolCallVisualState =
+  | "running"
+  | "permission"
+  | "success"
+  | "failure";
+
+/** Map host tool fields to a distinct semantic UI state. */
+export function toolCallVisualState(t: ToolCallView): ToolCallVisualState {
+  const summary = t.summary.trim().toLowerCase();
+  // Older persisted sessions recorded "awaiting permission" as false.
+  if (summary === "awaiting permission") return "permission";
+  if (t.ok === true) return "success";
+  if (t.ok === false) return "failure";
+  // ok undefined/null → in-flight, not a warning.
+  return "running";
+}
+
+function StatusIcon({ state }: { state: ToolCallVisualState }) {
+  if (state === "success") return <IconCheck />;
+  if (state === "failure") return <IconAlert />;
+  // running + permission: neutral tool mark (never warning merely for in-flight).
+  return <IconTool />;
 }
 
 function hasExpandableDetail(t: ToolCallView): boolean {
@@ -37,7 +55,9 @@ export function ToolCallList({
   const [openIds, setOpenIds] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
     for (const t of tools) {
-      if (t.ok === false && hasExpandableDetail(t)) init[t.id] = true;
+      if (toolCallVisualState(t) === "failure" && hasExpandableDetail(t)) {
+        init[t.id] = true;
+      }
     }
     return init;
   });
@@ -77,25 +97,31 @@ export function ToolCallList({
       {visible.map((t) => {
         const expandable = hasExpandableDetail(t);
         const open = expandable && !!openIds[t.id];
-        // Older persisted sessions recorded "awaiting permission" as false.
-        // Pending is neutral until the user approves or denies (#691).
-        const effectiveOk =
-          t.summary.trim().toLowerCase() === "awaiting permission"
-            ? undefined
-            : t.ok;
+        const state = toolCallVisualState(t);
+        const dataOk =
+          state === "success"
+            ? "true"
+            : state === "failure"
+              ? "false"
+              : state === "running"
+                ? "running"
+                : "pending";
+        const summaryText =
+          t.summary ||
+          (state === "failure"
+            ? "failed"
+            : state === "running"
+              ? "running…"
+              : "…");
         return (
           <div
             key={t.id}
             className="tool-row"
-            data-ok={
-              effectiveOk === true
-                ? "true"
-                : effectiveOk === false
-                  ? "false"
-                  : "pending"
-            }
+            data-ok={dataOk}
+            data-state={state}
             data-open={open ? "true" : "false"}
             role="listitem"
+            aria-busy={state === "running" ? true : undefined}
           >
             <button
               type="button"
@@ -112,11 +138,11 @@ export function ToolCallList({
               }
             >
               <span className="tool-row__status" aria-hidden>
-                <StatusIcon ok={effectiveOk} />
+                <StatusIcon state={state} />
               </span>
               <span className="tool-row__name">{t.name}</span>
-              <span className="tool-row__summary" title={t.summary}>
-                {t.summary || (effectiveOk === false ? "failed" : "…")}
+              <span className="tool-row__summary" title={summaryText}>
+                {summaryText}
               </span>
               {expandable ? (
                 <span className="tool-row__chev" aria-hidden>

@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 import {
   clampMetricRange,
   downsampleMetricPoints,
+  METRIC_LOAD_BLOCKED_MIXED,
+  METRIC_LOAD_BLOCKED_ORDER_ONLY,
+  METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+  metricLoadGate,
   metricPointsForRange,
   pointFallsInGap,
   validateOperationalMetricsDocument,
@@ -109,6 +113,74 @@ describe("operational metrics schema", () => {
       ]),
     );
   });
+
+  it("shares valid metrics-parity fixture with Rust (required series provenance)", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/valid-with-provenance.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(JSON.stringify(result.issues));
+    expect(
+      result.data.series.every((series) => series.provenance.source.length > 0),
+    ).toBe(true);
+  });
+
+  it("rejects shared invalid-missing-series-provenance fixture", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/invalid-missing-series-provenance.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected missing provenance to fail");
+    expect(result.issues.map((issue) => issue.path)).toEqual(
+      expect.arrayContaining(["$.series[0].provenance"]),
+    );
+  });
+
+  it("rejects shared invalid-empty-series fixture", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/metrics-parity/invalid-empty-series.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected empty series to fail");
+    expect(result.issues.map((issue) => issue.path)).toEqual(
+      expect.arrayContaining(["$.series"]),
+    );
+  });
+
+  it("accepts logs-plus-metrics operational-metrics.v1.json from IEB fixtures", () => {
+    const doc = JSON.parse(
+      readFileSync(
+        resolve(
+          process.cwd(),
+          "../fixtures/incident-evidence/valid/logs-plus-metrics/metrics/operational-metrics.v1.json",
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const result = validateOperationalMetricsDocument(doc);
+    expect(result.ok).toBe(true);
+  });
 });
 
 describe("operational metric rendering helpers", () => {
@@ -169,5 +241,58 @@ describe("operational metric rendering helpers", () => {
       from: 2,
       to: 8,
     });
+  });
+});
+
+describe("metricLoadGate (corpus wall-clock requirement)", () => {
+  const readyWall = {
+    timeQuality: "wall" as const,
+    spanFrom: 1_700_000_000,
+    spanTo: 1_700_000_100,
+    bucketCount: 4,
+  };
+
+  it("allows loading only for a ready wall-clock timeline", () => {
+    expect(metricLoadGate(readyWall)).toEqual({ allowed: true });
+  });
+
+  it("blocks order_only with the exact corpus-clock explanation", () => {
+    const gate = metricLoadGate({ ...readyWall, timeQuality: "order_only" });
+    expect(gate.allowed).toBe(false);
+    if (gate.allowed) throw new Error("expected blocked");
+    expect(gate.reason).toBe(METRIC_LOAD_BLOCKED_ORDER_ONLY);
+  });
+
+  it("blocks mixed with the distinct unresolved-time explanation", () => {
+    const gate = metricLoadGate({ ...readyWall, timeQuality: "mixed" });
+    expect(gate.allowed).toBe(false);
+    if (gate.allowed) throw new Error("expected blocked");
+    expect(gate.reason).toBe(METRIC_LOAD_BLOCKED_MIXED);
+  });
+
+  it("fails honestly when the timeline is empty, loading, or errored", () => {
+    expect(metricLoadGate(null).allowed).toBe(false);
+    expect(metricLoadGate(null)).toEqual({
+      allowed: false,
+      reason: METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE,
+    });
+    const loading = metricLoadGate(readyWall, { loading: true });
+    expect(loading.allowed).toBe(false);
+    if (!loading.allowed) {
+      expect(loading.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
+    const errored = metricLoadGate(readyWall, { error: "summary failed" });
+    expect(errored.allowed).toBe(false);
+    if (!errored.allowed) {
+      expect(errored.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
+    const empty = metricLoadGate({
+      ...readyWall,
+      bucketCount: 0,
+    });
+    expect(empty.allowed).toBe(false);
+    if (!empty.allowed) {
+      expect(empty.reason).toBe(METRIC_LOAD_BLOCKED_TIMELINE_UNAVAILABLE);
+    }
   });
 });

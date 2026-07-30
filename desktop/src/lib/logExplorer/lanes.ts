@@ -30,6 +30,18 @@ export function linkAllowed(quality: "wall" | "mixed" | "order_only"): string | 
   return null;
 }
 
+export function exactAlignmentAllowed(
+  quality: "wall" | "mixed" | "order_only",
+): string | null {
+  if (quality === "mixed") {
+    return "exact alignment requires a reliable shared wall clock; corpus has mixed time quality";
+  }
+  if (quality === "order_only") {
+    return "exact alignment requires a reliable shared wall clock; corpus is order-only";
+  }
+  return null;
+}
+
 export function nearestAtOrAfter(
   events: LaneEventRef[],
   cursorTs: number,
@@ -88,7 +100,7 @@ export function computeGaps(
   bucketSecs: number,
   quality: "wall" | "mixed" | "order_only",
 ): GapRegion[] | { error: string } {
-  const refuse = linkAllowed(quality);
+  const refuse = exactAlignmentAllowed(quality);
   if (refuse) return { error: refuse };
   if (lanes.length === 0 || windowTo <= windowFrom) return [];
   const width = Math.max(1, bucketSecs);

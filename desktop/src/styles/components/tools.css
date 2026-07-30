@@ -62,6 +62,15 @@
   color: var(--danger);
 }
 
+/* In-flight tools: neutral, never warning chrome (#768). */
+.tool-row[data-ok="running"] .tool-row__status {
+  color: var(--accent, var(--text-muted));
+}
+
+.tool-row[data-ok="pending"] .tool-row__status {
+  color: var(--text-faint);
+}
+
 .tool-row__main {
   display: grid;
   grid-template-columns: 14px minmax(72px, max-content) 1fr 14px;

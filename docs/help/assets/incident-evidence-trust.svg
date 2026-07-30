@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="180" viewBox="0 0 680 180" role="img" aria-labelledby="title" aria-label="Trust boundary from producer host through offline validator to residual product publish">
+  <title id="title">Incident Evidence Bundle trust boundaries</title>
+  <!-- Explicit hex palette — readable on light and dark help chrome without theme inheritance. -->
+  <rect width="680" height="180" fill="#0f172a"/>
+  <rect x="20" y="30" width="180" height="120" rx="8" fill="#111827" stroke="#38bdf8" stroke-width="2"/>
+  <text x="110" y="70" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#e5e7eb">Producer host</text>
+  <text x="110" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">authorized files only</text>
+  <text x="110" y="115" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#9ca3af">no network in validate</text>
+  <rect x="250" y="30" width="180" height="120" rx="8" fill="#111827" stroke="#34d399" stroke-width="2"/>
+  <text x="340" y="70" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#e5e7eb">Offline validator</text>
+  <text x="340" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#d1fae5">paths · hashes · limits</text>
+  <text x="340" y="115" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#d1fae5">fail closed</text>
+  <rect x="480" y="30" width="180" height="120" rx="8" fill="#1f2937" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5 4"/>
+  <text x="570" y="70" text-anchor="middle" font-family="system-ui,sans-serif" font-size="13" fill="#e5e7eb">Product publish</text>
+  <text x="570" y="95" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#fef3c7">import residual</text>
+  <text x="570" y="115" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#fef3c7">no partial state</text>
+  <path d="M200 90 H250" stroke="#38bdf8" stroke-width="2" fill="none"/>
+  <path d="M430 90 H480" stroke="#fbbf24" stroke-width="2" fill="none" stroke-dasharray="4 3"/>
+</svg>

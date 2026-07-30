@@ -183,7 +183,20 @@ press **Shift+F10**, to open the richer exact bounds, lane counts, resident
 state, and severity breakdown. Click elsewhere or press Escape to dismiss it.
 The complete textual bucket list remains available through **Timeline data**.
 
-When session metric tracks are open, hovering the log histogram or any metric
+**Load metrics…** validates and stores one bounded metric document with the
+exact corpus. The safe filename, digest prefix, and attachment state remain
+visible; closing/reopening Explorer or restarting the app restores and
+revalidates the stored copy. **Replace metrics…** preserves the current
+attachment if the replacement fails. **Remove attachment** removes only the
+stored metric relationship/content, not logs, findings, or the original file.
+Metric content is not shared with the agent.
+
+Tracks render only when every series and the corpus have compatible wall-clock
+time and their ranges overlap. An order-only, mixed, or non-overlapping
+document remains attached with a visible reason instead of being plotted
+dishonestly.
+
+When attached metric tracks are open, hovering the log histogram or any metric
 track moves one shared preview line. A concise value and sample-time callout
 appears at that same horizontal position on every metric track and on the log
 histogram, while each metric header also updates to its nearest real sample.

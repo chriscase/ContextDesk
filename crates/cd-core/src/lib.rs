@@ -14,6 +14,7 @@ pub mod ai_probe;
 pub mod audit;
 pub mod branding;
 pub mod build_identity;
+pub mod capability_qualification;
 pub mod chat;
 pub mod config;
 pub mod confluence_ro;
@@ -28,6 +29,9 @@ pub mod harvest;
 pub mod help;
 pub mod home_source;
 pub mod http_preset;
+pub mod incident_evidence;
+/// Deterministic ZIP pack/validate for Incident Evidence Bundle v1 (#765).
+pub mod incident_evidence_archive;
 pub mod index;
 pub mod index_watch;
 pub mod injection;

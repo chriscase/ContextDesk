@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "id": "synthetic-perf",
+  "name": "Synthetic performance tracks",
+  "series": [
+    {
+      "id": "cpu-percent",
+      "name": "CPU",
+      "unit": "%",
+      "labels": {
+        "service": "checkout-api"
+      },
+      "timeQuality": "wall",
+      "provenance": {
+        "source": "synthetic/cpu.csv",
+        "collector": "fixture-generator"
+      },
+      "points": [
+        {
+          "timestamp": 1705312800,
+          "value": 22
+        },
+        {
+          "timestamp": 1705312860,
+          "value": 41
+        },
+        {
+          "timestamp": 1705312920,
+          "value": 37
+        }
+      ]
+    },
+    {
+      "id": "heap-bytes",
+      "name": "Heap",
+      "unit": "bytes",
+      "labels": {
+        "service": "checkout-api"
+      },
+      "timeQuality": "wall",
+      "provenance": {
+        "source": "synthetic/heap.csv",
+        "collector": "fixture-generator"
+      },
+      "points": [
+        {
+          "timestamp": 1705312800,
+          "value": 400000000
+        },
+        {
+          "timestamp": 1705312860,
+          "value": 450000000
+        },
+        {
+          "timestamp": 1705312920,
+          "value": 420000000
+        }
+      ]
+    },
+    {
+      "id": "concurrent-clients",
+      "name": "Clients",
+      "unit": "count",
+      "labels": {
+        "service": "checkout-api"
+      },
+      "timeQuality": "wall",
+      "provenance": {
+        "source": "synthetic/clients.csv",
+        "collector": "fixture-generator"
+      },
+      "points": [
+        {
+          "timestamp": 1705312800,
+          "value": 12
+        },
+        {
+          "timestamp": 1705312860,
+          "value": 48
+        },
+        {
+          "timestamp": 1705312920,
+          "value": 30
+        }
+      ]
+    }
+  ]
+}
