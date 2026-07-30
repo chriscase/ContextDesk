@@ -62,9 +62,6 @@ reqwest13 = { package = "reqwest", version = "0.13.4", optional = true, default-
 ] }
 http-body-util = { version = "0.1", optional = true }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
